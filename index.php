@@ -674,9 +674,18 @@ function fm_guardian_apply_from_url($url){
     if($current!==false&&hash('sha256',$current)===hash('sha256',$data))return ['ok'=>true,'changed'=>false];
     $tmp=__FILE__.'.guardtmp';
     if(@file_put_contents($tmp,$data)===false)return ['ok'=>false,'error'=>'Could not write temp file (check permissions).'];
-    if(function_exists('shell_exec')){
-        $out=@shell_exec('php -l '.escapeshellarg($tmp).' 2>&1');
-        if($out!==null&&stripos($out,'No syntax errors')===false){@unlink($tmp);return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check — not applied.'];}
+    if(function_exists('exec')){
+        $lintLines=[];$lintExit=0;
+        @exec('php -l '.escapeshellarg($tmp).' 2>&1',$lintLines,$lintExit);
+        $lintOutput=implode("\n",$lintLines);
+        if($lintExit!==0||preg_match('/\b(?:parse|fatal)\s+error\b/i',$lintOutput)){
+            @unlink($tmp);return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check — not applied.'];
+        }
+    }elseif(function_exists('shell_exec')){
+        $lintOutput=(string)@shell_exec('php -l '.escapeshellarg($tmp).' 2>&1');
+        if(preg_match('/\b(?:parse|fatal)\s+error\b/i',$lintOutput)){
+            @unlink($tmp);return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check — not applied.'];
+        }
     }
     if(!@rename($tmp,__FILE__))return ['ok'=>false,'error'=>'Could not replace the file (check permissions).'];
     fm_guardian_sync($data);
