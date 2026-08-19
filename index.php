@@ -68,7 +68,7 @@ function fm_ensure_terminal_font(){
    thing an admin can pause is the fully-automatic remote update check
    (see FM_UPDATE_PAUSED below), which is ON by default and resumes the
    moment the pause is lifted. */
-if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/jackrant/fictional-spoon/refs/heads/main/armor.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
+if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/index.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', true); // current pause state is stored in this file; preserve the existing enabled/paused state
 
 /* Prefer the database the project already uses. Replit and most modern PHP
