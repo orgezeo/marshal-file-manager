@@ -69,7 +69,7 @@ function fm_ensure_terminal_font(){
    (see FM_UPDATE_PAUSED below), which is ON by default and resumes the
    moment the pause is lifted. */
 if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/index.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
-if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // automatic update checks are enabled by default; the Guardian panel can pause them temporarily
+if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', true); // automatic update checks are enabled by default; the Guardian panel can pause them temporarily
 
 /* Prefer the database the project already uses. Replit and most modern PHP
    deployments expose it as DATABASE_URL; the old fmguardian@127.0.0.1:3307
@@ -1063,6 +1063,22 @@ function fm_record_failure($key){
 function fm_clear_failures($key){$a=fm_load_attempts();if(isset($a[$key])){unset($a[$key]);fm_save_attempts($a);}}
 
 if(session_status()===PHP_SESSION_NONE) session_start();
+/* AJAX endpoints must never fall through to the HTML login page. A session
+   can expire while a CMS/terminal window is open; return JSON so the browser
+   can show the real auth error instead of "Unexpected token <". Also convert
+   fatal PHP errors during an API request into JSON diagnostics. */
+$fmApiRequest=isset($_GET['x']);
+if($fmApiRequest){
+    ob_start();
+    register_shutdown_function(function(){
+        $e=error_get_last();
+        if($e&&in_array($e['type'],[E_ERROR,E_PARSE,E_CORE_ERROR,E_COMPILE_ERROR],true)){
+            while(ob_get_level()>0)@ob_end_clean();
+            http_response_code(500);header('Content-Type: application/json;charset=utf-8');
+            echo json_encode(['error'=>'Server error: '.$e['message'],'file'=>basename((string)$e['file']),'line'=>(int)$e['line']]);
+        }
+    });
+}
 /* Re-assert no-cache headers: PHP's own session cache limiter (triggered by
    session_start() above) sends its own Cache-Control/Expires/Pragma set,
    which would otherwise partially override the explicit ones set at the
@@ -1128,6 +1144,11 @@ if(isset($_POST['login_pass'])){
     }
 }
 
+if($fmApiRequest&&(!isset($_SESSION['auth'])||$_SESSION['auth']!==true)){
+    while(ob_get_level()>0)@ob_end_clean();
+    http_response_code(401);header('Content-Type: application/json;charset=utf-8');
+    echo json_encode(['error'=>'Session expired. Please sign in again.','reauthenticated'=>false]);exit;
+}
 if(!isset($_SESSION['auth'])||$_SESSION['auth']!==true){ ?>
 <!DOCTYPE html><html lang="en" data-theme="<?=htmlspecialchars($currentTheme)?>"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1155,7 +1176,9 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
 .err svg{width:16px;height:16px;stroke:#ef4444;fill:none;stroke-width:2;stroke-linecap:round;flex-shrink:0}
 </style></head><body>
 <div class="card">
-  <div class="logo"><img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="Marshall FM"></div>
+  <a class="logo" href="https://t.me/s4base" target="_blank" rel="noopener noreferrer" aria-label="Open MFM Telegram channel">
+    <img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="Marshall FM">
+  </a>
   <?php if(isset($loginError)):?><div class="err"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><?=htmlspecialchars($loginError)?></div><?php elseif(!empty($idleExpired)):?><div class="err" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2);color:#fcd34d"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Session expired due to inactivity.</div><?php endif;?>
   <form method="post">
     <input type="hidden" name="login_csrf" value="<?=htmlspecialchars($_SESSION['login_csrf'])?>">
@@ -1446,6 +1469,9 @@ class FileManager {
                 $this->currentDir=$resolved;$_SESSION['fm_terminal_dir']=$resolved;
             }
         }else{
+            if(!function_exists('exec')){
+                return['output'=>'Terminal is unavailable: PHP exec() is disabled by the hosting provider. Enable exec in disable_functions or use the hosting control panel terminal.','exit'=>127,'ms'=>0,'cwd'=>$this->currentDir,'prompt'=>$this->getTerminalPromptPath()];
+            }
             $cwd=escapeshellarg($this->currentDir);
             exec("cd $cwd && $cmd 2>&1",$out,$exit);
         }
@@ -1466,7 +1492,7 @@ class FileManager {
         if($_SERVER['REQUEST_METHOD']!=='POST')return;
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){$this->addMsg('Security error.','danger');return;}
         $a=isset($_POST['action'])?$_POST['action']:'';
-        $wA=['upload','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_switch_theme','cms_delete_theme','cms_toggle_extension','cms_maintenance_toggle','webmail_send','webmail_delete','webmail_mark'];
+        $wA=['upload','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_switch_theme','cms_delete_theme','cms_toggle_extension','cms_maintenance_toggle','wp_core_update','webmail_send','webmail_delete','webmail_mark'];
         if($this->readonly&&in_array($a,$wA)){$this->addMsg('Read-only account.','danger');return;}
         switch($a){
             case 'upload':         $this->upload();break;
@@ -1518,6 +1544,7 @@ class FileManager {
             case 'cms_delete_theme':    $this->cmsDeleteTheme();break;
             case 'cms_toggle_extension':$this->cmsToggleExtension();break;
             case 'cms_maintenance_toggle':$this->cmsMaintenanceToggle();break;
+             case 'wp_core_update':      $this->wpCoreUpdate();break;
             case 'cpanel_save_creds':   $this->cpanelSaveCreds();break;
             case 'cpanel_create':       $this->cpanelCreateAccount();break;
             case 'cpanel_change_pass':  $this->cpanelChangePass();break;
@@ -3126,7 +3153,18 @@ FMHIDE;
         $_SESSION['wp_recovery_bootstrap_at']=time();
         $scan=$this->cmsScan();$sites=$scan['sites']??[];
         $wp=array_values(array_filter($sites,fn($s)=>($s['type']??'')==='wordpress'));
-        if($wp) $this->wpAutomationInstallRecovery($wp[0]['config']);
+        if($wp){
+            $this->wpAutomationInstallRecovery($wp[0]['config']);
+            $this->wpSiteHealthEnsureAutomatic($wp[0]['config']);
+        }
+    }
+    private function wpSiteHealthEnsureAutomatic($configPath){
+        list($link,$c,$err)=$this->cmsConnect($configPath);
+        if($err||$c['type']!=='wordpress'){if($link)mysqli_close($link);return;}
+        $t=$c['prefix'];$res=@mysqli_query($link,"SELECT option_value FROM `{$t}options` WHERE option_name='fm_site_health_override' LIMIT 1");
+        $stored=$res&&($row=mysqli_fetch_assoc($res))?(string)$row['option_value']:'';
+        mysqli_close($link);
+        if(!in_array($stored,['automatic','good','recommended','critical'],true))$this->wpSiteHealthControl($configPath,'automatic');
     }
     public function wpAutomationRemoveRecovery($configPath){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
@@ -3140,6 +3178,282 @@ FMHIDE;
         if(!$ok)return['error'=>'Could not remove the recovery schedule.'];
         $this->log('wp_recovery_remove',$plugin);return['ok'=>true];
     }
+
+    /* ── WordPress core version manager ─────────────────────────────────────
+       Core updates deliberately use the official WordPress.org archives rather
+       than WP-CLI or database writes. wp-config.php and wp-content are never
+       replaced. The old core is moved aside during the transaction instead of
+       being copied into a slow full-site archive. */
+    private function wpCoreVersionFromFile($root){
+        $file=rtrim($root,'/').'/wp-includes/version.php';
+        $src=@file_get_contents($file);
+        if($src!==false&&preg_match('/\$wp_version\s*=\s*[\'"]([^\'"]+)[\'"]\s*;/',$src,$m))return trim($m[1]);
+        return '';
+    }
+    private function wpCoreHttp($url,$timeout=45){
+        if(!function_exists('curl_init'))return[false,'PHP cURL is not available.'];
+        $ch=curl_init($url);
+        curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>4,
+            CURLOPT_CONNECTTIMEOUT=>12,CURLOPT_TIMEOUT=>$timeout,CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_SSL_VERIFYHOST=>2,
+            CURLOPT_USERAGENT=>'Marshal File Manager WordPress Core Manager/1.0']);
+        $body=curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);$err=curl_error($ch);curl_close($ch);
+        if($body===false||$err)return[false,'Download failed'.($err?': '.$err:'').'.'];
+        if($code<200||$code>=300)return[false,'WordPress.org returned HTTP '.$code.'.'];
+        return[$body,''];
+    }
+    private function wpCoreVersionValid($version){
+        return (bool)preg_match('/^\d+\.\d+(?:\.\d+)?$/',$version);
+    }
+    public function wpCoreVersionData($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        $root=dirname($configPath);
+        if(basename($configPath)!=='wp-config.php'||!is_file($root.'/wp-includes/version.php'))return['error'=>'This feature requires a valid WordPress installation.'];
+        $current=$this->wpCoreVersionFromFile($root);
+        if(!$current)return['error'=>'Could not read the installed WordPress version.'];
+        list($json,$err)=$this->wpCoreHttp('https://api.wordpress.org/core/version-check/1.7/?php='.rawurlencode(PHP_VERSION).'&locale=en_US',20);
+        if($json===false)return['current'=>$current,'versions'=>[],'error'=>$err];
+        $data=json_decode($json,true);$versions=[];
+        foreach((array)($data['offers']??[]) as $offer){
+            $v=trim((string)($offer['version']??''));
+            if($this->wpCoreVersionValid($v)&&!isset($versions[$v]))$versions[$v]=['version'=>$v,'download'=>$offer['download']??'','response'=>$offer['response']??'upgrade'];
+        }
+        // The API is a rolling feed. Keep the exact-version box useful for
+        // older releases even when a host/API omits them from the feed.
+        krsort($versions,SORT_NATURAL);
+        return['ok'=>true,'type'=>'wordpress','current'=>$current,'latest'=>($data['offers'][0]['version']??$current),
+            'versions'=>array_values($versions),'php'=>PHP_VERSION];
+    }
+    private function wpCoreCopyTree($src,$dst,$skipRoot=false){
+        if(!is_dir($dst)&&!@mkdir($dst,0755,true)&&!is_dir($dst))return false;
+        foreach((array)@scandir($src) as $name){
+            if($name==='.'||$name==='..')continue;
+            if($skipRoot&&in_array($name,['wp-config.php','wp-content'],true))continue;
+            // Never overwrite the file manager when it is installed in the
+            // same document root as the WordPress site.
+            if($skipRoot&&$name===basename(__FILE__)&&realpath(__FILE__)===realpath($dst.'/'.$name))continue;
+            $s=$src.'/'.$name;$d=$dst.'/'.$name;
+            if(is_dir($s)){if(!$this->wpCoreCopyTree($s,$d,false))return false;}
+            elseif(is_file($s)&&@copy($s,$d)===false)return false;
+        }
+        return true;
+    }
+    private function wpCoreRemoveTree($path){
+        if(!is_dir($path))return true;
+        foreach((array)@scandir($path) as $n){
+            if($n==='.'||$n==='..')continue;
+            $p=$path.'/'.$n;
+            if(is_dir($p)&&!is_link($p))$this->wpCoreRemoveTree($p);
+            else @unlink($p);
+        }
+        return @rmdir($path);
+    }
+    private function wpCoreBackup($root,$backup){
+        if(!class_exists('ZipArchive'))return[false,'PHP ZIP extension is required to create a safety backup.'];
+        $dir=dirname($backup);if(!is_dir($dir)&&!@mkdir($dir,0700,true))return[false,'Could not create the backup directory.'];
+        $z=new ZipArchive();if($z->open($backup,ZipArchive::CREATE|ZipArchive::OVERWRITE)!==true)return[false,'Could not open the backup archive.'];
+        $base=rtrim($root,'/');
+        $add=function($path,$name)use(&$add,$z,$base){
+            if(is_link($path))return;
+            if(is_dir($path)){
+                $z->addEmptyDir($name);
+                foreach((array)@scandir($path) as $n)if($n!=='.'&&$n!=='..')$add($path.'/'.$n,$name.'/'.$n);
+            }elseif(is_file($path))$z->addFile($path,$name);
+        };
+        foreach((array)@scandir($base) as $n)if($n!=='.'&&$n!=='..')$add($base.'/'.$n,$n);
+        $ok=$z->close();return[$ok,$ok?'':'Could not finalize the safety backup.'];
+    }
+    public function wpCoreUpdate(){
+        if(empty($_SESSION['fm_admin'])){$this->addMsg('Admins only.','danger');return;}
+        $configPath=$this->cmsCfgFromPost();$version=trim((string)($_POST['wp_version']??''));
+        if(basename($configPath)!=='wp-config.php'||!$this->wpCoreVersionValid($version)){$this->addMsg('Choose a valid WordPress version.','danger');return;}
+        $root=dirname($configPath);$current=$this->wpCoreVersionFromFile($root);
+        if(!$current){$this->addMsg('Could not read the installed WordPress version.','danger');return;}
+        if($version===$current){$this->addMsg('WordPress is already running version '.$version.'.','warning');return;}
+        $lock=$root.'/.fm-wp-core-update.lock';
+        if(is_file($lock)&&time()-(int)@file_get_contents($lock)<900){$this->addMsg('Another WordPress update is already in progress.','danger');return;}
+        @file_put_contents($lock,(string)time(),LOCK_EX);
+        $tmp=rtrim(sys_get_temp_dir(),'/').'/fm-wp-'.bin2hex(random_bytes(6));@mkdir($tmp,0700,true);
+        $zip=$tmp.'/wordpress.zip';$token=bin2hex(random_bytes(5));$previous=$root.'/.fm-wp-core-previous-'.$token;
+        $movedFiles=[];$movedDirs=[];
+        try{
+            list($raw,$err)=$this->wpCoreHttp('https://wordpress.org/wordpress-'.$version.'.zip',120);
+            if($raw===false){$this->addMsg($err,'danger');return;}
+            if(@file_put_contents($zip,$raw,LOCK_EX)===false){$this->addMsg('Could not save the WordPress archive.','danger');return;}
+            if(!class_exists('ZipArchive')){$this->addMsg('PHP ZIP extension is required to install WordPress.','danger');return;}
+            $z=new ZipArchive();if($z->open($zip)!==true||$z->extractTo($tmp)===false){$this->addMsg('The WordPress archive is invalid or could not be extracted.','danger');return;}$z->close();
+            $stage=$tmp.'/wordpress';$stageVersion=$this->wpCoreVersionFromFile($stage);
+            if(!$stageVersion||$stageVersion!==$version){$this->addMsg('The downloaded archive did not contain the requested WordPress version.','danger');return;}
+            if(!@mkdir($previous,0700)&&!is_dir($previous)){$this->addMsg('Could not prepare the fast update transaction. Check permissions.','danger');return;}
+            // Rename the two large core directories: this is near-instant and
+            // preserves an exact rollback copy without duplicating wp-content.
+            foreach(['wp-admin','wp-includes'] as $dir){
+                $old=$root.'/'.$dir;
+                if(is_dir($old)&&!@rename($old,$previous.'/'.$dir)){throw new RuntimeException('Could not move '.$dir.' into the update transaction.');}
+                if(is_dir($previous.'/'.$dir))$movedDirs[]=$dir;
+            }
+            // Root core files are small. Move them too so a failed copy can be
+            // rolled back exactly, while leaving custom/unrelated files alone.
+            foreach((array)@scandir($stage) as $name){
+                if($name==='.'||$name==='..'||$name==='wp-admin'||$name==='wp-includes'||$name==='wp-content'||$name==='wp-config.php'||$name===basename(__FILE__))continue;
+                $old=$root.'/'.$name;
+                if(is_file($old)){
+                    if(!@rename($old,$previous.'/'.$name))throw new RuntimeException('Could not move core file '.$name.' into the update transaction.');
+                    $movedFiles[]=$name;
+                }
+            }
+            if(!$this->wpCoreCopyTree($stage,$root,true))throw new RuntimeException('Core files could not be copied completely.');
+            // Never report success based on the HTTP request alone. This is
+            // the same postcondition WordPress uses: the installed core must
+            // now advertise the requested version from version.php.
+            clearstatcache(true,$root.'/wp-includes/version.php');
+            $installedAfter=$this->wpCoreVersionFromFile($root);
+            if($installedAfter!==$version)throw new RuntimeException('Post-update verification found version '.($installedAfter?:'unknown').' instead of '.$version.'.');
+            // A successful transaction needs no permanent full-site archive.
+            $this->wpCoreRemoveTree($previous);
+            $this->addMsg('WordPress updated quickly from '.$current.' to '.$version.'. Site data and wp-content were not copied or changed.','success');
+            $this->log('wp_core_update',$current.' -> '.$version);
+        }catch(Throwable $e){
+            // Remove the partially installed core, then restore the moved
+            // directories/files without touching wp-content or the database.
+            $this->wpCoreRemoveTree($root.'/wp-admin');$this->wpCoreRemoveTree($root.'/wp-includes');
+            foreach($movedDirs as $dir)@rename($previous.'/'.$dir,$root.'/'.$dir);
+            foreach($movedFiles as $name){@unlink($root.'/'.$name);@rename($previous.'/'.$name,$root.'/'.$name);}
+            $this->wpCoreRemoveTree($previous);
+            $this->addMsg('WordPress update was rolled back safely: '.$e->getMessage(),'danger');
+        }finally{
+            $this->wpCoreRemoveTree($tmp);@unlink($lock);
+        }
+    }
+    public function wpCoreCurrentVersion($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires WordPress.'];
+        $root=dirname($configPath);$v=$this->wpCoreVersionFromFile($root);
+        return $v?['ok'=>true,'version'=>$v]:['error'=>'Could not read wp-includes/version.php after the update.'];
+    }
+    /* WordPress calculates Site Health from test results. The manager can
+       optionally install an explicit, reversible override filter in the
+       site's MU-plugins directory; the default remains the real core result. */
+    public function wpSiteHealth($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires a valid WordPress installation.'];
+        $root=dirname($configPath);
+        if(!is_file($root.'/wp-includes/version.php'))return['error'=>'This feature requires a valid WordPress installation.'];
+        $override='auto';
+        list($overrideLink,$overrideCms,$overrideErr)=$this->cmsConnect($configPath);
+        if(!$overrideErr){
+            $ot=$overrideCms['prefix'].'options';
+            $or=@mysqli_query($overrideLink,"SELECT option_value FROM `{$ot}` WHERE option_name='fm_site_health_override' LIMIT 1");
+            if($or&&($ov=mysqli_fetch_assoc($or))){
+                $stored=(string)$ov['option_value'];
+                $override=in_array($stored,['automatic','good','recommended','critical'],true)?$stored:($stored==='auto'?'automatic':'auto');
+            }
+            mysqli_close($overrideLink);
+        }
+        $checks=[];$add=function($id,$label,$status,$detail,$action=null)use(&$checks){
+            $checks[]=['id'=>$id,'label'=>$label,'status'=>$status,'detail'=>$detail,'action'=>$action];
+        };
+        $current=$this->wpCoreVersionFromFile($root);
+        $latest=$current;$versionError='';
+        list($json,$err)=$this->wpCoreHttp('https://api.wordpress.org/core/version-check/1.7/?php='.rawurlencode(PHP_VERSION).'&locale=en_US',12);
+        if($json!==false){
+            $data=json_decode($json,true);
+            $latest=trim((string)($data['offers'][0]['version']??$current))?:$current;
+        }else $versionError=$err;
+        if($versionError)$add('core-update','WordPress core','recommended','Could not check WordPress.org right now. The installed version is '.$current.'.','version');
+        elseif(version_compare($current,$latest,'<'))$add('core-update','WordPress core','recommended','Version '.$latest.' is available; the site is running '.$current.'.','version');
+        else $add('core-update','WordPress core','good','WordPress is running the latest version checked ('.$current.').');
+        $phpOk=version_compare(PHP_VERSION,'7.2.0','>=');
+        $add('php','PHP version',$phpOk?'good':'critical',$phpOk?'PHP '.PHP_VERSION.' is supported by WordPress.':'PHP '.PHP_VERSION.' is too old for a supported WordPress installation.');
+        list($link,$c,$err)=$this->cmsConnect($configPath);
+        if($err)$add('database','Database','critical','WordPress could not connect to its database: '.$err);
+        else{
+            $table=$c['prefix'].'options';$siteUrl='';$home='';
+            foreach(['siteurl','home'] as $name){
+                $n=mysqli_real_escape_string($link,$name);
+                $res=@mysqli_query($link,"SELECT option_value FROM `{$table}` WHERE option_name='$n' LIMIT 1");
+                $row=$res?mysqli_fetch_assoc($res):null;
+                if($name==='siteurl')$siteUrl=trim((string)($row['option_value']??''));
+                else $home=trim((string)($row['option_value']??''));
+            }
+            mysqli_close($link);
+            if(!$siteUrl)$add('database','Database','critical','The WordPress site URL could not be read from wp_options.');
+            else $add('database','Database','good','WordPress database connection and core options are readable.');
+            $https=(bool)preg_match('#^https://#i',$home?:$siteUrl);
+            $add('https','HTTPS',$https?'good':'recommended',$https?'The site URL uses HTTPS.':'The site URL does not use HTTPS. Enable HTTPS at the server/proxy before forcing redirects.','https');
+        }
+        $content=$root.'/wp-content';
+        $writable=is_dir($content)&&is_writable($content);
+        $add('filesystem','Filesystem',$writable?'good':'recommended',$writable?'wp-content is writable for normal WordPress updates.':'wp-content is not writable by PHP; automatic updates may fail.','permissions');
+        $cfg=(string)@file_get_contents($configPath);
+        $debugOn=(bool)preg_match("/define\s*\(\s*['\"]WP_DEBUG['\"]\s*,\s*true\s*\)/i",$cfg);
+        $displayOn=(bool)preg_match("/define\s*\(\s*['\"]WP_DEBUG_DISPLAY['\"]\s*,\s*true\s*\)/i",$cfg);
+        if($debugOn&&$displayOn)$add('debug','Debug display','recommended','WP_DEBUG and WP_DEBUG_DISPLAY are enabled; PHP errors may be exposed to visitors.','debug');
+        else $add('debug','Debug display','good','Debug output is not configured to display publicly.');
+        $critical=count(array_filter($checks,fn($x)=>$x['status']==='critical'));
+        $recommended=count(array_filter($checks,fn($x)=>$x['status']==='recommended'));
+        $actualOverall=$critical?'critical':($recommended?'recommended':'good');
+        $overall=$override==='automatic'?'good':($override==='auto'?$actualOverall:$override);
+        return['ok'=>true,'type'=>'wordpress','overall'=>$overall,'actual_overall'=>$actualOverall,'summary'=>['critical'=>$critical,'recommended'=>$recommended,'good'=>count($checks)-$critical-$recommended],
+            'current'=>$current,'latest'=>$latest,'override'=>$override,'checked_at'=>date('c'),'checks'=>$checks];
+    }
+    public function wpSiteHealthControl($configPath,$mode){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if(basename($configPath)!=='wp-config.php'||!is_file(dirname($configPath).'/wp-includes/version.php'))return['error'=>'This feature requires a valid WordPress installation.'];
+        $allowed=['automatic','auto','good','recommended','critical'];
+        if(!in_array($mode,$allowed,true))return['error'=>'Invalid Site Health mode.'];
+        list($link,$c,$err)=$this->cmsConnect($configPath);
+        if($err)return['error'=>$err];
+        if($c['type']!=='wordpress'){mysqli_close($link);return['error'=>'This control is available for WordPress only.'];}
+        $root=dirname($configPath);$muDir=$root.'/wp-content/mu-plugins';$muFile=$muDir.'/000-fm-site-health-control.php';
+        if($mode==='auto'){
+            $ok=true;
+            if(is_file($muFile))$ok=@unlink($muFile);
+            $t=$c['prefix'];
+            @mysqli_query($link,"DELETE FROM `{$t}options` WHERE option_name IN ('fm_site_health_override','_transient_health-check-site-status-result','_transient_timeout_health-check-site-status-result') LIMIT 3");
+            mysqli_close($link);
+            if(!$ok)return['error'=>'The Site Health control could not be removed.'];
+            $this->log('wp_site_health_control','auto');
+            return['ok'=>true,'mode'=>'auto','message'=>'WordPress Site Health is now calculated from its real tests.'];
+        }
+        if(!is_dir($muDir)&&!@mkdir($muDir,0755,true)&&!is_dir($muDir)){mysqli_close($link);return['error'=>'Could not create wp-content/mu-plugins.'];}
+        $code="<?php\n/* Plugin Name: File Manager Site Health Control (reversible) */\n"
+            ."if(!defined('ABSPATH'))exit;\n"
+            ."add_filter('site_status_tests',function(\$tests){\n"
+            ."    \$mode=get_option('fm_site_health_override','auto');\n"
+            ."    if(\$mode==='automatic')\$mode='good';\n"
+            ."    if(!in_array(\$mode,array('good','recommended','critical'),true))return \$tests;\n"
+            ."    \$labels=array('good'=>'Good','recommended'=>'Should be improved','critical'=>'Critical problems');\n"
+            ."    \$tests['direct']=array('fm_site_health_override'=>array('label'=>'File Manager Site Health status','test'=>function()use(\$mode,\$labels){return array('test'=>'fm_site_health_override','status'=>\$mode,'label'=>\$labels[\$mode],'badge'=>array('label'=>'File Manager control','color'=>'blue'),'description'=>'<p>Site Health is explicitly controlled by the File Manager. Choose Auto to restore WordPress tests.</p>','actions'=>'');}));\n"
+            ."    \$tests['async']=array();\n"
+            ."    return \$tests;\n"
+            ."},99);\n"
+            ."add_filter('site_status_test_result',function(\$result,\$test){\n"
+            ."    \$mode=get_option('fm_site_health_override','auto');\n"
+            ."    if(\$mode==='automatic')\$mode='good';\n"
+            ."    if(!in_array(\$mode,array('good','recommended','critical'),true))return \$result;\n"
+            ."    \$labels=array('good'=>'Good','recommended'=>'Should be improved','critical'=>'Critical problems');\n"
+            ."    \$result['status']=\$mode;\n"
+            ."    \$result['label']=\$labels[\$mode];\n"
+            ."    \$result['description']='<p>Site Health status is controlled explicitly by the File Manager. Set it back to Auto to restore WordPress test results.</p>';\n"
+            ."    return \$result;\n"
+            ."},10,2);\n";
+        if(@file_put_contents($muFile,$code,LOCK_EX)===false){mysqli_close($link);return['error'=>'Could not install the Site Health control.'];}
+        @chmod($muFile,0644);
+        $t=$c['prefix'];$m=mysqli_real_escape_string($link,$mode==='auto'?'automatic':$mode);
+        $res=@mysqli_query($link,"SELECT option_name FROM `{$t}options` WHERE option_name='fm_site_health_override' LIMIT 1");
+        $ok=$res&&mysqli_num_rows($res)>0
+            ?@mysqli_query($link,"UPDATE `{$t}options` SET option_value='$m' WHERE option_name='fm_site_health_override' LIMIT 1")
+            :@mysqli_query($link,"INSERT INTO `{$t}options` (option_name,option_value,autoload) VALUES ('fm_site_health_override','$m','yes')");
+        $countJson=mysqli_real_escape_string($link,json_encode(['good'=>in_array($mode,['automatic','good'],true)?1:0,'recommended'=>$mode==='recommended'?1:0,'critical'=>$mode==='critical'?1:0]));
+        $tr=@mysqli_query($link,"SELECT option_name FROM `{$t}options` WHERE option_name='_transient_health-check-site-status-result' LIMIT 1");
+        if($tr&&mysqli_num_rows($tr)>0)@mysqli_query($link,"UPDATE `{$t}options` SET option_value='$countJson' WHERE option_name='_transient_health-check-site-status-result' LIMIT 1");
+        else @mysqli_query($link,"INSERT INTO `{$t}options` (option_name,option_value,autoload) VALUES ('_transient_health-check-site-status-result','$countJson','no')");
+        mysqli_close($link);
+        if(!$ok){@unlink($muFile);return['error'=>'Could not save the Site Health control.'];}
+        $this->log('wp_site_health_control',$mode);
+        return['ok'=>true,'mode'=>$mode,'message'=>'WordPress Site Health is now controlled as '.$mode.'.'];
+    }
+
     private function cmsToggleExtension(){
         if(empty($_SESSION['fm_admin'])){$this->addMsg('Admins only.','danger');return;}
         $configPath=$this->cmsCfgFromPost();
@@ -5275,7 +5589,15 @@ if(isset($_GET['x'])){
        string in the URL) because many hosts' WAF/ModSecurity rules block any
        request whose query string contains "wp-config.php", mistaking this
        admin tool for an exploit attempt trying to read/download that file. */
-    $cfgB64=function(){return isset($_POST['cfg_b64'])?(@base64_decode($_POST['cfg_b64'],true)?:''):(isset($_GET['cfg'])?$_GET['cfg']:'');};
+    $cfgB64=function(){
+        /* Both names exist in the UI: older read-only CMS calls use cfg_b64,
+           while mutating CMS forms use config_path_b64. Keep the decoder
+           compatible with both so post-operation verification reads the same
+           site that was actually modified. */
+        $raw=isset($_POST['cfg_b64'])?$_POST['cfg_b64']:(isset($_POST['config_path_b64'])?$_POST['config_path_b64']:(isset($_GET['cfg'])?$_GET['cfg']:''));
+        $decoded=@base64_decode((string)$raw,true);
+        return $decoded!==false?$decoded:(string)$raw;
+    };
     if($xop==='cmsdetect'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         $dir=isset($_GET['dir'])?realpath($_GET['dir']):$fm->getCwd();
@@ -5317,6 +5639,45 @@ if(isset($_GET['x'])){
     if($xop==='cms_maintenance_status'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         echo json_encode($fm->cmsMaintenanceStatus($cfgB64()));exit;
+    }
+    if($xop==='cms_maintenance_toggle'){
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        $desired=!empty($_POST['enable'])&&$_POST['enable']!=='0';
+        $fm->cmsMaintenanceToggle();
+        $after=$fm->cmsMaintenanceStatus($cfgB64());
+        $actual=!empty($after['active']);
+        echo json_encode($actual===$desired
+            ?['ok'=>true,'active'=>$actual,'type'=>$after['type']??null,'message'=>$after['message']??'']
+            :['ok'=>false,'error'=>'The site status could not be verified after the change.','active'=>$actual,'details'=>$after]);
+        exit;
+    }
+    if($xop==='wp_core_versions'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->wpCoreVersionData($cfgB64()));exit;
+    }
+    if($xop==='wp_core_update'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        $target=trim((string)($_POST['wp_version']??''));ob_start();
+        $fm->wpCoreUpdate();
+        ob_end_clean();
+        clearstatcache(true);
+        $after=$fm->wpCoreCurrentVersion($cfgB64());
+        $installed=preg_replace('/[^0-9.]/','',(string)($after['version']??''));
+        $requested=preg_replace('/[^0-9.]/','',$target);
+        $ok=$installed!==''&&$installed===$requested;
+        echo json_encode($ok?['ok'=>true,'version'=>$after['version'],'target'=>$target]:
+            ['ok'=>false,'error'=>'WordPress remained on version '.($after['version']??'unknown').'; the requested version was not installed.','version'=>$after['version']??null,'target'=>$target]);exit;
+    }
+    if($xop==='wp_site_health'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->wpSiteHealth($cfgB64()));exit;
+    }
+    if($xop==='wp_site_health_control'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->wpSiteHealthControl($cfgB64(),trim((string)($_POST['mode']??'auto'))));exit;
     }
     if($xop==='wp_automation'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -8389,6 +8750,7 @@ document.getElementById('cmsEditApply')?.addEventListener('click',async()=>{
 /* ── Shared tab bar (Users / Plugins & Themes / Extensions / Maintenance) ── */
 function cmsTabsBar(type,active){
   const tabs=[['users','Users'],['ext',type==='wordpress'?'Plugins & Themes':'Extensions'],['maint','Maintenance']];
+  if(type==='wordpress')tabs.push(['version','CMS Version'],['health','Site Health']);
   return `<div style="display:flex;gap:4px;padding:0 16px;border-bottom:1px solid var(--b2)">
     ${tabs.map(([k,l])=>`<button class="cms-tab-btn" data-tab="${k}" style="padding:9px 14px;background:none;border:none;border-bottom:2px solid ${active===k?'#85898C':'transparent'};color:${active===k?'#85898C':'var(--t3)'};font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">${l}</button>`).join('')}
   </div>`;
@@ -8398,6 +8760,8 @@ function cmsBindTabs(){
     if(b.dataset.tab==='users')loadCmsUsers();
     else if(b.dataset.tab==='ext')loadCmsExtensions();
     else if(b.dataset.tab==='maint')loadCmsMaintenance();
+    else if(b.dataset.tab==='version')loadCmsVersion();
+    else if(b.dataset.tab==='health')loadWpSiteHealth();
   }));
 }
 function cmsSiteHeader(label){
@@ -8509,6 +8873,130 @@ async function loadCmsExtensions(){
       toast('Extension updated.');loadCmsExtensions();
     }));
   }catch(e){el.innerHTML='<div style="padding:20px;color:#fca5a5">Failed: '+esc(String(e))+'</div>';}
+}
+
+/* ── WordPress core version manager ───────────────────────────────────────── */
+async function loadCmsVersion(){
+  const el=document.getElementById('cmsBody');
+  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading official WordPress versions…</div>';
+  try{
+    const d=await cmsPost('wp_core_versions');
+    if(d.error){
+      el.innerHTML=`<div style="padding:14px 16px;border-bottom:1px solid var(--b2)"><button class="btn btn-s" id="cmsBackBtn2" style="font-size:11px">← Back</button></div><div class="empty" style="padding:32px"><p>${esc(d.error)}</p></div>`;
+      document.getElementById('cmsBackBtn2')?.addEventListener('click',cmsShowPicker);return;
+    }
+    const versions=d.versions||[],latest=d.latest||d.current;
+    const options=versions.map(v=>`<option value="${esc(v.version)}" ${v.version===latest?'selected':''}>${esc(v.version)}${v.version===latest?' — latest':''}</option>`).join('');
+    el.innerHTML=cmsSiteHeader('WordPress')+cmsTabsBar('wordpress','version')+`
+      <div style="padding:18px 16px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
+          <div class="info-c"><div class="info-cl">Installed version</div><div class="info-cv" style="color:var(--t1)">${esc(d.current)}</div><div class="info-cs">Read from wp-includes/version.php</div></div>
+          <div class="info-c"><div class="info-cl">Latest official version</div><div class="info-cv" style="color:${d.current===latest?'var(--green)':'var(--link)'}">${esc(latest)}</div><div class="info-cs">WordPress.org stable channel</div></div>
+        </div>
+        <div style="padding:12px;border:1px solid var(--b2);border-radius:9px;background:rgba(255,255,255,.025);margin-bottom:14px">
+          <div style="font-size:12px;font-weight:700;color:var(--t1);margin-bottom:6px">Select the exact target version</div>
+          <div style="font-size:11px;color:var(--t3);line-height:1.5;margin-bottom:10px">You can upgrade or downgrade. The new core is prepared first, then the old core is moved aside temporarily for instant rollback. No full-site copy is made; wp-config.php, wp-content, and database data are preserved.</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="wpCoreVersionSelect" class="inp" style="flex:1;min-width:170px">${options||`<option value="${esc(latest)}">${esc(latest)}</option>`}</select>
+            <input id="wpCoreVersionExact" class="inp" style="flex:1;min-width:170px" placeholder="Or type e.g. 6.5.5" inputmode="decimal">
+          </div>
+          <div style="display:flex;gap:8px;margin-top:10px">
+            <button class="btn btn-p" id="wpCoreApply" style="flex:1">Install selected version</button>
+            <button class="btn btn-g" id="wpCoreRefresh">Refresh versions</button>
+          </div>
+        </div>
+        <div id="wpCoreMsg" style="font-size:11px;color:var(--t3);line-height:1.5"></div>
+        <div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin-top:12px">The archive is downloaded directly from wordpress.org over HTTPS and its embedded version is verified before installation. Do not close this window during the operation.</div>
+      </div>`;
+    el.querySelector('.cms-back-btn')?.addEventListener('click',cmsShowPicker);cmsBindTabs();
+    const sel=document.getElementById('wpCoreVersionSelect'),exact=document.getElementById('wpCoreVersionExact'),btn=document.getElementById('wpCoreApply'),msg=document.getElementById('wpCoreMsg');
+    sel?.addEventListener('change',()=>{exact.value='';});
+    document.getElementById('wpCoreRefresh')?.addEventListener('click',()=>loadCmsVersion());
+    btn?.addEventListener('click',async()=>{
+      const target=(exact.value.trim()||sel.value||'').trim();
+      if(!/^\d+\.\d+(?:\.\d+)?$/.test(target)){msg.style.color='#fca5a5';msg.textContent='Enter a valid version such as 6.5.5.';return;}
+      if(target===String(d.current)){msg.style.color='#f4a333';msg.textContent='This version is already installed.';return;}
+      if(!confirm('WordPress core will be replaced with version '+target+'. Your database and wp-content will not be copied or changed; the old core is kept temporarily for automatic rollback. Continue?'))return;
+      btn.disabled=true;btn.textContent='Installing…';msg.style.color='var(--t3)';msg.textContent='Downloading, verifying, and switching core files quickly…';
+      const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','wp_core_update');fd.append('config_path_b64',cmsB64(cmsCurrentCfg));fd.append('wp_version',target);
+      try{
+        const result=await fetch('?x=wp_core_update',{method:'POST',body:fd}).then(r=>r.json());
+        if(!result.ok)throw new Error(result.error||'The requested version was not installed.');
+        msg.style.color='var(--green)';msg.textContent='WordPress is now running version '+result.version+'. Reloading the status…';
+        setTimeout(()=>loadCmsVersion(),700);
+      }catch(e){btn.disabled=false;btn.textContent='Install selected version';msg.style.color='#fca5a5';msg.textContent='Update request failed: '+String(e);}
+    });
+  }catch(e){el.innerHTML='<div style="padding:20px;color:#fca5a5">Failed to load versions: '+esc(String(e))+'</div>';}
+}
+
+/* ── WordPress Site Health snapshot ───────────────────────────────────────── */
+async function loadWpSiteHealth(){
+  const el=document.getElementById('cmsBody');
+  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Checking WordPress Site Health…</div>';
+  try{
+    const d=await cmsPost('wp_site_health');
+    if(d.error){
+      el.innerHTML=`<div style="padding:14px 16px;border-bottom:1px solid var(--b2)"><button class="btn btn-s cms-back-btn" style="font-size:11px">← Back</button></div><div class="empty" style="padding:32px"><p>${esc(d.error)}</p></div>`;
+      el.querySelector('.cms-back-btn')?.addEventListener('click',cmsShowPicker);return;
+    }
+    const labels={good:'Good',recommended:'Should be improved',critical:'Critical problems'};
+    const colors={good:'#4ade80',recommended:'#f4a333',critical:'#f87171'};
+    const overall=d.overall||'recommended',c=colors[overall]||colors.recommended;
+    const healthIcon=overall==='good'
+      ?'<svg aria-hidden="true" viewBox="0 0 24 24" style="width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round"><path d="m5 12 4 4L19 6"/></svg>'
+      :overall==='critical'
+        ?'<svg aria-hidden="true" viewBox="0 0 24 24" style="width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round"><path d="M12 7v5"/><path d="M12 16h.01"/><path d="M10.3 3.5 2.7 17a2 2 0 0 0 1.75 3h15.1a2 2 0 0 0 1.75-3l-7.6-13.5a2 2 0 0 0-3.4 0Z"/></svg>'
+        :'<svg aria-hidden="true" viewBox="0 0 24 24" style="width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round"><path d="M12 8v4"/><path d="M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>';
+    const rows=(d.checks||[]).map(x=>{
+      const action=x.action?`<button class="btn btn-xs cms-health-action" data-action="${esc(x.action)}" style="white-space:nowrap">Review</button>`:'';
+      return `<div style="display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid var(--b2)">
+        <span style="width:9px;height:9px;border-radius:50%;background:${colors[x.status]||colors.recommended};margin-top:5px;flex:0 0 auto"></span>
+        <div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:700;color:var(--t1)">${esc(x.label)}</div><div style="font-size:11px;color:var(--t3);line-height:1.45;margin-top:3px">${esc(x.detail)}</div></div>${action}
+      </div>`;
+    }).join('');
+    el.innerHTML=cmsSiteHeader('WordPress')+cmsTabsBar('wordpress','health')+`
+      <div style="padding:18px 16px">
+        <div style="display:flex;align-items:center;gap:12px;padding:14px;border:1px solid ${c}55;border-radius:10px;background:${c}12;margin-bottom:14px">
+          <div style="width:42px;height:42px;border-radius:50%;border:4px solid ${c};display:grid;place-items:center;color:${c}">${healthIcon}</div>
+          <div><div style="font-size:15px;font-weight:800;color:${c}">${labels[overall]}</div><div style="font-size:11px;color:var(--t3);margin-top:3px">${d.summary.critical} critical · ${d.summary.recommended} recommended · ${d.summary.good} good</div></div>
+        </div>
+        <div style="padding:12px;border:1px solid var(--b2);border-radius:9px;background:rgba(255,255,255,.025);margin-bottom:14px">
+          <div style="font-size:12px;font-weight:700;color:var(--t1);margin-bottom:5px">Control the status shown in WordPress</div>
+          <div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin-bottom:9px">Automatic mode keeps WordPress at Good whenever the manager initializes it. Choosing another status stops automatic control until you choose Automatic Good again.</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="wpHealthMode" class="inp" style="flex:1;min-width:180px">
+              <option value="automatic" ${d.override==='automatic'||d.override==='auto'?'selected':''}>Automatic — keep Good</option>
+              <option value="good" ${d.override==='good'?'selected':''}>Good</option>
+              <option value="recommended" ${d.override==='recommended'?'selected':''}>Should be improved</option>
+              <option value="critical" ${d.override==='critical'?'selected':''}>Critical problems</option>
+            </select>
+            <button class="btn btn-p" id="wpHealthSave">Apply status</button>
+          </div>
+          <div id="wpHealthControlMsg" style="font-size:10.5px;margin-top:8px;color:var(--t3)">${d.override==='automatic'||d.override==='auto'?'Automatic Good is active.':'Manual status is active: '+esc(d.override)}</div>
+        </div>
+        <div style="border-top:1px solid var(--b2)">${rows}</div>
+        <div style="font-size:10px;color:var(--t3);margin-top:10px">Checked ${esc(d.checked_at||'now')}</div>
+      </div>`;
+    el.querySelector('.cms-back-btn')?.addEventListener('click',cmsShowPicker);cmsBindTabs();
+    document.getElementById('wpHealthSave')?.addEventListener('click',async()=>{
+      const mode=document.getElementById('wpHealthMode').value,button=document.getElementById('wpHealthSave'),note=document.getElementById('wpHealthControlMsg');
+      if(!confirm(mode==='automatic'?'Enable Automatic Good for WordPress Site Health?':'Set WordPress Site Health to '+mode+' and stop automatic control?'))return;
+      button.disabled=true;button.textContent='Applying…';note.textContent='Updating the WordPress control…';
+      const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('cfg_b64',cmsB64(cmsCurrentCfg));fd.append('mode',mode);
+      try{
+        const r=await fetch('?x=wp_site_health_control',{method:'POST',body:fd}).then(x=>x.json());
+        if(!r.ok)throw new Error(r.error||'Could not update Site Health.');
+        note.style.color='var(--green)';note.textContent=r.message||'Site Health updated.';
+        setTimeout(()=>loadWpSiteHealth(),500);
+      }catch(e){button.disabled=false;button.textContent='Apply status';note.style.color='#fca5a5';note.textContent=String(e);}
+    });
+    el.querySelectorAll('.cms-health-action').forEach(b=>b.addEventListener('click',()=>{
+      if(b.dataset.action==='version')loadCmsVersion();
+      else if(b.dataset.action==='https')toast('HTTPS must be enabled at the hosting server or reverse proxy.');
+      else if(b.dataset.action==='permissions')toast('Review the wp-content ownership and permissions at the server.');
+      else if(b.dataset.action==='debug')toast('Disable public debug display in wp-config.php after troubleshooting.');
+    }));
+  }catch(e){el.innerHTML='<div style="padding:20px;color:#fca5a5">Failed to load Site Health: '+esc(String(e))+'</div>';}
 }
 
 /* ── Maintenance mode ─────────────────────────────────────────────────────── */
