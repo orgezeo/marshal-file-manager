@@ -594,9 +594,6 @@ Before submitting a change:
 5. Test the affected feature on a non-production server.
 6. Document new permissions, extensions, environment variables, or provider-specific behavior.
 
-## License
-
-No license file is currently included in this project. Add a `LICENSE` file before publishing the repository if you want others to legally reuse, modify, or redistribute the code.
 
 ## Community
 
