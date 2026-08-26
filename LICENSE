@@ -1,0 +1,98 @@
+Marshal File Manager Personal Use License
+Copyright (c) 2026 s4base
+
+All rights reserved.
+
+This software, including its source code, user interface, documentation, design,
+branding, and associated assets (collectively, the "Software") is proprietary
+software owned by the copyright holder.
+
+1. Grant of permission
+
+The copyright holder grants you a limited, non-exclusive, non-transferable,
+revocable permission to:
+
+  a. download and keep one or more copies of the Software; and
+  b. install and use the unmodified Software for your own personal purposes on
+     a server or website that you own, operate, or are expressly authorized to
+     administer.
+
+This permission is a license to use the Software. It is not a sale or transfer
+of ownership.
+
+2. Restrictions
+
+You may not, without prior written permission from the copyright holder:
+
+  a. modify, alter, patch, adapt, translate, or create derivative works from
+     the Software;
+  b. remove, hide, or change copyright notices, branding, attribution, or
+     license notices;
+  c. rename, rebrand, or present the Software or any substantial part of it as
+     your own work;
+  d. publish, republish, redistribute, mirror, sublicense, rent, lease, sell,
+     or commercially distribute the Software;
+  e. include the Software in another product, service, repository, hosting
+     package, or public download;
+  f. upload the Software or a modified copy to another public repository;
+  g. use the Software to provide unauthorized access to systems, accounts,
+     networks, websites, servers, files, databases, or mailboxes;
+  h. use the Software for hacking, malware, credential theft, exploitation,
+     evasion, disruption, surveillance, or any unlawful or abusive activity; or
+  i. use the Software to access or administer any system without the owner's
+     explicit authorization.
+
+3. Personal-use boundary
+
+The Software is intended for private administration of infrastructure that you
+own or are authorized to manage. You are solely responsible for obtaining all
+necessary permissions and for complying with applicable laws, hosting-provider
+rules, privacy requirements, and security obligations.
+
+4. Third-party components and services
+
+The Software may interact with third-party services, hosting panels, operating
+systems, PHP extensions, fonts, or APIs. Those components and services remain
+subject to their own licenses and terms. This license does not grant permission
+to use any third-party trademark, service, API, or content beyond the rights
+provided by its respective owner.
+
+5. Termination
+
+This license terminates automatically if you violate any term of it. Upon
+termination, you must stop using the Software and delete all copies in your
+possession or control, except where retention is required by law.
+
+6. Disclaimer of warranty
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. YOU USE THE SOFTWARE AT
+YOUR OWN RISK.
+
+The copyright holder is not responsible for any improper, harmful, abusive,
+unauthorized, or unlawful personal use of the Software. You are solely
+responsible for everything you do with the Software, including any damage,
+data loss, security incident, service interruption, legal violation, claim,
+or other consequence resulting from your use, configuration, modification,
+deployment, or failure to secure the Software.
+
+7. Limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER SHALL NOT BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR
+OTHER DAMAGES ARISING FROM OR RELATED TO THE SOFTWARE, ITS INSTALLATION, ITS
+USE, OR THE INABILITY TO USE IT.
+
+8. Permission requests
+
+Requests for written permission to modify, redistribute, rebrand, publish, or
+commercially use the Software should be directed to the copyright holder
+through the official project communication channel:
+
+https://t.me/s4base
+
+If any provision of this license is found to be unenforceable, the remaining
+provisions will remain in effect. This license is the complete agreement
+concerning the permitted use of the Software unless a separate written
+agreement is signed by the copyright holder.
