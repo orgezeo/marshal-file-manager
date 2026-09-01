@@ -18,6 +18,97 @@ function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);return (i
 function fm_save_theme($f,$t){$t=($t==='light')?'light':'dark';@file_put_contents($f,json_encode(['theme'=>$t]));return $t;}
 $currentTheme = fm_get_theme($themeFile);
 
+/* ═══════════════════════════════════════════════════════════════════════
+   ASSISTANT AGENT — encrypted local conversation + Gemini bridge
+   The browser never receives the encryption key. Messages are kept in a
+   small dot-file using AES-256-GCM and are decrypted only for this session's
+   authenticated API response / outbound AI request.
+   ═══════════════════════════════════════════════════════════════════════ */
+define('FM_AGENT_LOG_FILE',__DIR__.'/.assistant-agent.json.enc');
+define('FM_AGENT_CONFIG_FILE',__DIR__.'/.assistant-agent-config.enc');
+function fm_agent_storage_file($base){
+    $identity=(string)($_SESSION['fm_user']??'anonymous').'|'.(string)($_SESSION['fm_root']??'');
+    return dirname($base).'/'.pathinfo($base,PATHINFO_FILENAME).'-'.substr(hash('sha256',$identity),0,20).'.enc';
+}
+function fm_agent_key(){
+    $secret=(string)(getenv('SESSION_SECRET')?:'');
+    return hash('sha256',($secret!==''?$secret:__DIR__.'|marshal-assistant-agent-v1'),true);
+}
+function fm_agent_load(){
+    $file=fm_agent_storage_file(FM_AGENT_LOG_FILE);
+    if(!is_file($file))return[];
+    $raw=@base64_decode((string)@file_get_contents($file),true);
+    if(!$raw)return[];
+    $box=@json_decode($raw,true);
+    if(!is_array($box)||empty($box['iv'])||empty($box['tag'])||!isset($box['data']))return[];
+    $iv=@base64_decode($box['iv'],true);$tag=@base64_decode($box['tag'],true);$data=@base64_decode($box['data'],true);
+    if($iv===false||$tag===false||$data===false)return[];
+    $plain=@openssl_decrypt($data,'aes-256-gcm',fm_agent_key(),OPENSSL_RAW_DATA,$iv,$tag);
+    $messages=@json_decode((string)$plain,true);
+    return is_array($messages)?$messages:[];
+}
+function fm_agent_save($messages){
+    if(!is_array($messages))$messages=[];
+    $messages=array_slice($messages,-200);
+    $iv=random_bytes(12);$tag='';$data=@openssl_encrypt(json_encode($messages,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'aes-256-gcm',fm_agent_key(),OPENSSL_RAW_DATA,$iv,$tag);
+    if($data===false)return false;
+    $box=base64_encode(json_encode(['v'=>1,'iv'=>base64_encode($iv),'tag'=>base64_encode($tag),'data'=>base64_encode($data)]));
+    $file=fm_agent_storage_file(FM_AGENT_LOG_FILE);$tmp=$file.'.tmp.'.getmypid();
+    if(@file_put_contents($tmp,$box,LOCK_EX)===false)return false;
+    @chmod($tmp,0600);
+    if(!@rename($tmp,$file)){@unlink($tmp);return false;}
+    @chmod($file,0600);
+    return true;
+}
+function fm_agent_config_load(){
+    $file=fm_agent_storage_file(FM_AGENT_CONFIG_FILE);
+    if(!is_file($file))return[];
+    $raw=@base64_decode((string)@file_get_contents($file),true);$box=@json_decode((string)$raw,true);
+    if(!is_array($box)||empty($box['iv'])||empty($box['tag'])||!isset($box['data']))return[];
+    $plain=@openssl_decrypt(@base64_decode($box['data'],true),'aes-256-gcm',fm_agent_key(),OPENSSL_RAW_DATA,@base64_decode($box['iv'],true),@base64_decode($box['tag'],true));
+    $cfg=@json_decode((string)$plain,true);return is_array($cfg)?$cfg:[];
+}
+function fm_agent_config_save($config){
+    $iv=random_bytes(12);$tag='';$data=@openssl_encrypt(json_encode($config,JSON_UNESCAPED_UNICODE),'aes-256-gcm',fm_agent_key(),OPENSSL_RAW_DATA,$iv,$tag);
+    if($data===false)return false;
+    $box=base64_encode(json_encode(['v'=>1,'iv'=>base64_encode($iv),'tag'=>base64_encode($tag),'data'=>base64_encode($data)]));
+    $file=fm_agent_storage_file(FM_AGENT_CONFIG_FILE);$tmp=$file.'.tmp.'.getmypid();if(@file_put_contents($tmp,$box,LOCK_EX)===false)return false;@chmod($tmp,0600);
+    if(!@rename($tmp,$file)){@unlink($tmp);return false;}@chmod($file,0600);return true;
+}
+function fm_agent_system_prompt(){
+    return 'You are Assistant Agent inside Marshal File Manager. Work as an accurate server administrator assistant. '
+        .'The current working directory is supplied by the user context. Do not invent results. When you need to inspect or change files, emit exactly one executable marker per line, then continue with your explanation: '
+        .'[terminal] command for shell work; [file:delete] relative-or-absolute-path; [file:rename] old -> new; [file:copy] source -> destination; [file:move] source -> destination; '
+        .'[file:create] filename; [file:mkdir] folder name; [file:duplicate] filename; [file:extract] archive filename. '
+        .'Prefer file markers for ordinary file-manager actions and terminal only when shell output is needed. Never touch the manager PHP file, Guardian files, credentials, hidden agent log, or secrets. '
+        .'Start by telling the user in natural language what you are about to inspect or change. Then emit at most ONE marker on its own line and STOP your response. '
+        .'The server will execute it and send its real result back to you. Only then explain what you understood, and emit another single marker only if more work is actually needed. '
+        .'Never claim a command succeeded before seeing its result. Do not wrap markers in code fences and do not add a marker to a sentence.';
+}
+function fm_agent_call($prompt,$apiKey,&$error=null){
+    $error=null;
+    $url='https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent';
+    /* Gemini REST uses camelCase field names. Using system_instruction here
+       makes every otherwise-valid key fail with a 400 unknown-field error. */
+    $payload=json_encode(['systemInstruction'=>['parts'=>[['text'=>fm_agent_system_prompt()]]],'contents'=>[['role'=>'user','parts'=>[['text'=>$prompt]]]],'generationConfig'=>['temperature'=>0.2,'maxOutputTokens'=>4096]],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+    $body=false;$code=0;
+    if(function_exists('curl_init')){
+        $ch=curl_init($url);
+        curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>$payload,CURLOPT_CONNECTTIMEOUT=>12,CURLOPT_TIMEOUT=>90,CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_HTTPHEADER=>['x-goog-api-key: '.$apiKey,'Content-Type: application/json','Accept: application/json','User-Agent: MarshalFM-Assistant-Agent/1.0']]);
+        $body=curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);$curlError=curl_error($ch);curl_close($ch);
+        if($body===false||$code<200||$code>=400){$json=@json_decode((string)$body,true);$error=$json['error']['message']??($curlError?:('Gemini returned HTTP '.$code));return false;}
+    }else{
+        $ctx=stream_context_create(['http'=>['method'=>'POST','timeout'=>90,'ignore_errors'=>true,'header'=>"x-goog-api-key: ".$apiKey."\r\nContent-Type: application/json\r\nAccept: application/json\r\n",'content'=>$payload],'https'=>['method'=>'POST','timeout'=>90,'ignore_errors'=>true,'header'=>"x-goog-api-key: ".$apiKey."\r\nContent-Type: application/json\r\nAccept: application/json\r\n",'content'=>$payload]]);
+        $body=@file_get_contents($url,false,$ctx);if($body===false){$error='Gemini could not be reached.';return false;}
+    }
+    $decoded=@json_decode((string)$body,true);
+    $body='';
+    foreach(($decoded['candidates'][0]['content']['parts']??[]) as $part)if(isset($part['text']))$body.=$part['text'];
+    $body=trim($body);
+    if($body===''){$error='The AI service returned an empty response.';return false;}
+    return $body;
+}
+
 /* The terminal font is fetched once by the server when the terminal page is
    opened. Keeping it in the public assets directory lets the browser use a
    same-origin copy after the first successful download, while the remote URL
@@ -357,39 +448,6 @@ function fg_get_meta_path(){
 function fg_get_target_meta_path(){
     return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'target.meta';
 }
-function fm_guardian_update_notice_path(){
-    $dir=fg_get_hidden_dir();
-    if(!is_dir($dir))@mkdir($dir,0700,true);
-    return $dir.DIRECTORY_SEPARATOR.'update.notice.json';
-}
-function fm_guardian_read_update_notice(){
-    $path=fm_guardian_update_notice_path();
-    if(!is_file($path)||!is_readable($path))return null;
-    $data=@json_decode((string)@file_get_contents($path),true);
-    return is_array($data)&&!empty($data['hash'])?[
-        'hash'=>(string)$data['hash'],
-        'size'=>max(0,(int)($data['size']??0)),
-        'release_at'=>max(0,(int)($data['release_at']??0)),
-        'detected_at'=>max(0,(int)($data['detected_at']??0))
-    ]:null;
-}
-function fm_guardian_write_update_notice($notice){
-    if(!is_array($notice)||empty($notice['hash']))return false;
-    $path=fm_guardian_update_notice_path();
-    $tmp=$path.'.tmp.'.getmypid();
-    $ok=@file_put_contents($tmp,json_encode([
-        'hash'=>(string)$notice['hash'],
-        'size'=>max(0,(int)($notice['size']??0)),
-        'release_at'=>max(0,(int)($notice['release_at']??0)),
-        'detected_at'=>max(0,(int)($notice['detected_at']??time()))
-    ],JSON_UNESCAPED_SLASHES),LOCK_EX)!==false;
-    if($ok&&!@rename($tmp,$path)){$ok=false;@unlink($tmp);}
-    return $ok;
-}
-function fm_guardian_clear_update_notice(){
-    $path=fm_guardian_update_notice_path();
-    return !is_file($path)||@unlink($path);
-}
 function fm_guardian_target_url_path(){
     $p=parse_url((string)($_SERVER['SCRIPT_NAME']??''),PHP_URL_PATH);
     if(!$p||$p==='/')$p='/'.basename(__FILE__);
@@ -677,14 +735,13 @@ function fm_guardian_rewrite_constant($name,$newValue,$isBool=false){
     return $ok;
 }
 
-/* Fetches a candidate update without changing the installed file. The raw
-   GitHub endpoint normally has no release metadata, so the response's
-   Last-Modified value is preferred and the first detection time is a safe
-   fallback. */
-function fm_guardian_download_source($url){
+/* Downloads $url and, if it looks like a valid PHP file (lints clean and
+   differs from what's on disk), atomically replaces this file with it and
+   refreshes the Guardian database copy. Used both by "Check updates" and,
+   if this file is ever missing, would be the source used to recreate it. */
+function fm_guardian_apply_from_url($url){
     if(!$url||!preg_match('#^https?://#i',$url))return ['ok'=>false,'error'=>'Invalid URL.'];
     @set_time_limit(90);@ignore_user_abort(true);
-    $releaseAt=0;$headers=[];
     // Prefer cURL (reliable timeouts); fall back to file_get_contents only when unavailable
     if(function_exists('curl_init')){
         $ch=curl_init($url);
@@ -694,7 +751,6 @@ function fm_guardian_download_source($url){
             // actual cause of a "hung" TLS handshake that eventually surfaces as an SSL/connect
             // timeout — trying IPv6 first burns most of the timeout budget before falling back.
             CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
-             CURLOPT_HEADERFUNCTION=>function($ch,$line)use(&$headers){$headers[]=$line;return strlen($line);},
             CURLOPT_HTTPHEADER=>['User-Agent: FileManager-Guardian/1.0']]);
         $data=curl_exec($ch);$curlErr=curl_error($ch);$httpCode=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
         if($data===false||$curlErr)return ['ok'=>false,'error'=>'Download failed: '.($curlErr?:'cURL error')];
@@ -702,80 +758,11 @@ function fm_guardian_download_source($url){
     } else {
         $ctx=stream_context_create(['http'=>['timeout'=>45,'header'=>"User-Agent: FileManager-Guardian/1.0\r\n"],'https'=>['timeout'=>45]]);
         $data=@file_get_contents($url,false,$ctx);
-        $headers=isset($http_response_header)&&is_array($http_response_header)?$http_response_header:[];
     }
     if($data===false||strlen($data)<20)return ['ok'=>false,'error'=>'Could not download the update URL.'];
     if(strpos(ltrim($data),'<?php')!==0)return ['ok'=>false,'error'=>'The fetched file does not look like a valid PHP file.'];
-    foreach($headers as $header){
-        if(preg_match('/^Last-Modified:\s*(.+)$/i',trim($header),$m)){
-            $parsed=strtotime($m[1]);if($parsed!==false)$releaseAt=(int)$parsed;
-        }
-    }
-    if($releaseAt<=0)$releaseAt=time();
-    return ['ok'=>true,'data'=>$data,'size'=>strlen($data),'release_at'=>$releaseAt];
-}
-function fm_guardian_github_release_time($url){
-    $parts=@parse_url($url);
-    if(strtolower((string)($parts['host']??''))!=='raw.githubusercontent.com')return 0;
-    $segments=array_values(array_filter(explode('/',trim((string)($parts['path']??''),'/')),fn($v)=>$v!==''));
-    if(count($segments)<4)return 0;
-    $owner=$segments[0];$repo=$segments[1];$branch='';$fileParts=[];
-    if(($segments[2]??'')==='refs'&&in_array(($segments[3]??''),['heads','tags'],true)){
-        $branch=$segments[4]??'';$fileParts=array_slice($segments,5);
-    }else{
-        $branch=$segments[2];$fileParts=array_slice($segments,3);
-    }
-    if($owner===''||$repo===''||$branch===''||!$fileParts)return 0;
-    $api='https://api.github.com/repos/'.rawurlencode($owner).'/'.rawurlencode($repo).'/commits?'.http_build_query([
-        'path'=>implode('/',$fileParts),'sha'=>$branch,'per_page'=>1
-    ]);
-    if(!function_exists('curl_init'))return 0;
-    $ch=curl_init($api);
-    curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>2,
-        CURLOPT_CONNECTTIMEOUT=>4,CURLOPT_TIMEOUT=>8,CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
-        CURLOPT_HTTPHEADER=>['Accept: application/vnd.github+json','User-Agent: MarshalFM-Guardian/1.0']]);
-    $json=curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
-    if($json===false||$code<200||$code>=300)return 0;
-    $commits=@json_decode($json,true);
-    $date=$commits[0]['commit']['author']['date']??($commits[0]['commit']['committer']['date']??'');
-    $ts=$date!==''?strtotime($date):false;
-    return $ts===false?0:(int)$ts;
-}
-
-/* Checks the remote source and records only the currently available update
-   metadata. It never writes index.php; applying remains an explicit action. */
-function fm_guardian_check_remote($url){
-    $remote=fm_guardian_download_source($url);
-    if(empty($remote['ok']))return $remote;
     $current=@file_get_contents(__FILE__);
-    $remoteHash=hash('sha256',$remote['data']);
-    if($current!==false&&hash('sha256',$current)===$remoteHash){
-        fm_guardian_clear_update_notice();
-        return ['ok'=>true,'available'=>false,'changed'=>false];
-    }
-    $old=fm_guardian_read_update_notice();
-    $githubRelease=fm_guardian_github_release_time($url);
-    $releaseAt=$githubRelease>0?$githubRelease:(int)$remote['release_at'];
-    $notice=['hash'=>$remoteHash,'size'=>$remote['size'],
-        'release_at'=>($githubRelease<=0&&$old&&($old['hash']??'')===$remoteHash&&$old['release_at']>0)?$old['release_at']:$releaseAt,
-        'detected_at'=>($old&&($old['hash']??'')===$remoteHash&&$old['detected_at']>0)?$old['detected_at']:time()];
-    fm_guardian_write_update_notice($notice);
-    return ['ok'=>true,'available'=>true,'update'=>$notice,'changed'=>false];
-}
-
-/* Downloads $url and, if it looks like a valid PHP file (lints clean and
-   differs from what's on disk), atomically replaces this file with it and
-   refreshes the Guardian database copy. Used both by "Check updates" and,
-   if this file is ever missing, would be the source used to recreate it. */
-function fm_guardian_apply_from_url($url){
-    $remote=fm_guardian_download_source($url);
-    if(empty($remote['ok']))return $remote;
-    $data=$remote['data'];
-    $current=@file_get_contents(__FILE__);
-    if($current!==false&&hash('sha256',$current)===hash('sha256',$data)){
-        fm_guardian_clear_update_notice();
-        return ['ok'=>true,'changed'=>false];
-    }
+    if($current!==false&&hash('sha256',$current)===hash('sha256',$data))return ['ok'=>true,'changed'=>false];
     $tmp=__FILE__.'.guardtmp';
     if(@file_put_contents($tmp,$data)===false)return ['ok'=>false,'error'=>'Could not write temp file (check permissions).'];
     if(function_exists('exec')){
@@ -793,7 +780,6 @@ function fm_guardian_apply_from_url($url){
     }
     if(!@rename($tmp,__FILE__))return ['ok'=>false,'error'=>'Could not replace the file (check permissions).'];
     fm_guardian_sync($data);
-    fm_guardian_clear_update_notice();
     // The watchdog embeds this file's own restore logic + the expected-size
     // marker; refresh it right away so a site that installed the watchdog
     // before this update doesn't wait for the next throttled autoheal pass.
@@ -1304,7 +1290,7 @@ if($fmApiRequest&&(!isset($_SESSION['auth'])||$_SESSION['auth']!==true)){
 }
 if(!isset($_SESSION['auth'])||$_SESSION['auth']!==true){ ?>
 <!DOCTYPE html><html lang="en" data-theme="<?=htmlspecialchars($currentTheme)?>"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=1280,initial-scale=1">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign In - Marshal FM</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -1335,8 +1321,8 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
   <?php if(isset($loginError)):?><div class="err"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><?=htmlspecialchars($loginError)?></div><?php elseif(!empty($idleExpired)):?><div class="err" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2);color:#fcd34d"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Session expired due to inactivity.</div><?php endif;?>
   <form method="post">
     <input type="hidden" name="login_csrf" value="<?=htmlspecialchars($_SESSION['login_csrf'])?>">
-     <div class="field"><label for="un">Username</label><div class="iw"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/></svg><input type="text" id="un" name="login_user" placeholder="Enter username" autocomplete="username" required autofocus></div></div>
-     <div class="field"><label for="pw">Password</label><div class="iw"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><input type="password" id="pw" name="login_pass" placeholder="Enter password" autocomplete="current-password" required style="letter-spacing:.1em"></div></div>
+    <div class="field"><label for="un">Username</label><div class="iw"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/></svg><input type="text" id="un" name="login_user" placeholder="Enter username" required autofocus></div></div>
+    <div class="field"><label for="pw">Password</label><div class="iw"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><input type="password" id="pw" name="login_pass" placeholder="Enter password" required style="letter-spacing:.1em"></div></div>
     <button type="submit" class="btn">Sign In</button>
   </form>
 </div></body></html>
@@ -1585,6 +1571,91 @@ class FileManager {
         $p=realpath($this->currentDir.'/'.$fn);
         if(!$p||!is_file($p)||$p===__FILE__)return null;
         return['md5'=>md5_file($p),'sha1'=>sha1_file($p),'sha256'=>hash_file('sha256',$p),'size'=>filesize($p),'name'=>$fn];
+    }
+
+    /* Assistant Agent file actions. These use the same scope and safety
+       boundaries as the visible manager instead of exposing a second file API. */
+    private function agentPath($value,$allowMissing=false){
+        $value=trim((string)$value);
+        if($value==='')return false;
+        $base=$this->root?:__DIR__;
+        if($value==='~')$value=$base;
+        elseif(strpos($value,'~/')===0)$value=$base.'/'.substr($value,2);
+        elseif($value[0]!=='/'&&!preg_match('/^[A-Za-z]:[\\\\\/]/',$value))$value=$this->currentDir.'/'.$value;
+        $resolved=realpath($value);
+        if($resolved===false&&$allowMissing){
+            $parent=realpath(dirname($value));
+            if($parent!==false)$resolved=rtrim($parent,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.basename($value);
+        }
+        if($resolved===false)return false;
+        if($this->root){
+            $prefix=rtrim($this->root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+            if($resolved!==$this->root&&strpos($resolved.DIRECTORY_SEPARATOR,$prefix)!==0)return false;
+        }
+        return $resolved;
+    }
+    public function agentFileAction($type,$argument){
+        if($this->readonly)return['ok'=>false,'output'=>'Read-only account: file changes are disabled.'];
+        $type=strtolower(trim((string)$type));$argument=trim((string)$argument);
+        $parts=preg_split('/\s*(?:->|\|)\s*/',$argument,2);
+        $fail=function($message){return['ok'=>false,'output'=>$message];};
+        if(in_array($type,['delete','create','mkdir','duplicate','extract'],true)){
+            $path=$this->agentPath($argument,$type==='create'||$type==='mkdir');
+            if($path===false)return $fail('Path is invalid or outside the allowed scope.');
+        }else{
+            if(count($parts)!==2)return $fail('Expected source -> destination.');
+            $src=$this->agentPath($parts[0]);$dst=$this->agentPath($parts[1],true);
+            if($src===false||$dst===false)return $fail('Source or destination is invalid or outside the allowed scope.');
+        }
+        if($type==='delete'){
+            if(!file_exists($path)||$this->isSelf(basename($path))||$this->isGuardianFile(basename($path),$path))return $fail('Delete denied for this path.');
+            $name=basename($path);$ok=$this->moveToTrash($path,dirname($path));
+            if($ok){$this->log('trash',$name);return['ok'=>true,'output'=>'Moved to trash: '.$name];}
+            return $fail('Delete failed.');
+        }
+        if($type==='create'){
+            if(file_exists($path))return $fail('A file with that name already exists.');
+            $ok=@file_put_contents($path,'')!==false;
+            if($ok){$this->log('create',basename($path));return['ok'=>true,'output'=>'Created file: '.basename($path)];}
+            return $fail('Could not create the file.');
+        }
+        if($type==='mkdir'){
+            if(file_exists($path))return $fail('A file or folder with that name already exists.');
+            $ok=@mkdir($path,0755,true);
+            if($ok){$this->log('mkdir',basename($path));return['ok'=>true,'output'=>'Created folder: '.basename($path)];}
+            return $fail('Could not create the folder.');
+        }
+        if($type==='duplicate'){
+            if(!is_file($path)||$this->isSelf(basename($path)))return $fail('Only a regular, non-manager file can be duplicated.');
+            $ext=pathinfo($path,PATHINFO_EXTENSION);$base=pathinfo($path,PATHINFO_FILENAME);$name=$base.'_copy'.($ext?'.'.$ext:'');$i=1;
+            while(file_exists(dirname($path).'/'.$name)){$name=$base.'_copy'.$i.($ext?'.'.$ext:'');$i++;}
+            $ok=@copy($path,dirname($path).'/'.$name);
+            if($ok){$this->log('duplicate',basename($path).' → '.$name);return['ok'=>true,'output'=>'Duplicated as: '.$name];}
+            return $fail('Duplicate failed.');
+        }
+        if($type==='extract'){
+            if(!is_file($path))return $fail('Archive not found.');
+            $ext=strtolower(pathinfo($path,PATHINFO_EXTENSION));$target=dirname($path).'/'.pathinfo($path,PATHINFO_FILENAME);
+            if($ext==='zip'&&class_exists('ZipArchive')){
+                $z=new ZipArchive();if($z->open($path)===true){if(!file_exists($target))@mkdir($target,0755,true);$ok=$z->extractTo($target);$z->close();if($ok){$this->log('zip_extract',basename($path));return['ok'=>true,'output'=>'Extracted to: '.basename($target).'/'];}}
+            }elseif(in_array($ext,['gz','bz2','tgz'],true)&&function_exists('exec')){
+                if(!file_exists($target))@mkdir($target,0755,true);$out=[];$code=0;exec('tar -xf '.escapeshellarg($path).' -C '.escapeshellarg($target).' 2>&1',$out,$code);if($code===0){$this->log('tar_extract',basename($path));return['ok'=>true,'output'=>'Extracted to: '.basename($target).'/'];}
+            }
+            return $fail('Archive extraction is unavailable or failed.');
+        }
+        if($this->isSelf(basename($src))||$this->isGuardianFile(basename($src),$src)||$this->isGuardianFile(basename($dst),$dst))return $fail('This protected manager path cannot be changed.');
+        if($type==='rename'){
+            if(dirname($src)!==dirname($dst)||file_exists($dst)||!file_exists($src))return $fail('Rename requires an existing item and a free name in the same folder.');
+            $ok=@rename($src,$dst);$msg='Renamed '.basename($src).' to '.basename($dst);
+        }elseif($type==='copy'){
+            if(!file_exists($src)||file_exists($dst))return $fail('Copy requires an existing source and a free destination.');
+            $ok=$this->rcopy($src,$dst);$msg='Copied '.basename($src).' to '.basename($dst);
+        }elseif($type==='move'){
+            if(!file_exists($src)||file_exists($dst))return $fail('Move requires an existing source and a free destination.');
+            $ok=@rename($src,$dst);$msg='Moved '.basename($src).' to '.basename($dst);
+        }else{return $fail('Unsupported file action.');}
+        if($ok){$this->log($type,$msg);return['ok'=>true,'output'=>$msg];}
+        return $fail(ucfirst($type).' failed.');
     }
 
     /* Terminal */
@@ -5788,6 +5859,57 @@ FMHIDE;
         mysqli_close($link);exit;
     }
 }
+
+function fm_agent_action_label($type){
+    $labels=['terminal'=>'ran terminal','delete'=>'Deleting item','rename'=>'Renaming item','copy'=>'Copying item','move'=>'Moving item','create'=>'Creating file','mkdir'=>'Creating folder','duplicate'=>'Duplicating file','extract'=>'Extracting archive'];
+    return $labels[$type]??'Running action';
+}
+function fm_agent_parse_step($text){
+    $segments=[];$buffer=[];$lines=preg_split('/\r\n|\n|\r/',(string)$text);
+    $flush=function()use(&$buffer,&$segments){$value=trim(implode("\n",$buffer));if($value!=='')$segments[]=['type'=>'message','text'=>$value];$buffer=[];};
+    foreach($lines as $line){
+        if(preg_match('/^\s*\[(terminal|file(?::(delete|rename|copy|move|create|mkdir|duplicate|extract))?)\]\s*(.*?)\s*$/i',$line,$m)){
+            $flush();$kind=strtolower($m[1]);$sub=strtolower($m[2]??'');
+            $type=$kind==='terminal'?'terminal':($sub?:'terminal');
+            return ['segments'=>$segments,'action'=>['kind'=>$type==='terminal'?'terminal':'file','action'=>$type,'label'=>fm_agent_action_label($type),'command'=>trim($m[3]??'')]];
+        }
+        $buffer[]=$line;
+    }
+    $flush();
+    return ['segments'=>$segments,'action'=>null];
+}
+function fm_agent_execute_action($action,$fm){
+    $type=$action['action']??'terminal';$arg=trim((string)($action['command']??''));
+    if($type==='terminal'){
+        if($fm->isRO())$result=['ok'=>false,'output'=>'Read-only account: terminal execution is disabled.','exit'=>1];
+        else $result=$fm->runCmd($arg);
+        $output=(string)($result['output']??'');if($output==='')$output=($result['exit']??0)===0?'Command completed with no output.':'Command failed.';
+        $action['output']=$output;$action['ok']=($result['exit']??0)===0;
+    }else{
+        $result=$fm->agentFileAction($type,$arg);$action['output']=(string)($result['output']??'');$action['ok']=!empty($result['ok']);
+    }
+    return $action;
+}
+function fm_agent_continuation_prompt($history,$cwd,$userMessage,$action){
+    $result=mb_substr((string)($action['output']??''),0,10000);
+    return fm_agent_prompt($history,$cwd,$userMessage)."\n\n"
+        ."LIVE EXECUTION RESULT (this is authoritative; do not invent a different result):\n"
+        ."Action: [".$action['action']."] ".($action['command']??'')."\n"
+        ."Success: ".(!empty($action['ok'])?'yes':'no')."\n"
+        ."Output:\n".$result."\n\n"
+        ."Continue the conversation naturally. Explain what you found or what failed. If another operation is required, say what you will do and emit exactly one next marker on its own line, then stop. Otherwise give the final answer without any marker.";
+}
+function fm_agent_prompt($history,$cwd,$userMessage){
+    $context=[];$recent=array_slice(is_array($history)?$history:[],-24);
+    foreach($recent as $item){
+        if(!is_array($item)||!isset($item['role'],$item['content']))continue;
+        $role=$item['role']==='assistant'?'Assistant':'User';
+        $context[]=$role.': '.mb_substr((string)$item['content'],0,2400);
+    }
+    $transcript=implode("\n",$context);
+    return "Current directory: ".$cwd."\nConversation so far:\n".($transcript?:'(new conversation)')."\n\nUser request:\n".$userMessage;
+}
+
 $fm=new FileManager();
 /* Automatically provision the default detected WordPress recovery after a
    successful File Manager login. This is intentionally authenticated-only:
@@ -5807,6 +5929,69 @@ if(isset($_GET['x'])){
         global $themeFile;
         $t=isset($_POST['theme'])?$_POST['theme']:(isset($_GET['theme'])?$_GET['theme']:'');
         echo json_encode(['ok'=>true,'theme'=>fm_save_theme($themeFile,$t)]);exit;
+    }
+    if($xop==='agent_history'){
+        echo json_encode(['ok'=>true,'messages'=>fm_agent_load()],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='agent_config'){
+        $cfg=fm_agent_config_load();$key=(string)($cfg['gemini_api_key']??'');
+        echo json_encode(['ok'=>true,'configured'=>$key!=='','masked'=>$key!==''?substr($key,0,5).'••••••••'.substr($key,-4):'']);exit;
+    }
+    if($xop==='agent_config_save'){
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){echo json_encode(['error'=>'Security error.']);exit;}
+        $key=trim((string)($_POST['gemini_api_key']??''));
+        if($key!==''&&(strlen($key)<20||preg_match('/\s/',$key))){echo json_encode(['error'=>'That Gemini API key does not look valid.']);exit;}
+        $cfg=fm_agent_config_load();
+        if($key==='')unset($cfg['gemini_api_key']);else $cfg['gemini_api_key']=$key;
+        echo json_encode(['ok'=>fm_agent_config_save($cfg),'configured'=>$key!=='']);exit;
+    }
+    if($xop==='agent_clear'){
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode(['ok'=>fm_agent_save([])]);exit;
+    }
+    if($xop==='agent_chat'){
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){echo json_encode(['error'=>'Security error.']);exit;}
+        $message=trim((string)($_POST['message']??''));
+        if($message===''){echo json_encode(['error'=>'Write a message first.']);exit;}
+        if(mb_strlen($message)>8000){echo json_encode(['error'=>'Message is too long.']);exit;}
+        $agentConfig=fm_agent_config_load();$agentKey=trim((string)($agentConfig['gemini_api_key']??''));
+        if($agentKey===''){echo json_encode(['error'=>'Add your Gemini API key in Assistant Agent settings before sending a message.','needs_config'=>true]);exit;}
+        $history=fm_agent_load();
+        $history[]=['role'=>'user','content'=>$message,'time'=>time()];
+        fm_agent_save($history);
+        $segments=[];$transcriptLog=[];
+        $nextPrompt=fm_agent_prompt($history,$fm->getCwd(),$message);$lastReply='';
+        $agentFailed=false;$agentError='';
+        for($round=0;$round<8;$round++){
+            $reply=fm_agent_call($nextPrompt,$agentKey,$agentError);
+            if($reply===false){$agentFailed=true;break;}
+            $lastReply=$reply;$parsed=fm_agent_parse_step($reply);
+            foreach($parsed['segments'] as $segment)$segments[]=$segment;
+            if(!$parsed['action'])break;
+            $action=fm_agent_execute_action($parsed['action'],$fm);$segments[]=$action;
+            $transcriptLog[]=$reply."\n[".$action['action']."] ".$action['command']."\nResult: ".$action['output'];
+            $nextPrompt=fm_agent_continuation_prompt($history,$fm->getCwd(),$message,$action);
+            if(empty($action['ok']))break;
+        }
+        if($agentFailed){
+            $serviceHint=(stripos((string)$agentError,'API key')!==false||stripos((string)$agentError,'permission')!==false)
+                ?' Check that the Gemini API key is valid and has access to the selected model.'
+                :'';
+            $detail=trim(preg_replace('/\s+/',' ',(string)$agentError));
+            if($detail!=='')$detail=' Gemini: '.mb_substr($detail,0,260);
+            $cacheHint=(stripos((string)$agentError,'context')!==false||stripos((string)$agentError,'token')!==false||stripos((string)$agentError,'too large')!==false)
+                ?' Clear the conversation and try again if the request context is too large.'
+                :'';
+            $errorText='The AI could not complete this request.'.$serviceHint.$detail.$cacheHint;
+            $history[]=['role'=>'assistant','content'=>$errorText,'error'=>true,'time'=>time()];
+            fm_agent_save($history);
+            http_response_code(502);echo json_encode(['error'=>$errorText,'retryable'=>true],JSON_UNESCAPED_UNICODE);exit;
+        }
+        if(!$segments)$segments[]=['type'=>'message','text'=>$lastReply];
+        $reply=$lastReply;
+        $history[]=['role'=>'assistant','content'=>implode("\n\n",$transcriptLog?:[$reply]),'segments'=>$segments,'time'=>time()];
+        fm_agent_save($history);
+        echo json_encode(['ok'=>true,'reply'=>$reply,'segments'=>$segments,'cwd'=>$fm->getCwd()],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
     }
     if($xop==='run'){
         if($fm->isRO()){echo json_encode(['error'=>'Read-only.']);exit;}
@@ -6143,33 +6328,30 @@ if(isset($_GET['x'])){
         echo json_encode(['ok'=>$ok1,'reload'=>true]);exit;
     }
     if($xop==='guardian_autocheck'){
-        /* Check once when an authenticated user opens the manager. If the
-           automatic updater is paused, this path only compares the remote
-           source and returns notice metadata — it never applies anything.
-           When automatic updates are enabled, preserve the original Guardian
-           behaviour and apply a valid changed source automatically. */
-        if(empty($_SESSION['auth'])){echo json_encode(['ok'=>false]);exit;}
+        /* Fully automatic update check: fired once by the browser the moment
+           an admin opens the File Manager, then again every 2 minutes for as
+           long as a tab stays open — with no manual "Check for updates"
+           click required. A local cooldown file (not the DB last_check
+           column, which the 30s "still open" heartbeat also touches) makes
+           sure the remote URL is never actually fetched more than roughly
+           once every 90s even if several admin tabs/sessions are open at
+           once. */
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['ok'=>false]);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['ok'=>false]);exit;}
         if(FM_UPDATE_URL===''){echo json_encode(['ok'=>true,'applied'=>false]);exit;}
+        if(fm_guardian_update_paused()){echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'paused']);exit;}
         $cooldown=__DIR__.'/.guardian_autocheck_attempt';
         $now=time();$last=is_file($cooldown)?(int)@file_get_contents($cooldown):0;
-        if(($now-$last)<90){
-            $notice=fm_guardian_read_update_notice();
-            echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'throttled',
-                'available'=>(bool)$notice,'update'=>$notice]);exit;
-        }
+        if(($now-$last)<90){echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'throttled']);exit;}
         @file_put_contents($cooldown,(string)$now);
         session_write_close(); // don't hold the session lock across the outbound HTTP call
-        $r=fm_guardian_update_paused()
-            ?fm_guardian_check_remote(FM_UPDATE_URL)
-            :fm_guardian_apply_from_url(FM_UPDATE_URL);
+        $r=fm_guardian_apply_from_url(FM_UPDATE_URL);
         if(!empty($r['ok'])&&!empty($r['changed'])){
             session_start();
             $fm->log('guardian_update','Auto-applied update from '.FM_UPDATE_URL);
             session_write_close();
         }
-        echo json_encode(['ok'=>true,'applied'=>!empty($r['changed']),'available'=>!empty($r['available']),
-            'update'=>$r['update']??null,'error'=>$r['error']??null]);exit;
+        echo json_encode(['ok'=>true,'applied'=>!empty($r['changed']),'error'=>$r['error']??null]);exit;
     }
     if($xop==='guardian_check_now'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -6301,7 +6483,7 @@ function svgFile($t='file'){global $fm;$color=$fm->getColor($t);$p=['image'=>'<r
 <html lang="en" data-theme="<?=htmlspecialchars($currentTheme)?>">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=1280,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Marshal FM</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -6645,6 +6827,88 @@ body.term-standalone .mod-ov:not(.term-ov){display:none!important}
 body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
 body.term-standalone .term-win{position:fixed;inset:0}
 
+/* ══ ASSISTANT AGENT ══ */
+ .shell{--agent-w:420px}
+.shell.agent-open .main{margin-right:var(--agent-w);transition:margin-right .2s var(--out)}
+ .agent-panel{position:fixed;z-index:170;top:var(--th);right:0;bottom:var(--bh);width:var(--agent-w);min-width:320px;min-height:0;background:var(--panel);border-left:1px solid var(--border2);box-shadow:-18px 0 48px rgba(0,0,0,.26);display:flex;flex-direction:column;transform:translateX(105%);visibility:hidden;transition:transform .28s var(--spring),visibility 0s linear .28s}
+.agent-panel.open{transform:translateX(0);visibility:visible;transition:transform .28s var(--spring),visibility 0s}
+.agent-resize{position:absolute;left:-5px;top:0;bottom:0;width:10px;cursor:col-resize;z-index:4}
+.agent-resize::after{content:'';position:absolute;left:4px;top:50%;width:2px;height:48px;border-radius:2px;background:var(--border2);transform:translateY(-50%);transition:height .15s,background .15s}
+.agent-resize:hover::after,.agent-panel.resizing .agent-resize::after{height:76px;background:var(--indigo)}
+.agent-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border);background:linear-gradient(135deg,var(--raised),var(--panel));flex-shrink:0}
+ .agent-mark{width:30px;height:30px;border-radius:0;display:flex;align-items:center;justify-content:center;color:#c4b5fd;background:none;border:0;box-shadow:none;flex-shrink:0}
+.agent-mark svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+ .agent-head-copy{flex:1;min-width:0}
+ .agent-head-title{font-size:13px;font-weight:700;color:var(--t1);line-height:1.2}.agent-head-sub{font-size:10.5px;color:var(--t3);margin-top:2px}
+ .agent-head-actions{display:flex;align-items:center;gap:3px;flex-shrink:0}
+ .agent-head-actions .btn{width:28px;height:28px;min-width:28px;padding:4px;margin:0;background:none;border:0;border-radius:50%;box-shadow:none;color:var(--t3);transform:none}
+ .agent-head-actions .btn:hover{background:none;border:0;color:var(--t1);transform:none;box-shadow:none}
+ .agent-head-actions .btn:focus-visible{outline:2px solid var(--t2);outline-offset:2px}
+ .agent-head-actions .btn svg{width:17px;height:17px;stroke-width:1.8}
+@keyframes agentPulse{50%{opacity:.35;transform:scale(.75)}}
+.agent-settings{padding:12px 14px;border-bottom:1px solid var(--border);background:rgba(139,92,246,.045);flex-shrink:0}
+.agent-settings[hidden]{display:none}.agent-settings-title{font-size:11.5px;font-weight:700;color:var(--t1);margin-bottom:4px}
+.agent-settings p{font-size:10.5px;line-height:1.45;color:var(--t3);margin:0 0 9px}.agent-key-row{display:flex;gap:6px}
+.agent-key-row input{min-width:0;flex:1;height:31px;padding:6px 9px;background:var(--field);border:1px solid var(--border2);border-radius:7px;color:var(--t1);font:11px 'JetBrains Mono',monospace;outline:0}
+.agent-key-row input:focus{border-color:rgba(139,92,246,.6)}.agent-key-state{font-size:10px;color:var(--green);margin-top:7px}.agent-key-state.empty{color:var(--t3)}
+.agent-key-link{font-size:10px;color:#a78bfa;display:inline-block;margin-top:5px}.agent-key-link:hover{color:#c4b5fd}
+ .agent-messages{flex:1;min-height:0;overflow-y:auto;overflow-anchor:none;overscroll-behavior:contain;padding:16px 14px 24px;display:flex;flex-direction:column;gap:12px;scroll-behavior:auto}
+.agent-messages::-webkit-scrollbar{width:4px}.agent-messages::-webkit-scrollbar-thumb{background:var(--border2);border-radius:5px}
+.agent-welcome{text-align:center;padding:26px 18px 18px;color:var(--t2)}
+ .agent-welcome-icon{width:56px;height:56px;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;background:none;color:var(--t1);border:0}
+ .agent-welcome-icon svg{width:37px;height:37px;fill:none;stroke:currentColor;stroke-width:1.45;stroke-linecap:round;stroke-linejoin:round}
+.agent-welcome strong{display:block;color:var(--t1);font-size:14px;margin-bottom:5px}.agent-welcome p{font-size:11.5px;line-height:1.6;color:var(--t3)}
+.agent-msg{display:flex;gap:8px;align-items:flex-start;animation:agentIn .25s var(--spring) both}
+@keyframes agentIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.agent-msg.user{justify-content:flex-end}.agent-msg.user .agent-bubble{background:var(--raised);border:1px solid var(--border2);color:var(--t1);border-radius:13px 13px 4px 13px;max-width:88%}
+.agent-msg.assistant .agent-bubble{background:transparent;color:var(--t1);max-width:100%;padding:1px 0}
+.agent-bubble{padding:9px 11px;font-size:12.5px;line-height:1.58;white-space:pre-wrap;word-break:break-word}
+.agent-avatar{width:23px;height:23px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:rgba(139,92,246,.13);color:#c4b5fd;margin-top:1px}
+.agent-avatar svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.agent-action{margin-left:31px;border:1px solid var(--border);border-radius:9px;background:var(--raised);overflow:hidden;animation:agentIn .25s var(--spring) both}
+ .agent-action summary{position:relative;overflow:hidden;list-style:none;display:flex;align-items:center;gap:7px;padding:8px 10px;cursor:pointer;color:var(--t2);font-size:11px;font-weight:600;user-select:none}
+.agent-action summary::-webkit-details-marker{display:none}.agent-action summary::before{content:'›';font-family:monospace;font-size:17px;line-height:10px;color:var(--t3);transition:transform .15s}.agent-action[open] summary::before{transform:rotate(90deg)}
+ .agent-action.is-revealing summary::after{content:'';position:absolute;top:-20%;left:105%;width:42%;height:140%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.48),transparent);transform:skewX(-18deg);pointer-events:none;animation:agentActionShimmer 1s ease-in-out infinite}
+ @keyframes agentActionShimmer{from{left:105%}to{left:-55%}}
+.agent-action .action-pip{width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}.agent-action.failed .action-pip{background:var(--red)}
+.agent-action .action-detail{border-top:1px solid var(--border);padding:9px 10px;font-family:'JetBrains Mono',monospace;font-size:10.5px;line-height:1.5;color:var(--t2);white-space:pre-wrap;word-break:break-word;max-height:190px;overflow:auto}
+.agent-action .action-command{color:#c4b5fd;margin-bottom:6px}.agent-action .action-command::before{content:'$ ';color:var(--t3)}
+.agent-typing{display:flex;align-items:center;gap:5px;padding:4px 0 5px 31px;color:var(--t3);font-size:11px}
+.agent-typing i{width:5px;height:5px;border-radius:50%;background:currentColor;animation:agentDot 1s ease-in-out infinite}.agent-typing i:nth-child(2){animation-delay:.15s}.agent-typing i:nth-child(3){animation-delay:.3s}
+@keyframes agentDot{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
+.agent-error{display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px solid rgba(239,68,68,.22);background:rgba(239,68,68,.07);border-radius:9px;color:#fca5a5;font-size:11.5px;line-height:1.5}
+.agent-error button{margin-left:auto;flex-shrink:0}
+ .agent-compose{position:relative;z-index:2;padding:10px 12px 12px;border-top:0;background:var(--panel);flex-shrink:0}
+ .agent-compose::before{content:'';position:absolute;left:0;right:0;top:-34px;height:34px;background:linear-gradient(to bottom,transparent,var(--panel));pointer-events:none}
+   .agent-compose-box{position:relative;display:flex;align-items:flex-start;gap:10px;min-height:84px;padding:10px;background:var(--raised);border:1px solid rgba(220,220,220,.11);border-radius:18px;transition:border-color .18s,box-shadow .18s}
+.agent-compose-box:focus-within{border-color:rgba(139,92,246,.55);box-shadow:0 0 0 3px rgba(139,92,246,.1)}
+   .agent-compose textarea{width:100%;min-height:56px;max-height:120px;resize:none;border:0;outline:0;background:transparent;color:var(--t1);font:12.5px/1.5 'Inter',sans-serif;padding:2px 0}
+   .agent-compose textarea::placeholder{color:rgba(185,185,185,.38)}.agent-send{align-self:flex-end;width:30px;height:30px;margin:0;padding:0;border:0;outline:0;box-shadow:none;border-radius:50%;background:#8b5cf6;color:#fff;display:flex;align-items:center;justify-content:center;flex-shrink:0;appearance:none}
+ .agent-send:hover{background:#7c3aed;transform:translateY(-1px)}.agent-send:focus,.agent-send:focus-visible{outline:0;box-shadow:none}.agent-send:disabled{opacity:.45;cursor:wait;transform:none}.agent-send svg{width:14px;height:14px}
+.agent-compose-hint{font-size:9.5px;color:var(--t3);padding:6px 3px 0;display:flex;justify-content:space-between}.agent-cwd{font-family:'JetBrains Mono',monospace;max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Neutral assistant treatment: actions read like a conversation timeline,
+   not coloured cards competing with the file manager. */
+ .agent-panel .agent-mark,.agent-panel .agent-welcome-icon{color:#d0d0d0;background:none;border-color:transparent;box-shadow:none}
+.agent-panel .agent-resize:hover::after,.agent-panel.resizing .agent-resize::after{background:#b8b8b8}
+.agent-panel .agent-action{margin-left:31px;border:0;border-left:1px solid #4c4c4c;border-radius:0;background:transparent;box-shadow:none}
+.agent-panel .agent-action summary{padding:5px 0 5px 11px;color:#bdbdbd;font-weight:500}
+.agent-panel .agent-action summary::before{color:#858585}.agent-panel .agent-action .action-pip{background:#aaa}.agent-panel .agent-action.failed .action-pip{background:#666}
+.agent-panel .agent-action .action-detail{border-top:1px solid #383838;padding:8px 0 8px 11px;color:#a9a9a9;max-height:180px}
+.agent-panel .agent-action .action-command{color:#d0d0d0}.agent-panel .agent-action .action-command::before{color:#777}
+.agent-panel .agent-send{background:#bcbcbc;color:#151515}.agent-panel .agent-send:hover{background:#d2d2d2}
+.agent-panel .agent-avatar{background:#292929;color:#cfcfcf}.agent-panel .agent-error{border-color:#555;background:#292929;color:#c7c7c7}
+.agent-panel .agent-error .btn-red,.agent-panel .agent-key-row .btn-blue{background:#bcbcbc;color:#151515;border-color:#aaa}
+.agent-panel .agent-error .btn-red:hover,.agent-panel .agent-key-row .btn-blue:hover{background:#d2d2d2}
+.agent-panel .agent-key-link{color:#c2c2c2}.agent-panel .agent-key-link:hover{color:#fff}
+.agent-panel .agent-settings{background:#242424;border-bottom-color:#4a4a4a}.agent-panel .agent-key-state{color:#bdbdbd}.agent-panel .agent-key-state.empty{color:#898989}
+.agent-panel .agent-key-row input:focus{border-color:#9b9b9b}.agent-panel .agent-compose-box:focus-within{border-color:#999;box-shadow:0 0 0 3px rgba(160,160,160,.1)}
+@media(max-width:768px){
+  .agent-panel{top:var(--th);bottom:var(--bh);width:100%;min-width:0}
+  .shell.agent-open .main{margin-right:0}
+  .agent-resize{left:auto;right:0;cursor:ew-resize}
+  .agent-resize::after{left:auto;right:4px}
+}
+
 /* ══ EDITOR ══ */
 .ed-card{background:var(--surf);border:1px solid var(--border);border-radius:var(--rlg);overflow:hidden;animation:fadeUp .3s var(--spring) both}
 .ed-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 14px;background:var(--raised);border-bottom:1px solid var(--border)}
@@ -6682,53 +6946,6 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .empty{text-align:center;padding:56px 20px}
 .empty svg{width:44px;height:44px;stroke:var(--t3);fill:none;stroke-width:1.5;stroke-linecap:round;margin:0 auto 12px;display:block}
 .empty p{color:var(--t3);font-size:14px;font-weight:var(--fw-muted)}
-
- /* ══ MODERN MICRO-INTERACTIONS & LOADING ══ */
- .shell{isolation:isolate}
- .topbar,.sidebar,.toolbar{box-shadow:0 1px 0 rgba(255,255,255,.018)}
- .content{background-image:radial-gradient(ellipse 72% 42% at 52% -12%,rgba(201,198,194,.035),transparent 72%)}
- .card{box-shadow:0 12px 32px rgba(0,0,0,.12),inset 0 1px 0 rgba(255,255,255,.018)}
- .ft thead tr{position:sticky;top:0;z-index:3;box-shadow:0 1px 0 var(--border)}
- .ft tbody tr:hover td:first-child{box-shadow:inset 2px 0 0 var(--link)}
- .ft tbody tr.selected td:first-child{box-shadow:inset 2px 0 0 var(--link)}
- .gi{box-shadow:inset 0 1px 0 rgba(255,255,255,.016)}
- .filter-bar{padding-top:2px;position:sticky;top:-12px;z-index:4;background:linear-gradient(var(--bg) 78%,transparent);margin-bottom:2px}
- .btn:focus-visible,.sb-item:focus-visible,.sb-flink:focus-visible,.fb-btn:focus-visible,.gi:focus-visible,.inp:focus-visible{outline:2px solid rgba(201,198,194,.7);outline-offset:2px}
- .fm-loading{display:flex;align-items:center;justify-content:center;gap:9px;min-height:64px;padding:18px 16px;color:var(--t3);font-size:12px;text-align:center}
- .fm-loading.compact{justify-content:flex-start;min-height:0;padding:10px 12px}
- .fm-loader{width:15px;height:15px;border:1.5px solid rgba(201,198,194,.18);border-top-color:var(--t1);border-radius:50%;flex:0 0 auto;animation:fmSpin .8s linear infinite}
- .fm-loading-label{display:inline-block;color:var(--t3);background:linear-gradient(90deg,var(--t3) 0%,#d8d4d0 48%,var(--t3) 100%);background-size:220% 100%;background-position:100% 0;background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:fmShimmer 1.8s linear infinite}
- @keyframes fmSpin{to{transform:rotate(360deg)}}
- @keyframes fmShimmer{from{background-position:100% 0}to{background-position:-120% 0}}
- .fm-update-notice{margin:0 0 12px;padding:16px 18px;border:1px solid rgba(217,153,24,.36);border-radius:var(--rlg);background:rgba(255,226,116,.16);box-shadow:0 8px 24px rgba(132,84,0,.08),inset 0 1px 0 rgba(255,255,255,.16);animation:alertIn .35s var(--spring) both}
- .fm-update-notice[hidden]{display:none}
- .fm-update-title{color:#9a6200;font-size:15px;font-weight:800;line-height:1.35;margin-bottom:6px}
- .fm-update-copy{color:#8c690e;font-size:12.5px;line-height:1.55;margin-bottom:9px}
- .fm-update-meta{display:flex;flex-wrap:wrap;gap:5px 18px;color:#76590d;font-size:11px;font-weight:600;line-height:1.5}
- .fm-update-meta strong{color:#6b4d04}
- .fm-update-actions{display:flex;align-items:center;gap:10px;margin-top:13px}
- .fm-update-btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:34px;padding:7px 13px;border:1px solid #d18b00;border-radius:8px;background:#e6a400;color:#fff;box-shadow:0 3px 10px rgba(174,111,0,.24);font-size:12px;font-weight:800;cursor:pointer;transition:background .15s,transform .15s,box-shadow .15s}
- .fm-update-btn:hover{background:#cb8f00;box-shadow:0 5px 14px rgba(174,111,0,.3)}
- .fm-update-btn:active{transform:translateY(1px)}
- .fm-update-btn:disabled{opacity:.72;cursor:wait;transform:none}
- .fm-update-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
- .fm-update-progress{display:none;position:relative;overflow:hidden;width:min(260px,100%);height:5px;border-radius:6px;background:rgba(128,87,0,.16)}
- .fm-update-progress.is-loading{display:block}
- .fm-update-progress::after{content:'';position:absolute;inset:0;width:42%;border-radius:inherit;background:#d18b00;box-shadow:0 0 10px rgba(209,139,0,.35);animation:fmUpdateProgress 1.15s ease-in-out infinite}
- @keyframes fmUpdateProgress{0%{transform:translateX(-115%)}100%{transform:translateX(255%)}}
- :root[data-theme="dark"] .fm-update-title{color:#f7c453}
- :root[data-theme="dark"] .fm-update-copy{color:#e7c86c}
- :root[data-theme="dark"] .fm-update-meta{color:#d7b952}
- :root[data-theme="dark"] .fm-update-meta strong{color:#f4d277}
- .fm-loading-pre{display:flex!important;align-items:center;justify-content:center;width:100%!important;min-height:180px;margin:0!important;padding:24px!important;color:var(--t3)!important;background:#07090e!important;white-space:normal!important}
- .fm-loading-pre .fm-loading-label{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;font-size:12px}
- .skeleton{position:relative;overflow:hidden;background:var(--raised);border-radius:6px}
- .skeleton::after{content:'';position:absolute;inset:0;background:linear-gradient(105deg,transparent 25%,rgba(216,212,208,.08) 48%,transparent 70%);background-size:220% 100%;animation:fmShimmer 1.8s linear infinite}
- .upload-progress{min-width:260px;padding:11px 14px!important;border-radius:12px!important;background:rgba(32,32,32,.94)!important;backdrop-filter:blur(14px);box-shadow:0 18px 48px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.04)!important}
- .upload-progress .up-track{height:5px!important;background:rgba(255,255,255,.08)!important;border-radius:6px!important}
- .upload-progress .up-fill{height:100%!important;background:linear-gradient(90deg,#777a7c,#d8d4d0)!important;border-radius:6px!important;box-shadow:0 0 12px rgba(216,212,208,.2)}
- :root[data-theme="light"] .upload-progress{background:rgba(255,255,255,.96)!important;box-shadow:0 18px 48px rgba(0,0,0,.16),inset 0 1px 0 rgba(255,255,255,.8)!important}
- :root[data-theme="light"] .upload-progress .up-track{background:rgba(0,0,0,.09)!important}
 
 /* ══ SCROLLBAR ══ */
 ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:6px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.14)}
@@ -6896,9 +7113,12 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
          <svg viewBox="0 0 24 24" style="stroke:#2563eb"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/><path d="m15 5 3 3"/></svg>CMS MFM ACC Login
        </button>
        <?php endif;?>
-      <?php if(!$fm->isRO()):?>
-      <button class="sb-item" id="termBtn"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>Terminal</button>
-      <?php endif;?>
+       <?php if(!$fm->isRO()):?>
+       <button class="sb-item" id="termBtn"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>Terminal</button>
+       <?php endif;?>
+       <button class="sb-item" id="agentBtn" title="Open Assistant Agent">
+         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 4.5c-2.4 0-4 1.6-4 4v4.5c0 2.4 1.6 4 4 4h1.2l2.3 2.1 2.3-2.1h1.2c2.4 0 4-1.6 4-4V8.5c0-2.4-1.6-4-4-4h-7z"/><path d="M8 11.5h.01M16 11.5h.01"/><path d="M8.5 14.5c1.8 1.2 5.2 1.2 7 0"/></svg>Assistant Agent
+       </button>
       <button class="sb-item" id="actBtn"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Activity Log</button>
       <button class="sb-item" id="srvBtn"><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>Server Info</button>
       <?php if(!$fm->isRO()):?>
@@ -6970,6 +7190,50 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   </div>
 </aside>
 
+<!-- ASSISTANT AGENT SIDE PANEL -->
+<aside class="agent-panel" id="agentPanel" aria-label="Assistant Agent">
+  <div class="agent-resize" id="agentResize" role="separator" aria-orientation="vertical" aria-label="Resize Assistant Agent"></div>
+  <div class="agent-head">
+    <div class="agent-mark">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 4.5c-2.4 0-4 1.6-4 4v4.5c0 2.4 1.6 4 4 4h1.2l2.3 2.1 2.3-2.1h1.2c2.4 0 4-1.6 4-4V8.5c0-2.4-1.6-4-4-4h-7z"/><path d="M8 11.5h.01M16 11.5h.01"/><path d="M8.5 14.5c1.8 1.2 5.2 1.2 7 0"/></svg>
+    </div>
+     <div class="agent-head-copy"><div class="agent-head-title">Assistant Agent</div><div class="agent-head-sub">Your server workspace companion</div></div>
+     <div class="agent-head-actions">
+       <button type="button" class="btn btn-icon" id="agentSettingsBtn" title="Gemini settings" aria-label="Gemini settings">
+         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-1.7 1.7-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5v.2h-2.4v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L8 17l.1-.1A1.7 1.7 0 0 0 8.4 15a1.7 1.7 0 0 0-1.5-1H6.7v-2.4h.2a1.7 1.7 0 0 0 1.5-1A1.7 1.7 0 0 0 8.1 8.7L8 8.6l1.7-1.7.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5v-.2h2.4v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1 1.7 1.7-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.2V14h-.2a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+       </button>
+       <button type="button" class="btn btn-icon" id="agentClose" title="Close Assistant Agent" aria-label="Close Assistant Agent">
+         <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+       </button>
+     </div>
+  </div>
+  <div class="agent-settings" id="agentSettings" hidden>
+    <div class="agent-settings-title">Gemini API connection</div>
+    <p>Use your own Google AI Studio key. It is encrypted on this server and never included in chat history.</p>
+    <form id="agentConfigForm" autocomplete="off">
+      <div class="agent-key-row"><input type="password" id="agentKeyInput" name="gemini_api_key" placeholder="Paste Gemini API key" autocomplete="off" spellcheck="false"><button type="submit" class="btn btn-xs btn-blue">Save</button></div>
+    </form>
+    <div class="agent-key-state" id="agentKeyState">Not configured</div>
+    <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="agent-key-link">Get a Gemini API key ↗</a>
+  </div>
+  <div class="agent-messages" id="agentMessages">
+    <div class="agent-welcome" id="agentWelcome">
+      <div class="agent-welcome-icon"><svg viewBox="0 0 24 24"><path d="M7.5 4.5c-2.4 0-4 1.6-4 4v4.5c0 2.4 1.6 4 4 4h1.2l2.3 2.1 2.3-2.1h1.2c2.4 0 4-1.6 4-4V8.5c0-2.4-1.6-4-4-4h-7z"/><path d="M8 11.5h.01M16 11.5h.01"/><path d="M8.5 14.5c1.8 1.2 5.2 1.2 7 0"/></svg></div>
+      <strong>How can I help?</strong>
+      <p>Ask me to inspect, organize, or manage this workspace. I’ll show every terminal command and file action as it happens.</p>
+    </div>
+  </div>
+  <div class="agent-compose">
+    <div class="agent-compose-box">
+      <textarea id="agentInput" rows="1" maxlength="8000" placeholder="Ask MFM Assistant Agent to do something…" aria-label="Message MFM Assistant Agent"></textarea>
+      <button type="button" class="agent-send" id="agentSend" aria-label="Send message">
+        <svg viewBox="0 0 24 24"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4Z"/></svg>
+      </button>
+    </div>
+    <div class="agent-compose-hint"><span>Enter to send · Shift+Enter for a new line</span><span class="agent-cwd" id="agentCwd"></span></div>
+  </div>
+</aside>
+
 <!-- MAIN -->
 <main class="main">
   <?php if(!$editMode):?>
@@ -7026,7 +7290,6 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <?php endforeach;?>
     </div>
     <?php endif;?>
-    <div class="fm-update-notice" id="fmUpdateNotice" hidden role="status" aria-live="polite"></div>
 
     <?php if(isset($_GET['cs'])&&$_GET['cs']!==''):
       $cs=$fm->contentSearch($_GET['cs'],isset($_GET['deep'])&&$_GET['deep']==='1');?>
@@ -7345,7 +7608,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <?php if(!$fm->isRO()):?><form method="post" style="margin-right:8px"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>"><input type="hidden" name="action" value="clear_log"><button class="btn btn-xs btn-red" onclick="return confirm('Clear all?')">Clear</button></form><?php endif;?>
       <button class="btn btn-icon btn-g" id="actClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div class="mod-body" style="padding:0" id="actBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" style="padding:0" id="actBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
   </div>
 </div>
 
@@ -7353,7 +7616,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <div class="mod-ov" id="srvOv">
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div><span class="mod-title">Server Information</span><button class="btn btn-icon btn-g" id="srvClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" id="srvBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" id="srvBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
   </div>
 </div>
 
@@ -7366,7 +7629,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       </select>
       <button class="btn btn-icon btn-g" id="largeClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div class="mod-body" style="padding:0" id="largeBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" style="padding:0" id="largeBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
   </div>
 </div>
 
@@ -7374,7 +7637,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <div class="mod-ov" id="dupOv">
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div><span class="mod-title">Duplicate Files</span><button class="btn btn-icon btn-g" id="dupClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" style="padding:0" id="dupBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" style="padding:0" id="dupBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
   </div>
 </div>
 
@@ -7403,7 +7666,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <?php if(!$fm->isRO()):?><form method="post" style="margin-right:8px"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>"><input type="hidden" name="action" value="clear_errlog"><button class="btn btn-xs btn-red" onclick="return confirm('Clear the error log?')">Clear</button></form><?php endif;?>
       <button class="btn btn-icon btn-g" id="errLogClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div class="mod-body" id="errLogBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" id="errLogBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
   </div>
 </div>
 
@@ -7411,7 +7674,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <div class="mod-ov" id="envOv">
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div><span class="mod-title">Environment Variables</span><button class="btn btn-icon btn-g" id="envClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" style="padding:0" id="envBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" style="padding:0" id="envBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
   </div>
 </div>
 <!-- SSH ACCESS MODAL -->
@@ -7422,8 +7685,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
        <button class="ssh-tab-btn ssh-tab-active" data-tab="status" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid #85898C;color:#85898C;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Server Status</button>
       <button class="ssh-tab-btn" data-tab="users" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid transparent;color:var(--t3);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">User Management</button>
     </div>
-    <div class="mod-body" id="sshBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
-    <div class="mod-body" id="sshUsersBody" style="display:none;padding:0"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" id="sshBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" id="sshUsersBody" style="display:none;padding:0"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
   </div>
 </div>
 
@@ -7501,7 +7764,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <div class="mod-ov" id="cmsOv">
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div><span class="mod-title">CMS Manager</span><button class="btn btn-icon btn-g" id="cmsClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" style="padding:0" id="cmsBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" style="padding:0" id="cmsBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
   </div>
 </div>
 
@@ -7558,7 +7821,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="cpanel-tab-btn cpanel-tab-active" data-tab="accounts" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid #85898C;color:#85898C;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Accounts</button>
       <button class="cpanel-tab-btn" data-tab="connect" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid transparent;color:var(--t3);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Connection</button>
     </div>
-    <div class="mod-body" id="cpanelAccountsBody" style="padding:0"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" id="cpanelAccountsBody" style="padding:0"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
     <div class="mod-body" id="cpanelConnBody" style="display:none"></div>
   </div>
 </div>
@@ -7720,7 +7983,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <div class="mod-ov" id="guardOv">
   <div class="mod mod-md">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div><span class="mod-title">File Guardian</span><button class="btn btn-icon btn-g" id="guardClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" id="guardBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" id="guardBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
   </div>
 </div>
 <?php endif;?>
@@ -7946,6 +8209,159 @@ function closeSB(){sidebar.classList.remove('open');sideOv.classList.remove('vis
 menuBtn?.addEventListener('click',()=>sidebar.classList.contains('open')?closeSB():openSB());
 sideOv.addEventListener('click',closeSB);
 sidebar.querySelectorAll('.sb-item,.sb-flink').forEach(el=>el.addEventListener('click',()=>{if(window.innerWidth<=768)closeSB();}));
+
+/* ═══════════════════════════════════════
+   ASSISTANT AGENT
+ ═══════════════════════════════════════ */
+const agentPanel=document.getElementById('agentPanel');
+const agentMessages=document.getElementById('agentMessages');
+const agentInput=document.getElementById('agentInput');
+const agentSend=document.getElementById('agentSend');
+const agentSettings=document.getElementById('agentSettings');
+const agentConfigForm=document.getElementById('agentConfigForm');
+const agentKeyInput=document.getElementById('agentKeyInput');
+const agentKeyState=document.getElementById('agentKeyState');
+const agentCwd=document.getElementById('agentCwd');
+let agentBusy=false,agentHistoryLoaded=false;
+ let agentScrollFrame=0,agentRevealingAction=null;
+ function agentScroll(){
+   if(!agentMessages)return;
+   cancelAnimationFrame(agentScrollFrame);
+   agentScrollFrame=requestAnimationFrame(()=>{
+     agentMessages.scrollTop=agentMessages.scrollHeight;
+     requestAnimationFrame(()=>{if(agentMessages)agentMessages.scrollTop=agentMessages.scrollHeight;});
+   });
+ }
+function agentIcon(){
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 4.5c-2.4 0-4 1.6-4 4v4.5c0 2.4 1.6 4 4 4h1.2l2.3 2.1 2.3-2.1h1.2c2.4 0 4-1.6 4-4V8.5c0-2.4-1.6-4-4-4h-7z"/><path d="M8 11.5h.01M16 11.5h.01"/><path d="M8.5 14.5c1.8 1.2 5.2 1.2 7 0"/></svg>';
+}
+ function agentStopActionReveal(){
+   if(agentRevealingAction)agentRevealingAction.classList.remove('is-revealing');
+   agentRevealingAction=null;
+ }
+function agentRemoveWelcome(){document.getElementById('agentWelcome')?.remove();}
+function agentAddUser(text){
+  agentRemoveWelcome();
+  const row=document.createElement('div');row.className='agent-msg user';
+  row.innerHTML='<div class="agent-bubble"></div>';row.querySelector('.agent-bubble').textContent=text;
+  agentMessages.appendChild(row);agentScroll();
+}
+function agentTypeText(el,text,speed=12){
+  return new Promise(resolve=>{
+    let i=0;el.textContent='';
+    const tick=()=>{if(i>=text.length){resolve();return;}el.textContent+=text[i++];agentScroll();setTimeout(tick,speed);};
+    tick();
+  });
+}
+function agentAddAction(action,animate=true){
+  const details=document.createElement('details');details.className='agent-action'+(action.ok?'':' failed');
+  details.innerHTML='<summary><span class="action-pip"></span><span></span></summary><div class="action-detail"><div class="action-command"></div><div class="action-output"></div></div>';
+   details.open=false;
+   if(animate){
+     details.classList.add('is-revealing');
+     agentRevealingAction=details;
+     setTimeout(()=>{if(agentRevealingAction===details)agentStopActionReveal();},1600);
+   }
+  details.querySelector('summary span:nth-child(2)').textContent=action.label||'Running action';
+  details.querySelector('.action-command').textContent=action.command||'';
+  details.querySelector('.action-output').textContent=action.output||'No output.';
+  agentMessages.appendChild(details);agentScroll();
+  return animate?new Promise(r=>setTimeout(r,420)):Promise.resolve();
+}
+async function agentRenderAssistant(item,animate=true){
+  agentRemoveWelcome();
+  const segments=Array.isArray(item.segments)?item.segments:[{type:'message',text:item.content||''}];
+  for(const seg of segments){
+    if(seg.type==='action'){await agentAddAction(seg,animate);continue;}
+    if(!seg.text)continue;
+     agentStopActionReveal();
+    const row=document.createElement('div');row.className='agent-msg assistant';
+    row.innerHTML='<div class="agent-avatar">'+agentIcon()+'</div><div class="agent-bubble"></div>';
+    agentMessages.appendChild(row);
+    if(animate)await agentTypeText(row.querySelector('.agent-bubble'),seg.text);
+    else row.querySelector('.agent-bubble').textContent=seg.text;
+    agentScroll();
+  }
+}
+function agentAddError(text){
+  agentRemoveWelcome();
+  const box=document.createElement('div');box.className='agent-error';
+  box.innerHTML='<span></span><button type="button" class="btn btn-xs btn-red">Clear chat</button>';
+  box.querySelector('span').textContent=text;box.querySelector('button').addEventListener('click',agentClear);
+  agentMessages.appendChild(box);agentScroll();
+}
+async function agentLoadHistory(){
+  if(agentHistoryLoaded)return;
+  agentHistoryLoaded=true;
+  try{
+    const r=await fetch('?x=agent_history',{cache:'no-store'});const d=await r.json();
+    if(!d.ok||!Array.isArray(d.messages))return;
+    const items=d.messages;
+    if(items.length){agentRemoveWelcome();for(const item of items){if(item.role==='user')agentAddUser(item.content||'');else if(item.role==='assistant'){if(item.error)agentAddError(item.content||'AI request failed.');else await agentRenderAssistant(item,false);}}}
+  }catch(e){agentHistoryLoaded=false;}
+}
+function agentOpen(){
+  document.querySelector('.shell')?.classList.add('agent-open');agentPanel?.classList.add('open');agentLoadConfig();
+  agentCwd.textContent=CWD;agentLoadHistory().then(agentScroll);setTimeout(()=>agentInput?.focus(),220);
+}
+function agentClosePanel(){agentPanel?.classList.remove('open');document.querySelector('.shell')?.classList.remove('agent-open');}
+document.getElementById('agentBtn')?.addEventListener('click',agentOpen);
+document.getElementById('agentClose')?.addEventListener('click',agentClosePanel);
+document.getElementById('agentSettingsBtn')?.addEventListener('click',()=>{
+  if(!agentSettings)return;
+  agentSettings.hidden=!agentSettings.hidden;
+  if(!agentSettings.hidden){agentLoadConfig();setTimeout(()=>agentKeyInput?.focus(),80);}
+});
+async function agentLoadConfig(){
+  try{
+    const r=await fetch('?x=agent_config',{cache:'no-store'});const d=await r.json();
+    if(d.configured){agentKeyState.textContent='Connected · '+d.masked;agentKeyState.classList.remove('empty');}
+    else{agentKeyState.textContent='Not configured';agentKeyState.classList.add('empty');}
+  }catch(e){}
+}
+agentConfigForm?.addEventListener('submit',async e=>{
+  e.preventDefault();const key=agentKeyInput.value.trim();
+  if(!key){agentKeyState.textContent='Enter a key to connect Gemini.';agentKeyState.classList.add('empty');return;}
+  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('gemini_api_key',key);
+  const save=agentConfigForm.querySelector('button');save.disabled=true;save.textContent='Saving…';
+   try{const r=await fetch('?x=agent_config_save',{method:'POST',body:fd});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Save failed');agentKeyInput.value='';agentKeyState.textContent='Connected · key saved securely';agentKeyState.classList.remove('empty');}
+  catch(err){agentKeyState.textContent=err.message||'Could not save the key.';agentKeyState.classList.add('empty');}
+  save.disabled=false;save.textContent='Save';
+});
+document.getElementById('agentResize')?.addEventListener('pointerdown',e=>{
+  if(window.innerWidth<=768)return;
+  e.preventDefault();agentPanel.classList.add('resizing');agentResizeStart(e);
+});
+function agentResizeStart(e){
+  const startX=e.clientX,startW=agentPanel.getBoundingClientRect().width;
+  const move=ev=>{const width=Math.max(320,Math.min(Math.min(720,window.innerWidth-270),startW+(startX-ev.clientX)));document.querySelector('.shell').style.setProperty('--agent-w',width+'px');};
+  const done=()=>{agentPanel.classList.remove('resizing');document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',done);};
+  document.addEventListener('pointermove',move);document.addEventListener('pointerup',done,{once:true});
+}
+async function agentClear(){
+  if(!confirm('Clear the Assistant Agent conversation?'))return;
+  const fd=new FormData();fd.append('csrf_token',CSRF);
+   try{const r=await fetch('?x=agent_clear',{method:'POST',body:fd});const d=await r.json();if(!d.ok)throw new Error();agentMessages.innerHTML='<div class="agent-welcome" id="agentWelcome"><div class="agent-welcome-icon">'+agentIcon()+'</div><strong>How can I help?</strong><p>Ask me to inspect, organize, or manage this workspace. I’ll show every terminal command and file action as it happens.</p></div>';agentHistoryLoaded=true;}
+  catch(e){agentAddError('Could not clear the conversation. Please try again.');}
+}
+async function agentSubmit(){
+  if(agentBusy)return;
+  const text=agentInput.value.trim();if(!text)return;
+  agentInput.value='';agentInput.style.height='auto';agentAddUser(text);
+  const typing=document.createElement('div');typing.className='agent-typing';typing.innerHTML='<i></i><i></i><i></i><span>Thinking</span>';agentMessages.appendChild(typing);agentScroll();
+   agentBusy=true;agentSend.disabled=true;
+  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('message',text);
+  try{
+    const r=await fetch('?x=agent_chat&dir='+encodeURIComponent(CWD),{method:'POST',body:fd,cache:'no-store'});const d=await r.json();
+    typing.remove();
+    if(!r.ok||!d.ok){agentAddError(d.error||'The AI request failed. Clear the conversation and start again.');if(d.needs_config){agentSettings.hidden=false;agentLoadConfig();}}
+    else{await agentRenderAssistant({content:d.reply,segments:d.segments},true);agentCwd.textContent=d.cwd||CWD;}
+  }catch(e){typing.remove();agentAddError('The AI could not be reached. Clear the conversation and start again if its context cache is full.');}
+   agentBusy=false;agentSend.disabled=false;
+}
+agentSend?.addEventListener('click',agentSubmit);
+agentInput?.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();agentSubmit();}});
+agentInput?.addEventListener('input',()=>{agentInput.style.height='auto';agentInput.style.height=Math.min(agentInput.scrollHeight,120)+'px';});
 
 /* ═══════════════════════════════════════
    MODAL HELPERS
@@ -8260,10 +8676,10 @@ function openPreview(url,type,fname){
   else if(type==='pdf'){const fr=document.createElement('iframe');fr.src=url;prevBody.appendChild(fr);}
   else if(type==='markdown'){
     mdShowingSource=false;document.getElementById('prevMdToggleLabel').textContent='View Source';mdToggle.style.display='';
-    const div=document.createElement('div');div.className='md-render';div.innerHTML='<div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div>';prevBody.appendChild(div);
+    const div=document.createElement('div');div.className='md-render';div.innerHTML='Loading…';prevBody.appendChild(div);
     fetch(url).then(r=>r.text()).then(t=>{mdRawText=t.length>200000?t.slice(0,200000)+'\n…(truncated)':t;div.innerHTML=mdToHtml(mdRawText);}).catch(()=>{div.textContent='Could not load file.';});
   }
-  else{const pre=document.createElement('pre');pre.className='fm-loading-pre';pre.innerHTML='<span class="fm-loading-label">Loading…</span>';prevBody.appendChild(pre);fetch(url).then(r=>r.text()).then(t=>{pre.className='';pre.textContent=t.length>200000?t.slice(0,200000)+'\n…(truncated)':t;}).catch(()=>{pre.className='';pre.textContent='Could not load file.';});}
+  else{const pre=document.createElement('pre');pre.textContent='Loading…';prevBody.appendChild(pre);fetch(url).then(r=>r.text()).then(t=>{pre.textContent=t.length>200000?t.slice(0,200000)+'\n…(truncated)':t;}).catch(()=>{pre.textContent='Could not load file.';});}
   prevOv.classList.add('open');
 }
 document.getElementById('prevMdToggle')?.addEventListener('click',()=>{
@@ -8390,7 +8806,7 @@ document.getElementById('rdApply')?.addEventListener('click',()=>{
 ═══════════════════════════════════════ */
 document.getElementById('actBtn')?.addEventListener('click',async()=>{
   openMod('actOv');
-  document.getElementById('actBody').innerHTML=fmLoading('Loading…');
+  document.getElementById('actBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
   try{
     const log=await fetch('?x=lg').then(r=>r.json());
     if(!log.length){document.getElementById('actBody').innerHTML='<div class="empty" style="padding:40px"><p>No activity yet.</p></div>';return;}
@@ -8405,7 +8821,7 @@ document.getElementById('actClose')?.addEventListener('click',()=>closeMod('actO
 ═══════════════════════════════════════ */
 document.getElementById('srvBtn')?.addEventListener('click',async()=>{
   openMod('srvOv');
-  document.getElementById('srvBody').innerHTML=fmLoading('Loading…');
+  document.getElementById('srvBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
   try{
     const d=await fetch('?x=sv').then(r=>r.json());
     document.getElementById('srvBody').innerHTML=`<div style="padding:16px">
@@ -8444,64 +8860,21 @@ async function guardianHeartbeat(){
 }
 if(document.getElementById('guardBtn'))setInterval(guardianHeartbeat,30000);
 
-/* Update check — runs once as soon as an authenticated user opens the
-   manager. When Guardian's automatic updater is paused, the server only
-   returns the remote update metadata and this page renders the notice above
-   the file list. The explicit button below uses the existing manual Guardian
-   update path, so applying an update always remains a deliberate action. */
-function fmRenderUpdateNotice(update){
-  const box=document.getElementById('fmUpdateNotice');
-  if(!box||!update)return;
-  const size=Number(update.size)||0;
-  const release=Number(update.release_at)||0;
-  const date=release?new Date(release*1000).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}):'—';
-  box.innerHTML=`<div class="fm-update-title">A new update is available for Marshall File Manager. Update now!</div>
-    <div class="fm-update-copy">This update may fix some issues, improve system stability, and add new features.</div>
-    <div class="fm-update-meta"><span>Update size: <strong>${esc(formatBytes(size))}</strong></span><span>Date of release of the update: <strong>${esc(date)}</strong></span></div>
-    <div class="fm-update-actions"><button type="button" class="fm-update-btn" id="fmUpdateNowBtn"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg><span>Update Now</span></button><div class="fm-update-progress" id="fmUpdateProgress" aria-hidden="true"></div><span id="fmUpdateState" style="font-size:11px;color:#8c690e"></span></div>`;
-  box.hidden=false;
-  document.getElementById('fmUpdateNowBtn')?.addEventListener('click',fmApplyUpdateFromNotice);
-}
-async function fmApplyUpdateFromNotice(){
-  const btn=document.getElementById('fmUpdateNowBtn');
-  const progress=document.getElementById('fmUpdateProgress');
-  const state=document.getElementById('fmUpdateState');
-  if(!btn||btn.disabled)return;
-  btn.disabled=true;
-  btn.innerHTML='<svg viewBox="0 0 24 24" style="animation:fmSpin .8s linear infinite"><circle cx="12" cy="12" r="9" stroke-dasharray="28 28"/></svg><span>Updating…</span>';
-  progress?.classList.add('is-loading');
-  if(state){state.textContent='Downloading update…';state.style.color='#8c690e';}
-  const fd=new FormData();fd.append('csrf_token',CSRF);
-  try{
-    const r=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(x=>x.json());
-    if(r.error){
-      if(state){state.textContent=r.error;state.style.color='#b42318';}
-      btn.disabled=false;btn.innerHTML='<svg viewBox="0 0 24 24"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg><span>Update Now</span>';
-      progress?.classList.remove('is-loading');return;
-    }
-    if(r.changed){
-      if(state){state.textContent='Update applied — reloading…';state.style.color='#28713e';}
-      setTimeout(()=>location.reload(),900);
-    }else{
-      if(state){state.textContent='Already up to date.';state.style.color='#28713e';}
-      progress?.classList.remove('is-loading');
-      btn.disabled=false;
-    }
-  }catch{
-    if(state){state.textContent='Update failed.';state.style.color='#b42318';}
-    btn.disabled=false;progress?.classList.remove('is-loading');
-  }
-}
+/* Fully automatic update check — runs once the moment the admin opens the
+   File Manager, then every 2 minutes for as long as a tab stays open. No
+   manual visit to the Guardian panel is required for updates to be found
+   and applied; the server also throttles this itself (see guardian_autocheck
+   above) so several open tabs never cause extra remote fetches. */
 async function guardianAutoUpdateCheck(){
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);
     const d=await fetch('?x=guardian_autocheck',{method:'POST',body:fd}).then(r=>r.json());
     if(d&&d.applied){toast('Guardian found and applied an update automatically — reloading…');setTimeout(()=>location.reload(),1200);}
-    else if(d&&d.available&&d.update)fmRenderUpdateNotice(d.update);
   }catch{}
 }
-if(document.getElementById('fmUpdateNotice')){
+if(document.getElementById('guardBtn')){
   guardianAutoUpdateCheck();
+  setInterval(guardianAutoUpdateCheck,120000);
 }
 
 /* ═══════════════════════════════════════
@@ -8554,7 +8927,7 @@ function delAbsPath(path,btn){
 ═══════════════════════════════════════ */
 document.getElementById('errLogBtn')?.addEventListener('click',async()=>{
   openMod('errLogOv');
-  document.getElementById('errLogBody').innerHTML=fmLoading('Loading…');
+  document.getElementById('errLogBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
   try{
     const d=await fetch('?x=errlog').then(r=>r.json());
     if(d.error){document.getElementById('errLogBody').innerHTML='<div class="empty" style="padding:40px"><p>'+esc(d.error)+'</p></div>';return;}
@@ -8567,7 +8940,7 @@ document.getElementById('errLogClose')?.addEventListener('click',()=>closeMod('e
 
 document.getElementById('envBtn')?.addEventListener('click',async()=>{
   openMod('envOv');
-  document.getElementById('envBody').innerHTML=fmLoading('Loading…');
+  document.getElementById('envBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
   try{
     const d=await fetch('?x=envvars').then(r=>r.json());
     if(d.error){document.getElementById('envBody').innerHTML='<div class="empty" style="padding:40px"><p>'+esc(d.error)+'</p></div>';return;}
@@ -9115,7 +9488,7 @@ async function openCmsAdd(){
    // for every normal Add User form so the previous flow cannot leak state
    // into the next account creation.
    document.getElementById('cmsAddHidden').checked=false;
-  const sel=document.getElementById('cmsAddRole');sel.innerHTML='<option>Loading options…</option>';
+  const sel=document.getElementById('cmsAddRole');sel.innerHTML='<option>Loading…</option>';
   openMod('cmsAddOv');
   try{
     if(cmsCurrentType==='wordpress'){sel.innerHTML=cmsAllRoles.map(r=>`<option value="${r}">${r}</option>`).join('');}
@@ -9207,7 +9580,7 @@ function cmsSiteHeader(label){
 /* ── Plugins & Themes (WordPress) / Extensions (Joomla) ──────────────────── */
 async function loadCmsExtensions(){
   const el=document.getElementById('cmsBody');
-  el.innerHTML=fmLoading('Loading…');
+  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
   try{
     const d=await cmsPost('cms_extensions');
     if(d.error){
@@ -9432,7 +9805,7 @@ async function loadWpSiteHealth(){
 /* ── Maintenance mode ─────────────────────────────────────────────────────── */
 async function loadCmsMaintenance(){
   const el=document.getElementById('cmsBody');
-  el.innerHTML=fmLoading('Loading…');
+  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
   try{
     const d=await cmsPost('cms_maintenance_status');
     if(d.error){
@@ -9744,9 +10117,8 @@ function uploadWithProgress(files){
   const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','upload');
   for(const f of files)fd.append('file[]',f);
   const bar=document.createElement('div');
-  bar.className='upload-progress';
-  bar.style.cssText='position:fixed;left:50%;bottom:calc(var(--bh,26px) + 12px);transform:translateX(-50%);color:var(--t1);font-size:12.5px;font-weight:500;z-index:9999;box-sizing:border-box';
-  bar.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:7px"><span class="fm-loading-label">Uploading…</span><span id="upSpeedTxt" style="font-family:JetBrains Mono,monospace;font-size:10.5px;color:var(--t3)">0 MB/s</span></div><div class="up-track"><div id="upSpeedBar" class="up-fill" style="width:0%;transition:width .1s"></div></div>';
+  bar.style.cssText='position:fixed;left:50%;bottom:calc(var(--bh,26px) + 12px);transform:translateX(-50%);background:var(--raised);border:1px solid var(--border2);color:var(--t1);padding:10px 18px;border-radius:10px;font-size:12.5px;font-weight:500;z-index:9999;min-width:240px;box-shadow:0 8px 32px rgba(0,0,0,.5)';
+  bar.innerHTML='<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>Uploading…</span><span id="upSpeedTxt">0 MB/s</span></div><div style="height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden"><div id="upSpeedBar" style="height:100%;width:0%;background:#85898C;transition:width .1s"></div></div>';
   document.body.appendChild(bar);
   const xhr=new XMLHttpRequest();
   let lastT=performance.now(),lastLoaded=0;
@@ -9830,7 +10202,7 @@ document.getElementById('sqlClose')?.addEventListener('click',()=>closeMod('sqlO
 function guardFmt(ts){return ts?new Date(ts*1000).toLocaleString():'—';}
 async function guardLoad(){
   const el=document.getElementById('guardBody');
-  el.innerHTML=fmLoading('Loading…');
+  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
   try{
     const s=await fetch('?x=guardian_status').then(r=>r.json());
     if(s.error){el.innerHTML='<div style="padding:20px;color:#fca5a5">'+esc(s.error)+'</div>';return;}
@@ -10139,7 +10511,7 @@ document.getElementById('cpanelBtn')?.addEventListener('click',()=>{
    Falls back to the Connection tab only if every method fails. */
 async function cpAutoConnectThenLoad(){
   const el=cpAccBody();
-  el.innerHTML=fmLoading('Connecting to cPanel…');
+  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)"><svg viewBox="0 0 24 24" style="width:28px;height:28px;stroke:currentColor;fill:none;stroke-width:1.5;margin-bottom:10px;display:block;margin-inline:auto"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Connecting to cPanel…</div>';
   try{
     const ac=await fetch('?x=cpanel_auto_connect').then(r=>r.json());
     if(ac.ok){
@@ -10258,7 +10630,7 @@ function renderCpConn(){
 /* ── Accounts list ── */
 async function loadCpAccounts(){
   const el=cpAccBody();
-  el.innerHTML=fmLoading('Loading accounts…');
+  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)"><svg viewBox="0 0 24 24" style="width:28px;height:28px;stroke:currentColor;fill:none;stroke-width:1.5;margin-bottom:10px;display:block;margin-inline:auto"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Loading accounts…</div>';
   try{
     const d=await fetch('?x=cpanel_accounts').then(r=>r.json());
     if(d.error==='no_creds'){
@@ -10358,7 +10730,7 @@ async function openCpCreate(){
   openMod('cpanelCreateOv');
   // Load plans
   const sel=document.getElementById('cpNewPlan');
-  sel.innerHTML='<option value="">Loading plans…</option>';
+  sel.innerHTML='<option value="">Loading…</option>';
   try{
     const d=await fetch('?x=cpanel_plans').then(r=>r.json());
     if(d.plans&&d.plans.length){
@@ -10449,7 +10821,7 @@ async function wmOpenMailbox(mailbox){
   wmCurrentMailbox=mailbox;wmCurrentFolder='INBOX';
   document.getElementById('wmMsgView').innerHTML='<div style="text-align:center;padding:40px;color:var(--t3);font-size:12px">Select a message to read it</div>';
   const fEl=document.getElementById('wmFolderList');
-  fEl.innerHTML=fmLoading('Loading folders…',true);
+  fEl.innerHTML='<div style="padding:10px 12px;color:var(--t3);font-size:11.5px">Loading folders…</div>';
   try{
     const d=await fetch('?x=webmail_folders&mailbox='+encodeURIComponent(mailbox)).then(r=>r.json());
     const folders=d.ok?(d.folders||['INBOX']):['INBOX'];
@@ -10466,7 +10838,7 @@ async function wmOpenMailbox(mailbox){
 
 async function wmLoadMessages(){
   const el=document.getElementById('wmMsgList');
-  el.innerHTML=fmLoading('Loading…');
+  el.innerHTML='<div style="text-align:center;padding:24px;color:var(--t3);font-size:12px">Loading…</div>';
   try{
     const d=await fetch('?x=webmail_messages&mailbox='+encodeURIComponent(wmCurrentMailbox)+'&folder='+encodeURIComponent(wmCurrentFolder)).then(r=>r.json());
     if(!d.ok){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">${esc(d.error||'Failed to load messages.')}</div>`;return;}
@@ -10487,7 +10859,7 @@ async function wmLoadMessages(){
 
 async function wmOpenMessage(uid){
   const el=document.getElementById('wmMsgView');
-  el.innerHTML=fmLoading('Loading…');
+  el.innerHTML='<div style="text-align:center;padding:40px;color:var(--t3);font-size:12px">Loading…</div>';
   try{
     const d=await fetch('?x=webmail_message&mailbox='+encodeURIComponent(wmCurrentMailbox)+'&folder='+encodeURIComponent(wmCurrentFolder)+'&uid='+encodeURIComponent(uid)).then(r=>r.json());
     if(!d.ok){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">${esc(d.error||'Failed to load message.')}</div>`;return;}
@@ -10572,7 +10944,7 @@ document.getElementById('wmSendBtn')?.addEventListener('click',async()=>{
 (function(){
 let wpAutoCfg=null,wpAutoData=null;
 const body=document.getElementById('wpAutomationBody');
-function wpAutoMsg(s,c='var(--t3)'){return c==='var(--t3)'?fmLoading(s,true):`<div style="padding:10px 16px;color:${c};font-size:11.5px">${esc(s)}</div>`;}
+function wpAutoMsg(s,c='var(--t3)'){return`<div style="padding:10px 16px;color:${c};font-size:11.5px">${esc(s)}</div>`;}
 function wpAutoPost(url,fd,cfg=wpAutoCfg){
   if(cfg&&!fd.has('cfg_b64'))fd.append('cfg_b64',cmsB64(cfg));
   return fetch(url,{method:'POST',body:fd}).then(r=>r.json());
@@ -10793,9 +11165,6 @@ if(FM_CMS_AUTO_LOGIN){
 }
 
 /* HELPERS */
-function fmLoading(label='Loading…',compact=false){
-  return '<div class="fm-loading'+(compact?' compact':'')+'"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">'+esc(label)+'</span></div>';
-}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}
 </script>
