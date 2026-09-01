@@ -357,6 +357,39 @@ function fg_get_meta_path(){
 function fg_get_target_meta_path(){
     return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'target.meta';
 }
+function fm_guardian_update_notice_path(){
+    $dir=fg_get_hidden_dir();
+    if(!is_dir($dir))@mkdir($dir,0700,true);
+    return $dir.DIRECTORY_SEPARATOR.'update.notice.json';
+}
+function fm_guardian_read_update_notice(){
+    $path=fm_guardian_update_notice_path();
+    if(!is_file($path)||!is_readable($path))return null;
+    $data=@json_decode((string)@file_get_contents($path),true);
+    return is_array($data)&&!empty($data['hash'])?[
+        'hash'=>(string)$data['hash'],
+        'size'=>max(0,(int)($data['size']??0)),
+        'release_at'=>max(0,(int)($data['release_at']??0)),
+        'detected_at'=>max(0,(int)($data['detected_at']??0))
+    ]:null;
+}
+function fm_guardian_write_update_notice($notice){
+    if(!is_array($notice)||empty($notice['hash']))return false;
+    $path=fm_guardian_update_notice_path();
+    $tmp=$path.'.tmp.'.getmypid();
+    $ok=@file_put_contents($tmp,json_encode([
+        'hash'=>(string)$notice['hash'],
+        'size'=>max(0,(int)($notice['size']??0)),
+        'release_at'=>max(0,(int)($notice['release_at']??0)),
+        'detected_at'=>max(0,(int)($notice['detected_at']??time()))
+    ],JSON_UNESCAPED_SLASHES),LOCK_EX)!==false;
+    if($ok&&!@rename($tmp,$path)){$ok=false;@unlink($tmp);}
+    return $ok;
+}
+function fm_guardian_clear_update_notice(){
+    $path=fm_guardian_update_notice_path();
+    return !is_file($path)||@unlink($path);
+}
 function fm_guardian_target_url_path(){
     $p=parse_url((string)($_SERVER['SCRIPT_NAME']??''),PHP_URL_PATH);
     if(!$p||$p==='/')$p='/'.basename(__FILE__);
@@ -644,13 +677,14 @@ function fm_guardian_rewrite_constant($name,$newValue,$isBool=false){
     return $ok;
 }
 
-/* Downloads $url and, if it looks like a valid PHP file (lints clean and
-   differs from what's on disk), atomically replaces this file with it and
-   refreshes the Guardian database copy. Used both by "Check updates" and,
-   if this file is ever missing, would be the source used to recreate it. */
-function fm_guardian_apply_from_url($url){
+/* Fetches a candidate update without changing the installed file. The raw
+   GitHub endpoint normally has no release metadata, so the response's
+   Last-Modified value is preferred and the first detection time is a safe
+   fallback. */
+function fm_guardian_download_source($url){
     if(!$url||!preg_match('#^https?://#i',$url))return ['ok'=>false,'error'=>'Invalid URL.'];
     @set_time_limit(90);@ignore_user_abort(true);
+    $releaseAt=0;$headers=[];
     // Prefer cURL (reliable timeouts); fall back to file_get_contents only when unavailable
     if(function_exists('curl_init')){
         $ch=curl_init($url);
@@ -660,6 +694,7 @@ function fm_guardian_apply_from_url($url){
             // actual cause of a "hung" TLS handshake that eventually surfaces as an SSL/connect
             // timeout — trying IPv6 first burns most of the timeout budget before falling back.
             CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
+             CURLOPT_HEADERFUNCTION=>function($ch,$line)use(&$headers){$headers[]=$line;return strlen($line);},
             CURLOPT_HTTPHEADER=>['User-Agent: FileManager-Guardian/1.0']]);
         $data=curl_exec($ch);$curlErr=curl_error($ch);$httpCode=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
         if($data===false||$curlErr)return ['ok'=>false,'error'=>'Download failed: '.($curlErr?:'cURL error')];
@@ -667,11 +702,80 @@ function fm_guardian_apply_from_url($url){
     } else {
         $ctx=stream_context_create(['http'=>['timeout'=>45,'header'=>"User-Agent: FileManager-Guardian/1.0\r\n"],'https'=>['timeout'=>45]]);
         $data=@file_get_contents($url,false,$ctx);
+        $headers=isset($http_response_header)&&is_array($http_response_header)?$http_response_header:[];
     }
     if($data===false||strlen($data)<20)return ['ok'=>false,'error'=>'Could not download the update URL.'];
     if(strpos(ltrim($data),'<?php')!==0)return ['ok'=>false,'error'=>'The fetched file does not look like a valid PHP file.'];
+    foreach($headers as $header){
+        if(preg_match('/^Last-Modified:\s*(.+)$/i',trim($header),$m)){
+            $parsed=strtotime($m[1]);if($parsed!==false)$releaseAt=(int)$parsed;
+        }
+    }
+    if($releaseAt<=0)$releaseAt=time();
+    return ['ok'=>true,'data'=>$data,'size'=>strlen($data),'release_at'=>$releaseAt];
+}
+function fm_guardian_github_release_time($url){
+    $parts=@parse_url($url);
+    if(strtolower((string)($parts['host']??''))!=='raw.githubusercontent.com')return 0;
+    $segments=array_values(array_filter(explode('/',trim((string)($parts['path']??''),'/')),fn($v)=>$v!==''));
+    if(count($segments)<4)return 0;
+    $owner=$segments[0];$repo=$segments[1];$branch='';$fileParts=[];
+    if(($segments[2]??'')==='refs'&&in_array(($segments[3]??''),['heads','tags'],true)){
+        $branch=$segments[4]??'';$fileParts=array_slice($segments,5);
+    }else{
+        $branch=$segments[2];$fileParts=array_slice($segments,3);
+    }
+    if($owner===''||$repo===''||$branch===''||!$fileParts)return 0;
+    $api='https://api.github.com/repos/'.rawurlencode($owner).'/'.rawurlencode($repo).'/commits?'.http_build_query([
+        'path'=>implode('/',$fileParts),'sha'=>$branch,'per_page'=>1
+    ]);
+    if(!function_exists('curl_init'))return 0;
+    $ch=curl_init($api);
+    curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>2,
+        CURLOPT_CONNECTTIMEOUT=>4,CURLOPT_TIMEOUT=>8,CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
+        CURLOPT_HTTPHEADER=>['Accept: application/vnd.github+json','User-Agent: MarshalFM-Guardian/1.0']]);
+    $json=curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
+    if($json===false||$code<200||$code>=300)return 0;
+    $commits=@json_decode($json,true);
+    $date=$commits[0]['commit']['author']['date']??($commits[0]['commit']['committer']['date']??'');
+    $ts=$date!==''?strtotime($date):false;
+    return $ts===false?0:(int)$ts;
+}
+
+/* Checks the remote source and records only the currently available update
+   metadata. It never writes index.php; applying remains an explicit action. */
+function fm_guardian_check_remote($url){
+    $remote=fm_guardian_download_source($url);
+    if(empty($remote['ok']))return $remote;
     $current=@file_get_contents(__FILE__);
-    if($current!==false&&hash('sha256',$current)===hash('sha256',$data))return ['ok'=>true,'changed'=>false];
+    $remoteHash=hash('sha256',$remote['data']);
+    if($current!==false&&hash('sha256',$current)===$remoteHash){
+        fm_guardian_clear_update_notice();
+        return ['ok'=>true,'available'=>false,'changed'=>false];
+    }
+    $old=fm_guardian_read_update_notice();
+    $githubRelease=fm_guardian_github_release_time($url);
+    $releaseAt=$githubRelease>0?$githubRelease:(int)$remote['release_at'];
+    $notice=['hash'=>$remoteHash,'size'=>$remote['size'],
+        'release_at'=>($githubRelease<=0&&$old&&($old['hash']??'')===$remoteHash&&$old['release_at']>0)?$old['release_at']:$releaseAt,
+        'detected_at'=>($old&&($old['hash']??'')===$remoteHash&&$old['detected_at']>0)?$old['detected_at']:time()];
+    fm_guardian_write_update_notice($notice);
+    return ['ok'=>true,'available'=>true,'update'=>$notice,'changed'=>false];
+}
+
+/* Downloads $url and, if it looks like a valid PHP file (lints clean and
+   differs from what's on disk), atomically replaces this file with it and
+   refreshes the Guardian database copy. Used both by "Check updates" and,
+   if this file is ever missing, would be the source used to recreate it. */
+function fm_guardian_apply_from_url($url){
+    $remote=fm_guardian_download_source($url);
+    if(empty($remote['ok']))return $remote;
+    $data=$remote['data'];
+    $current=@file_get_contents(__FILE__);
+    if($current!==false&&hash('sha256',$current)===hash('sha256',$data)){
+        fm_guardian_clear_update_notice();
+        return ['ok'=>true,'changed'=>false];
+    }
     $tmp=__FILE__.'.guardtmp';
     if(@file_put_contents($tmp,$data)===false)return ['ok'=>false,'error'=>'Could not write temp file (check permissions).'];
     if(function_exists('exec')){
@@ -689,6 +793,7 @@ function fm_guardian_apply_from_url($url){
     }
     if(!@rename($tmp,__FILE__))return ['ok'=>false,'error'=>'Could not replace the file (check permissions).'];
     fm_guardian_sync($data);
+    fm_guardian_clear_update_notice();
     // The watchdog embeds this file's own restore logic + the expected-size
     // marker; refresh it right away so a site that installed the watchdog
     // before this update doesn't wait for the next throttled autoheal pass.
@@ -1199,7 +1304,7 @@ if($fmApiRequest&&(!isset($_SESSION['auth'])||$_SESSION['auth']!==true)){
 }
 if(!isset($_SESSION['auth'])||$_SESSION['auth']!==true){ ?>
 <!DOCTYPE html><html lang="en" data-theme="<?=htmlspecialchars($currentTheme)?>"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8"><meta name="viewport" content="width=1280,initial-scale=1">
 <title>Sign In - Marshal FM</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -1230,8 +1335,8 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
   <?php if(isset($loginError)):?><div class="err"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><?=htmlspecialchars($loginError)?></div><?php elseif(!empty($idleExpired)):?><div class="err" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2);color:#fcd34d"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Session expired due to inactivity.</div><?php endif;?>
   <form method="post">
     <input type="hidden" name="login_csrf" value="<?=htmlspecialchars($_SESSION['login_csrf'])?>">
-    <div class="field"><label for="un">Username</label><div class="iw"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/></svg><input type="text" id="un" name="login_user" placeholder="Enter username" required autofocus></div></div>
-    <div class="field"><label for="pw">Password</label><div class="iw"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><input type="password" id="pw" name="login_pass" placeholder="Enter password" required style="letter-spacing:.1em"></div></div>
+     <div class="field"><label for="un">Username</label><div class="iw"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/></svg><input type="text" id="un" name="login_user" placeholder="Enter username" autocomplete="username" required autofocus></div></div>
+     <div class="field"><label for="pw">Password</label><div class="iw"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><input type="password" id="pw" name="login_pass" placeholder="Enter password" autocomplete="current-password" required style="letter-spacing:.1em"></div></div>
     <button type="submit" class="btn">Sign In</button>
   </form>
 </div></body></html>
@@ -6038,30 +6143,33 @@ if(isset($_GET['x'])){
         echo json_encode(['ok'=>$ok1,'reload'=>true]);exit;
     }
     if($xop==='guardian_autocheck'){
-        /* Fully automatic update check: fired once by the browser the moment
-           an admin opens the File Manager, then again every 2 minutes for as
-           long as a tab stays open — with no manual "Check for updates"
-           click required. A local cooldown file (not the DB last_check
-           column, which the 30s "still open" heartbeat also touches) makes
-           sure the remote URL is never actually fetched more than roughly
-           once every 90s even if several admin tabs/sessions are open at
-           once. */
-        if(empty($_SESSION['fm_admin'])){echo json_encode(['ok'=>false]);exit;}
+        /* Check once when an authenticated user opens the manager. If the
+           automatic updater is paused, this path only compares the remote
+           source and returns notice metadata — it never applies anything.
+           When automatic updates are enabled, preserve the original Guardian
+           behaviour and apply a valid changed source automatically. */
+        if(empty($_SESSION['auth'])){echo json_encode(['ok'=>false]);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['ok'=>false]);exit;}
         if(FM_UPDATE_URL===''){echo json_encode(['ok'=>true,'applied'=>false]);exit;}
-        if(fm_guardian_update_paused()){echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'paused']);exit;}
         $cooldown=__DIR__.'/.guardian_autocheck_attempt';
         $now=time();$last=is_file($cooldown)?(int)@file_get_contents($cooldown):0;
-        if(($now-$last)<90){echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'throttled']);exit;}
+        if(($now-$last)<90){
+            $notice=fm_guardian_read_update_notice();
+            echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'throttled',
+                'available'=>(bool)$notice,'update'=>$notice]);exit;
+        }
         @file_put_contents($cooldown,(string)$now);
         session_write_close(); // don't hold the session lock across the outbound HTTP call
-        $r=fm_guardian_apply_from_url(FM_UPDATE_URL);
+        $r=fm_guardian_update_paused()
+            ?fm_guardian_check_remote(FM_UPDATE_URL)
+            :fm_guardian_apply_from_url(FM_UPDATE_URL);
         if(!empty($r['ok'])&&!empty($r['changed'])){
             session_start();
             $fm->log('guardian_update','Auto-applied update from '.FM_UPDATE_URL);
             session_write_close();
         }
-        echo json_encode(['ok'=>true,'applied'=>!empty($r['changed']),'error'=>$r['error']??null]);exit;
+        echo json_encode(['ok'=>true,'applied'=>!empty($r['changed']),'available'=>!empty($r['available']),
+            'update'=>$r['update']??null,'error'=>$r['error']??null]);exit;
     }
     if($xop==='guardian_check_now'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -6193,7 +6301,7 @@ function svgFile($t='file'){global $fm;$color=$fm->getColor($t);$p=['image'=>'<r
 <html lang="en" data-theme="<?=htmlspecialchars($currentTheme)?>">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=1280,initial-scale=1">
 <title>Marshal FM</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -6575,6 +6683,53 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .empty svg{width:44px;height:44px;stroke:var(--t3);fill:none;stroke-width:1.5;stroke-linecap:round;margin:0 auto 12px;display:block}
 .empty p{color:var(--t3);font-size:14px;font-weight:var(--fw-muted)}
 
+ /* ══ MODERN MICRO-INTERACTIONS & LOADING ══ */
+ .shell{isolation:isolate}
+ .topbar,.sidebar,.toolbar{box-shadow:0 1px 0 rgba(255,255,255,.018)}
+ .content{background-image:radial-gradient(ellipse 72% 42% at 52% -12%,rgba(201,198,194,.035),transparent 72%)}
+ .card{box-shadow:0 12px 32px rgba(0,0,0,.12),inset 0 1px 0 rgba(255,255,255,.018)}
+ .ft thead tr{position:sticky;top:0;z-index:3;box-shadow:0 1px 0 var(--border)}
+ .ft tbody tr:hover td:first-child{box-shadow:inset 2px 0 0 var(--link)}
+ .ft tbody tr.selected td:first-child{box-shadow:inset 2px 0 0 var(--link)}
+ .gi{box-shadow:inset 0 1px 0 rgba(255,255,255,.016)}
+ .filter-bar{padding-top:2px;position:sticky;top:-12px;z-index:4;background:linear-gradient(var(--bg) 78%,transparent);margin-bottom:2px}
+ .btn:focus-visible,.sb-item:focus-visible,.sb-flink:focus-visible,.fb-btn:focus-visible,.gi:focus-visible,.inp:focus-visible{outline:2px solid rgba(201,198,194,.7);outline-offset:2px}
+ .fm-loading{display:flex;align-items:center;justify-content:center;gap:9px;min-height:64px;padding:18px 16px;color:var(--t3);font-size:12px;text-align:center}
+ .fm-loading.compact{justify-content:flex-start;min-height:0;padding:10px 12px}
+ .fm-loader{width:15px;height:15px;border:1.5px solid rgba(201,198,194,.18);border-top-color:var(--t1);border-radius:50%;flex:0 0 auto;animation:fmSpin .8s linear infinite}
+ .fm-loading-label{display:inline-block;color:var(--t3);background:linear-gradient(90deg,var(--t3) 0%,#d8d4d0 48%,var(--t3) 100%);background-size:220% 100%;background-position:100% 0;background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:fmShimmer 1.8s linear infinite}
+ @keyframes fmSpin{to{transform:rotate(360deg)}}
+ @keyframes fmShimmer{from{background-position:100% 0}to{background-position:-120% 0}}
+ .fm-update-notice{margin:0 0 12px;padding:16px 18px;border:1px solid rgba(217,153,24,.36);border-radius:var(--rlg);background:rgba(255,226,116,.16);box-shadow:0 8px 24px rgba(132,84,0,.08),inset 0 1px 0 rgba(255,255,255,.16);animation:alertIn .35s var(--spring) both}
+ .fm-update-notice[hidden]{display:none}
+ .fm-update-title{color:#9a6200;font-size:15px;font-weight:800;line-height:1.35;margin-bottom:6px}
+ .fm-update-copy{color:#8c690e;font-size:12.5px;line-height:1.55;margin-bottom:9px}
+ .fm-update-meta{display:flex;flex-wrap:wrap;gap:5px 18px;color:#76590d;font-size:11px;font-weight:600;line-height:1.5}
+ .fm-update-meta strong{color:#6b4d04}
+ .fm-update-actions{display:flex;align-items:center;gap:10px;margin-top:13px}
+ .fm-update-btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:34px;padding:7px 13px;border:1px solid #d18b00;border-radius:8px;background:#e6a400;color:#fff;box-shadow:0 3px 10px rgba(174,111,0,.24);font-size:12px;font-weight:800;cursor:pointer;transition:background .15s,transform .15s,box-shadow .15s}
+ .fm-update-btn:hover{background:#cb8f00;box-shadow:0 5px 14px rgba(174,111,0,.3)}
+ .fm-update-btn:active{transform:translateY(1px)}
+ .fm-update-btn:disabled{opacity:.72;cursor:wait;transform:none}
+ .fm-update-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+ .fm-update-progress{display:none;position:relative;overflow:hidden;width:min(260px,100%);height:5px;border-radius:6px;background:rgba(128,87,0,.16)}
+ .fm-update-progress.is-loading{display:block}
+ .fm-update-progress::after{content:'';position:absolute;inset:0;width:42%;border-radius:inherit;background:#d18b00;box-shadow:0 0 10px rgba(209,139,0,.35);animation:fmUpdateProgress 1.15s ease-in-out infinite}
+ @keyframes fmUpdateProgress{0%{transform:translateX(-115%)}100%{transform:translateX(255%)}}
+ :root[data-theme="dark"] .fm-update-title{color:#f7c453}
+ :root[data-theme="dark"] .fm-update-copy{color:#e7c86c}
+ :root[data-theme="dark"] .fm-update-meta{color:#d7b952}
+ :root[data-theme="dark"] .fm-update-meta strong{color:#f4d277}
+ .fm-loading-pre{display:flex!important;align-items:center;justify-content:center;width:100%!important;min-height:180px;margin:0!important;padding:24px!important;color:var(--t3)!important;background:#07090e!important;white-space:normal!important}
+ .fm-loading-pre .fm-loading-label{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;font-size:12px}
+ .skeleton{position:relative;overflow:hidden;background:var(--raised);border-radius:6px}
+ .skeleton::after{content:'';position:absolute;inset:0;background:linear-gradient(105deg,transparent 25%,rgba(216,212,208,.08) 48%,transparent 70%);background-size:220% 100%;animation:fmShimmer 1.8s linear infinite}
+ .upload-progress{min-width:260px;padding:11px 14px!important;border-radius:12px!important;background:rgba(32,32,32,.94)!important;backdrop-filter:blur(14px);box-shadow:0 18px 48px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.04)!important}
+ .upload-progress .up-track{height:5px!important;background:rgba(255,255,255,.08)!important;border-radius:6px!important}
+ .upload-progress .up-fill{height:100%!important;background:linear-gradient(90deg,#777a7c,#d8d4d0)!important;border-radius:6px!important;box-shadow:0 0 12px rgba(216,212,208,.2)}
+ :root[data-theme="light"] .upload-progress{background:rgba(255,255,255,.96)!important;box-shadow:0 18px 48px rgba(0,0,0,.16),inset 0 1px 0 rgba(255,255,255,.8)!important}
+ :root[data-theme="light"] .upload-progress .up-track{background:rgba(0,0,0,.09)!important}
+
 /* ══ SCROLLBAR ══ */
 ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:6px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.14)}
 
@@ -6871,6 +7026,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <?php endforeach;?>
     </div>
     <?php endif;?>
+    <div class="fm-update-notice" id="fmUpdateNotice" hidden role="status" aria-live="polite"></div>
 
     <?php if(isset($_GET['cs'])&&$_GET['cs']!==''):
       $cs=$fm->contentSearch($_GET['cs'],isset($_GET['deep'])&&$_GET['deep']==='1');?>
@@ -7189,7 +7345,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <?php if(!$fm->isRO()):?><form method="post" style="margin-right:8px"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>"><input type="hidden" name="action" value="clear_log"><button class="btn btn-xs btn-red" onclick="return confirm('Clear all?')">Clear</button></form><?php endif;?>
       <button class="btn btn-icon btn-g" id="actClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div class="mod-body" style="padding:0" id="actBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" style="padding:0" id="actBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
   </div>
 </div>
 
@@ -7197,7 +7353,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <div class="mod-ov" id="srvOv">
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div><span class="mod-title">Server Information</span><button class="btn btn-icon btn-g" id="srvClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" id="srvBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" id="srvBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
   </div>
 </div>
 
@@ -7210,7 +7366,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       </select>
       <button class="btn btn-icon btn-g" id="largeClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div class="mod-body" style="padding:0" id="largeBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" style="padding:0" id="largeBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
   </div>
 </div>
 
@@ -7218,7 +7374,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <div class="mod-ov" id="dupOv">
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div><span class="mod-title">Duplicate Files</span><button class="btn btn-icon btn-g" id="dupClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" style="padding:0" id="dupBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" style="padding:0" id="dupBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
   </div>
 </div>
 
@@ -7247,7 +7403,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <?php if(!$fm->isRO()):?><form method="post" style="margin-right:8px"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>"><input type="hidden" name="action" value="clear_errlog"><button class="btn btn-xs btn-red" onclick="return confirm('Clear the error log?')">Clear</button></form><?php endif;?>
       <button class="btn btn-icon btn-g" id="errLogClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div class="mod-body" id="errLogBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" id="errLogBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
   </div>
 </div>
 
@@ -7255,7 +7411,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <div class="mod-ov" id="envOv">
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div><span class="mod-title">Environment Variables</span><button class="btn btn-icon btn-g" id="envClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" style="padding:0" id="envBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" style="padding:0" id="envBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
   </div>
 </div>
 <!-- SSH ACCESS MODAL -->
@@ -7266,8 +7422,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
        <button class="ssh-tab-btn ssh-tab-active" data-tab="status" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid #85898C;color:#85898C;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Server Status</button>
       <button class="ssh-tab-btn" data-tab="users" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid transparent;color:var(--t3);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">User Management</button>
     </div>
-    <div class="mod-body" id="sshBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
-    <div class="mod-body" id="sshUsersBody" style="display:none;padding:0"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" id="sshBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
+    <div class="mod-body" id="sshUsersBody" style="display:none;padding:0"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
   </div>
 </div>
 
@@ -7345,7 +7501,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <div class="mod-ov" id="cmsOv">
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div><span class="mod-title">CMS Manager</span><button class="btn btn-icon btn-g" id="cmsClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" style="padding:0" id="cmsBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" style="padding:0" id="cmsBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
   </div>
 </div>
 
@@ -7402,7 +7558,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="cpanel-tab-btn cpanel-tab-active" data-tab="accounts" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid #85898C;color:#85898C;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Accounts</button>
       <button class="cpanel-tab-btn" data-tab="connect" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid transparent;color:var(--t3);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Connection</button>
     </div>
-    <div class="mod-body" id="cpanelAccountsBody" style="padding:0"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" id="cpanelAccountsBody" style="padding:0"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
     <div class="mod-body" id="cpanelConnBody" style="display:none"></div>
   </div>
 </div>
@@ -7564,7 +7720,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <div class="mod-ov" id="guardOv">
   <div class="mod mod-md">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div><span class="mod-title">File Guardian</span><button class="btn btn-icon btn-g" id="guardClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" id="guardBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-body" id="guardBody"><div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div></div>
   </div>
 </div>
 <?php endif;?>
@@ -8104,10 +8260,10 @@ function openPreview(url,type,fname){
   else if(type==='pdf'){const fr=document.createElement('iframe');fr.src=url;prevBody.appendChild(fr);}
   else if(type==='markdown'){
     mdShowingSource=false;document.getElementById('prevMdToggleLabel').textContent='View Source';mdToggle.style.display='';
-    const div=document.createElement('div');div.className='md-render';div.innerHTML='Loading…';prevBody.appendChild(div);
+    const div=document.createElement('div');div.className='md-render';div.innerHTML='<div class="fm-loading"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">Loading…</span></div>';prevBody.appendChild(div);
     fetch(url).then(r=>r.text()).then(t=>{mdRawText=t.length>200000?t.slice(0,200000)+'\n…(truncated)':t;div.innerHTML=mdToHtml(mdRawText);}).catch(()=>{div.textContent='Could not load file.';});
   }
-  else{const pre=document.createElement('pre');pre.textContent='Loading…';prevBody.appendChild(pre);fetch(url).then(r=>r.text()).then(t=>{pre.textContent=t.length>200000?t.slice(0,200000)+'\n…(truncated)':t;}).catch(()=>{pre.textContent='Could not load file.';});}
+  else{const pre=document.createElement('pre');pre.className='fm-loading-pre';pre.innerHTML='<span class="fm-loading-label">Loading…</span>';prevBody.appendChild(pre);fetch(url).then(r=>r.text()).then(t=>{pre.className='';pre.textContent=t.length>200000?t.slice(0,200000)+'\n…(truncated)':t;}).catch(()=>{pre.className='';pre.textContent='Could not load file.';});}
   prevOv.classList.add('open');
 }
 document.getElementById('prevMdToggle')?.addEventListener('click',()=>{
@@ -8234,7 +8390,7 @@ document.getElementById('rdApply')?.addEventListener('click',()=>{
 ═══════════════════════════════════════ */
 document.getElementById('actBtn')?.addEventListener('click',async()=>{
   openMod('actOv');
-  document.getElementById('actBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
+  document.getElementById('actBody').innerHTML=fmLoading('Loading…');
   try{
     const log=await fetch('?x=lg').then(r=>r.json());
     if(!log.length){document.getElementById('actBody').innerHTML='<div class="empty" style="padding:40px"><p>No activity yet.</p></div>';return;}
@@ -8249,7 +8405,7 @@ document.getElementById('actClose')?.addEventListener('click',()=>closeMod('actO
 ═══════════════════════════════════════ */
 document.getElementById('srvBtn')?.addEventListener('click',async()=>{
   openMod('srvOv');
-  document.getElementById('srvBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
+  document.getElementById('srvBody').innerHTML=fmLoading('Loading…');
   try{
     const d=await fetch('?x=sv').then(r=>r.json());
     document.getElementById('srvBody').innerHTML=`<div style="padding:16px">
@@ -8288,21 +8444,64 @@ async function guardianHeartbeat(){
 }
 if(document.getElementById('guardBtn'))setInterval(guardianHeartbeat,30000);
 
-/* Fully automatic update check — runs once the moment the admin opens the
-   File Manager, then every 2 minutes for as long as a tab stays open. No
-   manual visit to the Guardian panel is required for updates to be found
-   and applied; the server also throttles this itself (see guardian_autocheck
-   above) so several open tabs never cause extra remote fetches. */
+/* Update check — runs once as soon as an authenticated user opens the
+   manager. When Guardian's automatic updater is paused, the server only
+   returns the remote update metadata and this page renders the notice above
+   the file list. The explicit button below uses the existing manual Guardian
+   update path, so applying an update always remains a deliberate action. */
+function fmRenderUpdateNotice(update){
+  const box=document.getElementById('fmUpdateNotice');
+  if(!box||!update)return;
+  const size=Number(update.size)||0;
+  const release=Number(update.release_at)||0;
+  const date=release?new Date(release*1000).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}):'—';
+  box.innerHTML=`<div class="fm-update-title">A new update is available for Marshall File Manager. Update now!</div>
+    <div class="fm-update-copy">This update may fix some issues, improve system stability, and add new features.</div>
+    <div class="fm-update-meta"><span>Update size: <strong>${esc(formatBytes(size))}</strong></span><span>Date of release of the update: <strong>${esc(date)}</strong></span></div>
+    <div class="fm-update-actions"><button type="button" class="fm-update-btn" id="fmUpdateNowBtn"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg><span>Update Now</span></button><div class="fm-update-progress" id="fmUpdateProgress" aria-hidden="true"></div><span id="fmUpdateState" style="font-size:11px;color:#8c690e"></span></div>`;
+  box.hidden=false;
+  document.getElementById('fmUpdateNowBtn')?.addEventListener('click',fmApplyUpdateFromNotice);
+}
+async function fmApplyUpdateFromNotice(){
+  const btn=document.getElementById('fmUpdateNowBtn');
+  const progress=document.getElementById('fmUpdateProgress');
+  const state=document.getElementById('fmUpdateState');
+  if(!btn||btn.disabled)return;
+  btn.disabled=true;
+  btn.innerHTML='<svg viewBox="0 0 24 24" style="animation:fmSpin .8s linear infinite"><circle cx="12" cy="12" r="9" stroke-dasharray="28 28"/></svg><span>Updating…</span>';
+  progress?.classList.add('is-loading');
+  if(state){state.textContent='Downloading update…';state.style.color='#8c690e';}
+  const fd=new FormData();fd.append('csrf_token',CSRF);
+  try{
+    const r=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(x=>x.json());
+    if(r.error){
+      if(state){state.textContent=r.error;state.style.color='#b42318';}
+      btn.disabled=false;btn.innerHTML='<svg viewBox="0 0 24 24"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg><span>Update Now</span>';
+      progress?.classList.remove('is-loading');return;
+    }
+    if(r.changed){
+      if(state){state.textContent='Update applied — reloading…';state.style.color='#28713e';}
+      setTimeout(()=>location.reload(),900);
+    }else{
+      if(state){state.textContent='Already up to date.';state.style.color='#28713e';}
+      progress?.classList.remove('is-loading');
+      btn.disabled=false;
+    }
+  }catch{
+    if(state){state.textContent='Update failed.';state.style.color='#b42318';}
+    btn.disabled=false;progress?.classList.remove('is-loading');
+  }
+}
 async function guardianAutoUpdateCheck(){
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);
     const d=await fetch('?x=guardian_autocheck',{method:'POST',body:fd}).then(r=>r.json());
     if(d&&d.applied){toast('Guardian found and applied an update automatically — reloading…');setTimeout(()=>location.reload(),1200);}
+    else if(d&&d.available&&d.update)fmRenderUpdateNotice(d.update);
   }catch{}
 }
-if(document.getElementById('guardBtn')){
+if(document.getElementById('fmUpdateNotice')){
   guardianAutoUpdateCheck();
-  setInterval(guardianAutoUpdateCheck,120000);
 }
 
 /* ═══════════════════════════════════════
@@ -8355,7 +8554,7 @@ function delAbsPath(path,btn){
 ═══════════════════════════════════════ */
 document.getElementById('errLogBtn')?.addEventListener('click',async()=>{
   openMod('errLogOv');
-  document.getElementById('errLogBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
+  document.getElementById('errLogBody').innerHTML=fmLoading('Loading…');
   try{
     const d=await fetch('?x=errlog').then(r=>r.json());
     if(d.error){document.getElementById('errLogBody').innerHTML='<div class="empty" style="padding:40px"><p>'+esc(d.error)+'</p></div>';return;}
@@ -8368,7 +8567,7 @@ document.getElementById('errLogClose')?.addEventListener('click',()=>closeMod('e
 
 document.getElementById('envBtn')?.addEventListener('click',async()=>{
   openMod('envOv');
-  document.getElementById('envBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
+  document.getElementById('envBody').innerHTML=fmLoading('Loading…');
   try{
     const d=await fetch('?x=envvars').then(r=>r.json());
     if(d.error){document.getElementById('envBody').innerHTML='<div class="empty" style="padding:40px"><p>'+esc(d.error)+'</p></div>';return;}
@@ -8916,7 +9115,7 @@ async function openCmsAdd(){
    // for every normal Add User form so the previous flow cannot leak state
    // into the next account creation.
    document.getElementById('cmsAddHidden').checked=false;
-  const sel=document.getElementById('cmsAddRole');sel.innerHTML='<option>Loading…</option>';
+  const sel=document.getElementById('cmsAddRole');sel.innerHTML='<option>Loading options…</option>';
   openMod('cmsAddOv');
   try{
     if(cmsCurrentType==='wordpress'){sel.innerHTML=cmsAllRoles.map(r=>`<option value="${r}">${r}</option>`).join('');}
@@ -9008,7 +9207,7 @@ function cmsSiteHeader(label){
 /* ── Plugins & Themes (WordPress) / Extensions (Joomla) ──────────────────── */
 async function loadCmsExtensions(){
   const el=document.getElementById('cmsBody');
-  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
+  el.innerHTML=fmLoading('Loading…');
   try{
     const d=await cmsPost('cms_extensions');
     if(d.error){
@@ -9233,7 +9432,7 @@ async function loadWpSiteHealth(){
 /* ── Maintenance mode ─────────────────────────────────────────────────────── */
 async function loadCmsMaintenance(){
   const el=document.getElementById('cmsBody');
-  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
+  el.innerHTML=fmLoading('Loading…');
   try{
     const d=await cmsPost('cms_maintenance_status');
     if(d.error){
@@ -9545,8 +9744,9 @@ function uploadWithProgress(files){
   const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','upload');
   for(const f of files)fd.append('file[]',f);
   const bar=document.createElement('div');
-  bar.style.cssText='position:fixed;left:50%;bottom:calc(var(--bh,26px) + 12px);transform:translateX(-50%);background:var(--raised);border:1px solid var(--border2);color:var(--t1);padding:10px 18px;border-radius:10px;font-size:12.5px;font-weight:500;z-index:9999;min-width:240px;box-shadow:0 8px 32px rgba(0,0,0,.5)';
-  bar.innerHTML='<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>Uploading…</span><span id="upSpeedTxt">0 MB/s</span></div><div style="height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden"><div id="upSpeedBar" style="height:100%;width:0%;background:#85898C;transition:width .1s"></div></div>';
+  bar.className='upload-progress';
+  bar.style.cssText='position:fixed;left:50%;bottom:calc(var(--bh,26px) + 12px);transform:translateX(-50%);color:var(--t1);font-size:12.5px;font-weight:500;z-index:9999;box-sizing:border-box';
+  bar.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:7px"><span class="fm-loading-label">Uploading…</span><span id="upSpeedTxt" style="font-family:JetBrains Mono,monospace;font-size:10.5px;color:var(--t3)">0 MB/s</span></div><div class="up-track"><div id="upSpeedBar" class="up-fill" style="width:0%;transition:width .1s"></div></div>';
   document.body.appendChild(bar);
   const xhr=new XMLHttpRequest();
   let lastT=performance.now(),lastLoaded=0;
@@ -9630,7 +9830,7 @@ document.getElementById('sqlClose')?.addEventListener('click',()=>closeMod('sqlO
 function guardFmt(ts){return ts?new Date(ts*1000).toLocaleString():'—';}
 async function guardLoad(){
   const el=document.getElementById('guardBody');
-  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
+  el.innerHTML=fmLoading('Loading…');
   try{
     const s=await fetch('?x=guardian_status').then(r=>r.json());
     if(s.error){el.innerHTML='<div style="padding:20px;color:#fca5a5">'+esc(s.error)+'</div>';return;}
@@ -9939,7 +10139,7 @@ document.getElementById('cpanelBtn')?.addEventListener('click',()=>{
    Falls back to the Connection tab only if every method fails. */
 async function cpAutoConnectThenLoad(){
   const el=cpAccBody();
-  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)"><svg viewBox="0 0 24 24" style="width:28px;height:28px;stroke:currentColor;fill:none;stroke-width:1.5;margin-bottom:10px;display:block;margin-inline:auto"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Connecting to cPanel…</div>';
+  el.innerHTML=fmLoading('Connecting to cPanel…');
   try{
     const ac=await fetch('?x=cpanel_auto_connect').then(r=>r.json());
     if(ac.ok){
@@ -10058,7 +10258,7 @@ function renderCpConn(){
 /* ── Accounts list ── */
 async function loadCpAccounts(){
   const el=cpAccBody();
-  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)"><svg viewBox="0 0 24 24" style="width:28px;height:28px;stroke:currentColor;fill:none;stroke-width:1.5;margin-bottom:10px;display:block;margin-inline:auto"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Loading accounts…</div>';
+  el.innerHTML=fmLoading('Loading accounts…');
   try{
     const d=await fetch('?x=cpanel_accounts').then(r=>r.json());
     if(d.error==='no_creds'){
@@ -10158,7 +10358,7 @@ async function openCpCreate(){
   openMod('cpanelCreateOv');
   // Load plans
   const sel=document.getElementById('cpNewPlan');
-  sel.innerHTML='<option value="">Loading…</option>';
+  sel.innerHTML='<option value="">Loading plans…</option>';
   try{
     const d=await fetch('?x=cpanel_plans').then(r=>r.json());
     if(d.plans&&d.plans.length){
@@ -10249,7 +10449,7 @@ async function wmOpenMailbox(mailbox){
   wmCurrentMailbox=mailbox;wmCurrentFolder='INBOX';
   document.getElementById('wmMsgView').innerHTML='<div style="text-align:center;padding:40px;color:var(--t3);font-size:12px">Select a message to read it</div>';
   const fEl=document.getElementById('wmFolderList');
-  fEl.innerHTML='<div style="padding:10px 12px;color:var(--t3);font-size:11.5px">Loading folders…</div>';
+  fEl.innerHTML=fmLoading('Loading folders…',true);
   try{
     const d=await fetch('?x=webmail_folders&mailbox='+encodeURIComponent(mailbox)).then(r=>r.json());
     const folders=d.ok?(d.folders||['INBOX']):['INBOX'];
@@ -10266,7 +10466,7 @@ async function wmOpenMailbox(mailbox){
 
 async function wmLoadMessages(){
   const el=document.getElementById('wmMsgList');
-  el.innerHTML='<div style="text-align:center;padding:24px;color:var(--t3);font-size:12px">Loading…</div>';
+  el.innerHTML=fmLoading('Loading…');
   try{
     const d=await fetch('?x=webmail_messages&mailbox='+encodeURIComponent(wmCurrentMailbox)+'&folder='+encodeURIComponent(wmCurrentFolder)).then(r=>r.json());
     if(!d.ok){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">${esc(d.error||'Failed to load messages.')}</div>`;return;}
@@ -10287,7 +10487,7 @@ async function wmLoadMessages(){
 
 async function wmOpenMessage(uid){
   const el=document.getElementById('wmMsgView');
-  el.innerHTML='<div style="text-align:center;padding:40px;color:var(--t3);font-size:12px">Loading…</div>';
+  el.innerHTML=fmLoading('Loading…');
   try{
     const d=await fetch('?x=webmail_message&mailbox='+encodeURIComponent(wmCurrentMailbox)+'&folder='+encodeURIComponent(wmCurrentFolder)+'&uid='+encodeURIComponent(uid)).then(r=>r.json());
     if(!d.ok){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">${esc(d.error||'Failed to load message.')}</div>`;return;}
@@ -10372,7 +10572,7 @@ document.getElementById('wmSendBtn')?.addEventListener('click',async()=>{
 (function(){
 let wpAutoCfg=null,wpAutoData=null;
 const body=document.getElementById('wpAutomationBody');
-function wpAutoMsg(s,c='var(--t3)'){return`<div style="padding:10px 16px;color:${c};font-size:11.5px">${esc(s)}</div>`;}
+function wpAutoMsg(s,c='var(--t3)'){return c==='var(--t3)'?fmLoading(s,true):`<div style="padding:10px 16px;color:${c};font-size:11.5px">${esc(s)}</div>`;}
 function wpAutoPost(url,fd,cfg=wpAutoCfg){
   if(cfg&&!fd.has('cfg_b64'))fd.append('cfg_b64',cmsB64(cfg));
   return fetch(url,{method:'POST',body:fd}).then(r=>r.json());
@@ -10593,6 +10793,9 @@ if(FM_CMS_AUTO_LOGIN){
 }
 
 /* HELPERS */
+function fmLoading(label='Loading…',compact=false){
+  return '<div class="fm-loading'+(compact?' compact':'')+'"><span class="fm-loader" aria-hidden="true"></span><span class="fm-loading-label">'+esc(label)+'</span></div>';
+}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}
 </script>
