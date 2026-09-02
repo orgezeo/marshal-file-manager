@@ -787,6 +787,38 @@ function fm_guardian_selftest_htaccess(){
     return $code>0&&$code<500;
 }
 
+/* Replaces this file's source while accommodating shared-hosting permissions.
+   Some hosts allow PHP to write an existing file but deny directory-level
+   rename/replace operations. Try the atomic same-directory rename first, then
+   fall back to a locked in-place write and verify the exact bytes. */
+function fm_guardian_commit_source($path,$newSrc,$oldSrc){
+    $tmp=$path.'.guardtmp.'.getmypid();
+    if(@file_put_contents($tmp,$newSrc,LOCK_EX)===false)return false;
+    $mode=@fileperms($path);
+    if($mode!==false)@chmod($tmp,$mode&0777);
+    if(!is_link($path)&&@rename($tmp,$path)){
+        $written=@file_get_contents($path);
+        if($written!==false&&hash('sha256',$written)===hash('sha256',$newSrc))return true;
+        // A successful rename should be exact, but do not leave a bad file
+        // behind if a filesystem reports success while returning stale bytes.
+        @file_put_contents($path,$oldSrc,LOCK_EX);
+        return false;
+    }
+    @unlink($tmp);
+
+    // Direct writes work on hosts where the file is writable but its parent
+    // directory is not writable enough for rename-over-existing-file.
+    $written=@file_put_contents($path,$newSrc,LOCK_EX);
+    if($written!==false){
+        $actual=@file_get_contents($path);
+        if($actual!==false&&hash('sha256',$actual)===hash('sha256',$newSrc))return true;
+    }
+    // Best-effort rollback keeps a failed settings update from leaving a
+    // truncated manager file.
+    @file_put_contents($path,$oldSrc,LOCK_EX);
+    return false;
+}
+
 /* Rewrites a single define('NAME', ...) line INSIDE THIS FILE'S OWN SOURCE
    CODE (never in a side json file — the admin explicitly asked for the
    Update URL and the on/off switch to live in the file itself). Always
@@ -802,15 +834,16 @@ function fm_guardian_rewrite_constant($name,$newValue,$isBool=false){
     $count=0;
     $newSrc=preg_replace($pattern,$replacement,$src,1,$count);
     if($count!==1||$newSrc===null)return false;
-    $tmp=__FILE__.'.guardtmp';
-    if(@file_put_contents($tmp,$newSrc)===false)return false;
+    $tmp=__FILE__.'.guardlint.'.getmypid();
+    if(@file_put_contents($tmp,$newSrc,LOCK_EX)===false)return false;
     $lintOk=true;
     if(function_exists('shell_exec')){
         $out=@shell_exec('php -l '.escapeshellarg($tmp).' 2>&1');
         if($out!==null&&stripos($out,'No syntax errors')===false)$lintOk=false;
     }
     if(!$lintOk){@unlink($tmp);return false;}
-    $ok=@rename($tmp,__FILE__);
+    @unlink($tmp);
+    $ok=fm_guardian_commit_source(__FILE__,$newSrc,$src);
     if($ok)fm_guardian_sync($newSrc);
     return $ok;
 }
