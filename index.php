@@ -2634,6 +2634,15 @@ class FileManager {
                 $real=$parent;
             }
         }
+        /* Inline background images and CSS-backed lazy loaders are common on
+           homepages and dashboards, even when there is no <img> element. */
+        preg_match_all('/url\s*\(\s*([\'"]?)([^\'")\s]+)\1\s*\)/i',$html,$cssUrls);
+        foreach($cssUrls[2]??[] as $raw){
+            $url=$this->wpImageUrl($raw,$base);if(!$url)continue;
+            $key=strtok($url,'?');$ext=strtolower(pathinfo(parse_url($key,PHP_URL_PATH)??'','extension'));
+            if(!in_array($ext,['jpg','jpeg','png','gif','webp','bmp','avif'],true)||isset($seen[$key]))continue;
+            $seen[$key]=1;$out[]=['url'=>$url,'source'=>$source.' (background)','label'=>basename(parse_url($key,PHP_URL_PATH)??$key),'width'=>null,'height'=>null];
+        }
         return $out;
     }
     private function wpSiteRoot($configPath){
@@ -4223,9 +4232,10 @@ FMNUM;
         return['ok'=>true,'enabled'=>false,'message'=>'Real WordPress numbers are restored.'];
     }
 
-    /* ── WordPress Images Replacer ──────────────────────────────────────────
-       Originals are never overwritten. Replacements live in their own uploads
-       folder and a small option + MU-plugin changes only the browser output. */
+     /* ── WordPress Images Replacer ──────────────────────────────────────────
+        New replacements are real file replacements. The original is copied to
+        a backup before the chosen upload is moved into the exact original path
+        and filename. Legacy presentation mappings remain readable. */
     private function wpImageOption($link,$c){
         $v=$this->wpOption($link,$c['prefix'],'fm_image_replacer');
         return is_array($v)?$v:[];
@@ -4253,6 +4263,62 @@ FMNUM;
         $u=parse_url($url);$b=parse_url($base);
         if(empty($u['host'])||empty($b['host'])||strtolower($u['host'])!==strtolower($b['host']))return null;
         return '/'.ltrim(rawurldecode($u['path']??''),'/');
+    }
+    private function wpImageLocalPath($root,$base,$url){
+        $root=realpath($root);$u=parse_url($url);$b=parse_url($base);
+        if(!$root||empty($u['host'])||empty($b['host'])||strtolower($u['host'])!==strtolower($b['host']))return null;
+        $path=rawurldecode((string)($u['path']??''));$basePath=rtrim((string)($b['path']??''),'/');
+        if($basePath!==''&&$basePath!=='/'){
+            if($path===$basePath)$path='/';
+            elseif(strpos($path,$basePath.'/')===0)$path=substr($path,strlen($basePath));
+            else return null;
+        }
+        $relative=ltrim($path,'/');
+        if($relative===''||strpos($relative,"\0")!==false||preg_match('#(^|/)\.\.?(/|$)#',$relative))return null;
+        $candidate=$root.'/'.$relative;$dir=realpath(dirname($candidate));
+        if(!$dir||($dir!==$root&&strpos($dir,rtrim($root,'/').'/')!==0)||!is_file($candidate))return null;
+        return $dir.'/'.basename($candidate);
+    }
+    private function wpImageStoredPath($root,$relative){
+        $root=realpath($root);$relative=ltrim(str_replace('\\','/',(string)$relative),'/');
+        if(!$root||$relative===''||strpos($relative,"\0")!==false||preg_match('#(^|/)\.\.?(/|$)#',$relative))return null;
+        $candidate=$root.'/'.$relative;$dir=realpath(dirname($candidate));
+        if(!$dir||($dir!==$root&&strpos($dir,rtrim($root,'/').'/')!==0))return null;
+        return $dir.'/'.basename($candidate);
+    }
+    private function wpImageAtomicCopy($source,$target,$mode=null){
+        $dir=dirname($target);if(!is_dir($dir)||!is_readable($source))return false;
+        $tmp=@tempnam($dir,'.fm-image-');if(!$tmp)return false;
+        $ok=@copy($source,$tmp);
+        if($ok&&$mode!==null)@chmod($tmp,(int)$mode);
+        if($ok)$ok=@rename($tmp,$target);
+        if(!$ok)@unlink($tmp);
+        return $ok;
+    }
+    private function wpImageDirectBackupPath($root,$key){
+        return rtrim($root,'/').'/wp-content/uploads/fm-image-replacer/backups/'.$key.'.original';
+    }
+    private function wpImageProtectBackupDir($dir){
+        if(!is_dir($dir)&&!@mkdir($dir,0755,true)&&!is_dir($dir))return false;
+        $ht=$dir.'/.htaccess';
+        if(!is_file($ht))@file_put_contents($ht,"Require all denied\nDeny from all\n",LOCK_EX);
+        $index=$dir.'/index.html';
+        if(!is_file($index))@file_put_contents($index,'',LOCK_EX);
+        return is_dir($dir);
+    }
+    private function wpImageHasLegacyItems($items){
+        foreach((array)$items as $item)if(is_array($item)&&!empty($item['replacement_url'])&&($item['mode']??'')!=='direct')return true;
+        return false;
+    }
+    private function wpImageSyncLegacyPlugin($root,$items){
+        $plugin=rtrim($root,'/').'/wp-content/mu-plugins/000-fm-image-replacer.php';
+        if($this->wpImageHasLegacyItems($items)){
+            $muDir=dirname($plugin);
+            if(!is_dir($muDir)&&!@mkdir($muDir,0755,true)&&!is_dir($muDir))return false;
+            if(@file_put_contents($plugin,$this->wpImageReplacePluginCode(),LOCK_EX)===false)return false;
+            @chmod($plugin,0644);
+        }elseif(is_file($plugin))@unlink($plugin);
+        return true;
     }
     private function wpImageFetch($url){
         if(!preg_match('#^https?://#i',(string)$url))return false;
@@ -4324,8 +4390,9 @@ FMNUM;
         return <<<'FMIMG'
 <?php
 /**
- * File Manager Images Replacer — presentation-only and reversible.
- * Original image files are never overwritten.
+ * File Manager Images Replacer — reversible direct file replacement.
+ * Direct mappings are already written to the original path and must not be
+ * rewritten in the browser. Legacy mappings still use the old URL swap.
  */
 if(!defined('ABSPATH'))exit;
 function fm_image_replacer_output($surface='frontend'){
@@ -4351,18 +4418,18 @@ function fm_image_replacer_output($surface='frontend'){
       function swap(el,attr){
         var v=el.getAttribute(attr);if(!v)return;
         var key=clean(v),hit=null;
-        Object.keys(items).some(function(k){var item=items[k];if(item&&item.original_url&&clean(item.original_url)===key&&allowed(item)){hit=item;return true;}return false;});
+        Object.keys(items).some(function(k){var item=items[k];if(item&&item.mode!=='direct'&&item.original_url&&clean(item.original_url)===key&&allowed(item)){hit=item;return true;}return false;});
         if(hit&&hit.replacement_url)el.setAttribute(attr,hit.replacement_url);
       }
       function swapSet(el,attr){
         var v=el.getAttribute(attr);if(!v)return;
-        var parts=v.split(',').map(function(p){var bits=p.trim().split(/\s+/);if(bits[0]){var key=clean(bits[0]);Object.keys(items).some(function(k){var item=items[k];if(item&&item.original_url&&clean(item.original_url)===key&&allowed(item)){bits[0]=item.replacement_url;return true;}return false;});}return bits.join(' ');});
+        var parts=v.split(',').map(function(p){var bits=p.trim().split(/\s+/);if(bits[0]){var key=clean(bits[0]);Object.keys(items).some(function(k){var item=items[k];if(item&&item.mode!=='direct'&&item.original_url&&clean(item.original_url)===key&&allowed(item)){bits[0]=item.replacement_url;return true;}return false;});}return bits.join(' ');});
         el.setAttribute(attr,parts.join(', '));
       }
       function swapCss(value){
         return String(value||'').replace(/url\s*\(\s*(['"]?)(.*?)\1\s*\)/gi,function(all,q,url){
           var key=clean(url),replacement='';
-          Object.keys(items).some(function(k){var item=items[k];if(item&&item.original_url&&clean(item.original_url)===key&&allowed(item)){replacement=item.replacement_url;return true;}return false;});
+          Object.keys(items).some(function(k){var item=items[k];if(item&&item.mode!=='direct'&&item.original_url&&clean(item.original_url)===key&&allowed(item)){replacement=item.replacement_url;return true;}return false;});
           return replacement?'url('+q+replacement+q+')':all;
         });
       }
@@ -4441,29 +4508,66 @@ FMIMG;
         $dashHtml=$this->wpImageFetch($dashUrl);
         $dashboard=$this->wpImageExtract($dashHtml,$dashUrl,'Dashboard');
         $dashboard=array_merge($dashboard,$this->wpImageStylesheets($dashHtml,$dashUrl,'Dashboard'));
-        $t=$c['prefix'];
+        $t=$c['prefix'];$root=$this->wpSiteRoot($configPath);
         $media=[];
         $res=@mysqli_query($link,"SELECT ID,post_title,guid FROM `{$t}posts` WHERE post_type='attachment' AND post_mime_type LIKE 'image/%' ORDER BY ID DESC LIMIT 500");
         while($res&&($row=mysqli_fetch_assoc($res))){
             $url=$this->wpImageUrl($row['guid'],$base);if(!$url)continue;
             $media[]=['url'=>$url,'source'=>'Media library','label'=>$row['post_title']?:basename(parse_url($url,PHP_URL_PATH)??$url),'width'=>null,'height'=>null];
         }
-        $dashboard=array_merge($dashboard,$this->wpImageFileInventory($this->wpSiteRoot($configPath),$base,'Dashboard assets'));
+        $dashboard=array_merge($dashboard,$this->wpImageFileInventory($root,$base,'Dashboard assets'));
         $items=[];$add=function($list)use(&$items){foreach($list as $item){$k=strtok($item['url'],'?');if(!$k)continue;if(!isset($items[$k]))$items[$k]=$item;}};
         $add($home);$add($dashboard);$add($media);
         $stored=$this->wpImageOption($link,$c);$saved=is_array($stored['items']??null)?$stored['items']:[];
         foreach($items as $key=>&$item){
             $hash=hash('sha256',$key);$hit=is_array($saved)&&isset($saved[$hash])?$saved[$hash]:null;
-            $item['key']=$hash;$item['replaced']=is_array($hit)&&!empty($hit['replacement_url']);
-            $item['replacement_url']=$item['replaced']?$hit['replacement_url']:'';
+            $target=is_array($hit)?$this->wpImageLocalPath($root,$base,$key):null;
+            $backup='';
+            if(is_array($hit)&&($hit['mode']??'')==='direct'&&!empty($hit['backup_path'])){
+                $backup=$root.'/'.ltrim((string)$hit['backup_path'],'/');
+            }
+            $directActive=is_array($hit)&&($hit['mode']??'')==='direct'&&$target&&is_file($target)&&$backup&&is_file($backup);
+            $legacyActive=is_array($hit)&&($hit['mode']??'')!=='direct'&&!empty($hit['replacement_url']);
+            $item['key']=$hash;$item['replaced']=$directActive||$legacyActive;
+            $item['replacement_url']=$item['replaced']?($hit['replacement_url']??''):'';
             $item['scope_path']=$hit['scope_path']??$pagePath;
+            $item['mode']=$hit['mode']??($legacyActive?'legacy':'');
+            $item['updated_at']=(int)($hit['updated_at']??0);
+            if($directActive){
+                $item['target_path']=$hit['target_path']??$this->wpImagePath($key,$base);
+                $item['original_filename']=$hit['original_filename']??basename($target);
+                $item['backup_ready']=true;
+            }
         }unset($item);
+        $recent=[];
+        foreach($saved as $hash=>$hit){
+            if(!is_array($hit)||empty($hit['original_url']))continue;
+            $target=$this->wpImageLocalPath($root,$base,$hit['original_url']);
+            $backup=($hit['mode']??'')==='direct'&&!empty($hit['backup_path'])
+                ?$root.'/'.ltrim((string)$hit['backup_path'],'/'): '';
+            $active=($hit['mode']??'')==='direct'
+                ?($target&&$backup&&is_file($target)&&is_file($backup))
+                :!empty($hit['replacement_url']);
+            if(!$active)continue;
+            $recent[]=[
+                'key'=>$hash,'url'=>$hit['original_url'],'original_url'=>$hit['original_url'],
+                'replacement_url'=>$hit['replacement_url']??'','label'=>$hit['original_filename']??basename(parse_url($hit['original_url'],PHP_URL_PATH)??$hit['original_url']),
+                'source'=>$hit['source']??'Recent replacement','scope_path'=>$hit['scope_path']??$pagePath,
+                'updated_at'=>(int)($hit['updated_at']??0),'replaced'=>true,'mode'=>$hit['mode']??'legacy',
+                'target_path'=>$hit['target_path']??$this->wpImagePath($hit['original_url'],$base),
+                'original_filename'=>$hit['original_filename']??basename(parse_url($hit['original_url'],PHP_URL_PATH)??$hit['original_url']),
+                'width'=>(int)($hit['width']??0),'height'=>(int)($hit['height']??0)
+            ];
+        }
+        usort($recent,fn($a,$b)=>($b['updated_at']??0)<=>($a['updated_at']??0));
+        $recent=array_slice($recent,0,12);
         mysqli_close($link);
         return['ok'=>true,'config'=>$configPath,'home'=>$base,'page_path'=>$pagePath,'page_url'=>$pageUrl,
             'page_found'=>$homeHtml!==false,'dashboard_found'=>$dashHtml!==false,'images'=>array_values($items),
             'replaced_count'=>count(array_filter($saved,fn($v)=>is_array($v)&&!empty($v['replacement_url']))),
             'default_path'=>$defaultPath,
-            'note'=>'Original image files are kept untouched. Replacements are applied only on the selected page path and wp-admin.'];
+            'recent'=>$recent,
+            'note'=>'New replacements are written to the original file path after an automatic backup.'];
     }
     public function wpImageReplace($configPath){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
@@ -4472,7 +4576,7 @@ FMIMG;
         $upload=$_FILES['replacement_image'];if((int)$upload['error']!==UPLOAD_ERR_OK)return['error'=>'The replacement image upload failed.'];
         if((int)$upload['size']>25*1024*1024)return['error'=>'Replacement images must be 25 MB or smaller.'];
         $replacementInfo=@getimagesize($upload['tmp_name']);if(!$replacementInfo)return['error'=>'The selected file is not a readable image; nothing was changed.'];
-        if(!in_array((string)($replacementInfo['mime']??''),['image/jpeg','image/png','image/gif','image/webp'],true))return['error'=>'Use a JPEG, PNG, GIF, or WebP replacement image.'];
+        if(!in_array((string)($replacementInfo['mime']??''),['image/jpeg','image/png','image/gif','image/webp','image/bmp','image/avif'],true))return['error'=>'Use a JPEG, PNG, GIF, WebP, BMP, or AVIF replacement image.'];
         if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
         $url=trim((string)($_POST['image_url']??''));$scope=trim((string)($_POST['scope_path']??'/'));
         if(!preg_match('#^https?://#i',$url)||strlen($url)>2000){mysqli_close($link);return['error'=>'Invalid original image URL.'];}
@@ -4483,61 +4587,60 @@ FMIMG;
         if(!$originalUrl||empty($baseParts['host'])||empty($urlParts['host'])||strtolower($baseParts['host'])!==strtolower($urlParts['host'])){
             mysqli_close($link);return['error'=>'Only images belonging to this WordPress site can be replaced.'];
         }
-        $url=$originalUrl;
-        $original=$this->wpImageFetch($url);
-        $originalInfo=$original!==false?@getimagesizefromstring($original):false;
-        if(!$originalInfo){mysqli_close($link);return['error'=>'The original image could not be read; nothing was changed.'];}
-        $ow=(int)$originalInfo[0];$oh=(int)$originalInfo[1];$mime=(string)($originalInfo['mime']??'image/jpeg');
-        $inputMime=(string)($replacementInfo['mime']??'image/jpeg');
-        $inputFormat=['image/jpeg'=>'jpg','image/png'=>'png','image/gif'=>'gif','image/webp'=>'webp','image/bmp'=>'bmp'][$inputMime]??'jpg';
-        $format=['image/jpeg'=>'jpg','image/png'=>'png','image/gif'=>'gif','image/webp'=>'webp'][$mime]??'jpg';
-        $root=$this->wpSiteRoot($configPath);$dir=$root.'/wp-content/uploads/fm-image-replacer';
-        if(!is_dir($dir)&&!@mkdir($dir,0755,true)&&!is_dir($dir)){mysqli_close($link);return['error'=>'Could not create the replacement image folder.'];}
-        $key=hash('sha256',strtok($url,'?'));$dest=$dir.'/'.$key.'.'.$format;
-        $uploadBytes=@file_get_contents($upload['tmp_name']);
-        $src=$uploadBytes!==false?@imagecreatefromstring($uploadBytes):false;
-        if(!$src){mysqli_close($link);return['error'=>'The selected image could not be decoded; nothing was changed.'];}
-        $sw=imagesx($src);$sh=imagesy($src);
-        if($sw===$ow&&$sh===$oh){
-            $dest=$dir.'/'.$key.'.'.$inputFormat;
-            $wrote=@copy($upload['tmp_name'],$dest);
-        }else{
-            if(!function_exists('imagecreatetruecolor')){$wrote=false;}else{
-                $target=imagecreatetruecolor($ow,$oh);$ext=$format;
-                if(in_array($ext,['png','gif','webp'],true)){imagealphablending($target,false);imagesavealpha($target,true);$transparent=imagecolorallocatealpha($target,0,0,0,127);imagefill($target,0,0,$transparent);}
-                $srcRatio=$sw/$sh;$dstRatio=$ow/$oh;
-                if($srcRatio>$dstRatio){$cw=(int)round($sh*$dstRatio);$ch=$sh;$sx=(int)floor(($sw-$cw)/2);$sy=0;}
-                else{$cw=$sw;$ch=(int)round($sw/$dstRatio);$sx=0;$sy=(int)floor(($sh-$ch)/2);}
-                imagecopyresampled($target,$src,0,0,$sx,$sy,$ow,$oh,$cw,$ch);
-                if(in_array($ext,['jpg','jpeg'],true))$wrote=@imagejpeg($target,$dest,100);
-                elseif($ext==='png')$wrote=@imagepng($target,$dest,0);
-                elseif($ext==='webp'&&function_exists('imagewebp'))$wrote=@imagewebp($target,$dest,100);
-                else $wrote=@imagegif($target,$dest);
-                imagedestroy($target);
-            }
+        $url=$originalUrl;$root=$this->wpSiteRoot($configPath);
+        $target=$this->wpImageLocalPath($root,$base,$url);
+        if(!$target){mysqli_close($link);return['error'=>'The original image file could not be found inside this WordPress site. Nothing was changed.'];}
+        $key=hash('sha256',strtok($url,'?'));$settings=$this->wpImageOption($link,$c);
+        if(!isset($settings['items'])||!is_array($settings['items']))$settings['items']=[];
+        $old=is_array($settings['items'][$key]??null)?$settings['items'][$key]:null;
+        $backup=$this->wpImageDirectBackupPath($root,$key);$backupDir=dirname($backup);
+        $oldDirect=is_array($old)&&($old['mode']??'')==='direct';
+        if($oldDirect&&!is_file($backup)){
+            mysqli_close($link);return['error'=>'The protected original backup is missing, so the current image was not changed.'];
         }
-        imagedestroy($src);
-        if(!$wrote){mysqli_close($link);return['error'=>'Could not create the replacement image; nothing was changed.'];}
-        $site=(string)$this->wpOption($link,$c['prefix'],'siteurl');$site=rtrim($site?:$base,'/');
-        $replacementUrl=$site.'/wp-content/uploads/fm-image-replacer/'.basename($dest);
-        $settings=$this->wpImageOption($link,$c);if(!isset($settings['items'])||!is_array($settings['items']))$settings['items']=[];
-        $old=$settings['items'][$key]??null;if(is_array($old)&&!empty($old['replacement_url'])){
-            $oldName=basename(parse_url($old['replacement_url'],PHP_URL_PATH)??'');if($oldName&&is_file($dir.'/'.$oldName))@unlink($dir.'/'.$oldName);
+        if(!$this->wpImageProtectBackupDir($backupDir)){
+            mysqli_close($link);return['error'=>'Could not create the protected original-image backup folder.'];
         }
+        $targetMode=@fileperms($target);$targetMode=$targetMode===false?0644:($targetMode&0777);
+        $hadBackup=is_file($backup);
+        if(!$hadBackup&&!$this->wpImageAtomicCopy($target,$backup,0640)){
+            mysqli_close($link);return['error'=>'Could not save the original image backup; nothing was changed.'];
+        }
+        $wrote=$this->wpImageAtomicCopy($upload['tmp_name'],$target,$targetMode);
+        if(!$wrote){
+            if(!$hadBackup)@unlink($backup);
+            mysqli_close($link);return['error'=>'Could not write the selected image to the original file path; nothing was changed.'];
+        }
+        $originalInfo=@getimagesize($backup);$ow=(int)($originalInfo[0]??0);$oh=(int)($originalInfo[1]??0);
+        $relativeBackup=ltrim(str_replace('\\','/',substr($backup,strlen(rtrim($root,'/')))),'/');
+        $relativeTarget=$this->wpImagePath($url,$base);
         $basePath=parse_url($base,PHP_URL_PATH)?:'/';
         $scopePath=rtrim($basePath,'/');
         if($scope!=='/')$scopePath.='/'.ltrim($scope,'/');
         $scopePath='/'.ltrim($scopePath,'/');
         $settings['home_path']=$scopePath;
-        $settings['items'][$key]=['original_url'=>$url,'replacement_url'=>$replacementUrl,'scope_path'=>$scopePath,'surface'=>'both','source'=>'manager','width'=>$ow,'height'=>$oh,'updated_at'=>time()];
-        $ok=$this->wpImageWriteSettings($link,$c,$settings);mysqli_close($link);
-        if(!$ok){@unlink($dest);return['error'=>'The replacement file was created but WordPress settings could not be saved.'];}
-        $muDir=$root.'/wp-content/mu-plugins';
-        if(!is_dir($muDir)&&!@mkdir($muDir,0755,true)&&!is_dir($muDir))return['error'=>'Image saved, but the WordPress helper folder could not be created.'];
-        $plugin=$muDir.'/000-fm-image-replacer.php';
-        if(@file_put_contents($plugin,$this->wpImageReplacePluginCode(),LOCK_EX)===false)return['error'=>'Image saved, but the WordPress helper could not be installed.'];
-        @chmod($plugin,0644);$this->log('wp_image_replace',basename($url));
-        return['ok'=>true,'message'=>"Image replaced at {$ow}×{$oh} without changing the original.",'replacement_url'=>$replacementUrl];
+        $settings['items'][$key]=[
+            'original_url'=>$url,'replacement_url'=>$url,'mode'=>'direct','target_path'=>$relativeTarget,
+            'backup_path'=>$relativeBackup,'original_filename'=>basename($target),
+            'replacement_filename'=>basename((string)($upload['name']??'')),'replacement_size'=>(int)$upload['size'],
+            'scope_path'=>$scopePath,'surface'=>'both','source'=>'manager','width'=>$ow,'height'=>$oh,
+            'target_mode'=>$targetMode,'updated_at'=>time()
+        ];
+        $ok=$this->wpImageWriteSettings($link,$c,$settings);
+        if(!$ok){
+            $this->wpImageAtomicCopy($backup,$target,$targetMode);
+            if(!$hadBackup)@unlink($backup);
+            mysqli_close($link);return['error'=>'The selected image was written, but settings could not be saved; the original image was restored.'];
+        }
+        mysqli_close($link);
+        if(is_array($old)&&!empty($old['replacement_url'])&&($old['mode']??'')!=='direct'){
+            $legacyDir=$root.'/wp-content/uploads/fm-image-replacer';
+            $oldName=basename(parse_url($old['replacement_url'],PHP_URL_PATH)??'');
+            if($oldName&&is_file($legacyDir.'/'.$oldName))@unlink($legacyDir.'/'.$oldName);
+        }
+        $this->wpImageSyncLegacyPlugin($root,$settings['items']);
+        $this->log('wp_image_replace',basename($url));
+        return['ok'=>true,'message'=>"The selected image replaced ".basename($target)." at its original path. The original is backed up and can be restored.",'replacement_url'=>$url,'target_path'=>$relativeTarget];
     }
     public function wpImageRestore($configPath,$all=false){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
@@ -4546,20 +4649,52 @@ FMIMG;
         if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
         $settings=$this->wpImageOption($link,$c);$items=is_array($settings['items']??null)?$settings['items']:[];
         $root=$this->wpSiteRoot($configPath);$dir=$root.'/wp-content/uploads/fm-image-replacer';
+        $base=$this->wpImageHomeUrl($link,$c['prefix']);$remaining=[];$errors=[];
+        $restoreDirect=function($item)use($root,$base,&$errors){
+            $url=(string)($item['original_url']??'');
+            $target=!empty($item['target_path'])?$this->wpImageStoredPath($root,$item['target_path']):$this->wpImageLocalPath($root,$base,$url);
+            $backup=!empty($item['backup_path'])?$root.'/'.ltrim((string)$item['backup_path'],'/'):$this->wpImageDirectBackupPath($root,hash('sha256',strtok($url,'?')));
+            if(!$target||!is_file($backup)){ $errors[]='The protected original backup is missing for '.basename(parse_url($url,PHP_URL_PATH)??$url).'.';return false; }
+            $mode=(int)($item['target_mode']??0644);
+            if(!$this->wpImageAtomicCopy($backup,$target,$mode)){ $errors[]='Could not restore '.basename($target).'.';return false; }
+            @unlink($backup);return true;
+        };
+        $removeLegacy=function($item)use($root,$dir){
+            $n=basename(parse_url((string)($item['replacement_url']??''),PHP_URL_PATH)??'');
+            if($n&&is_file($dir.'/'.$n))@unlink($dir.'/'.$n);
+        };
         if($all){
-            foreach($items as $item)if(is_array($item)&&!empty($item['replacement_url'])){$n=basename(parse_url($item['replacement_url'],PHP_URL_PATH)??'');if($n)@unlink($dir.'/'.$n);}
-            @mysqli_query($link,"DELETE FROM `{$c['prefix']}options` WHERE option_name='fm_image_replacer' LIMIT 1");$items=[];
+            foreach($items as $key=>$item){
+                if(!is_array($item))continue;
+                if(($item['mode']??'')==='direct'){
+                    $before=count($errors);$restoreDirect($item);
+                    if(count($errors)>$before)$remaining[$key]=$item;
+                }
+                else{$removeLegacy($item);}
+            }
         }else{
-            $url=trim((string)($_POST['image_url']??''));$key=hash('sha256',strtok($url,'?'));
-            if(isset($items[$key])){$n=basename(parse_url($items[$key]['replacement_url']??'',PHP_URL_PATH)??'');if($n)@unlink($dir.'/'.$n);unset($items[$key]);}
-            if($items){$settings['items']=$items;$this->wpImageWriteSettings($link,$c,$settings);}
-            else @mysqli_query($link,"DELETE FROM `{$c['prefix']}options` WHERE option_name='fm_image_replacer' LIMIT 1");
+            $rawUrl=trim((string)($_POST['image_url']??''));$url=$this->wpImageUrl($rawUrl,$base);
+            $key=hash('sha256',strtok($url?:$rawUrl,'?'));
+            if(!isset($items[$key])){$errors[]='Replacement record not found.';}
+            else{
+                $item=$items[$key];
+                if(($item['mode']??'')==='direct'){$before=count($errors);$restoreDirect($item);if(count($errors)===$before)unset($items[$key]);else $remaining[$key]=$item;}
+                else{$removeLegacy($item);unset($items[$key]);}
+            }
+            foreach($items as $key=>$item)if(!isset($remaining[$key]))$remaining[$key]=$item;
         }
+        if($errors){
+            $settings['items']=$remaining;
+            if(!$this->wpImageWriteSettings($link,$c,$settings))$errors[]='The restore failed and the recovery record could not be saved.';
+            mysqli_close($link);return['error'=>implode(' ',$errors)];
+        }
+        if($remaining){$settings['items']=$remaining;$ok=$this->wpImageWriteSettings($link,$c,$settings);}
+        else{$ok=(bool)@mysqli_query($link,"DELETE FROM `{$c['prefix']}options` WHERE option_name='fm_image_replacer' LIMIT 1");}
         mysqli_close($link);
-        $plugin=$root.'/wp-content/mu-plugins/000-fm-image-replacer.php';
-        if(!$items&&is_file($plugin))@unlink($plugin);
+        if(!$ok)return['error'=>'Files were restored, but the Images Replacer settings could not be updated.'];
+        $this->wpImageSyncLegacyPlugin($root,$remaining);
         $this->log('wp_image_restore',$all?'all':'one');
-        return['ok'=>true,'message'=>$all?'All original images are restored.':'The original image is restored.'];
+        return['ok'=>true,'message'=>$all?'All original images are restored and the replacement history was cleared.':'The original file was restored at its original path.'];
     }
 
     private function cmsToggleExtension(){
@@ -12144,7 +12279,7 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
 /* ═══════════════════════════════════════════════════════════════════════════
    WORDPRESS IMAGES REPLACER
    The page scan is read-only; only the explicit upload/restore actions write
-   a reversible MU-plugin setting and a new file under uploads.
+   the selected image to its original path and maintain a protected backup.
 ═══════════════════════════════════════════════════════════════════════════ */
 (function(){
   let imageCfg=null,imageData=null;
@@ -12169,7 +12304,7 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
     body.innerHTML=`
       <div style="padding:14px 16px;border-bottom:1px solid var(--b2);font-size:12px;color:var(--t2)">
         Choose a WordPress installation
-        <div style="font-size:10.5px;color:var(--t3);margin-top:5px">The scan reads the selected page, its dashboard assets, and the WordPress media library. Original files are never overwritten.</div>
+        <div style="font-size:10.5px;color:var(--t3);margin-top:5px">The scan reads the selected page, its dashboard assets, and the WordPress media library. Before replacement, the original file is backed up automatically.</div>
       </div>
       ${sites.length?sites.map((site,i)=>`<div class="wp-image-site" data-cfg="${escText(site.config)}" style="display:flex;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid var(--b2);cursor:pointer">
         <div style="width:30px;height:30px;border-radius:8px;background:rgba(33,117,155,.16);display:grid;place-items:center;color:#5bc0de;font-size:15px;font-weight:800">${i+1}</div>
@@ -12213,14 +12348,15 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
   function imageCard(item,index){
     const inputId='wpImageFile'+index;
     const dims=item.width&&item.height?item.width+' × '+item.height:'Original dimensions detected during replacement';
+    const preview=item.replaced&&item.updated_at?item.url+(item.url.includes('?')?'&':'?')+'fm_replaced='+item.updated_at:(item.replacement_url||item.url);
     return `<article class="wp-image-card" style="border:1px solid var(--b2);border-radius:10px;overflow:hidden;background:rgba(255,255,255,.018);min-width:0">
       <div style="height:132px;background:rgba(0,0,0,.18);display:grid;place-items:center;overflow:hidden">
-        <img src="${escText(item.replacement_url||item.url)}" alt="" loading="lazy" style="max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain" onerror="this.style.opacity='.25'">
+        <img src="${escText(preview)}" alt="" loading="lazy" style="max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain" onerror="this.style.opacity='.25'">
       </div>
       <div style="padding:10px">
         <div title="${escText(item.url)}" style="font-size:11.5px;font-weight:700;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escText(item.label||'Image')}</div>
         <div style="font-size:10px;color:var(--t3);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escText(item.source||'WordPress')} · ${escText(dims)}</div>
-        <div style="font-size:9.5px;color:${item.replaced?'#86efac':'var(--t3)'};margin-top:5px">${item.replaced?'Replacement active':'Original image'}</div>
+        <div style="font-size:9.5px;color:${item.replaced?'#86efac':'var(--t3)'};margin-top:5px">${item.replaced?(item.mode==='direct'?'File replaced at original path · backup ready':'Replacement active'):'Original image'}</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:9px">
           <label for="${inputId}" class="btn btn-xs btn-p" style="cursor:pointer;flex:1;text-align:center">${item.replaced?'Replace again':'Replace'}</label>
           <input id="${inputId}" type="file" accept="image/*" style="display:none" data-index="${index}">
@@ -12229,10 +12365,37 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
       </div>
     </article>`;
   }
+  function recentImageCard(item,index){
+    const inputId='wpRecentImageFile'+index;
+    const stamp=item.updated_at?new Date(item.updated_at*1000).toLocaleString():'Recently';
+    return `<article style="border:1px solid rgba(134,239,172,.24);border-radius:10px;overflow:hidden;background:rgba(134,239,172,.035);display:flex;gap:10px;padding:9px;min-width:0">
+      <div style="width:74px;height:62px;flex:0 0 74px;border-radius:7px;background:rgba(0,0,0,.2);display:grid;place-items:center;overflow:hidden">
+        <img src="${escText(item.url)}${item.updated_at?(item.url.includes('?')?'&':'?')+'fm_replaced='+item.updated_at:''}" alt="" loading="lazy" style="max-width:100%;max-height:100%;object-fit:contain" onerror="this.style.opacity='.25'">
+      </div>
+      <div style="min-width:0;flex:1">
+        <div title="${escText(item.url)}" style="font-size:11px;font-weight:700;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escText(item.original_filename||item.label||'Image')}</div>
+        <div style="font-size:9.5px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px">${escText(item.target_path||item.url)}</div>
+        <div style="font-size:9px;color:#86efac;margin-top:3px">Backup ready · ${escText(stamp)}</div>
+        <div style="display:flex;gap:5px;margin-top:6px">
+          <label for="${inputId}" class="btn btn-xs btn-p" style="cursor:pointer;flex:1;text-align:center">Change again</label>
+          <input id="${inputId}" type="file" accept="image/*" style="display:none" data-recent-index="${index}">
+          <button type="button" class="btn btn-xs btn-g wp-image-recent-restore" data-recent-index="${index}" style="flex:1">Restore</button>
+        </div>
+      </div>
+    </article>`;
+  }
   function renderImages(){
     const images=imageData.images||[];
+    const recent=Array.isArray(imageData.recent)?imageData.recent:[];
     const page=imageData.page_path||'/';
     const replaced=Number(imageData.replaced_count||0);
+    const recentMarkup=recent.length?`<div style="padding:13px 16px;border-bottom:1px solid var(--b2);background:rgba(134,239,172,.025)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px">
+          <div><div style="font-size:11px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.55px">Recent replacements</div><div style="font-size:10px;color:var(--t3);margin-top:3px">Quick access to your last ${recent.length} active image${recent.length===1?'':'s'}.</div></div>
+          <span style="font-size:10px;color:#86efac">${recent.length} active</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px">${recent.map(recentImageCard).join('')}</div>
+      </div>`:'';
     body.innerHTML=`
       <div style="padding:12px 16px;border-bottom:1px solid var(--b2)">
         <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
@@ -12244,23 +12407,27 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
           ${escText(imageData.home||'WordPress')} · ${images.length} image${images.length===1?'':'s'} found · ${replaced} replacement${replaced===1?'':'s'} active.
           ${imageData.page_found?'':' The selected page could not be fetched; dashboard and media results may still be available.'}
         </div>
-        <div style="font-size:10px;color:var(--t3);margin-top:4px">Replacements are cropped from the center to the original dimensions, with maximum quality. Same-sized uploads are copied byte-for-byte without compression.</div>
+        <div style="font-size:10px;color:var(--t3);margin-top:4px">The chosen image is copied byte-for-byte to the original file path and renamed to the original filename and extension. A protected backup is created before every first replacement.</div>
       </div>
+      ${recentMarkup}
       ${images.length?`<div style="padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px">${images.map(imageCard).join('')}</div>`:
         '<div style="padding:35px 16px;text-align:center;color:var(--t3);font-size:11.5px">No supported images were found for this path.</div>'}`;
     document.getElementById('wpImagesScan')?.addEventListener('click',()=>{
       const path=document.getElementById('wpImagesPath')?.value.trim()||'/';loadImages(path);
     });
     body.querySelectorAll('input[type=file][data-index]').forEach(input=>input.addEventListener('change',()=>replaceImage(Number(input.dataset.index),input.files?.[0])));
+    body.querySelectorAll('input[type=file][data-recent-index]').forEach(input=>input.addEventListener('change',()=>replaceRecentImage(Number(input.dataset.recentIndex),input.files?.[0])));
     body.querySelectorAll('.wp-image-restore').forEach(button=>button.addEventListener('click',()=>restoreImage(Number(button.dataset.index))));
+    body.querySelectorAll('.wp-image-recent-restore').forEach(button=>button.addEventListener('click',()=>restoreRecentImage(Number(button.dataset.recentIndex))));
     document.getElementById('wpImagesAllRestore')?.addEventListener('click',restoreAllImages);
   }
-  async function replaceImage(index,file){
-    const item=imageData?.images?.[index];
+  async function replaceImage(index,file){return replaceImageItem(imageData?.images?.[index],file);}
+  async function replaceRecentImage(index,file){return replaceImageItem(imageData?.recent?.[index],file);}
+  async function replaceImageItem(item,file){
     if(!item||!file)return;
     if(!file.type.startsWith('image/')){toast('Choose an image file.');return;}
     if(file.size>25*1024*1024){toast('Replacement images must be 25 MB or smaller.');return;}
-    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('image_url',item.url);fd.append('scope_path',imageData.page_path||'/');fd.append('replacement_image',file);
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('image_url',item.original_url||item.url);fd.append('scope_path',imageData.page_path||'/');fd.append('replacement_image',file);
     body.querySelectorAll('input,button').forEach(el=>{el.disabled=true;});
     try{
       const result=await imagePost('?x=wp_image_replace',fd);
@@ -12268,9 +12435,11 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
       toast(result.message||'Image replaced.');await loadImages(imageData.page_path||'/');
     }catch(error){toast(String(error));renderImages();}
   }
-  async function restoreImage(index){
-    const item=imageData?.images?.[index];if(!item)return;
-    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('image_url',item.url);
+  async function restoreImage(index){return restoreImageItem(imageData?.images?.[index]);}
+  async function restoreRecentImage(index){return restoreImageItem(imageData?.recent?.[index]);}
+  async function restoreImageItem(item){
+    if(!item)return;
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('image_url',item.original_url||item.url);
     try{
       const result=await imagePost('?x=wp_image_restore',fd);
       if(!result.ok)throw new Error(result.error||'The original image could not be restored.');
