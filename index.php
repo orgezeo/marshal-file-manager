@@ -2634,6 +2634,15 @@ class FileManager {
                 $real=$parent;
             }
         }
+        /* Inline background images and CSS-backed lazy loaders are common on
+           homepages and dashboards, even when there is no <img> element. */
+        preg_match_all('/url\s*\(\s*([\'"]?)([^\'")\s]+)\1\s*\)/i',$html,$cssUrls);
+        foreach($cssUrls[2]??[] as $raw){
+            $url=$this->wpImageUrl($raw,$base);if(!$url)continue;
+            $key=strtok($url,'?');$ext=strtolower(pathinfo(parse_url($key,PHP_URL_PATH)??'','extension'));
+            if(!in_array($ext,['jpg','jpeg','png','gif','webp','bmp','avif'],true)||isset($seen[$key]))continue;
+            $seen[$key]=1;$out[]=['url'=>$url,'source'=>$source.' (background)','label'=>basename(parse_url($key,PHP_URL_PATH)??$key),'width'=>null,'height'=>null];
+        }
         return $out;
     }
     private function wpSiteRoot($configPath){
@@ -4221,6 +4230,336 @@ FMNUM;
         if(!$ok)return['error'=>'Could not clear the numbers control setting.'];
         $this->log('wp_numbers_control','reset');
         return['ok'=>true,'enabled'=>false,'message'=>'Real WordPress numbers are restored.'];
+    }
+
+    /* ── WordPress Images Replacer ──────────────────────────────────────────
+       Originals are never overwritten. Replacements live in their own uploads
+       folder and a small option + MU-plugin changes only the browser output. */
+    private function wpImageOption($link,$c){
+        $v=$this->wpOption($link,$c['prefix'],'fm_image_replacer');
+        return is_array($v)?$v:[];
+    }
+    private function wpImageUrl($url,$base){
+        $url=trim(html_entity_decode((string)$url,ENT_QUOTES|ENT_HTML5,'UTF-8'));
+        if($url===''||preg_match('#^(data|blob|javascript):#i',$url))return null;
+        if(strpos($url,'//')===0){
+            $scheme=parse_url($base,PHP_URL_SCHEME)?:'https';return $scheme.':'.$url;
+        }
+        if(preg_match('#^https?://#i',$url))return strtok($url,'#');
+        $b=parse_url($base);if(empty($b['host']))return null;
+        $origin=($b['scheme']??'https').'://'.$b['host'].(!empty($b['port'])?':'.$b['port']:'');
+        if($url[0]==='/')return $origin.$url;
+        $path=$b['path']??'/';$dir=rtrim(str_replace('\\','/',dirname($path)),'/');
+        $full=$dir.'/'.$url;
+        $parts=[];
+        foreach(explode('/',$full) as $part){
+            if($part===''||$part==='.')continue;
+            if($part==='..')array_pop($parts);else $parts[]=$part;
+        }
+        return $origin.'/'.implode('/',$parts);
+    }
+    private function wpImagePath($url,$base){
+        $u=parse_url($url);$b=parse_url($base);
+        if(empty($u['host'])||empty($b['host'])||strtolower($u['host'])!==strtolower($b['host']))return null;
+        return '/'.ltrim(rawurldecode($u['path']??''),'/');
+    }
+    private function wpImageFetch($url){
+        if(!preg_match('#^https?://#i',(string)$url))return false;
+        if(function_exists('curl_init')){
+            $ch=curl_init($url);
+            curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,
+                CURLOPT_CONNECTTIMEOUT=>6,CURLOPT_TIMEOUT=>15,CURLOPT_SSL_VERIFYPEER=>true,
+                CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,CURLOPT_USERAGENT=>'FileManager-Images-Replacer/1.0']);
+            $data=curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
+            return $data!==false&&$code>=200&&$code<400&&strlen($data)<=25*1024*1024?$data:false;
+        }
+        $ctx=stream_context_create(['http'=>['timeout'=>15,'header'=>"User-Agent: FileManager-Images-Replacer/1.0\r\n"],
+            'https'=>['timeout'=>15,'header'=>"User-Agent: FileManager-Images-Replacer/1.0\r\n"]]);
+        $data=@file_get_contents($url,false,$ctx);
+        return $data!==false&&strlen($data)<=25*1024*1024?$data:false;
+    }
+    private function wpImageAttr($tag,$name){
+        $q=preg_quote($name,'/');
+        if(preg_match('/\b'.$q.'\s*=\s*([\'"])(.*?)\1/is',$tag,$m))return trim(html_entity_decode($m[2],ENT_QUOTES|ENT_HTML5,'UTF-8'));
+        return '';
+    }
+    private function wpImageExtract($html,$base,$source){
+        $out=[];$seen=[];
+        if(!is_string($html)||$html==='')return $out;
+        preg_match_all('/<(?:img|source)\b[^>]*>/i',$html,$tags);
+        foreach($tags[0]??[] as $tag){
+            $urls=[];
+            foreach(['src','data-src','data-lazy-src'] as $attr){$v=$this->wpImageAttr($tag,$attr);if($v)$urls[]=$v;}
+            foreach(['srcset','data-srcset'] as $attr){
+                $set=$this->wpImageAttr($tag,$attr);
+                if($set)foreach(explode(',',$set) as $candidate){$parts=preg_split('/\s+/',trim($candidate));if(!empty($parts[0]))$urls[]=$parts[0];}
+            }
+            foreach($urls as $raw){
+                $url=$this->wpImageUrl($raw,$base);if(!$url)continue;
+                $key=strtok($url,'?');$ext=strtolower(pathinfo(parse_url($key,PHP_URL_PATH)??'','extension'));
+                if(!in_array($ext,['jpg','jpeg','png','gif','webp','bmp','avif'],true))continue;
+                if(isset($seen[$key]))continue;$seen[$key]=1;
+                $out[]=['url'=>$url,'source'=>$source,'label'=>basename(parse_url($key,PHP_URL_PATH)??$key),
+                    'width'=>null,'height'=>null];
+            }
+        }
+        return $out;
+    }
+    private function wpImageStylesheets($html,$base,$source){
+        $out=[];$seen=[];
+        if(!is_string($html)||$html==='')return $out;
+        preg_match_all('/<link\b[^>]*>/i',$html,$links);
+        foreach($links[0]??[] as $tag){
+            $rel=strtolower($this->wpImageAttr($tag,'rel'));
+            if($rel!==''&&strpos($rel,'stylesheet')===false)continue;
+            $href=$this->wpImageAttr($tag,'href');if(!$href)continue;
+            $url=$this->wpImageUrl($href,$base);if(!$url||isset($seen[$url]))continue;
+            $seen[$url]=1;$css=$this->wpImageFetch($url);if($css===false)continue;
+            $out=array_merge($out,$this->wpImageExtract($css,$url,$source.' stylesheet'));
+            if(count($out)>=250)break;
+        }
+        return $out;
+    }
+    private function wpImageReplacePluginCode(){
+        return <<<'FMIMG'
+<?php
+/**
+ * File Manager Images Replacer — presentation-only and reversible.
+ * Original image files are never overwritten.
+ */
+if(!defined('ABSPATH'))exit;
+function fm_image_replacer_output($surface='frontend'){
+    $settings=get_option('fm_image_replacer',array());
+    if(!is_array($settings)||empty($settings['items'])||!is_array($settings['items']))return;
+    $settings['home_path']=isset($settings['home_path'])?(string)$settings['home_path']:'/';
+    $settings['surface']=$surface;
+    $json=function_exists('wp_json_encode')?wp_json_encode($settings,JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT):json_encode($settings);
+    if(!$json)return;
+    echo '<script id="fm-image-replacer">window.fmImageReplacer='.$json.';</script>';
+    ?>
+    <script>
+    (function(d,w){
+      var s=w.fmImageReplacer||{},items=s.items||{},home=s.home_path||'/';
+      var path=(w.location.pathname||'/').replace(/\/+$/,'')||'/';
+      var admin=/\/wp-admin(?:\/|$)/.test(path);
+      function clean(u){try{var x=new URL(u,w.location.href);return x.href.split('#')[0];}catch(e){return u;}}
+      function allowed(item){
+        var surface=item.surface||'both';
+        if(admin)return surface==='both'||surface==='dashboard'||item.scope==='dashboard'||item.scope==='admin';
+        return (surface==='both'||surface==='frontend')&&(item.scope_path===path||item.scope_path===home);
+      }
+      function swap(el,attr){
+        var v=el.getAttribute(attr);if(!v)return;
+        var key=clean(v),hit=null;
+        Object.keys(items).some(function(k){var item=items[k];if(item&&item.original_url&&clean(item.original_url)===key&&allowed(item)){hit=item;return true;}return false;});
+        if(hit&&hit.replacement_url)el.setAttribute(attr,hit.replacement_url);
+      }
+      function swapSet(el,attr){
+        var v=el.getAttribute(attr);if(!v)return;
+        var parts=v.split(',').map(function(p){var bits=p.trim().split(/\s+/);if(bits[0]){var key=clean(bits[0]);Object.keys(items).some(function(k){var item=items[k];if(item&&item.original_url&&clean(item.original_url)===key&&allowed(item)){bits[0]=item.replacement_url;return true;}return false;});}return bits.join(' ');});
+        el.setAttribute(attr,parts.join(', '));
+      }
+      function swapCss(value){
+        return String(value||'').replace(/url\s*\(\s*(['"]?)(.*?)\1\s*\)/gi,function(all,q,url){
+          var key=clean(url),replacement='';
+          Object.keys(items).some(function(k){var item=items[k];if(item&&item.original_url&&clean(item.original_url)===key&&allowed(item)){replacement=item.replacement_url;return true;}return false;});
+          return replacement?'url('+q+replacement+q+')':all;
+        });
+      }
+      function apply(){
+        d.querySelectorAll('img').forEach(function(el){['src','data-src','data-lazy-src'].forEach(function(a){swap(el,a);});['srcset','data-srcset'].forEach(function(a){swapSet(el,a);});});
+        d.querySelectorAll('source').forEach(function(el){swapSet(el,'srcset');swap(el,'src');});
+        d.querySelectorAll('[style]').forEach(function(el){el.setAttribute('style',swapCss(el.getAttribute('style')));});
+      }
+      if(d.readyState==='loading')d.addEventListener('DOMContentLoaded',apply);else apply();
+      if(w.MutationObserver){var timer=0;new MutationObserver(function(){clearTimeout(timer);timer=setTimeout(apply,30);}).observe(d.documentElement,{childList:true,subtree:true});}
+    })(document,window);
+    </script>
+    <?php
+}
+add_action('wp_head',function(){fm_image_replacer_output('frontend');},99);
+add_action('admin_head',function(){fm_image_replacer_output('dashboard');},99);
+FMIMG;
+    }
+    private function wpImageWriteSettings($link,$c,$settings){
+        $t=$c['prefix'];$serialized=mysqli_real_escape_string($link,serialize($settings));
+        $has=@mysqli_query($link,"SELECT option_name FROM `{$t}options` WHERE option_name='fm_image_replacer' LIMIT 1");
+        return $has&&mysqli_num_rows($has)>0
+            ?(bool)@mysqli_query($link,"UPDATE `{$t}options` SET option_value='$serialized' WHERE option_name='fm_image_replacer' LIMIT 1")
+            :(bool)@mysqli_query($link,"INSERT INTO `{$t}options` (option_name,option_value,autoload) VALUES ('fm_image_replacer','$serialized','no')");
+    }
+    private function wpImageHomeUrl($link,$prefix){
+        $home=(string)$this->wpOption($link,$prefix,'home');
+        $site=(string)$this->wpOption($link,$prefix,'siteurl');
+        return rtrim($home?:$site,'/');
+    }
+    private function wpImageDefaultPath($link,$prefix,$home){
+        $show=(string)$this->wpOption($link,$prefix,'show_on_front');
+        $front=(int)$this->wpOption($link,$prefix,'page_on_front');
+        if($show==='page'&&$front>0){
+            $t=$prefix.'posts';$id=$front;
+            $res=@mysqli_query($link,"SELECT post_name FROM `{$t}` WHERE ID=$id AND post_status='publish' LIMIT 1");
+            if($res&&($row=mysqli_fetch_assoc($res))&&!empty($row['post_name']))return '/'.trim($row['post_name'],'/').'/';
+        }
+        return '/';
+    }
+    private function wpImageFileInventory($root,$base,$source,$limit=250){
+        $out=[];$seen=[];$dirs=[];
+        foreach(['wp-admin/images','wp-includes/images'] as $relative){
+            $dir=$root.'/'.$relative;if(is_dir($dir))$dirs[]=$dir;
+        }
+        foreach($dirs as $dir){
+            try{$it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir,RecursiveDirectoryIterator::SKIP_DOTS));}
+            catch(Throwable $e){continue;}
+            foreach($it as $file){
+                if(count($out)>=$limit)break;
+                if(!$file->isFile())continue;
+                $ext=strtolower($file->getExtension());
+                if(!in_array($ext,['jpg','jpeg','png','gif','webp','bmp','avif'],true))continue;
+                $relative=str_replace('\\','/',substr($file->getPathname(),strlen($root)));
+                $url=rtrim($base,'/').'/'.ltrim($relative,'/');
+                if(isset($seen[$url]))continue;$seen[$url]=1;
+                $out[]=['url'=>$url,'source'=>$source,'label'=>basename($relative),'width'=>null,'height'=>null];
+            }
+        }
+        return $out;
+    }
+    public function wpImageInventory($configPath,$pagePath='/'){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires a valid WordPress installation.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $base=$this->wpImageHomeUrl($link,$c['prefix']);
+        if(!$base){mysqli_close($link);return['error'=>'Could not read the WordPress site URL.'];}
+        $pagePath=trim((string)$pagePath);if($pagePath===''||$pagePath[0]!=='/')$pagePath='/'.$pagePath;
+        if(strpos($pagePath,'..')!==false||preg_match('#^[a-z]+://#i',$pagePath)||preg_match('/[\x00-\x1F\x7F\\\\?#]/',$pagePath)){mysqli_close($link);return['error'=>'Enter a site path such as /home, not a full URL or a path containing ..'];}
+        $pageUrl=$base.rtrim($pagePath,'/');if($pagePath==='/')$pageUrl=$base.'/';
+        $defaultPath=$this->wpImageDefaultPath($link,$c['prefix'],$base);
+        $homeHtml=$this->wpImageFetch($pageUrl);
+        $home=$this->wpImageExtract($homeHtml,$pageUrl,'Homepage');
+        $home=array_merge($home,$this->wpImageStylesheets($homeHtml,$pageUrl,'Homepage'));
+        $dashUrl=$base.'/wp-admin/';
+        $dashHtml=$this->wpImageFetch($dashUrl);
+        $dashboard=$this->wpImageExtract($dashHtml,$dashUrl,'Dashboard');
+        $dashboard=array_merge($dashboard,$this->wpImageStylesheets($dashHtml,$dashUrl,'Dashboard'));
+        $t=$c['prefix'];
+        $media=[];
+        $res=@mysqli_query($link,"SELECT ID,post_title,guid FROM `{$t}posts` WHERE post_type='attachment' AND post_mime_type LIKE 'image/%' ORDER BY ID DESC LIMIT 500");
+        while($res&&($row=mysqli_fetch_assoc($res))){
+            $url=$this->wpImageUrl($row['guid'],$base);if(!$url)continue;
+            $media[]=['url'=>$url,'source'=>'Media library','label'=>$row['post_title']?:basename(parse_url($url,PHP_URL_PATH)??$url),'width'=>null,'height'=>null];
+        }
+        $dashboard=array_merge($dashboard,$this->wpImageFileInventory($this->wpSiteRoot($configPath),$base,'Dashboard assets'));
+        $items=[];$add=function($list)use(&$items){foreach($list as $item){$k=strtok($item['url'],'?');if(!$k)continue;if(!isset($items[$k]))$items[$k]=$item;}};
+        $add($home);$add($dashboard);$add($media);
+        $stored=$this->wpImageOption($link,$c);$saved=is_array($stored['items']??null)?$stored['items']:[];
+        foreach($items as $key=>&$item){
+            $hash=hash('sha256',$key);$hit=is_array($saved)&&isset($saved[$hash])?$saved[$hash]:null;
+            $item['key']=$hash;$item['replaced']=is_array($hit)&&!empty($hit['replacement_url']);
+            $item['replacement_url']=$item['replaced']?$hit['replacement_url']:'';
+            $item['scope_path']=$hit['scope_path']??$pagePath;
+        }unset($item);
+        mysqli_close($link);
+        return['ok'=>true,'config'=>$configPath,'home'=>$base,'page_path'=>$pagePath,'page_url'=>$pageUrl,
+            'page_found'=>$homeHtml!==false,'dashboard_found'=>$dashHtml!==false,'images'=>array_values($items),
+            'replaced_count'=>count(array_filter($saved,fn($v)=>is_array($v)&&!empty($v['replacement_url']))),
+            'default_path'=>$defaultPath,
+            'note'=>'Original image files are kept untouched. Replacements are applied only on the selected page path and wp-admin.'];
+    }
+    public function wpImageReplace($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if($this->isRO())return['error'=>'Read-only account.'];
+        if(basename($configPath)!=='wp-config.php'||empty($_FILES['replacement_image']))return['error'=>'Choose a WordPress installation and an image first.'];
+        $upload=$_FILES['replacement_image'];if((int)$upload['error']!==UPLOAD_ERR_OK)return['error'=>'The replacement image upload failed.'];
+        if((int)$upload['size']>25*1024*1024)return['error'=>'Replacement images must be 25 MB or smaller.'];
+        $replacementInfo=@getimagesize($upload['tmp_name']);if(!$replacementInfo)return['error'=>'The selected file is not a readable image; nothing was changed.'];
+        if(!in_array((string)($replacementInfo['mime']??''),['image/jpeg','image/png','image/gif','image/webp'],true))return['error'=>'Use a JPEG, PNG, GIF, or WebP replacement image.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $url=trim((string)($_POST['image_url']??''));$scope=trim((string)($_POST['scope_path']??'/'));
+        if(!preg_match('#^https?://#i',$url)||strlen($url)>2000){mysqli_close($link);return['error'=>'Invalid original image URL.'];}
+        if($scope===''||$scope[0]!=='/'||strpos($scope,'..')!==false||preg_match('/[\x00-\x1F\x7F\\\\?#]/',$scope)){mysqli_close($link);return['error'=>'Invalid page path.'];}
+        $base=$this->wpImageHomeUrl($link,$c['prefix']);
+        $originalUrl=$this->wpImageUrl($url,$base);
+        $baseParts=parse_url($base);$urlParts=parse_url($originalUrl?:$url);
+        if(!$originalUrl||empty($baseParts['host'])||empty($urlParts['host'])||strtolower($baseParts['host'])!==strtolower($urlParts['host'])){
+            mysqli_close($link);return['error'=>'Only images belonging to this WordPress site can be replaced.'];
+        }
+        $url=$originalUrl;
+        $original=$this->wpImageFetch($url);
+        $originalInfo=$original!==false?@getimagesizefromstring($original):false;
+        if(!$originalInfo){mysqli_close($link);return['error'=>'The original image could not be read; nothing was changed.'];}
+        $ow=(int)$originalInfo[0];$oh=(int)$originalInfo[1];$mime=(string)($originalInfo['mime']??'image/jpeg');
+        $inputMime=(string)($replacementInfo['mime']??'image/jpeg');
+        $inputFormat=['image/jpeg'=>'jpg','image/png'=>'png','image/gif'=>'gif','image/webp'=>'webp','image/bmp'=>'bmp'][$inputMime]??'jpg';
+        $format=['image/jpeg'=>'jpg','image/png'=>'png','image/gif'=>'gif','image/webp'=>'webp'][$mime]??'jpg';
+        $root=$this->wpSiteRoot($configPath);$dir=$root.'/wp-content/uploads/fm-image-replacer';
+        if(!is_dir($dir)&&!@mkdir($dir,0755,true)&&!is_dir($dir)){mysqli_close($link);return['error'=>'Could not create the replacement image folder.'];}
+        $key=hash('sha256',strtok($url,'?'));$dest=$dir.'/'.$key.'.'.$format;
+        $uploadBytes=@file_get_contents($upload['tmp_name']);
+        $src=$uploadBytes!==false?@imagecreatefromstring($uploadBytes):false;
+        if(!$src){mysqli_close($link);return['error'=>'The selected image could not be decoded; nothing was changed.'];}
+        $sw=imagesx($src);$sh=imagesy($src);
+        if($sw===$ow&&$sh===$oh){
+            $dest=$dir.'/'.$key.'.'.$inputFormat;
+            $wrote=@copy($upload['tmp_name'],$dest);
+        }else{
+            if(!function_exists('imagecreatetruecolor')){$wrote=false;}else{
+                $target=imagecreatetruecolor($ow,$oh);$ext=$format;
+                if(in_array($ext,['png','gif','webp'],true)){imagealphablending($target,false);imagesavealpha($target,true);$transparent=imagecolorallocatealpha($target,0,0,0,127);imagefill($target,0,0,$transparent);}
+                $srcRatio=$sw/$sh;$dstRatio=$ow/$oh;
+                if($srcRatio>$dstRatio){$cw=(int)round($sh*$dstRatio);$ch=$sh;$sx=(int)floor(($sw-$cw)/2);$sy=0;}
+                else{$cw=$sw;$ch=(int)round($sw/$dstRatio);$sx=0;$sy=(int)floor(($sh-$ch)/2);}
+                imagecopyresampled($target,$src,0,0,$sx,$sy,$ow,$oh,$cw,$ch);
+                if(in_array($ext,['jpg','jpeg'],true))$wrote=@imagejpeg($target,$dest,100);
+                elseif($ext==='png')$wrote=@imagepng($target,$dest,0);
+                elseif($ext==='webp'&&function_exists('imagewebp'))$wrote=@imagewebp($target,$dest,100);
+                else $wrote=@imagegif($target,$dest);
+                imagedestroy($target);
+            }
+        }
+        imagedestroy($src);
+        if(!$wrote){mysqli_close($link);return['error'=>'Could not create the replacement image; nothing was changed.'];}
+        $site=(string)$this->wpOption($link,$c['prefix'],'siteurl');$site=rtrim($site?:$base,'/');
+        $replacementUrl=$site.'/wp-content/uploads/fm-image-replacer/'.basename($dest);
+        $settings=$this->wpImageOption($link,$c);if(!isset($settings['items'])||!is_array($settings['items']))$settings['items']=[];
+        $old=$settings['items'][$key]??null;if(is_array($old)&&!empty($old['replacement_url'])){
+            $oldName=basename(parse_url($old['replacement_url'],PHP_URL_PATH)??'');if($oldName&&is_file($dir.'/'.$oldName))@unlink($dir.'/'.$oldName);
+        }
+        $basePath=parse_url($base,PHP_URL_PATH)?:'/';
+        $scopePath=rtrim($basePath,'/');
+        if($scope!=='/')$scopePath.='/'.ltrim($scope,'/');
+        $scopePath='/'.ltrim($scopePath,'/');
+        $settings['home_path']=$scopePath;
+        $settings['items'][$key]=['original_url'=>$url,'replacement_url'=>$replacementUrl,'scope_path'=>$scopePath,'surface'=>'both','source'=>'manager','width'=>$ow,'height'=>$oh,'updated_at'=>time()];
+        $ok=$this->wpImageWriteSettings($link,$c,$settings);mysqli_close($link);
+        if(!$ok){@unlink($dest);return['error'=>'The replacement file was created but WordPress settings could not be saved.'];}
+        $muDir=$root.'/wp-content/mu-plugins';
+        if(!is_dir($muDir)&&!@mkdir($muDir,0755,true)&&!is_dir($muDir))return['error'=>'Image saved, but the WordPress helper folder could not be created.'];
+        $plugin=$muDir.'/000-fm-image-replacer.php';
+        if(@file_put_contents($plugin,$this->wpImageReplacePluginCode(),LOCK_EX)===false)return['error'=>'Image saved, but the WordPress helper could not be installed.'];
+        @chmod($plugin,0644);$this->log('wp_image_replace',basename($url));
+        return['ok'=>true,'message'=>"Image replaced at {$ow}×{$oh} without changing the original.",'replacement_url'=>$replacementUrl];
+    }
+    public function wpImageRestore($configPath,$all=false){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if($this->isRO())return['error'=>'Read-only account.'];
+        if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires a valid WordPress installation.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $settings=$this->wpImageOption($link,$c);$items=is_array($settings['items']??null)?$settings['items']:[];
+        $root=$this->wpSiteRoot($configPath);$dir=$root.'/wp-content/uploads/fm-image-replacer';
+        if($all){
+            foreach($items as $item)if(is_array($item)&&!empty($item['replacement_url'])){$n=basename(parse_url($item['replacement_url'],PHP_URL_PATH)??'');if($n)@unlink($dir.'/'.$n);}
+            @mysqli_query($link,"DELETE FROM `{$c['prefix']}options` WHERE option_name='fm_image_replacer' LIMIT 1");$items=[];
+        }else{
+            $url=trim((string)($_POST['image_url']??''));$key=hash('sha256',strtok($url,'?'));
+            if(isset($items[$key])){$n=basename(parse_url($items[$key]['replacement_url']??'',PHP_URL_PATH)??'');if($n)@unlink($dir.'/'.$n);unset($items[$key]);}
+            if($items){$settings['items']=$items;$this->wpImageWriteSettings($link,$c,$settings);}
+            else @mysqli_query($link,"DELETE FROM `{$c['prefix']}options` WHERE option_name='fm_image_replacer' LIMIT 1");
+        }
+        mysqli_close($link);
+        $plugin=$root.'/wp-content/mu-plugins/000-fm-image-replacer.php';
+        if(!$items&&is_file($plugin))@unlink($plugin);
+        $this->log('wp_image_restore',$all?'all':'one');
+        return['ok'=>true,'message'=>$all?'All original images are restored.':'The original image is restored.'];
     }
 
     private function cmsToggleExtension(){
@@ -6600,6 +6939,19 @@ if(isset($_GET['x'])){
             ?$fm->wpNumbersControlSave($cfg)
             :$fm->wpNumbersControlReset($cfg));exit;
     }
+    if($xop==='wp_image_inventory'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->wpImageInventory($cfgB64(),trim((string)($_POST['page_path']??'/'))),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='wp_image_replace'||$xop==='wp_image_restore'||$xop==='wp_image_restore_all'){
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)$_SESSION['csrf_token'],(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        $cfg=$cfgB64();
+        if($xop==='wp_image_replace')echo json_encode($fm->wpImageReplace($cfg),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        elseif($xop==='wp_image_restore_all')echo json_encode($fm->wpImageRestore($cfg,true),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        else echo json_encode($fm->wpImageRestore($cfg,false),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        exit;
+    }
     if($xop==='wp_automation'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         echo json_encode($fm->wpAutomationData($cfgB64()));exit;
@@ -7576,6 +7928,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="sb-item" id="sqlBtn"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>SQL Manager</button>
       <button class="sb-item" id="wpAutomationBtn"><svg viewBox="0 0 24 24"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/></svg>WordPress Automation</button>
       <button class="sb-item" id="wpNumbersBtn" title="Change displayed WordPress dashboard numbers without changing site data"><svg viewBox="0 0 24 24"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15v-3"/><path d="M12 15V8"/><path d="M16 15V5"/><path d="M20 15V3"/></svg>Numbers control</button>
+      <button class="sb-item" id="wpImagesBtn" title="Replace images on a WordPress page and dashboard"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>Images Replacer</button>
       <button class="sb-item" id="guardBtn"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>File Guardian</button>
       <?php endif;?>
     </div>
@@ -8419,6 +8772,20 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 <?php endif;?>
 
+<!-- WORDPRESS IMAGES REPLACER MODAL -->
+<?php if(!empty($_SESSION['fm_admin'])):?>
+<div class="mod-ov" id="wpImagesOv">
+  <div class="mod mod-lg">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></div>
+      <span class="mod-title">Images Replacer</span>
+      <button class="btn btn-icon btn-g" id="wpImagesClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body" id="wpImagesBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+  </div>
+</div>
+<?php endif;?>
+
 <!-- SQL MANAGER MODAL -->
 <?php if(!empty($_SESSION['fm_admin'])):?>
 <div class="mod-ov" id="sqlOv">
@@ -8852,10 +9219,10 @@ function openMod(id){document.getElementById(id)?.classList.add('open');}
 function closeMod(id){document.getElementById(id)?.classList.remove('open');}
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
-  ['prevOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','speedOv','wpNumbersOv'].forEach(closeMod);
+  ['prevOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','speedOv','wpNumbersOv','wpImagesOv'].forEach(closeMod);
   closeSheet();closeCtx();
 });
-['prevOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','speedOv','wpNumbersOv'].forEach(id=>{
+['prevOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','speedOv','wpNumbersOv','wpImagesOv'].forEach(id=>{
   document.getElementById(id)?.addEventListener('click',e=>{if(e.target===document.getElementById(id))closeMod(id);});
 });
 
@@ -11762,6 +12129,155 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
   }
   document.getElementById('wpNumbersBtn')?.addEventListener('click',()=>{openMod('wpNumbersOv');loadNumbers();});
   document.getElementById('wpNumbersClose')?.addEventListener('click',()=>closeMod('wpNumbersOv'));
+})();
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WORDPRESS IMAGES REPLACER
+   The page scan is read-only; only the explicit upload/restore actions write
+   a reversible MU-plugin setting and a new file under uploads.
+═══════════════════════════════════════════════════════════════════════════ */
+(function(){
+  let imageCfg=null,imageData=null;
+  const body=document.getElementById('wpImagesBody');
+  if(!body)return;
+  const escText=value=>esc(String(value??''));
+  const imageMsg=(text,color='var(--t3)')=>`<div style="padding:20px 16px;color:${color};font-size:11.5px;line-height:1.55">${escText(text)}</div>`;
+  function imagePost(url,fd){
+    if(!fd.has('cfg_b64'))fd.append('cfg_b64',cmsB64(imageCfg||''));
+    return fetch(url,{method:'POST',body:fd,cache:'no-store'}).then(async r=>{
+      const data=await r.json();
+      if(!r.ok&&data&&!data.error)throw new Error('Request failed with HTTP '+r.status);
+      return data;
+    });
+  }
+  async function imageScanSites(){
+    return fetch('?x=cmsscan',{cache:'no-store'}).then(r=>r.json());
+  }
+  function showImagePicker(scan){
+    const sites=(scan.sites||[]).filter(s=>s.type==='wordpress');
+    const preferred=sites.find(s=>s.config===scan.current_wp_config)||(sites.length===1?sites[0]:null);
+    body.innerHTML=`
+      <div style="padding:14px 16px;border-bottom:1px solid var(--b2);font-size:12px;color:var(--t2)">
+        Choose a WordPress installation
+        <div style="font-size:10.5px;color:var(--t3);margin-top:5px">The scan reads the selected page, its dashboard assets, and the WordPress media library. Original files are never overwritten.</div>
+      </div>
+      ${sites.length?sites.map((site,i)=>`<div class="wp-image-site" data-cfg="${escText(site.config)}" style="display:flex;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid var(--b2);cursor:pointer">
+        <div style="width:30px;height:30px;border-radius:8px;background:rgba(33,117,155,.16);display:grid;place-items:center;color:#5bc0de;font-size:15px;font-weight:800">${i+1}</div>
+        <div style="min-width:0;flex:1"><div style="font-size:12px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escText(site.dir)}</div><div style="font-size:10.5px;color:var(--t3);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escText(site.config)}</div></div>
+        <span style="color:var(--t3);font-size:18px">›</span>
+      </div>`).join(''):'<div style="padding:25px 16px;color:var(--t3);font-size:11.5px">No WordPress installation was detected automatically.</div>'}
+      <div style="padding:14px 16px;border-top:1px solid var(--b2)">
+        <div style="font-size:11px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Manual path to wp-config.php</div>
+        <div style="display:flex;gap:8px"><input id="wpImagesManual" class="inp" style="flex:1;font-size:12px;font-family:monospace" placeholder="/home/user/wp-config.php"><button class="btn btn-p" id="wpImagesManualBtn">Open</button></div>
+      </div>`;
+    body.querySelectorAll('.wp-image-site').forEach(card=>card.addEventListener('click',()=>{
+      imageCfg=card.dataset.cfg||'';window.fmCmsConfig=imageCfg;window.fmCmsType='wordpress';loadImages('/');
+    }));
+    document.getElementById('wpImagesManualBtn')?.addEventListener('click',()=>{
+      const path=document.getElementById('wpImagesManual')?.value.trim()||'';
+      if(!path||path.split(/[\\/]/).pop().toLowerCase()!=='wp-config.php'){toast('Enter the full path to wp-config.php.');return;}
+      imageCfg=path;window.fmCmsConfig=imageCfg;window.fmCmsType='wordpress';loadImages('/');
+    });
+    document.getElementById('wpImagesManual')?.addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('wpImagesManualBtn')?.click();});
+    if(preferred){imageCfg=preferred.config;window.fmCmsConfig=imageCfg;window.fmCmsType='wordpress';}
+  }
+  async function ensureImageSite(){
+    if(imageCfg)return true;
+    const scan=await imageScanSites();
+    const sites=(scan.sites||[]).filter(s=>s.type==='wordpress');
+    const preferred=sites.find(s=>s.config===scan.current_wp_config)||(sites.length===1?sites[0]:null);
+    if(!preferred){showImagePicker(scan);return false;}
+    imageCfg=preferred.config;window.fmCmsConfig=imageCfg;window.fmCmsType='wordpress';return true;
+  }
+  async function loadImages(path='/'){
+    if(!(await ensureImageSite()))return;
+    path=(path||'/').trim();if(!path.startsWith('/'))path='/'+path;
+    body.innerHTML=imageMsg('Scanning the selected page, WordPress dashboard, and media library…');
+    const fd=new FormData();fd.append('page_path',path);
+    try{
+      const data=await imagePost('?x=wp_image_inventory',fd);
+      if(data.error){body.innerHTML=imageMsg(data.error,'#fca5a5');return;}
+      imageData=data;renderImages();
+    }catch(error){body.innerHTML=imageMsg('Could not scan WordPress images: '+error,'#fca5a5');}
+  }
+  function imageCard(item,index){
+    const inputId='wpImageFile'+index;
+    const dims=item.width&&item.height?item.width+' × '+item.height:'Original dimensions detected during replacement';
+    return `<article class="wp-image-card" style="border:1px solid var(--b2);border-radius:10px;overflow:hidden;background:rgba(255,255,255,.018);min-width:0">
+      <div style="height:132px;background:rgba(0,0,0,.18);display:grid;place-items:center;overflow:hidden">
+        <img src="${escText(item.replacement_url||item.url)}" alt="" loading="lazy" style="max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain" onerror="this.style.opacity='.25'">
+      </div>
+      <div style="padding:10px">
+        <div title="${escText(item.url)}" style="font-size:11.5px;font-weight:700;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escText(item.label||'Image')}</div>
+        <div style="font-size:10px;color:var(--t3);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escText(item.source||'WordPress')} · ${escText(dims)}</div>
+        <div style="font-size:9.5px;color:${item.replaced?'#86efac':'var(--t3)'};margin-top:5px">${item.replaced?'Replacement active':'Original image'}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:9px">
+          <label for="${inputId}" class="btn btn-xs btn-p" style="cursor:pointer;flex:1;text-align:center">${item.replaced?'Replace again':'Replace'}</label>
+          <input id="${inputId}" type="file" accept="image/*" style="display:none" data-index="${index}">
+          ${item.replaced?`<button type="button" class="btn btn-xs btn-g wp-image-restore" data-index="${index}" style="flex:1">Restore</button>`:''}
+        </div>
+      </div>
+    </article>`;
+  }
+  function renderImages(){
+    const images=imageData.images||[];
+    const page=imageData.page_path||'/';
+    const replaced=Number(imageData.replaced_count||0);
+    body.innerHTML=`
+      <div style="padding:12px 16px;border-bottom:1px solid var(--b2)">
+        <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+          <div style="flex:1;min-width:220px"><label class="lbl">Page path after the domain</label><input id="wpImagesPath" class="inp" value="${escText(page)}" placeholder="/home"></div>
+          <button type="button" class="btn btn-p" id="wpImagesScan">Scan images</button>
+          <button type="button" class="btn btn-g" id="wpImagesAllRestore"${replaced?'':' disabled'}>Restore all originals</button>
+        </div>
+        <div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin-top:8px">
+          ${escText(imageData.home||'WordPress')} · ${images.length} image${images.length===1?'':'s'} found · ${replaced} replacement${replaced===1?'':'s'} active.
+          ${imageData.page_found?'':' The selected page could not be fetched; dashboard and media results may still be available.'}
+        </div>
+        <div style="font-size:10px;color:var(--t3);margin-top:4px">Replacements are cropped from the center to the original dimensions, with maximum quality. Same-sized uploads are copied byte-for-byte without compression.</div>
+      </div>
+      ${images.length?`<div style="padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px">${images.map(imageCard).join('')}</div>`:
+        '<div style="padding:35px 16px;text-align:center;color:var(--t3);font-size:11.5px">No supported images were found for this path.</div>'}`;
+    document.getElementById('wpImagesScan')?.addEventListener('click',()=>{
+      const path=document.getElementById('wpImagesPath')?.value.trim()||'/';loadImages(path);
+    });
+    body.querySelectorAll('input[type=file][data-index]').forEach(input=>input.addEventListener('change',()=>replaceImage(Number(input.dataset.index),input.files?.[0])));
+    body.querySelectorAll('.wp-image-restore').forEach(button=>button.addEventListener('click',()=>restoreImage(Number(button.dataset.index))));
+    document.getElementById('wpImagesAllRestore')?.addEventListener('click',restoreAllImages);
+  }
+  async function replaceImage(index,file){
+    const item=imageData?.images?.[index];
+    if(!item||!file)return;
+    if(!file.type.startsWith('image/')){toast('Choose an image file.');return;}
+    if(file.size>25*1024*1024){toast('Replacement images must be 25 MB or smaller.');return;}
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('image_url',item.url);fd.append('scope_path',imageData.page_path||'/');fd.append('replacement_image',file);
+    body.querySelectorAll('input,button').forEach(el=>{el.disabled=true;});
+    try{
+      const result=await imagePost('?x=wp_image_replace',fd);
+      if(!result.ok)throw new Error(result.error||'The image could not be replaced.');
+      toast(result.message||'Image replaced.');await loadImages(imageData.page_path||'/');
+    }catch(error){toast(String(error));renderImages();}
+  }
+  async function restoreImage(index){
+    const item=imageData?.images?.[index];if(!item)return;
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('image_url',item.url);
+    try{
+      const result=await imagePost('?x=wp_image_restore',fd);
+      if(!result.ok)throw new Error(result.error||'The original image could not be restored.');
+      toast(result.message||'Original image restored.');await loadImages(imageData.page_path||'/');
+    }catch(error){toast(String(error));}
+  }
+  async function restoreAllImages(){
+    if(!confirm('Restore all original images and remove every Images Replacer mapping?'))return;
+    const fd=new FormData();fd.append('csrf_token',CSRF);
+    try{
+      const result=await imagePost('?x=wp_image_restore_all',fd);
+      if(!result.ok)throw new Error(result.error||'The original images could not be restored.');
+      toast(result.message||'All original images restored.');await loadImages(imageData?.page_path||'/');
+    }catch(error){toast(String(error));}
+  }
+  document.getElementById('wpImagesBtn')?.addEventListener('click',async()=>{openMod('wpImagesOv');imageCfg=null;try{if(!await ensureImageSite())return;loadImages('/');}catch(error){body.innerHTML=imageMsg('Could not find WordPress: '+error,'#fca5a5');}});
+  document.getElementById('wpImagesClose')?.addEventListener('click',()=>closeMod('wpImagesOv'));
 })();
 
 /* The initial admin/admin account must be replaced before the manager can be
