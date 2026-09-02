@@ -1521,7 +1521,7 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
   <form method="post">
     <input type="hidden" name="login_csrf" value="<?=htmlspecialchars($_SESSION['login_csrf'])?>">
     <div class="field"><label for="un">Username</label><div class="iw"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/></svg><input type="text" id="un" name="login_user" placeholder="Enter username" required autofocus></div></div>
-    <div class="field"><label for="pw">Password</label><div class="iw"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><input type="password" id="pw" name="login_pass" placeholder="Enter password" required style="letter-spacing:.1em"></div></div>
+     <div class="field"><label for="pw">Password</label><div class="iw"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><input type="password" id="pw" name="login_pass" placeholder="Enter password" autocomplete="current-password" required style="letter-spacing:.1em"></div></div>
     <button type="submit" class="btn">Sign In</button>
   </form>
 </div></body></html>
@@ -1709,7 +1709,11 @@ class FileManager {
         else $this->addMsg('Cannot clear log (permission denied).','danger');
     }
 
-    /* Environment variables (secrets redacted) */
+    /* Environment variables exposed only through the explicit admin-only
+       ENV Reader. The old getEnvSafe() API is kept for compatibility with
+       older clients, but the reader below intentionally returns the raw
+       file bytes because the administrator explicitly asked to inspect the
+       complete .env contents. */
     public function getEnvSafe(){
         $e=array_merge(is_array($_ENV)?$_ENV:[],getenv()?:[]);
         $out=[];
@@ -1721,6 +1725,115 @@ class FileManager {
             $out[$k]=$v;
         }
         ksort($out);return $out;
+    }
+
+    private function inspectionRoots(){
+        if($this->root)return[$this->root];
+        /* An unrestricted administrator can inspect the whole server. The
+           iterator below excludes virtual kernel trees, which are not real
+           application files and can otherwise block or loop while scanning. */
+        return[DIRECTORY_SEPARATOR,'/usr/local'];
+    }
+    private function inspectionPath($path){
+        $rp=realpath((string)$path);
+        if($rp===false||!is_file($rp)||!is_readable($rp))return false;
+        if($this->root){
+            $prefix=rtrim($this->root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+            if($rp!==$this->root&&strpos($rp.DIRECTORY_SEPARATOR,$prefix)!==0)return false;
+        }
+        return $rp;
+    }
+    private function inspectionIterator($root){
+        if(!is_dir($root))return null;
+        try{
+            $skip=['/proc','/sys','/dev','/run','/nix','/usr','/lib','/lib64','/bin','/sbin','/boot','/var/cache','/var/lib'];
+            $base=realpath($root)?:$root;
+            $dir=new RecursiveDirectoryIterator($base,FilesystemIterator::SKIP_DOTS|FilesystemIterator::CURRENT_AS_FILEINFO);
+            $filter=new RecursiveCallbackFilterIterator($dir,function($current)use($skip){
+                try{
+                    $path=$current->getPathname();
+                    if($current->isLink())return false;
+                    if($current->isDir()){
+                        $real=realpath($path)?:$path;
+                        foreach($skip as $blocked)if($real===$blocked||strpos($real,rtrim($blocked,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0)return false;
+                    }
+                    return true;
+                }catch(Throwable $e){return false;}
+            });
+            return new RecursiveIteratorIterator($filter,RecursiveIteratorIterator::LEAVES_ONLY,RecursiveIteratorIterator::CATCH_GET_CHILD);
+        }catch(Throwable $e){return null;}
+    }
+    private function envFileName($name){
+        $name=(string)$name;
+        return $name==='.env'||preg_match('/^\.env\.[^\/\\\\]+$/i',$name);
+    }
+    public function getEnvFiles(){
+        $found=[];$seen=[];
+        foreach($this->inspectionRoots() as $root){
+            $it=$this->inspectionIterator($root);if(!$it)continue;
+            foreach($it as $item){
+                try{
+                    if(!$item->isFile()||!$this->envFileName($item->getFilename()))continue;
+                    $path=$this->inspectionPath($item->getPathname());
+                    if($path===false||isset($seen[$path]))continue;
+                    $seen[$path]=true;
+                    $content=@file_get_contents($path);
+                    if($content===false)continue;
+                    $found[]=[
+                        'path'=>$path,
+                        'name'=>basename($path),
+                        'directory'=>dirname($path),
+                        'size'=>(int)@filesize($path),
+                        'modified'=>(int)@filemtime($path),
+                        /* Base64 keeps every byte intact, including a
+                           non-UTF-8 value or a trailing NUL byte. */
+                        'content_b64'=>base64_encode($content),
+                    ];
+                }catch(Throwable $e){continue;}
+            }
+        }
+        usort($found,function($a,$b){return strcasecmp($a['path'],$b['path']);});
+        return['files'=>$found,'scanned_roots'=>$this->inspectionRoots()];
+    }
+    private function serverLogName($name){
+        $n=strtolower((string)$name);
+        if(preg_match('/\.(?:log|out|err)(?:\.[0-9]+)?$/i',$n))return true;
+        if(preg_match('/(?:^|[_\-.])(access|error|audit|auth|syslog|messages|secure|daemon|kern|cron|mail|journal|debug|php.*fpm|nginx|apache|httpd)(?:[_\-.]|$)/i',$n))return true;
+        return in_array($n,['syslog','messages','secure','auth','daemon','kern','cron','maillog','boot.log','btmp','wtmp','lastlog'],true);
+    }
+    public function getServerLogs(){
+        $found=[];$seen=[];
+        $configured=$this->errLogPath();
+        if($configured){
+            $path=$this->inspectionPath($configured);
+            if($path!==false&&isset($seen[$path])===false&&$this->serverLogName(basename($path))){
+                $seen[$path]=true;
+                $found[]=['path'=>$path,'name'=>basename($path),'directory'=>dirname($path),'size'=>(int)@filesize($path),'modified'=>(int)@filemtime($path),'source'=>'PHP error_log'];
+            }
+        }
+        foreach($this->inspectionRoots() as $root){
+            $it=$this->inspectionIterator($root);if(!$it)continue;
+            foreach($it as $item){
+                try{
+                    if(!$item->isFile()||!$this->serverLogName($item->getFilename()))continue;
+                    $path=$this->inspectionPath($item->getPathname());
+                    if($path===false||isset($seen[$path]))continue;
+                    $seen[$path]=true;
+                    $found[]=['path'=>$path,'name'=>basename($path),'directory'=>dirname($path),'size'=>(int)@filesize($path),'modified'=>(int)@filemtime($path),'source'=>'Server log'];
+                }catch(Throwable $e){continue;}
+            }
+        }
+        usort($found,function($a,$b){return strcasecmp($a['path'],$b['path']);});
+        foreach($found as &$entry)$entry['path_b64']=base64_encode($entry['path']);
+        unset($entry);
+        return['logs'=>$found,'scanned_roots'=>$this->inspectionRoots()];
+    }
+    public function readServerLog($path){
+        $path=$this->inspectionPath($path);
+        if($path===false||!$this->serverLogName(basename((string)$path)))return['error'=>'This log is unavailable or outside the allowed scope.'];
+        $content=@file_get_contents($path);
+        if($content===false)return['error'=>'The log could not be read. Check the server permissions.'];
+        return['path'=>$path,'name'=>basename($path),'directory'=>dirname($path),'size'=>(int)@filesize($path),'modified'=>(int)@filemtime($path),'content_b64'=>base64_encode($content)];
     }
 
     /* Large-file scanner (recursive, time-capped) */
@@ -7130,6 +7243,20 @@ if(isset($_GET['x'])){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         echo json_encode($fm->getEnvSafe());exit;
     }
+    if($xop==='envfiles'){
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->getEnvFiles(),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='serverlogs'){
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->getServerLogs(),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='serverlog'){
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['error'=>'Admins only.']);exit;}
+        $raw=base64_decode((string)($_GET['path']??''),true);
+        if($raw===false||$raw===''){echo json_encode(['error'=>'No log selected.']);exit;}
+        echo json_encode($fm->readServerLog($raw),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
     if($xop==='phpinfo'){
         if(empty($_SESSION['fm_admin'])){http_response_code(403);header('Content-Type: text/plain');echo 'Admins only.';exit;}
         header('Content-Type: text/html;charset=utf-8');phpinfo();exit;
@@ -7874,6 +8001,10 @@ input[type=file]{display:none}
 .mod-title{font-size:13px;font-weight:700;color:var(--t1);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mod-body{overflow:auto;flex:1;padding:13px}
 .mod-body::-webkit-scrollbar{width:4px}.mod-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:6px}
+.server-log-item{display:block;width:100%;padding:10px 12px;text-align:left;border:0;border-bottom:1px solid var(--border);background:transparent;color:var(--t1);cursor:pointer;font-family:inherit;transition:background .15s,border-color .15s}
+.server-log-item:hover{background:var(--hov)}.server-log-item.active{background:rgba(133,137,140,.13);box-shadow:inset 3px 0 var(--link)}
+.server-log-item strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:650}
+.server-log-item span{display:block;margin-top:4px;color:var(--t3);font-family:'JetBrains Mono',monospace;font-size:9.5px;line-height:1.45;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ══ PREVIEW ══ */
 .prev-ov{display:none;position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.85);backdrop-filter:blur(10px);align-items:center;justify-content:center;padding:20px}
@@ -8065,6 +8196,14 @@ body.term-standalone .term-win{position:fixed;inset:0}
   .shell.agent-open .main{margin-right:0}
   .agent-resize{left:auto;right:0;cursor:ew-resize}
   .agent-resize::after{left:auto;right:4px}
+}
+@media(max-width:600px){
+  #errLogOv{padding:8px}
+  #errLogOv .mod,#envOv .mod{max-height:94vh}
+  #errLogOv .mod>div:last-child{min-height:70vh;max-height:78vh;flex-direction:column}
+  #serverLogList{width:100%!important;max-height:150px;border-right:0!important;border-bottom:1px solid var(--border)}
+  #errLogBody{min-height:0}
+  #envReaderContent{min-height:220px}
 }
 
 /* ══ EDITOR ══ */
@@ -8299,8 +8438,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="sb-item" id="dupBtn"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Find Duplicates</button>
       <button class="sb-item" id="speedBtn"><svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Speed Test</button>
       <?php if(!empty($_SESSION['fm_admin'])):?>
-      <button class="sb-item" id="errLogBtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>Error Log</button>
-      <button class="sb-item" id="envBtn"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>Environment</button>
+       <button class="sb-item" id="errLogBtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>Log Viewer</button>
+       <button class="sb-item" id="envBtn"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>ENV Reader</button>
       <a href="?x=phpinfo" target="_blank" class="sb-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 2-3 4"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>PHP Info</a>
       <button class="sb-item" id="sshBtn"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>SSH Access</button>
       <button class="sb-item" id="cmsBtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>CMS Manager</button>
@@ -8840,22 +8979,38 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 
 <?php if(!empty($_SESSION['fm_admin'])):?>
-<!-- ERROR LOG MODAL -->
+<!-- SERVER LOG VIEWER MODAL -->
 <div class="mod-ov" id="errLogOv">
-  <div class="mod mod-lg">
-    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div><span class="mod-title">PHP Error Log</span>
-      <?php if(!$fm->isRO()):?><form method="post" style="margin-right:8px"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>"><input type="hidden" name="action" value="clear_errlog"><button class="btn btn-xs btn-red" onclick="return confirm('Clear the error log?')">Clear</button></form><?php endif;?>
+  <div class="mod mod-lg" style="max-width:980px">
+    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div><span class="mod-title">Log Viewer</span>
+      <button class="btn btn-xs btn-g" id="serverLogRefresh">Refresh</button>
       <button class="btn btn-icon btn-g" id="errLogClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div class="mod-body" id="errLogBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div style="display:flex;min-height:58vh;max-height:70vh">
+      <div id="serverLogList" style="width:250px;overflow-y:auto;border-right:1px solid var(--border);flex-shrink:0"><div style="text-align:center;padding:28px 12px;color:var(--t3);font-size:12px">Loading…</div></div>
+      <div class="mod-body" style="padding:0;min-width:0" id="errLogBody"><div style="text-align:center;padding:32px;color:var(--t3)">Select a server log</div></div>
+    </div>
   </div>
 </div>
 
-<!-- ENVIRONMENT VARIABLES MODAL -->
+<!-- ENV READER MODAL -->
 <div class="mod-ov" id="envOv">
   <div class="mod mod-lg">
-    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div><span class="mod-title">Environment Variables</span><button class="btn btn-icon btn-g" id="envClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-    <div class="mod-body" style="padding:0" id="envBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div><span class="mod-title">ENV Reader</span>
+      <button class="btn btn-xs btn-g" id="envRefresh">Search again</button>
+      <button class="btn btn-icon btn-g" id="envClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div id="envReaderTabs" style="display:flex;gap:4px;overflow-x:auto;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--raised)"></div>
+    <div class="mod-body" style="padding:0;display:flex;flex-direction:column;min-height:0" id="envBody">
+      <div id="envReaderMeta" style="padding:9px 14px;border-bottom:1px solid var(--border);font-size:11px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+      <pre id="envReaderContent" style="margin:0;padding:16px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.55;white-space:pre;overflow:auto;flex:1;min-height:300px;color:var(--t1);background:var(--panel)"><span style="color:var(--t3)">Loading…</span></pre>
+      <div style="display:flex;align-items:center;gap:7px;padding:9px 12px;border-top:1px solid var(--border);background:var(--raised)">
+        <button class="btn btn-xs btn-g" id="envPrev">Previous</button>
+        <button class="btn btn-xs btn-g" id="envNext">Next</button>
+        <button class="btn btn-xs btn-blue" id="envCopy" style="margin-left:auto">Copy contents</button>
+        <span id="envReaderCount" style="font-size:10.5px;color:var(--t3);min-width:52px;text-align:center"></span>
+      </div>
+    </div>
   </div>
 </div>
 <!-- SSH ACCESS MODAL -->
@@ -10211,30 +10366,95 @@ function delAbsPath(path,btn){
 }
 
 /* ═══════════════════════════════════════
-   ERROR LOG / ENVIRONMENT VARIABLES (admin)
+   SERVER LOG VIEWER / ENV READER (admin)
 ═══════════════════════════════════════ */
+function decodeBase64Text(value){
+  try{
+    const raw=atob(value||''), bytes=new Uint8Array(raw.length);
+    for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+    if(window.TextDecoder)return new TextDecoder('utf-8').decode(bytes);
+    let binary='';for(let i=0;i<bytes.length;i++)binary+=String.fromCharCode(bytes[i]);
+    return decodeURIComponent(escape(binary));
+  }catch{return '[Unable to decode this file as text.]';}
+}
+let envReaderFiles=[],envReaderIndex=0;
+function renderEnvReader(){
+  const tabs=document.getElementById('envReaderTabs'),meta=document.getElementById('envReaderMeta'),pre=document.getElementById('envReaderContent');
+  if(!tabs||!meta||!pre)return;
+  tabs.innerHTML='';
+  if(!envReaderFiles.length){
+    meta.textContent='No .env files found in the accessible server scope.';
+    pre.textContent='No .env or .env.* files were found.';
+    document.getElementById('envReaderCount').textContent='0 files';
+    document.getElementById('envPrev').disabled=true;document.getElementById('envNext').disabled=true;document.getElementById('envCopy').disabled=true;
+    return;
+  }
+  envReaderIndex=Math.max(0,Math.min(envReaderIndex,envReaderFiles.length-1));
+  envReaderFiles.forEach((file,index)=>{
+    const tab=document.createElement('button');tab.type='button';tab.className='btn btn-xs '+(index===envReaderIndex?'btn-p':'btn-g');tab.textContent=file.name;tab.title=file.path;
+    tab.addEventListener('click',()=>{envReaderIndex=index;renderEnvReader();});tabs.appendChild(tab);
+  });
+  const file=envReaderFiles[envReaderIndex];
+  meta.textContent=file.path+' · '+formatBytes(file.size)+' · '+(file.modified?new Date(file.modified*1000).toLocaleString():'');
+  pre.textContent=decodeBase64Text(file.content_b64);
+  document.getElementById('envReaderCount').textContent=(envReaderIndex+1)+' / '+envReaderFiles.length;
+  document.getElementById('envPrev').disabled=envReaderIndex===0;document.getElementById('envNext').disabled=envReaderIndex===envReaderFiles.length-1;document.getElementById('envCopy').disabled=false;
+}
+async function loadEnvReader(){
+  const tabs=document.getElementById('envReaderTabs'),pre=document.getElementById('envReaderContent');
+  if(tabs)tabs.innerHTML='<span style="font-size:11px;color:var(--t3);padding:4px">Searching deeply…</span>';
+  if(pre)pre.textContent='Searching the accessible server scope for .env files…';
+  try{
+    const d=await fetch('?x=envfiles').then(r=>r.json());
+    if(d.error)throw new Error(d.error);
+    envReaderFiles=d.files||[];envReaderIndex=0;renderEnvReader();
+  }catch(e){if(pre)pre.textContent='Failed: '+String(e.message||e);}
+}
 document.getElementById('errLogBtn')?.addEventListener('click',async()=>{
   openMod('errLogOv');
-  document.getElementById('errLogBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
-  try{
-    const d=await fetch('?x=errlog').then(r=>r.json());
-    if(d.error){document.getElementById('errLogBody').innerHTML='<div class="empty" style="padding:40px"><p>'+esc(d.error)+'</p></div>';return;}
-    if(!d.path){document.getElementById('errLogBody').innerHTML='<div class="empty" style="padding:40px"><p>No error_log configured in php.ini.</p></div>';return;}
-    if(!d.lines.length){document.getElementById('errLogBody').innerHTML='<div class="empty" style="padding:40px"><p>Log is empty.</p></div>';return;}
-    document.getElementById('errLogBody').innerHTML=`<div style="padding:8px 14px;font-size:10.5px;color:var(--t3);border-bottom:1px solid var(--border)">${esc(d.path)} - showing last ${d.lines.length} lines</div><pre style="margin:0;padding:14px;font-family:'JetBrains Mono',monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:60vh;overflow:auto;color:var(--t2)">${esc(d.lines.join('\n'))}</pre>`;
-  }catch{document.getElementById('errLogBody').innerHTML='<div style="padding:20px;color:#fca5a5">Failed.</div>';}
+  loadServerLogs();
 });
 document.getElementById('errLogClose')?.addEventListener('click',()=>closeMod('errLogOv'));
+document.getElementById('serverLogRefresh')?.addEventListener('click',()=>loadServerLogs());
+let serverLogs=[],serverLogIndex=-1;
+async function loadServerLogs(){
+  const list=document.getElementById('serverLogList'),body=document.getElementById('errLogBody');
+  if(list)list.innerHTML='<div style="text-align:center;padding:28px 12px;color:var(--t3);font-size:12px">Scanning server logs…</div>';
+  if(body)body.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Scanning readable server log files…</div>';
+  try{
+    const d=await fetch('?x=serverlogs').then(r=>r.json());
+    if(d.error)throw new Error(d.error);
+    serverLogs=d.logs||[];serverLogIndex=-1;
+    if(!serverLogs.length){
+      list.innerHTML='<div class="empty" style="padding:28px 12px"><p>No readable server log files were found.</p></div>';
+      body.innerHTML='<div class="empty" style="padding:40px"><p>No logs available to this PHP account.</p></div>';return;
+    }
+    list.innerHTML=serverLogs.map((file,index)=>`<button type="button" class="server-log-item" data-index="${index}" title="${esc(file.path)}"><strong>${esc(file.name)}</strong><span>${esc(file.directory)}<br>${formatBytes(file.size)}</span></button>`).join('');
+    list.querySelectorAll('.server-log-item').forEach(button=>button.addEventListener('click',()=>loadServerLog(Number(button.dataset.index))));
+    loadServerLog(0);
+  }catch(e){if(list)list.innerHTML='<div style="padding:20px;color:#fca5a5">Failed: '+esc(String(e.message||e))+'</div>';if(body)body.innerHTML='';}
+}
+async function loadServerLog(index){
+  const file=serverLogs[index],body=document.getElementById('errLogBody');if(!file||!body)return;
+  serverLogIndex=index;
+  document.querySelectorAll('.server-log-item').forEach((button,i)=>button.classList.toggle('active',i===index));
+  body.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Reading full log…</div>';
+  try{
+    const d=await fetch('?x=serverlog&path='+encodeURIComponent(file.path_b64)).then(r=>r.json());
+    if(d.error)throw new Error(d.error);
+    const text=decodeBase64Text(d.content_b64);
+    body.innerHTML=`<div style="display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid var(--border);font-size:10.5px;color:var(--t3);white-space:nowrap;overflow:hidden"><span style="overflow:hidden;text-overflow:ellipsis" title="${esc(d.path)}">${esc(d.path)}</span><button type="button" class="btn btn-xs btn-blue" id="serverLogCopy" style="margin-left:auto;flex-shrink:0">Copy</button></div><pre style="margin:0;padding:14px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;overflow:auto;flex:1;color:var(--t2)">${esc(text)}</pre>`;
+    document.getElementById('serverLogCopy')?.addEventListener('click',()=>navigator.clipboard?.writeText(text).then(()=>toast('Log copied.')).catch(()=>toast('Copy failed.')));
+  }catch(e){body.innerHTML='<div style="padding:20px;color:#fca5a5">Failed: '+esc(String(e.message||e))+'</div>';}
+}
+document.getElementById('envRefresh')?.addEventListener('click',loadEnvReader);
+document.getElementById('envPrev')?.addEventListener('click',()=>{if(envReaderIndex>0){envReaderIndex--;renderEnvReader();}});
+document.getElementById('envNext')?.addEventListener('click',()=>{if(envReaderIndex<envReaderFiles.length-1){envReaderIndex++;renderEnvReader();}});
+document.getElementById('envCopy')?.addEventListener('click',()=>{const text=document.getElementById('envReaderContent')?.textContent||'';navigator.clipboard?.writeText(text).then(()=>toast('ENV contents copied.')).catch(()=>toast('Copy failed.'));});
 
 document.getElementById('envBtn')?.addEventListener('click',async()=>{
   openMod('envOv');
-  document.getElementById('envBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
-  try{
-    const d=await fetch('?x=envvars').then(r=>r.json());
-    if(d.error){document.getElementById('envBody').innerHTML='<div class="empty" style="padding:40px"><p>'+esc(d.error)+'</p></div>';return;}
-    const rows=Object.entries(d).map(([k,v])=>`<tr><td style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--link);white-space:nowrap">${esc(k)}</td><td style="font-family:'JetBrains Mono',monospace;font-size:11.5px;word-break:break-all">${esc(v)}</td></tr>`).join('');
-    document.getElementById('envBody').innerHTML=`<div style="overflow:auto;max-height:65vh"><table class="log-t"><thead><tr><th>Variable</th><th>Value</th></tr></thead><tbody>${rows||'<tr><td colspan=2 style="padding:20px;color:var(--t3)">No variables.</td></tr>'}</tbody></table></div>`;
-  }catch{document.getElementById('envBody').innerHTML='<div style="padding:20px;color:#fca5a5">Failed.</div>';}
+  loadEnvReader();
 });
 document.getElementById('envClose')?.addEventListener('click',()=>closeMod('envOv'));
 
