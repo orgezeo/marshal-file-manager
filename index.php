@@ -2634,15 +2634,6 @@ class FileManager {
                 $real=$parent;
             }
         }
-        /* Inline background images and CSS-backed lazy loaders are common on
-           homepages and dashboards, even when there is no <img> element. */
-        preg_match_all('/url\s*\(\s*([\'"]?)([^\'")\s]+)\1\s*\)/i',$html,$cssUrls);
-        foreach($cssUrls[2]??[] as $raw){
-            $url=$this->wpImageUrl($raw,$base);if(!$url)continue;
-            $key=strtok($url,'?');$ext=strtolower(pathinfo(parse_url($key,PHP_URL_PATH)??'','extension'));
-            if(!in_array($ext,['jpg','jpeg','png','gif','webp','bmp','avif'],true)||isset($seen[$key]))continue;
-            $seen[$key]=1;$out[]=['url'=>$url,'source'=>$source.' (background)','label'=>basename(parse_url($key,PHP_URL_PATH)??$key),'width'=>null,'height'=>null];
-        }
         return $out;
     }
     private function wpSiteRoot($configPath){
@@ -3445,6 +3436,15 @@ FMJOOMLA;
     /* ── WordPress automation ─────────────────────────────────────────── */
     private function wpAutomationConnect($configPath,&$c,&$link,&$err){
         $link=null;$c=null;$err='';
+        $configPath=trim((string)$configPath);
+        if($configPath===''){
+            $scan=$this->cmsScan();
+            $configPath=$this->wpCurrentDomainConfig($scan['sites']??[]);
+        }
+        if(!$configPath||basename($configPath)!=='wp-config.php'||!is_readable($configPath)){
+            $err='No readable WordPress installation was detected automatically. You can select a site or paste its wp-config.php path.';
+            return false;
+        }
         list($link,$c,$err)=$this->cmsConnect($configPath);
         if($err)return false;
         if(($c['type']??'')!=='wordpress'){
@@ -4286,6 +4286,19 @@ FMNUM;
         if(!$dir||($dir!==$root&&strpos($dir,rtrim($root,'/').'/')!==0))return null;
         return $dir.'/'.basename($candidate);
     }
+    private function wpImageResolveReference($root,$base,$reference){
+        $reference=trim(html_entity_decode((string)$reference,ENT_QUOTES|ENT_HTML5,'UTF-8'));
+        if($reference===''||strlen($reference)>4000||preg_match('#^(data|blob|javascript):#i',$reference))return null;
+        $rootReal=realpath($root);
+        if($rootReal&&is_file($reference)){
+            $file=realpath($reference);
+            if($file&&($file===$rootReal||strpos($file,rtrim($rootReal,'/').'/')===0)){
+                $relative=str_replace('\\','/',substr($file,strlen(rtrim($rootReal,'/'))));
+                return rtrim($base,'/').'/'.ltrim($relative,'/');
+            }
+        }
+        return $this->wpImageUrl($reference,$base);
+    }
     private function wpImageAtomicCopy($source,$target,$mode=null){
         $dir=dirname($target);if(!is_dir($dir)||!is_readable($source))return false;
         $tmp=@tempnam($dir,'.fm-image-');if(!$tmp)return false;
@@ -4307,7 +4320,7 @@ FMNUM;
         return is_dir($dir);
     }
     private function wpImageHasLegacyItems($items){
-        foreach((array)$items as $item)if(is_array($item)&&!empty($item['replacement_url'])&&($item['mode']??'')!=='direct')return true;
+        foreach((array)$items as $item)if(is_array($item)&&!empty($item['original_url'])&&!empty($item['replacement_url']))return true;
         return false;
     }
     private function wpImageSyncLegacyPlugin($root,$items){
@@ -4391,8 +4404,9 @@ FMNUM;
 <?php
 /**
  * File Manager Images Replacer — reversible direct file replacement.
- * Direct mappings are already written to the original path and must not be
- * rewritten in the browser. Legacy mappings still use the old URL swap.
+ * Direct mappings are already written to the original path. Add a version
+ * query to direct URLs so browser, page-cache, and CDN copies are refreshed.
+ * Legacy mappings still use the old URL swap.
  */
 if(!defined('ABSPATH'))exit;
 function fm_image_replacer_output($surface='frontend'){
@@ -4409,28 +4423,38 @@ function fm_image_replacer_output($surface='frontend'){
       var s=w.fmImageReplacer||{},items=s.items||{},home=s.home_path||'/';
       var path=(w.location.pathname||'/').replace(/\/+$/,'')||'/';
       var admin=/\/wp-admin(?:\/|$)/.test(path);
-      function clean(u){try{var x=new URL(u,w.location.href);return x.href.split('#')[0];}catch(e){return u;}}
+      function clean(u){try{var x=new URL(u,w.location.href);return x.href.split('#')[0].replace(/([?&])fm_image_version=\d+/,'$1').replace(/[?&]$/,'');}catch(e){return String(u||'').replace(/([?&])fm_image_version=\d+/,'$1').replace(/[?&]$/,'');}}
       function allowed(item){
         var surface=item.surface||'both';
+         if(item.mode==='direct')return admin?(surface==='both'||surface==='dashboard'||item.scope==='dashboard'||item.scope==='admin'):(surface==='both'||surface==='frontend');
         if(admin)return surface==='both'||surface==='dashboard'||item.scope==='dashboard'||item.scope==='admin';
         return (surface==='both'||surface==='frontend')&&(item.scope_path===path||item.scope_path===home);
+      }
+      function getReplacement(item){
+        if(!item)return '';
+        if(item.mode==='direct'){
+          var original=item.original_url||'',version=Number(item.updated_at||0);
+          if(!version)return original;
+          return original+(original.indexOf('?')>=0?'&':'?')+'fm_image_version='+version;
+        }
+        return item.replacement_url||'';
       }
       function swap(el,attr){
         var v=el.getAttribute(attr);if(!v)return;
         var key=clean(v),hit=null;
-        Object.keys(items).some(function(k){var item=items[k];if(item&&item.mode!=='direct'&&item.original_url&&clean(item.original_url)===key&&allowed(item)){hit=item;return true;}return false;});
-        if(hit&&hit.replacement_url)el.setAttribute(attr,hit.replacement_url);
+         Object.keys(items).some(function(k){var item=items[k];if(item&&item.original_url&&clean(item.original_url)===key&&allowed(item)){hit=item;return true;}return false;});
+         var next=getReplacement(hit);if(next)el.setAttribute(attr,next);
       }
       function swapSet(el,attr){
         var v=el.getAttribute(attr);if(!v)return;
-        var parts=v.split(',').map(function(p){var bits=p.trim().split(/\s+/);if(bits[0]){var key=clean(bits[0]);Object.keys(items).some(function(k){var item=items[k];if(item&&item.mode!=='direct'&&item.original_url&&clean(item.original_url)===key&&allowed(item)){bits[0]=item.replacement_url;return true;}return false;});}return bits.join(' ');});
+         var parts=v.split(',').map(function(p){var bits=p.trim().split(/\s+/);if(bits[0]){var key=clean(bits[0]);Object.keys(items).some(function(k){var item=items[k];if(item&&item.original_url&&clean(item.original_url)===key&&allowed(item)){bits[0]=getReplacement(item);return true;}return false;});}return bits.join(' ');});
         el.setAttribute(attr,parts.join(', '));
       }
       function swapCss(value){
         return String(value||'').replace(/url\s*\(\s*(['"]?)(.*?)\1\s*\)/gi,function(all,q,url){
-          var key=clean(url),replacement='';
-          Object.keys(items).some(function(k){var item=items[k];if(item&&item.mode!=='direct'&&item.original_url&&clean(item.original_url)===key&&allowed(item)){replacement=item.replacement_url;return true;}return false;});
-          return replacement?'url('+q+replacement+q+')':all;
+           var key=clean(url),next='';
+           Object.keys(items).some(function(k){var item=items[k];if(item&&item.original_url&&clean(item.original_url)===key&&allowed(item)){next=getReplacement(item);return true;}return false;});
+           return next?'url('+q+next+q+')':all;
         });
       }
       function apply(){
@@ -4493,7 +4517,6 @@ FMIMG;
     }
     public function wpImageInventory($configPath,$pagePath='/'){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
-        if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires a valid WordPress installation.'];
         if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
         $base=$this->wpImageHomeUrl($link,$c['prefix']);
         if(!$base){mysqli_close($link);return['error'=>'Could not read the WordPress site URL.'];}
@@ -4572,22 +4595,22 @@ FMIMG;
     public function wpImageReplace($configPath){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
         if($this->isRO())return['error'=>'Read-only account.'];
-        if(basename($configPath)!=='wp-config.php'||empty($_FILES['replacement_image']))return['error'=>'Choose a WordPress installation and an image first.'];
+        if(empty($_FILES['replacement_image']))return['error'=>'Choose an image first.'];
         $upload=$_FILES['replacement_image'];if((int)$upload['error']!==UPLOAD_ERR_OK)return['error'=>'The replacement image upload failed.'];
         if((int)$upload['size']>25*1024*1024)return['error'=>'Replacement images must be 25 MB or smaller.'];
         $replacementInfo=@getimagesize($upload['tmp_name']);if(!$replacementInfo)return['error'=>'The selected file is not a readable image; nothing was changed.'];
         if(!in_array((string)($replacementInfo['mime']??''),['image/jpeg','image/png','image/gif','image/webp','image/bmp','image/avif'],true))return['error'=>'Use a JPEG, PNG, GIF, WebP, BMP, or AVIF replacement image.'];
         if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
-        $url=trim((string)($_POST['image_url']??''));$scope=trim((string)($_POST['scope_path']??'/'));
-        if(!preg_match('#^https?://#i',$url)||strlen($url)>2000){mysqli_close($link);return['error'=>'Invalid original image URL.'];}
+        $reference=trim((string)($_POST['image_ref']??($_POST['image_url']??'')));$scope=trim((string)($_POST['scope_path']??'/'));
+        if($reference===''||strlen($reference)>4000){mysqli_close($link);return['error'=>'Paste an image URL or a full server file path.'];}
         if($scope===''||$scope[0]!=='/'||strpos($scope,'..')!==false||preg_match('/[\x00-\x1F\x7F\\\\?#]/',$scope)){mysqli_close($link);return['error'=>'Invalid page path.'];}
-        $base=$this->wpImageHomeUrl($link,$c['prefix']);
-        $originalUrl=$this->wpImageUrl($url,$base);
-        $baseParts=parse_url($base);$urlParts=parse_url($originalUrl?:$url);
+        $base=$this->wpImageHomeUrl($link,$c['prefix']);$root=$this->wpSiteRoot($configPath);
+        $originalUrl=$this->wpImageResolveReference($root,$base,$reference);
+        $baseParts=parse_url($base);$urlParts=parse_url($originalUrl?:$reference);
         if(!$originalUrl||empty($baseParts['host'])||empty($urlParts['host'])||strtolower($baseParts['host'])!==strtolower($urlParts['host'])){
             mysqli_close($link);return['error'=>'Only images belonging to this WordPress site can be replaced.'];
         }
-        $url=$originalUrl;$root=$this->wpSiteRoot($configPath);
+        $url=$originalUrl;
         $target=$this->wpImageLocalPath($root,$base,$url);
         if(!$target){mysqli_close($link);return['error'=>'The original image file could not be found inside this WordPress site. Nothing was changed.'];}
         $key=hash('sha256',strtok($url,'?'));$settings=$this->wpImageOption($link,$c);
@@ -4645,7 +4668,6 @@ FMIMG;
     public function wpImageRestore($configPath,$all=false){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
         if($this->isRO())return['error'=>'Read-only account.'];
-        if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires a valid WordPress installation.'];
         if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
         $settings=$this->wpImageOption($link,$c);$items=is_array($settings['items']??null)?$settings['items']:[];
         $root=$this->wpSiteRoot($configPath);$dir=$root.'/wp-content/uploads/fm-image-replacer';
@@ -12300,7 +12322,7 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
   }
   function showImagePicker(scan){
     const sites=(scan.sites||[]).filter(s=>s.type==='wordpress');
-    const preferred=sites.find(s=>s.config===scan.current_wp_config)||(sites.length===1?sites[0]:null);
+    const preferred=sites.find(s=>s.config===scan.current_wp_config)||(scan.current_wp_config?{config:scan.current_wp_config,dir:'Current WordPress installation'}:(sites.length===1?sites[0]:null));
     body.innerHTML=`
       <div style="padding:14px 16px;border-bottom:1px solid var(--b2);font-size:12px;color:var(--t2)">
         Choose a WordPress installation
@@ -12330,7 +12352,7 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
     if(imageCfg)return true;
     const scan=await imageScanSites();
     const sites=(scan.sites||[]).filter(s=>s.type==='wordpress');
-    const preferred=sites.find(s=>s.config===scan.current_wp_config)||(sites.length===1?sites[0]:null);
+    const preferred=sites.find(s=>s.config===scan.current_wp_config)||(scan.current_wp_config?{config:scan.current_wp_config}:(sites.length===1?sites[0]:null));
     if(!preferred){showImagePicker(scan);return false;}
     imageCfg=preferred.config;window.fmCmsConfig=imageCfg;window.fmCmsType='wordpress';return true;
   }
@@ -12403,6 +12425,11 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
           <button type="button" class="btn btn-p" id="wpImagesScan">Scan images</button>
           <button type="button" class="btn btn-g" id="wpImagesAllRestore"${replaced?'':' disabled'}>Restore all originals</button>
         </div>
+        <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px">
+          <div style="flex:1;min-width:260px"><label class="lbl">Image URL or full server path</label><input id="wpImagesReference" class="inp" placeholder="Paste https://site/.../image.jpg or /home/user/.../image.jpg"></div>
+          <label class="btn btn-p" style="cursor:pointer;white-space:nowrap">Choose replacement<input id="wpImagesManualFile" type="file" accept="image/*" style="display:none"></label>
+        </div>
+        <div style="font-size:10px;color:var(--t3);margin-top:5px">Use this when the image is not listed: copy its exact URL from the page, or paste its absolute path on the server, then choose the replacement file.</div>
         <div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin-top:8px">
           ${escText(imageData.home||'WordPress')} · ${images.length} image${images.length===1?'':'s'} found · ${replaced} replacement${replaced===1?'':'s'} active.
           ${imageData.page_found?'':' The selected page could not be fetched; dashboard and media results may still be available.'}
@@ -12420,6 +12447,11 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
     body.querySelectorAll('.wp-image-restore').forEach(button=>button.addEventListener('click',()=>restoreImage(Number(button.dataset.index))));
     body.querySelectorAll('.wp-image-recent-restore').forEach(button=>button.addEventListener('click',()=>restoreRecentImage(Number(button.dataset.recentIndex))));
     document.getElementById('wpImagesAllRestore')?.addEventListener('click',restoreAllImages);
+    document.getElementById('wpImagesManualFile')?.addEventListener('change',event=>{
+      const reference=document.getElementById('wpImagesReference')?.value.trim()||'';
+      if(!reference){toast('Paste the image URL or full server path first.');event.target.value='';return;}
+      replaceImageItem({original_url:reference,url:reference},event.target.files?.[0]);
+    });
   }
   async function replaceImage(index,file){return replaceImageItem(imageData?.images?.[index],file);}
   async function replaceRecentImage(index,file){return replaceImageItem(imageData?.recent?.[index],file);}
@@ -12427,7 +12459,7 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
     if(!item||!file)return;
     if(!file.type.startsWith('image/')){toast('Choose an image file.');return;}
     if(file.size>25*1024*1024){toast('Replacement images must be 25 MB or smaller.');return;}
-    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('image_url',item.original_url||item.url);fd.append('scope_path',imageData.page_path||'/');fd.append('replacement_image',file);
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('image_ref',item.original_url||item.url);fd.append('scope_path',imageData.page_path||'/');fd.append('replacement_image',file);
     body.querySelectorAll('input,button').forEach(el=>{el.disabled=true;});
     try{
       const result=await imagePost('?x=wp_image_replace',fd);
