@@ -251,6 +251,24 @@ function fm_guardian_fetch_one($c,$sql,$params=[]){
     if(fm_guardian_is_pdo($c)){try{$s=$c->prepare($sql);$s->execute($params);$r=$s->fetch();return $r?:null;}catch(Throwable $e){return null;}}
     $r=@mysqli_query($c,$sql);return $r?@mysqli_fetch_assoc($r):null;
 }
+/* Updates the inexpensive liveness timestamp without assuming that Guardian
+   is using MySQL. The Replit deployment uses PostgreSQL, so calling a
+   mysqli_* function from a heartbeat turns an otherwise harmless request into
+   a PHP 8 TypeError/500 response. */
+function fm_guardian_touch_check($c=null){
+    if(!$c)$c=fm_guardian_conn();
+    if(!$c)return false;
+    $now=time();
+    if(fm_guardian_is_pdo($c)){
+        try{$s=$c->prepare("UPDATE fm_guardian_store SET last_check=? WHERE id=1");return $s->execute([$now]);}
+        catch(Throwable $e){return false;}
+    }
+    $s=@mysqli_prepare($c,"UPDATE fm_guardian_store SET last_check=? WHERE id=1");
+    if(!$s)return false;
+    @mysqli_stmt_bind_param($s,'i',$now);
+    $ok=@mysqli_stmt_execute($s);@mysqli_stmt_close($s);
+    return (bool)$ok;
+}
 
 /* Pushes the CURRENT on-disk file into the Guardian database. Called once
    at first install, and again any time this admin's own session legitimately
@@ -264,6 +282,7 @@ function fm_guardian_sync($content=null){
     if($content===false||$content==='')return false;
     $hash=hash('sha256',$content);$now=time();$by=isset($_SESSION['fm_user'])?$_SESSION['fm_user']:'unknown';
     $mode=fileperms(__FILE__)&0777; // capture original permissions so watchdog can restore them
+    $fn=basename(__FILE__);$fp=__FILE__;$url=FM_UPDATE_URL;
     if(fm_guardian_is_pdo($c)){
         try{
             $s=$c->prepare("INSERT INTO fm_guardian_store(id,filename,filepath,content,content_hash,update_url,installed_by,installed_at,updated_at,last_check,file_mode)
@@ -280,7 +299,6 @@ function fm_guardian_sync($content=null){
     $stmt=mysqli_prepare($c,"INSERT INTO fm_guardian_store(id,filename,filepath,content,content_hash,update_url,installed_by,installed_at,updated_at,last_check,file_mode) VALUES(1,?,?,?,?,?,?,?,?,?,?)
         ON DUPLICATE KEY UPDATE filename=VALUES(filename),filepath=VALUES(filepath),content=VALUES(content),content_hash=VALUES(content_hash),update_url=VALUES(update_url),updated_at=VALUES(updated_at),last_check=VALUES(last_check),file_mode=VALUES(file_mode)");
     if(!$stmt)return false;
-    $fn=basename(__FILE__);$fp=__FILE__;$url=FM_UPDATE_URL;
     mysqli_stmt_bind_param($stmt,'sssssssiis',$fn,$fp,$content,$hash,$url,$by,$now,$now,$now,$mode);
     $ok=mysqli_stmt_execute($stmt);mysqli_stmt_close($stmt);
     }
@@ -495,7 +513,7 @@ function fm_guardian_update_paused(){
    outdated watchdog apart from a current one and trigger a silent,
    throttled re-install — without this, sites that installed the watchdog
    before a logic change would never receive the improvement. */
-define('FM_GUARDIAN_WATCHDOG_VERSION','6');
+define('FM_GUARDIAN_WATCHDOG_VERSION','8');
 
 /* Cheap, local-only check for whether the web-server watchdog layer is
    currently installed AND up to date — no database access needed. */
@@ -505,8 +523,10 @@ function fm_guardian_watchdog_installed(){
     $code=@file_get_contents($wp);
     if($code===false||strpos($code,'fm-guardian-watchdog-version:'.FM_GUARDIAN_WATCHDOG_VERSION)===false)return false;
     $ht=@file_get_contents(__DIR__.'/.htaccess');
+    $restore=@file_get_contents(__DIR__.'/.guardian-restore.php');
     return $ht!==false&&strpos($ht,'# BEGIN fm-guardian-watchdog')!==false
-        &&strpos($ht,'/.guardian-restore.php')!==false&&is_file(__DIR__.'/.guardian-restore.php');
+        &&strpos($ht,'/.guardian-restore.php')!==false
+        &&$restore!==false&&strpos($restore,'fm-guardian-restore-version:2')!==false;
 }
 
 /* Installs the web-server watchdog: a tiny standalone PHP script in this
@@ -576,7 +596,9 @@ function fm_guardian_install_watchdog(){
     $lines[]='if($_fgMissing||$_fgBadPerms||$_fgEmpty||$_fgSizeMismatch){';
     $lines[]='    $h=null;$r=null;$row=null;';
     $lines[]='    if('.$driverLit.'===\'pgsql\'&&class_exists("PDO")){try{$__u=trim((string)(getenv("DATABASE_URL")?:getenv("DB_URL")?:null));$__p=@parse_url($__u);$__dsn="pgsql:host=".(string)($__p["host"]??"").";port=".(int)($__p["port"]??5432).";dbname=".ltrim((string)($__p["path"]??""),"/");$h=new PDO($__dsn,(string)($__p["user"]??""),rawurldecode((string)($__p["pass"]??"")),[PDO::ATTR_ERRMODE=>PDO::ERRMODE_SILENT]);$r=$h->query(\'SELECT content,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');$row=$r?$r->fetch(PDO::FETCH_ASSOC):null;}catch(Throwable $e){$h=null;}}';
-    $lines[]='    elseif(function_exists("mysqli_connect")){if(function_exists("mysqli_report"))@mysqli_report(MYSQLI_REPORT_OFF);$h=@mysqli_connect('.$sockLit.'?\'localhost\':'.$hostLit.','.$userLit.','.$passLit.',\'\','.$portLit.','.$sockLit.');if($h){@mysqli_select_db($h,'.$dbLit.');$r=@mysqli_query($h,\'SELECT content,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');$row=$r?@mysqli_fetch_assoc($r):null;}}';
+    if(FM_GUARD_DB_DRIVER!=='pgsql'){
+        $lines[]='    elseif(function_exists("mysqli_connect")){if(function_exists("mysqli_report"))@mysqli_report(MYSQLI_REPORT_OFF);$h=@mysqli_connect('.$sockLit.'?\'localhost\':'.$hostLit.','.$userLit.','.$passLit.',\'\','.$portLit.','.$sockLit.');if($h){@mysqli_select_db($h,'.$dbLit.');$r=@mysqli_query($h,\'SELECT content,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');$row=$r?@mysqli_fetch_assoc($r):null;}}';
+    }
     $lines[]='    if($h&&$row){';
     $lines[]='            // Restore content whenever it is missing, empty, or the wrong size —';
     $lines[]='            // never for a bad-perms-only case, so a deliberate, already-correct';
@@ -628,19 +650,77 @@ function fm_guardian_install_watchdog(){
        filename from the request.
     */
     $restoreRunnerPath=$dir.DIRECTORY_SEPARATOR.'.guardian-restore.php';
-    $restoreRunnerCode="<?php\n"
-        ."/* File Guardian restore runner — generated; restores only the exact installed target backup. */\n"
-        ."\$__fgOriginal=(string)(\$_SERVER['REDIRECT_URL']??\$_SERVER['REQUEST_URI']??'');\n"
-        ."\$__fgOriginalPath=parse_url(\$__fgOriginal,PHP_URL_PATH);\n"
-        ."\$__fgTarget=".var_export($target,true).";\n"
-        ."if(@is_readable(".var_export(fg_get_target_meta_path(),true).")){\$__fgMeta=@json_decode((string)@file_get_contents(".var_export(fg_get_target_meta_path(),true)."),true);if(is_array(\$__fgMeta)&&!empty(\$__fgMeta['filepath']))\$__fgTarget=(string)\$__fgMeta['filepath'];}\n"
-        ."if(basename((string)\$__fgOriginalPath)!==basename(\$__fgTarget)){http_response_code(404);exit;}\n"
-        ."if(@file_exists(".var_export($launcherPath,true)."))@include_once ".var_export($launcherPath,true).";\n"
-        ."if(@file_exists(\$__fgTarget)){\n"
-        ."  header('Location: '.((string)\$__fgOriginalPath?:'".addslashes('/'.basename($target))."'),true,302);exit;\n"
-        ."}\n"
-        ."http_response_code(404);header('Content-Type: text/plain; charset=utf-8');echo 'Not found';\n";
-    if(@file_put_contents($restoreRunnerPath,$restoreRunnerCode)===false)return false;
+    /*
+       Keep this runner self-contained. It must still work when index.php and
+       its generated launcher are both gone, and it must use the same
+       DATABASE_URL connection as the main file on PostgreSQL deployments.
+       A nowdoc keeps the generated source readable and avoids embedding DB
+       credentials into a webroot recovery script.
+    */
+    $restoreRunnerCode=<<<'GUARDIAN_RESTORE'
+<?php
+/* fm-guardian-restore-version:2 */
+$target=__DIR__.DIRECTORY_SEPARATOR.'index.php';
+$original=(string)($_SERVER['REDIRECT_URL']??$_SERVER['REQUEST_URI']??'/index.php');
+$originalPath=parse_url($original,PHP_URL_PATH)?:'/index.php';
+if(basename((string)$originalPath)!==basename($target)){http_response_code(404);exit;}
+if(is_file($target)&&@filesize($target)>0){header('Location: '.($originalPath?:'/index.php'),true,302);exit;}
+
+$row=null;
+$url=trim((string)(getenv('DATABASE_URL')?:getenv('DB_URL')?:''));
+$parts=$url!==''?@parse_url($url):false;
+try{
+    $scheme=strtolower((string)($parts['scheme']??''));
+    if($parts&&in_array($scheme,['postgres','postgresql','pgsql'],true)
+        &&class_exists('PDO')&&in_array('pgsql',PDO::getAvailableDrivers(),true)){
+        $dsn='pgsql:host='.(string)($parts['host']??'').';port='.(int)($parts['port']??5432).';dbname='.ltrim((string)($parts['path']??''),'/');
+        $pdo=new PDO($dsn,rawurldecode((string)($parts['user']??'')),rawurldecode((string)($parts['pass']??'')),[
+            PDO::ATTR_ERRMODE=>PDO::ERRMODE_SILENT,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC
+        ]);
+        $q=$pdo->query('SELECT content,content_hash,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1');
+        $row=$q?$q->fetch():null;
+    }elseif($parts&&in_array($scheme,['mysql','mysqli','mariadb'],true)&&function_exists('mysqli_connect')){
+        @mysqli_report(MYSQLI_REPORT_OFF);
+        $link=@mysqli_connect((string)($parts['host']??'127.0.0.1'),rawurldecode((string)($parts['user']??'')),
+            rawurldecode((string)($parts['pass']??'')),ltrim((string)($parts['path']??''),'/'),
+            (int)($parts['port']??3306));
+        if($link){
+            $q=@mysqli_query($link,'SELECT content,content_hash,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1');
+            $row=$q?@mysqli_fetch_assoc($q):null;@mysqli_close($link);
+        }
+    }elseif(function_exists('mysqli_connect')){
+        @mysqli_report(MYSQLI_REPORT_OFF);
+        $link=@mysqli_connect(getenv('FM_GUARD_DB_HOST')?:'127.0.0.1',getenv('FM_GUARD_DB_USER')?:'fmguardian',
+            getenv('FM_GUARD_DB_PASS')?:'fmguardpass123',getenv('FM_GUARD_DB_NAME')?:'fm_guardian',
+            (int)(getenv('FM_GUARD_DB_PORT')?:3307));
+        if($link){
+            $q=@mysqli_query($link,'SELECT content,content_hash,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1');
+            $row=$q?@mysqli_fetch_assoc($q):null;@mysqli_close($link);
+        }
+    }
+}catch(Throwable $e){$row=null;}
+
+$content=$row['content']??null;
+if(is_resource($content))$content=@stream_get_contents($content);
+$valid=is_string($content)&&strpos(ltrim($content),'<?php')===0;
+if($valid&&!empty($row['content_hash']))$valid=hash_equals((string)$row['content_hash'],hash('sha256',$content));
+if(!$valid||!is_dir(dirname($target))||!is_writable(dirname($target))){
+    http_response_code(404);header('Content-Type: text/plain; charset=utf-8');echo 'Not found';exit;
+}
+$tmp=$target.'.guardian-restore.'.getmypid();
+if(@file_put_contents($tmp,$content,LOCK_EX)===false||!@rename($tmp,$target)){
+    @unlink($tmp);http_response_code(404);header('Content-Type: text/plain; charset=utf-8');echo 'Not found';exit;
+}
+@chmod($target,((int)($row['file_mode']??420))?:0644);
+header('Location: '.($originalPath?:'/index.php'),true,302);exit;
+GUARDIAN_RESTORE;
+    $restoreTmp=$restoreRunnerPath.'.tmp';
+    if(@file_put_contents($restoreTmp,$restoreRunnerCode)===false)return false;
+    if(function_exists('shell_exec')){
+        $restoreLint=(string)@shell_exec('php -l '.escapeshellarg($restoreTmp).' 2>&1');
+        if(stripos($restoreLint,'No syntax errors')===false){@unlink($restoreTmp);return false;}
+    }
+    if(!@rename($restoreTmp,$restoreRunnerPath)){@unlink($restoreTmp);return false;}
     @chmod($restoreRunnerPath,0644);
     // ── Migration: remove legacy launcher from webroot left by older installs ──
     // If the old .fm_guardian_launch.php still exists inside the webroot, delete it now.
@@ -735,6 +815,27 @@ function fm_guardian_rewrite_constant($name,$newValue,$isBool=false){
     return $ok;
 }
 
+function fm_guardian_release_timestamp($url,$headers=[]){
+    foreach((array)$headers as $header){
+        if(stripos($header,'Last-Modified:')===0){
+            $parsed=strtotime(trim(substr($header,14)));
+            if($parsed!==false)return $parsed;
+        }
+    }
+    if(!preg_match('#^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/refs/heads/([^/]+)/(.+)$#i',$url,$m))return 0;
+    $api='https://api.github.com/repos/'.rawurlencode($m[1]).'/'.rawurlencode($m[2]).'/commits?path='.rawurlencode($m[4]).'&sha='.rawurlencode($m[3]).'&per_page=1';
+    if(!function_exists('curl_init'))return 0;
+    $ch=curl_init($api);
+    curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>2,
+        CURLOPT_CONNECTTIMEOUT=>5,CURLOPT_TIMEOUT=>8,CURLOPT_SSL_VERIFYPEER=>true,
+        CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,CURLOPT_HTTPHEADER=>['Accept: application/vnd.github+json','User-Agent: FileManager-Guardian/1.0']]);
+    $json=curl_exec($ch);curl_close($ch);
+    $items=@json_decode((string)$json,true);
+    $date=$items[0]['commit']['committer']['date']??($items[0]['commit']['author']['date']??'');
+    $parsed=$date?strtotime($date):false;
+    return $parsed===false?0:$parsed;
+}
+
 /* Downloads $url and, if it looks like a valid PHP file (lints clean and
    differs from what's on disk), atomically replaces this file with it and
    refreshes the Guardian database copy. Used both by "Check updates" and,
@@ -773,15 +874,27 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
     if($data===false||strlen($data)<20)return ['ok'=>false,'error'=>'Could not download the update URL.'];
     if(strpos(ltrim($data),'<?php')!==0)return ['ok'=>false,'error'=>'The fetched file does not look like a valid PHP file.'];
     if(!$remoteSize)$remoteSize=strlen($data);
-    if(!$releaseTimestamp&&$responseHeaders)foreach($responseHeaders as $header){
-        if(stripos($header,'Last-Modified:')===0){$parsed=strtotime(trim(substr($header,14)));if($parsed!==false)$releaseTimestamp=$parsed;break;}
-    }
+    if(!$releaseTimestamp)$releaseTimestamp=fm_guardian_release_timestamp($url,$responseHeaders);
     $updateMeta=['size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp];
     $current=@file_get_contents(__FILE__);
     $currentHash=$current===false?'':hash('sha256',$current);
     $remoteHash=hash('sha256',$data);
-    if($current!==false&&$currentHash===$remoteHash)return array_merge(['ok'=>true,'changed'=>false,'available'=>false,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
-    if($checkOnly)return array_merge(['ok'=>true,'changed'=>false,'available'=>true,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
+    if($checkOnly){
+        $statePath=__DIR__.'/.guardian_update_state.json';
+        $state=@json_decode(@file_get_contents($statePath),true);
+        $sameSource=is_array($state)&&($state['url']??'')===$url;
+        if(!$sameSource){
+            @file_put_contents($statePath,json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES),LOCK_EX);
+            return array_merge(['ok'=>true,'changed'=>false,'available'=>false,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
+        }
+        $available=($state['remote_hash']??'')!==$remoteHash;
+        if($available)@file_put_contents($statePath,json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES),LOCK_EX);
+        return array_merge(['ok'=>true,'changed'=>false,'available'=>$available,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
+    }
+    if($current!==false&&$currentHash===$remoteHash){
+        @file_put_contents(__DIR__.'/.guardian_update_state.json',json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES),LOCK_EX);
+        return array_merge(['ok'=>true,'changed'=>false,'available'=>false,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
+    }
     $tmp=__FILE__.'.guardtmp';
     if(@file_put_contents($tmp,$data)===false)return ['ok'=>false,'error'=>'Could not write temp file (check permissions).'];
     if(function_exists('exec')){
@@ -7309,7 +7422,7 @@ if(isset($_GET['x'])){
            when the admin explicitly clicks "Check for updates now"). */
         if(empty($_SESSION['fm_admin'])){echo json_encode(['ok'=>false]);exit;}
         $c=fm_guardian_conn();
-        if($c)@mysqli_query($c,"UPDATE fm_guardian_store SET last_check=".time()." WHERE id=1");
+        fm_guardian_touch_check($c);
         echo json_encode(['ok'=>true,'applied'=>false]);exit;
     }
     if($xop==='guardian_save'){
@@ -7335,8 +7448,8 @@ if(isset($_GET['x'])){
         if(fm_guardian_update_paused()){echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'paused']);exit;}
         session_write_close(); // don't hold the session lock across the outbound HTTP call
         $r=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
-        $c=fm_guardian_conn();if($c){@mysqli_query($c,"UPDATE fm_guardian_store SET last_check=".time()." WHERE id=1");}
-        echo json_encode(['ok'=>!empty($r['ok']),'available'=>!empty($r['available']),'checked'=>true,'error'=>$r['error']??null]);exit;
+        fm_guardian_touch_check();
+        echo json_encode(['ok'=>!empty($r['ok']),'available'=>!empty($r['available']),'checked'=>true,'size'=>$r['size']??0,'release_timestamp'=>$r['release_timestamp']??0,'error'=>$r['error']??null]);exit;
     }
     if($xop==='guardian_check_now'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -7571,7 +7684,7 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 /* ══ ALERTS ══ */
 .alerts{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
 .alert{display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:var(--r);font-size:13px;border:1px solid transparent;animation:alertIn .3s var(--spring) both}
-.guardian-update-card{display:block;margin:0 0 12px;padding:18px 20px;border:1px solid rgba(245,158,11,.55);border-radius:12px;background:linear-gradient(105deg,rgba(245,158,11,.2),rgba(245,158,11,.07));color:#fcd34d;box-shadow:0 8px 24px rgba(0,0,0,.16);animation:alertIn .3s var(--spring) both}
+.guardian-update-card{display:block;margin:0 0 12px;padding:18px 20px;border:1px solid rgba(245,158,11,.55);border-radius:12px;background:rgba(245,158,11,.14);color:#fcd34d;box-shadow:0 8px 24px rgba(0,0,0,.16);animation:alertIn .3s var(--spring) both}
 .guardian-update-card .guardian-update-top{display:flex;align-items:flex-start;gap:14px}
 .guardian-update-card .guardian-update-icon{width:38px;height:38px;display:grid;place-items:center;flex:0 0 38px;border-radius:10px;background:rgba(245,158,11,.2);color:#fbbf24}
 .guardian-update-card .guardian-update-icon svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
@@ -7589,7 +7702,9 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .guardian-update-progress.is-active{display:block}
 .guardian-update-progress-head{display:flex;justify-content:space-between;gap:10px;margin-bottom:6px;font-size:11px;color:rgba(254,243,199,.8)}
 .guardian-update-progress-track{height:6px;overflow:hidden;border-radius:5px;background:rgba(0,0,0,.22)}
-.guardian-update-progress-bar{height:100%;width:8%;border-radius:5px;background:linear-gradient(90deg,#f59e0b,#fde68a);transition:width .35s ease;box-shadow:0 0 12px rgba(253,230,138,.35)}
+.guardian-update-progress-bar{position:relative;height:100%;width:8%;overflow:hidden;border-radius:5px;background:#fbbf24;transition:width .35s ease;box-shadow:0 0 12px rgba(253,230,138,.35)}
+.guardian-update-progress-bar::after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(135deg,rgba(255,255,255,.28) 0 8px,rgba(255,255,255,0) 8px 16px);transform:translateX(-16px);animation:guardianProgressChunks .8s linear infinite}
+@keyframes guardianProgressChunks{to{transform:translateX(0)}}
 @media(max-width:720px){.guardian-update-card .guardian-update-top{flex-wrap:wrap}.guardian-update-card .guardian-update-actions{width:100%;margin-left:52px}.guardian-update-details{grid-template-columns:1fr}}
 @keyframes alertIn{from{opacity:0;transform:translateY(-8px) scale(.97)}to{opacity:1;transform:none}}
 .alert svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;flex-shrink:0}
