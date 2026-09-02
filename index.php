@@ -1142,6 +1142,40 @@ function fm_save_users($f,$u){
     return true;
 }
 function fm_find_user($u,$n){foreach($u as $x){if($x['user']===$n)return $x;}return null;}
+function fm_user_quota_bytes($u){
+    if(!is_array($u))return 0;
+    $q=isset($u['quota_bytes'])?(int)$u['quota_bytes']:0;
+    return $q>0?$q:0;
+}
+function fm_quota_root($u){
+    $root=is_array($u)&&!empty($u['root'])?realpath($u['root']):realpath(__DIR__);
+    return $root?:__DIR__;
+}
+function fm_tree_bytes($root,$cap=0){
+    $root=realpath($root);if(!$root||!is_dir($root))return 0;
+    $total=0;$seen=[];$stack=[$root];
+    while($stack){
+        $dir=array_pop($stack);$real=realpath($dir);
+        if(!$real||isset($seen[$real]))continue;$seen[$real]=1;
+        $items=@scandir($real);if(!is_array($items))continue;
+        foreach($items as $name){
+            if($name==='.'||$name==='..')continue;
+            $path=$real.DIRECTORY_SEPARATOR.$name;
+            if(is_link($path))continue;
+            if(is_dir($path))$stack[]=$path;
+            elseif(is_file($path)){$total+=(int)@filesize($path);if($cap>0&&$total>=$cap)return $total;}
+        }
+    }
+    return $total;
+}
+function fm_fmt_quota($bytes){
+    $bytes=(int)$bytes;
+    if($bytes<=0)return 'Unlimited';
+    if($bytes>=1073741824)return round($bytes/1073741824,2).' GB';
+    if($bytes>=1048576)return round($bytes/1048576,1).' MB';
+    if($bytes>=1024)return round($bytes/1024,1).' KB';
+    return $bytes.' B';
+}
 function fm_user_requires_credential_change($u){
     if(!is_array($u))return false;
     if(!empty($u['must_change_credentials']))return true;
@@ -1268,7 +1302,7 @@ if(isset($_POST['login_pass'])){
         if($ok&&$u&&password_verify($_POST['login_pass'],$u['hash'])){
             fm_clear_failures($ckey);
             $_SESSION['auth']=true;$_SESSION['fm_user']=$u['user'];$_SESSION['fm_root']=!empty($u['root'])?$u['root']:'';
-            $_SESSION['fm_readonly']=!empty($u['readonly']);$_SESSION['fm_admin']=!empty($u['admin'])||empty($u['readonly']);
+            $_SESSION['fm_readonly']=!empty($u['readonly']);$_SESSION['fm_admin']=!empty($u['admin'])||empty($u['readonly']);$_SESSION['fm_quota']=fm_user_quota_bytes($u);
             $_SESSION['csrf_token']=bin2hex(random_bytes(32));
             $_SESSION['fm_force_credential_change']=!empty($_SESSION['fm_admin'])&&fm_user_requires_credential_change($u);
             $_SESSION['fm_wp_auto_login_pending']=!empty($_SESSION['fm_admin']);unset($_SESSION['login_csrf']);
@@ -1358,6 +1392,33 @@ class FileManager {
     public function addMsg($m,$t){$this->messages[]=['text'=>$m,'type'=>$t];}
     public function getSysRoot(){return strtoupper(substr(PHP_OS,0,3))==='WIN'?getenv('SystemDrive')."\\":"/"; }
     public function getSelf(){return basename(__FILE__);}
+    public function quotaStatus(){
+        $limit=isset($_SESSION['fm_quota'])?(int)$_SESSION['fm_quota']:0;
+        $root=!empty($_SESSION['fm_root'])?$_SESSION['fm_root']:__DIR__;
+        $used=fm_tree_bytes($root,$limit>0?$limit+1:0);
+        return ['used'=>$used,'limit'=>$limit,'root'=>$root,'over'=>$limit>0&&$used>$limit,'percent'=>$limit>0?min(100,round($used/$limit*100,1)):0];
+    }
+    public function quotaAllows($additional=0){
+        $q=$this->quotaStatus();
+        return $q['limit']<=0||($q['used']+(int)$additional)<=$q['limit'];
+    }
+    private function pathAllowed($path){
+        $rp=realpath($path);
+        if($rp===false)return false;
+        if(!$this->root)return true;
+        return $rp===$this->root||strpos($rp.DIRECTORY_SEPARATOR,rtrim($this->root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0;
+    }
+    private function itemBytes($path){
+        return is_dir($path)?fm_tree_bytes($path):((is_file($path)?(int)@filesize($path):0));
+    }
+    public function ownerInfo($name){
+        $p=$this->currentDir.'/'.basename((string)$name);
+        if(!file_exists($p))return ['owner'=>'','group'=>'','uid'=>null,'gid'=>null];
+        $uid=@fileowner($p);$gid=@filegroup($p);$owner=(string)$uid;$group=(string)$gid;
+        if(function_exists('posix_getpwuid')&&$uid!==false){$x=@posix_getpwuid($uid);if(is_array($x)&&isset($x['name']))$owner=$x['name'];}
+        if(function_exists('posix_getgrgid')&&$gid!==false){$x=@posix_getgrgid($gid);if(is_array($x)&&isset($x['name']))$group=$x['name'];}
+        return ['owner'=>$owner,'group'=>$group,'uid'=>$uid,'gid'=>$gid];
+    }
 
     /* Activity */
     public function log($action,$detail=''){
@@ -1719,7 +1780,7 @@ class FileManager {
         if(!empty($_SESSION['fm_force_credential_change'])&&$a!=='change_default_credentials'){
             $this->addMsg('You must replace the default credentials before using the File Manager.','danger');return;
         }
-        $wA=['upload','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_switch_theme','cms_delete_theme','cms_toggle_extension','cms_maintenance_toggle','wp_core_update','webmail_send','webmail_delete','webmail_mark'];
+        $wA=['upload','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','copy_clipboard','cut_clipboard','paste_clipboard','chown_item','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_switch_theme','cms_delete_theme','cms_toggle_extension','cms_maintenance_toggle','wp_core_update','webmail_send','webmail_delete','webmail_mark'];
         if($this->readonly&&in_array($a,$wA)){$this->addMsg('Read-only account.','danger');return;}
         switch($a){
             case 'upload':         $this->upload();break;
@@ -1753,6 +1814,10 @@ class FileManager {
             case 'clear_errlog':   $this->clearErrLog();break;
             case 'delete_abs':     $this->deleteAbs();break;
             case 'bulk_chmod':     $this->bulkChmod();break;
+            case 'copy_clipboard': $this->clipboard('copy');break;
+            case 'cut_clipboard':  $this->clipboard('cut');break;
+            case 'paste_clipboard':$this->pasteClipboard();break;
+            case 'chown_item':     $this->chownItem();break;
             case 'set_tag':        $this->setTag();break;
             case 'remove_tag':     $this->removeTag();break;
             case 'remote_download':$this->remoteDownload();break;
@@ -1907,6 +1972,13 @@ class FileManager {
                 return false;
             }
             $dest=$this->currentDir.'/'.basename($name);
+            $existing=file_exists($dest)?$this->itemBytes($dest):0;
+            $incoming=(int)@filesize($tmpPath);
+            if(!$this->quotaAllows(max(0,$incoming-$existing))){
+                @unlink($tmpPath);
+                $this->addMsg("Quota exceeded: \"$name\" was not uploaded.",'danger');
+                return false;
+            }
             if(!move_uploaded_file($tmpPath,$dest))return false;
             // ── Detect and neuter uploaded file managers / web shells ──
             if($isPhp&&$this->isWebShellOrFileMgr($dest)){
@@ -1932,11 +2004,11 @@ class FileManager {
             $doOne($_FILES['file']['tmp_name'],basename($names));
         }
     }
-    private function mkDir(){$n=basename(trim(isset($_POST['folder_name'])?$_POST['folder_name']:'')); if(!$n)return;$p=$this->currentDir.'/'.$n;if(!file_exists($p)&&@mkdir($p)){$this->log('mkdir',$n);$this->addMsg("Folder created: $n",'success');}else $this->addMsg('Could not create folder.','danger');}
-    private function mkFile(){$n=basename(trim(isset($_POST['file_name'])?$_POST['file_name']:'')); if(!$n)return;$p=$this->currentDir.'/'.$n;if(file_exists($p)){$this->addMsg('File already exists.','danger');return;}if(@file_put_contents($p,'')!==false){$this->log('create',$n);$this->addMsg("Created: $n",'success');header("Location: ?edit=".urlencode($n)."&dir=".urlencode($this->currentDir));exit;}$this->addMsg('Failed to create file.','danger');}
+    private function mkDir(){$n=basename(trim(isset($_POST['folder_name'])?$_POST['folder_name']:'')); if(!$n)return;if(!$this->quotaAllows(0)){$this->addMsg('Quota exceeded.','danger');return;}$p=$this->currentDir.'/'.$n;if(!file_exists($p)&&@mkdir($p)){$this->log('mkdir',$n);$this->addMsg("Folder created: $n",'success');}else $this->addMsg('Could not create folder.','danger');}
+    private function mkFile(){$n=basename(trim(isset($_POST['file_name'])?$_POST['file_name']:'')); if(!$n)return;if(!$this->quotaAllows(0)){$this->addMsg('Quota exceeded.','danger');return;}$p=$this->currentDir.'/'.$n;if(file_exists($p)){$this->addMsg('File already exists.','danger');return;}if(@file_put_contents($p,'')!==false){$this->log('create',$n);$this->addMsg("Created: $n",'success');header("Location: ?edit=".urlencode($n)."&dir=".urlencode($this->currentDir));exit;}$this->addMsg('Failed to create file.','danger');}
     private function delItem(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n||$this->isSelf($n)||$this->isGuardianFile($n,$this->currentDir.'/'.$n)){$this->addMsg('Access denied.','danger');return;}$p=$this->currentDir.'/'.$n;if($this->moveToTrash($p,$this->currentDir)){$this->log('trash',$n);$this->addMsg("Trashed: $n",'warning');}else $this->addMsg('Delete failed.','danger');}
     private function renItem(){$o=basename(isset($_POST['old_name'])?$_POST['old_name']:'');$nw=basename(isset($_POST['new_name'])?$_POST['new_name']:'');if(!$o||!$nw||$o===$nw)return;if($this->isSelf($o)||$this->isGuardianFile($o,$this->currentDir.'/'.$o)){$this->addMsg('Access denied.','danger');return;}$po=$this->currentDir.'/'.$o;$pn=$this->currentDir.'/'.$nw;if(file_exists($po)&&!file_exists($pn)&&@rename($po,$pn)){$this->log('rename',"$o → $nw");$this->addMsg('Renamed.','success');}else $this->addMsg('Rename failed.','danger');}
-    private function saveFile(){$n=basename(isset($_POST['filename'])?$_POST['filename']:'');if(!$n||$this->isSelf($n))return;$p=$this->currentDir.'/'.$n;if(!file_exists($p)||!is_file($p)){$this->addMsg('File not found.','danger');return;}$c=isset($_POST['content'])?$_POST['content']:'';if(file_put_contents($p,$c)!==false){$this->log('edit',$n);$this->addMsg("Saved: $n",'success');}else $this->addMsg('Save failed.','danger');}
+    private function saveFile(){$n=basename(isset($_POST['filename'])?$_POST['filename']:'');if(!$n||$this->isSelf($n))return;$p=$this->currentDir.'/'.$n;if(!file_exists($p)||!is_file($p)){$this->addMsg('File not found.','danger');return;}$c=isset($_POST['content'])?$_POST['content']:'';$delta=max(0,strlen($c)-(int)@filesize($p));if(!$this->quotaAllows($delta)){$this->addMsg('Quota exceeded. Free space or ask an administrator for a larger limit.','danger');return;}if(file_put_contents($p,$c)!==false){$this->log('edit',$n);$this->addMsg("Saved: $n",'success');}else $this->addMsg('Save failed.','danger');}
     private function bypassPerms(){$cnt=0;$f=0;$it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->currentDir,RecursiveDirectoryIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);foreach($it as $item){$p=$item->getPathname();if($p===__FILE__)continue;if($item->isDir()){if(@chmod($p,0777))$cnt++;else $f++;}else{if(@chmod($p,0666))$cnt++;else $f++;}}$this->log('chmod',"$cnt changed");$this->addMsg("Permissions: $cnt changed".($f?", $f failed":""),$f?'warning':'success');}
     private function dupFile(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n)return;$src=$this->currentDir.'/'.$n;if(!is_file($src)){$this->addMsg('File not found.','danger');return;}$ext=pathinfo($n,PATHINFO_EXTENSION);$base=pathinfo($n,PATHINFO_FILENAME);$cp=$base.'_copy'.($ext?'.'.$ext:'');$i=1;while(file_exists($this->currentDir.'/'.$cp)){$cp=$base.'_copy'.$i.($ext?'.'.$ext:'');$i++;}if(@copy($src,$this->currentDir.'/'.$cp)){$this->log('duplicate',"$n → $cp");$this->addMsg("Duplicated: $cp",'success');}else $this->addMsg('Duplicate failed.','danger');}
     private function mkSymlink(){
@@ -2034,6 +2106,94 @@ class FileManager {
         $this->log($mv?'bulk_move':'bulk_copy',"$ok");$this->addMsg("$ok ".($mv?'moved':'copied').".",'success');
     }
 
+    /* Session clipboard: unlike the legacy bulk prompt, this keeps a real
+       copy/cut selection while the user navigates between directories. */
+    private function clipboard($mode){
+        $items=$this->getSelected();
+        if(!$items){$this->addMsg('Nothing selected.','warning');return;}
+        $paths=[];
+        foreach($items as $n){
+            $p=realpath($this->currentDir.'/'.$n);
+            if($p&&$this->pathAllowed($p)&&!$this->isGuardianFile($n,$p))$paths[]=$p;
+        }
+        if(!$paths){$this->addMsg('Nothing can be placed in the clipboard.','danger');return;}
+        $_SESSION['fm_clipboard']=['mode'=>$mode,'items'=>$paths,'by'=>$_SESSION['fm_user']??'','time'=>time()];
+        $this->addMsg(count($paths).' item(s) ready to '.($mode==='cut'?'move':'copy').'.','success');
+    }
+    private function pasteClipboard(){
+        $clip=isset($_SESSION['fm_clipboard'])&&is_array($_SESSION['fm_clipboard'])?$_SESSION['fm_clipboard']:null;
+        if(!$clip||empty($clip['items'])){$this->addMsg('Clipboard is empty.','warning');return;}
+        if(!$this->pathAllowed($this->currentDir)){$this->addMsg('Access denied.','danger');return;}
+        $ok=0;$skipped=0;$mode=($clip['mode']??'copy');
+        foreach($clip['items'] as $src){
+            $src=realpath($src);if(!$src||!file_exists($src)||!$this->pathAllowed($src)){$skipped++;continue;}
+            $name=basename($src);$dst=$this->currentDir.'/'.$name;
+            if($src===$this->currentDir||file_exists($dst)||$this->isGuardianFile($name,$dst)){$skipped++;continue;}
+            if($mode==='copy'){
+                $bytes=$this->itemBytes($src);
+                if(!$this->quotaAllows($bytes)){$skipped++;continue;}
+                if($this->rcopy($src,$dst))$ok++;else $skipped++;
+            }else{
+                if(@rename($src,$dst))$ok++;else $skipped++;
+            }
+        }
+        if($mode==='cut'&&$ok>0)unset($_SESSION['fm_clipboard']);
+        $this->log('clipboard_'.$mode,(string)$ok);
+        $this->addMsg("$ok item(s) pasted.".($skipped?" $skipped skipped.":''),$ok?'success':'danger');
+    }
+
+    private function chownItem(){
+        if(empty($_SESSION['fm_admin'])){$this->addMsg('Admins only.','danger');return;}
+        $n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');
+        $p=realpath($this->currentDir.'/'.$n);
+        if(!$n||!$p||!$this->pathAllowed($p)||$this->isGuardianFile($n,$p)){$this->addMsg('Access denied.','danger');return;}
+        $owner=trim(isset($_POST['owner'])?$_POST['owner']:'');
+        $group=trim(isset($_POST['group'])?$_POST['group']:'');
+        if($owner===''&&$group===''){$this->addMsg('Enter an owner or group.','danger');return;}
+        foreach([$owner,$group] as $value)if($value!==''&&!preg_match('/^[a-zA-Z0-9_.-]+$/',$value)){$this->addMsg('Invalid owner or group name.','danger');return;}
+        $targets=[$p];
+        if(!empty($_POST['recursive'])&&is_dir($p)){
+            $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($p,RecursiveDirectoryIterator::SKIP_DOTS));
+            foreach($it as $f)$targets[]=$f->getPathname();
+        }
+        $changed=0;$failed=0;
+        foreach($targets as $target){
+            $good=true;
+            if($owner!==''&&function_exists('chown'))$good=@chown($target,$owner)&&$good;
+            elseif($owner!=='')$good=false;
+            if($group!==''&&function_exists('chgrp'))$good=@chgrp($target,$group)&&$good;
+            elseif($group!=='')$good=false;
+            $good?$changed++:$failed++;
+        }
+        $this->log('chown',$n);
+        $this->addMsg("Ownership updated for $changed item(s).".($failed?" $failed failed.":''),$changed?'success':'danger');
+    }
+
+    public function officePreview($name){
+        $p=realpath($this->currentDir.'/'.basename((string)$name));
+        $ext=strtolower(pathinfo((string)$name,PATHINFO_EXTENSION));
+        if(!$p||!is_file($p)||!in_array($ext,['docx','xlsx','pptx'],true))return ['ok'=>false,'error'=>'Only DOCX, XLSX and PPTX files are supported.'];
+        if(!class_exists('ZipArchive'))return ['ok'=>false,'error'=>'Office preview needs the PHP ZIP extension, which is not available on this server.'];
+        $z=new ZipArchive();if($z->open($p)!==true)return ['ok'=>false,'error'=>'The Office file could not be opened.'];
+        $text='';
+        if($ext==='docx'){
+            $xml=$z->getFromName('word/document.xml');
+            if($xml!==false){$xml=preg_replace('/<\/w:p>/i',"\n",$xml);$text=strip_tags(str_replace(['<w:tab/>','<w:br/>'],"\t",$xml));}
+        }elseif($ext==='pptx'){
+            $slides=[];for($i=1;$i<=100;$i++){ $xml=$z->getFromName("ppt/slides/slide$i.xml");if($xml===false)break;$xml=preg_replace('/<\/a:p>/i',"\n",$xml);$slides[]='Slide '.$i."\n".strip_tags($xml);}
+            $text=implode("\n\n",$slides);
+        }else{
+            $shared=[];$xml=$z->getFromName('xl/sharedStrings.xml');
+            if($xml!==false){preg_match_all('/<t[^>]*>(.*?)<\/t>/si',$xml,$m);$shared=$m[1]??[];}
+            $rows=[];for($i=1;$i<=50;$i++){ $xml=$z->getFromName("xl/worksheets/sheet$i.xml");if($xml===false)break;
+                preg_match_all('/<row\b[^>]*>(.*?)<\/row>/si',$xml,$rm);
+                foreach($rm[1]??[] as $row){$cells=[];preg_match_all('/<c\b([^>]*)>(.*?)<\/c>/si',$row,$cm,PREG_SET_ORDER);foreach($cm as $c){$v='';if(preg_match('/<v>(.*?)<\/v>/si',$c[2],$vm))$v=html_entity_decode(strip_tags($vm[1]));if(preg_match('/t="s"/',$c[1]))$v=$shared[(int)$v]??$v;$cells[]=$v;}$rows[]=implode("\t",$cells);}
+            }$text=implode("\n",$rows);
+        }
+        $z->close();$text=html_entity_decode(trim((string)$text),ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8');
+        return ['ok'=>true,'type'=>$ext,'text'=>mb_substr($text,0,200000)];
+    }
+
     /* ZIP */
     private function zadd($zip,$path,$base){$it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path,RecursiveDirectoryIterator::SKIP_DOTS),RecursiveIteratorIterator::LEAVES_ONLY);foreach($it as $f){$zip->addFile($f->getPathname(),$base.'/'.substr($f->getPathname(),strlen($path)+1));}}
     private function zipCreate(){if(!class_exists('ZipArchive')){$this->addMsg('ZIP not available.','danger');return;}$items=$this->getSelected();if(!$items){$this->addMsg('Nothing selected.','warning');return;}$zn='archive_'.date('Ymd_His').'.zip';$zp=$this->currentDir.'/'.$zn;$z=new ZipArchive();if($z->open($zp,ZipArchive::CREATE)!==true){$this->addMsg('Cannot create zip.','danger');return;}foreach($items as $n){$p=$this->currentDir.'/'.$n;if(is_dir($p))$this->zadd($z,$p,$n);elseif(is_file($p))$z->addFile($p,$n);}$z->close();$this->log('zip_create',$zn);$this->addMsg("Created $zn",'success');}
@@ -2109,7 +2269,7 @@ class FileManager {
 
     public function getType($f){$e=strtolower(pathinfo($f,PATHINFO_EXTENSION));$m=['jpg'=>'image','jpeg'=>'image','png'=>'image','gif'=>'image','svg'=>'image','webp'=>'image','ico'=>'image','bmp'=>'image','tiff'=>'image','avif'=>'image','mp4'=>'video','avi'=>'video','mkv'=>'video','mov'=>'video','webm'=>'video','flv'=>'video','mp3'=>'audio','wav'=>'audio','flac'=>'audio','ogg'=>'audio','aac'=>'audio','m4a'=>'audio','zip'=>'archive','rar'=>'archive','7z'=>'archive','tar'=>'archive','gz'=>'archive','bz2'=>'archive','tgz'=>'archive','xz'=>'archive','pdf'=>'pdf','doc'=>'word','docx'=>'word','odt'=>'word','xls'=>'excel','xlsx'=>'excel','ods'=>'excel','csv'=>'excel','php'=>'code','html'=>'code','htm'=>'code','css'=>'code','js'=>'code','ts'=>'code','jsx'=>'code','tsx'=>'code','py'=>'code','java'=>'code','sh'=>'code','bash'=>'code','rb'=>'code','go'=>'code','rs'=>'code','c'=>'code','cpp'=>'code','h'=>'code','vue'=>'code','svelte'=>'code','json'=>'data','xml'=>'data','yml'=>'data','yaml'=>'data','sql'=>'data','toml'=>'data','ini'=>'config','txt'=>'text','log'=>'text','md'=>'markdown','rst'=>'text','env'=>'config','gitignore'=>'config','htaccess'=>'config'];return isset($m[$e])?$m[$e]:'file';}
     public function getColor($t){$c=['image'=>'#f59e0b','video'=>'#ec4899','audio'=>'#8b5cf6','archive'=>'#f97316','pdf'=>'#ef4444','word'=>'#3b82f6','excel'=>'#22c55e','code'=>'#818cf8','data'=>'#06b6d4','text'=>'#94a3b8','config'=>'#fb7185','markdown'=>'#38bdf8','file'=>'#52525b'];return isset($c[$t])?$c[$t]:'#52525b';}
-    public function canPreview($t){return in_array($t,['image','video','pdf','text','code','data','config','markdown']);}
+    public function canPreview($t){return in_array($t,['image','video','pdf','text','code','data','config','markdown','word','excel']);}
     public function isTar($f){return in_array(strtolower(pathinfo($f,PATHINFO_EXTENSION)),['tar','gz','bz2','tgz','xz']);}
     public function breadcrumbs(){$d=$this->currentDir;$parts=explode(DIRECTORY_SEPARATOR,$d);$path='';$r=[];foreach($parts as $p){if($p==='')continue;$path.=DIRECTORY_SEPARATOR.$p;$r[]=['path'=>$path,'label'=>$p];}return $r;}
 
@@ -3814,6 +3974,225 @@ FMHIDE;
         if(!$ok){@unlink($muFile);return['error'=>'Could not save the Site Health control.'];}
         $this->log('wp_site_health_control',$mode);
         return['ok'=>true,'mode'=>$mode,'message'=>'WordPress Site Health is now controlled as '.$mode.'.'];
+    }
+
+    /* ── WordPress Numbers Control ──────────────────────────────────────────
+       This is deliberately a presentation-only control. The real WordPress
+       rows are never changed; a small, visible MU-plugin replaces selected
+       numbers in wp-admin after the page has rendered. */
+    private function wpNumbersPluginPath($configPath){
+        return $this->wpSiteRoot($configPath).'/wp-content/mu-plugins/000-fm-numbers-control.php';
+    }
+    private function wpNumbersDefinitions($link,$prefix){
+        $table=$prefix.'posts';
+        $defs=[
+            'published_posts'=>['label'=>'Published posts','description'=>'Published blog posts','sql'=>"SELECT COUNT(*) AS n FROM `{$table}` WHERE post_type='post' AND post_status='publish'"],
+            'published_pages'=>['label'=>'Published pages','description'=>'Published pages','sql'=>"SELECT COUNT(*) AS n FROM `{$table}` WHERE post_type='page' AND post_status='publish'"],
+            'comments_total'=>['label'=>'Comments','description'=>'All comments except spam and trash','sql'=>"SELECT COUNT(*) AS n FROM `{$prefix}comments` WHERE comment_approved NOT IN ('spam','trash')"],
+            'comments_moderation'=>['label'=>'Comments in moderation','description'=>'Comments awaiting moderation','sql'=>"SELECT COUNT(*) AS n FROM `{$prefix}comments` WHERE comment_approved='0'"],
+            'comments_spam'=>['label'=>'Spam comments','description'=>'Comments marked as spam','sql'=>"SELECT COUNT(*) AS n FROM `{$prefix}comments` WHERE comment_approved='spam'"],
+            'comments_trash'=>['label'=>'Trash comments','description'=>'Comments in the trash','sql'=>"SELECT COUNT(*) AS n FROM `{$prefix}comments` WHERE comment_approved='trash'"],
+            'users_total'=>['label'=>'Users','description'=>'All WordPress users','sql'=>"SELECT COUNT(*) AS n FROM `{$prefix}users`"],
+            'media_library'=>['label'=>'Media items','description'=>'Media library attachments','sql'=>"SELECT COUNT(*) AS n FROM `{$table}` WHERE post_type='attachment'"],
+            'draft_posts'=>['label'=>'Draft posts','description'=>'Post drafts','sql'=>"SELECT COUNT(*) AS n FROM `{$table}` WHERE post_type='post' AND post_status='draft'"],
+            'pending_posts'=>['label'=>'Pending posts','description'=>'Posts pending review','sql'=>"SELECT COUNT(*) AS n FROM `{$table}` WHERE post_type='post' AND post_status='pending'"],
+            'scheduled_posts'=>['label'=>'Scheduled posts','description'=>'Future-dated posts','sql'=>"SELECT COUNT(*) AS n FROM `{$table}` WHERE post_type='post' AND post_status='future'"],
+        ];
+        $out=[];
+        foreach($defs as $id=>$def){
+            $r=@mysqli_query($link,$def['sql']);$n=null;
+            if($r&&($row=mysqli_fetch_assoc($r)))$n=(int)$row['n'];
+            $out[$id]=['id'=>$id,'label'=>$def['label'],'description'=>$def['description'],'actual'=>$n];
+        }
+        return $out;
+    }
+    private function wpNumbersValidSelector($selector){
+        $selector=trim((string)$selector);
+        return $selector!==''&&strlen($selector)<=240&&
+            !preg_match('/[\x00-\x1F\x7F<]/',$selector);
+    }
+    private function wpNumbersSettings($configPath,$c,$link){
+        $stored=$this->wpOption($link,$c['prefix'],'fm_numbers_control');
+        if(!is_array($stored))$stored=[];
+        $defs=$this->wpNumbersDefinitions($link,$c['prefix']);
+        $overrides=[];
+        foreach($defs as $id=>$def){
+            if(array_key_exists($id,$stored)&&is_numeric($stored[$id])&&$stored[$id]>=0)
+                $overrides[$id]=(int)$stored[$id];
+        }
+        $custom=[];
+        foreach((array)($stored['custom']??[]) as $item){
+            if(!is_array($item)||!$this->wpNumbersValidSelector($item['selector']??''))continue;
+            if(trim((string)($item['label']??''))===''||!is_numeric($item['value']??null)||$item['value']<0)continue;
+            $custom[]=['label'=>mb_substr(trim((string)$item['label']),0,80),'selector'=>trim((string)$item['selector']),'value'=>(int)$item['value']];
+            if(count($custom)>=10)break;
+        }
+        $emailSelector=$this->wpNumbersValidSelector($stored['email_selector']??'')
+            ?trim((string)$stored['email_selector']):'';
+        $plugin=$this->wpNumbersPluginPath($configPath);
+        return['ok'=>true,'type'=>'wordpress','config'=>$configPath,'definitions'=>array_values($defs),
+            'overrides'=>$overrides,'email_selector'=>$emailSelector,'custom'=>$custom,
+            'installed'=>is_file($plugin),'plugin'=>$plugin,
+            'note'=>'These controls change displayed admin numbers only. WordPress content and counts remain unchanged.'];
+    }
+    private function wpNumbersPluginCode(){
+        return <<<'FMNUM'
+<?php
+/**
+ * File Manager Numbers Control — reversible, presentation-only WordPress admin helper.
+ * It never changes posts, comments, users, or any other WordPress data.
+ */
+if(!defined('ABSPATH'))exit;
+add_action('admin_footer',function(){
+    if(function_exists('current_user_can')&&!current_user_can('manage_options'))return;
+    $settings=get_option('fm_numbers_control',array());
+    if(!is_array($settings))return;
+    $json=function_exists('wp_json_encode')?wp_json_encode($settings,JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT):json_encode($settings);
+    if(!$json)return;
+    echo '<script id="fm-numbers-control">window.fmNumbersControl='.$json.';</script>';
+    ?>
+    <script>
+    (function(d,w){
+      var s=w.fmNumbersControl||{},over=s&&typeof s==='object'?s:{};
+      var map={
+        published_posts:['#dashboard_right_now .post-count a'],
+        published_pages:['#dashboard_right_now .page-count a'],
+        comments_total:['#dashboard_right_now .comment-count a'],
+        comments_moderation:['#dashboard_right_now .comment-mod-count a','#menu-comments .awaiting-mod .pending-count','#wp-admin-bar-comments .awaiting-mod .ab-label'],
+        comments_spam:['#dashboard_right_now .spam-count a'],
+        comments_trash:['#dashboard_right_now .trash-count a'],
+        users_total:['#dashboard_right_now .user-count a'],
+        media_library:['#dashboard_right_now .media-count a'],
+        draft_posts:['#dashboard_right_now .draft-count a'],
+        pending_posts:['#dashboard_right_now .pending-count a'],
+        scheduled_posts:['#dashboard_right_now .future-count a']
+      };
+      function replaceNumber(el,value){
+        if(!el||value===undefined||value===null)return;
+        var re=/\d[\d,]*/;
+        function walk(node){
+          if(node.nodeType===3){
+            if(re.test(node.nodeValue))node.nodeValue=node.nodeValue.replace(re,String(value));
+            return;
+          }
+          for(var i=0;i<node.childNodes.length;i++)walk(node.childNodes[i]);
+        }
+        walk(el);
+      }
+      function apply(){
+        Object.keys(map).forEach(function(key){
+          if(!Object.prototype.hasOwnProperty.call(over,key))return;
+          map[key].forEach(function(selector){
+            try{d.querySelectorAll(selector).forEach(function(el){replaceNumber(el,over[key]);});}catch(e){}
+          });
+        });
+        if(over.email_selector&&over.email_messages!==undefined){
+          try{d.querySelectorAll(over.email_selector).forEach(function(el){replaceNumber(el,over.email_messages);});}catch(e){}
+        }
+        (Array.isArray(over.custom)?over.custom:[]).forEach(function(item){
+          if(!item||!item.selector||item.value===undefined)return;
+          try{d.querySelectorAll(item.selector).forEach(function(el){replaceNumber(el,item.value);});}catch(e){}
+        });
+      }
+      apply();
+      if(w.MutationObserver){
+        var timer=0;
+        new MutationObserver(function(){clearTimeout(timer);timer=setTimeout(apply,40);})
+          .observe(d.body||d.documentElement,{childList:true,subtree:true});
+      }
+    })(document,window);
+    </script>
+    <?php
+});
+FMNUM;
+    }
+    public function wpNumbersControl($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires a valid WordPress installation.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $result=$this->wpNumbersSettings($configPath,$c,$link);
+        mysqli_close($link);
+        return $result;
+    }
+    public function wpNumbersControlSave($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if($this->isRO())return['error'=>'Read-only account.'];
+        if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires a valid WordPress installation.'];
+        $raw=(string)($_POST['numbers_json']??'');
+        $input=json_decode($raw,true);
+        if(!is_array($input))return['error'=>'Numbers data must be valid JSON.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $allowed=array_keys($this->wpNumbersDefinitions($link,$c['prefix']));
+        $settings=[];
+        foreach($allowed as $id){
+            if(!array_key_exists($id,$input)||$input[$id]==='')continue;
+            if(!is_numeric($input[$id])||$input[$id]<0||$input[$id]>999999999)return['error'=>'Every number must be a whole number from 0 to 999999999.'];
+            $n=(string)$input[$id];
+            if(!preg_match('/^\d+$/',$n))return['error'=>'Every number must be a whole number from 0 to 999999999.'];
+            $settings[$id]=(int)$n;
+        }
+        if(array_key_exists('email_messages',$input)&&$input['email_messages']!==''){
+            if(!preg_match('/^\d+$/',(string)$input['email_messages'])||(int)$input['email_messages']>999999999)return['error'=>'The email number must be a whole number from 0 to 999999999.'];
+            $settings['email_messages']=(int)$input['email_messages'];
+        }
+        $emailSelector=trim((string)($input['email_selector']??''));
+        if(($emailSelector===''&&isset($settings['email_messages']))||($emailSelector!==''&&!isset($settings['email_messages'])))
+            return['error'=>'Email messages needs both a displayed number and a CSS selector.'];
+        if($emailSelector!==''){
+            if(!$this->wpNumbersValidSelector($emailSelector))return['error'=>'The email CSS selector is invalid or too long.'];
+            $settings['email_selector']=$emailSelector;
+        }
+        $custom=[];
+        foreach((array)($input['custom']??[]) as $item){
+            if(!is_array($item))continue;
+            $label=mb_substr(trim((string)($item['label']??'')),0,80);
+            $selector=trim((string)($item['selector']??''));
+            $value=(string)($item['value']??'');
+            if($label===''&&$selector===''&&$value==='')continue;
+            if($label===''||!$this->wpNumbersValidSelector($selector)||!preg_match('/^\d+$/',$value)||$value>999999999)
+                return['error'=>'Each custom number needs a label, a valid CSS selector, and a whole number.'];
+            $custom[]=['label'=>$label,'selector'=>$selector,'value'=>(int)$value];
+            if(count($custom)>=10)break;
+        }
+        if($custom)$settings['custom']=$custom;
+        $t=$c['prefix'];
+        if(!$settings){
+            $ok=@mysqli_query($link,"DELETE FROM `{$t}options` WHERE option_name='fm_numbers_control' LIMIT 1");
+            mysqli_close($link);
+            $plugin=$this->wpNumbersPluginPath($configPath);
+            if(is_file($plugin)&&!@unlink($plugin))return['error'=>'The setting was cleared, but the WordPress helper could not be removed.'];
+            if(!$ok)return['error'=>'Could not clear the numbers control setting.'];
+            $this->log('wp_numbers_control','reset');
+            return['ok'=>true,'enabled'=>false,'message'=>'Real WordPress numbers are restored.'];
+        }
+        $serialized=mysqli_real_escape_string($link,serialize($settings));
+        $has=@mysqli_query($link,"SELECT option_name FROM `{$t}options` WHERE option_name='fm_numbers_control' LIMIT 1");
+        $ok=$has&&mysqli_num_rows($has)>0
+            ?@mysqli_query($link,"UPDATE `{$t}options` SET option_value='$serialized' WHERE option_name='fm_numbers_control' LIMIT 1")
+            :@mysqli_query($link,"INSERT INTO `{$t}options` (option_name,option_value,autoload) VALUES ('fm_numbers_control','$serialized','no')");
+        if(!$ok){mysqli_close($link);return['error'=>'Could not save the numbers control settings.'];}
+        $root=$this->wpSiteRoot($configPath);$muDir=$root.'/wp-content/mu-plugins';
+        if(!is_dir($muDir)&&!@mkdir($muDir,0755,true)&&!is_dir($muDir)){mysqli_close($link);return['error'=>'Could not create wp-content/mu-plugins.'];}
+        $plugin=$this->wpNumbersPluginPath($configPath);
+        $wrote=@file_put_contents($plugin,$this->wpNumbersPluginCode(),LOCK_EX)!==false;
+        if($wrote)@chmod($plugin,0644);
+        mysqli_close($link);
+        if(!$wrote)return['error'=>'Settings were saved, but the WordPress helper could not be installed.'];
+        $this->log('wp_numbers_control',count($settings)?'enabled':'reset');
+        return['ok'=>true,'enabled'=>count($settings)>0,'message'=>count($settings)?'Displayed WordPress numbers updated.':'All number controls are cleared.'];
+    }
+    public function wpNumbersControlReset($configPath){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        if($this->isRO())return['error'=>'Read-only account.'];
+        if(basename($configPath)!=='wp-config.php')return['error'=>'This feature requires a valid WordPress installation.'];
+        if(!$this->wpAutomationConnect($configPath,$c,$link,$err))return['error'=>$err];
+        $t=$c['prefix'];$ok=@mysqli_query($link,"DELETE FROM `{$t}options` WHERE option_name='fm_numbers_control' LIMIT 1");
+        mysqli_close($link);
+        $plugin=$this->wpNumbersPluginPath($configPath);
+        if(is_file($plugin)&&!@unlink($plugin))return['error'=>'The database setting was cleared, but the WordPress helper could not be removed.'];
+        if(!$ok)return['error'=>'Could not clear the numbers control setting.'];
+        $this->log('wp_numbers_control','reset');
+        return['ok'=>true,'enabled'=>false,'message'=>'Real WordPress numbers are restored.'];
     }
 
     private function cmsToggleExtension(){
@@ -6045,6 +6424,16 @@ if(isset($_GET['x'])){
         echo json_encode(fm_server_speed_test());exit;
     }
     if($xop==='ls'){echo json_encode(array_values(array_filter(scandir($fm->getCwd())?:[],fn($x)=>$x!=='.'&&$x!=='..')));exit;}
+    if($xop==='office_preview'){
+        $fn=basename(isset($_GET['f'])?$_GET['f']:'');
+        header('Content-Type: application/json;charset=utf-8');
+        echo json_encode($fm->officePreview($fn),JSON_UNESCAPED_UNICODE);exit;
+    }
+    if($xop==='owner'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        $fn=basename(isset($_GET['f'])?$_GET['f']:'');
+        echo json_encode($fm->ownerInfo($fn));exit;
+    }
     if($xop==='imgprev'){
         /* Thumbnail resize - served as image/jpeg */
         $fn=isset($_GET['f'])?basename($_GET['f']):'';
@@ -6170,6 +6559,18 @@ if(isset($_GET['x'])){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
         echo json_encode($fm->wpSiteHealthControl($cfgB64(),trim((string)($_POST['mode']??'auto'))));exit;
+    }
+    if($xop==='wp_numbers_control'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->wpNumbersControl($cfgB64()));exit;
+    }
+    if($xop==='wp_numbers_control_save'||$xop==='wp_numbers_control_reset'){
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        $cfg=$cfgB64();
+        echo json_encode($xop==='wp_numbers_control_save'
+            ?$fm->wpNumbersControlSave($cfg)
+            :$fm->wpNumbersControlReset($cfg));exit;
     }
     if($xop==='wp_automation'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -6451,9 +6852,14 @@ if($_SERVER['REQUEST_METHOD']==='POST'&&isset($_POST['action'])&&in_array($_POST
     if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){$userMsg=['Security error.','danger'];}
     elseif(empty($_SESSION['fm_admin'])){$userMsg=['Admins only.','danger'];}
     else{$users=fm_load_users($usersFile);
-        if($_POST['action']==='add_user'){$nu=trim(isset($_POST['new_user'])?$_POST['new_user']:'');$np=isset($_POST['new_pass'])?$_POST['new_pass']:'';$nr=trim(isset($_POST['new_root'])?$_POST['new_root']:'');$nro=isset($_POST['new_readonly'])&&$_POST['new_readonly']==='1';
-            if(!$nu||!$np){$userMsg=['Username and password required.','danger'];}elseif(fm_find_user($users,$nu)){$userMsg=['Username exists.','danger'];}elseif($nr!==''&&!is_dir($nr)){$userMsg=['Folder not found.','danger'];}
-            else{$users[]=['user'=>$nu,'hash'=>password_hash($np,PASSWORD_DEFAULT),'root'=>$nr,'readonly'=>$nro,'admin'=>false];fm_save_users($usersFile,$users);$userMsg=["User '$nu' created.",'success'];}
+        if($_POST['action']==='add_user'){$nu=trim(isset($_POST['new_user'])?$_POST['new_user']:'');$np=isset($_POST['new_pass'])?$_POST['new_pass']:'';$nr=trim(isset($_POST['new_root'])?$_POST['new_root']:'');$nro=isset($_POST['new_readonly'])&&$_POST['new_readonly']==='1';$nq=trim(isset($_POST['new_quota'])?$_POST['new_quota']:'0');
+            $quotaBytes=0;
+            if($nq!==''&&strtolower($nq)!=='unlimited'){
+                if(!is_numeric($nq)||$nq<0){$userMsg=['Quota must be 0 (unlimited) or a positive number of MB.','danger'];}
+                else $quotaBytes=(int)round((float)$nq*1048576);
+            }
+            if(!$userMsg&&!$nu||!$userMsg&&!$np){$userMsg=['Username and password required.','danger'];}elseif(!$userMsg&&fm_find_user($users,$nu)){$userMsg=['Username exists.','danger'];}elseif(!$userMsg&&$nr!==''&&!is_dir($nr)){$userMsg=['Folder not found.','danger'];}
+            elseif(!$userMsg){$users[]=['user'=>$nu,'hash'=>password_hash($np,PASSWORD_DEFAULT),'root'=>$nr,'readonly'=>$nro,'admin'=>false,'quota_bytes'=>$quotaBytes];fm_save_users($usersFile,$users);$userMsg=["User '$nu' created.",'success'];}
         }elseif($_POST['action']==='remove_user'){$tu=trim(isset($_POST['target_user'])?$_POST['target_user']:'');
             if($tu==='admin'||$tu===$_SESSION['fm_user']){$userMsg=['Cannot remove this account.','danger'];}
             else{$users=array_values(array_filter($users,fn($u)=>$u['user']!==$tu));fm_save_users($usersFile,$users);$userMsg=["User '$tu' removed.",'success'];}
@@ -6916,6 +7322,12 @@ body.term-standalone .term-win{position:fixed;inset:0}
 .ed-fname svg{width:14px;height:14px;stroke:var(--indigo);fill:none;stroke-width:2;stroke-linecap:round}
 .ed-meta{font-size:11px;font-weight:var(--fw-muted);color:var(--t3);font-family:'JetBrains Mono',monospace;margin-left:auto}
 textarea.code{display:block;width:100%;min-height:520px;background:#070a10;color:#cdd6f4;border:none;padding:18px 20px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.85;resize:vertical;outline:none;tab-size:4;transition:box-shadow .2s}
+.ed-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 12px;background:var(--raised);border-bottom:1px solid var(--border)}
+.ed-tools .inp{height:30px;font-size:11px;min-width:130px}
+.ed-wrap{display:grid;grid-template-columns:52px 1fr;background:#070a10;overflow:hidden}
+.ed-lines{padding:18px 10px 18px 0;text-align:right;color:#515b70;background:#0b0f18;border-right:1px solid #1d2635;font:13px/1.85 'JetBrains Mono',monospace;user-select:none;overflow:hidden}
+.ed-wrap textarea.code{min-height:520px;resize:vertical}
+.ed-dirty{color:#fbbf24;font-size:11px;font-weight:600;display:none}.ed-dirty.show{display:inline}
 textarea.code:focus{box-shadow:inset 0 0 0 1.5px rgba(133,137,140,.45)}
 .ed-foot{padding:9px 14px;background:var(--raised);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px}
 .ed-hint{font-size:11px;font-weight:var(--fw-muted);color:var(--t3);font-family:'JetBrains Mono',monospace}
@@ -7144,6 +7556,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="sb-item" id="webmailBtn"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>Webmail Manager</button>
       <button class="sb-item" id="sqlBtn"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>SQL Manager</button>
       <button class="sb-item" id="wpAutomationBtn"><svg viewBox="0 0 24 24"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/></svg>WordPress Automation</button>
+      <button class="sb-item" id="wpNumbersBtn" title="Change displayed WordPress dashboard numbers without changing site data"><svg viewBox="0 0 24 24"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15v-3"/><path d="M12 15V8"/><path d="M16 15V5"/><path d="M20 15V3"/></svg>Numbers control</button>
       <button class="sb-item" id="guardBtn"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>File Guardian</button>
       <?php endif;?>
     </div>
@@ -7262,6 +7675,11 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     </div>
     <?php endif;?>
     <div class="tb-row" style="flex-wrap:wrap;gap:6px">
+      <?php if(!$fm->isRO()):?>
+      <button type="button" class="btn btn-sm btn-g" id="clipCopy" title="Keep selected items for copying"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy</button>
+      <button type="button" class="btn btn-sm btn-amb" id="clipCut" title="Keep selected items for moving"><svg viewBox="0 0 24 24"><path d="M6 2l12 20M18 2L6 22"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/></svg>Cut</button>
+      <button type="button" class="btn btn-sm btn-blue" id="clipPaste" title="Paste clipboard items here"><svg viewBox="0 0 24 24"><path d="M16 4h2a2 2 0 0 1 2 2v14H4V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>Paste</button>
+      <?php endif;?>
       <form method="post" style="display:contents">
         <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>">
         <input type="hidden" name="action" value="go_to_path">
@@ -7320,7 +7738,16 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <form method="post">
         <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>">
         <input type="hidden" name="action" value="save_edit"><input type="hidden" name="filename" value="<?=htmlspecialchars($editFile)?>">
-        <textarea name="content" class="code" spellcheck="false"><?=htmlspecialchars($editContent)?></textarea>
+        <div class="ed-tools">
+          <input type="text" id="edFind" class="inp" placeholder="Find…" aria-label="Find text">
+          <input type="text" id="edReplace" class="inp" placeholder="Replace with…" aria-label="Replacement text">
+          <button type="button" class="btn btn-xs btn-g" id="edFindNext">Find next</button>
+          <button type="button" class="btn btn-xs btn-g" id="edReplaceOne">Replace</button>
+          <button type="button" class="btn btn-xs btn-g" id="edReplaceAll">Replace all</button>
+          <button type="button" class="btn btn-xs btn-blue" id="edFormatJson">Format JSON</button>
+          <span class="ed-dirty" id="edDirty">Unsaved changes</span>
+        </div>
+        <div class="ed-wrap"><div class="ed-lines" id="edLines">1</div><textarea name="content" id="editorTA" class="code" spellcheck="false"><?=htmlspecialchars($editContent)?></textarea></div>
         <div class="ed-foot">
           <div class="ed-hint"><kbd>Tab</kbd> indent &nbsp;·&nbsp; <kbd>Ctrl+S</kbd> save</div>
           <div style="display:flex;gap:6px">
@@ -7527,6 +7954,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="ctx-item" id="ctx-share"><svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>Share Link</div>
   <div class="ctx-item" id="ctx-dirsize"><svg viewBox="0 0 24 24"><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>Calculate Size</div>
   <div class="ctx-item" id="ctx-perm"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Permissions</div>
+  <?php if(!empty($_SESSION['fm_admin'])):?><div class="ctx-item" id="ctx-owner"><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="4"/><path d="M2 21v-1a7 7 0 0 1 14 0v1"/><path d="M17 11h5M19 9v4"/></svg>Owner &amp; Group</div><?php endif;?>
   <div class="ctx-item" id="ctx-ren"><svg viewBox="0 0 24 24"><polyline points="5 12 12 5 19 12"/><line x1="12" y1="5" x2="12" y2="19"/></svg>Rename</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item danger" id="ctx-del"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>Delete</div>
@@ -7958,6 +8386,20 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   </div>
 </div>
 
+<!-- WORDPRESS NUMBERS CONTROL MODAL -->
+<?php if(!empty($_SESSION['fm_admin'])):?>
+<div class="mod-ov" id="wpNumbersOv">
+  <div class="mod mod-lg">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15v-3"/><path d="M12 15V8"/><path d="M16 15V5"/><path d="M20 15V3"/></svg></div>
+      <span class="mod-title">Numbers control</span>
+      <button class="btn btn-icon btn-g" id="wpNumbersClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body" id="wpNumbersBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+  </div>
+</div>
+<?php endif;?>
+
 <!-- SQL MANAGER MODAL -->
 <?php if(!empty($_SESSION['fm_admin'])):?>
 <div class="mod-ov" id="sqlOv">
@@ -8160,6 +8602,25 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 <?php endif;?>
 
+<!-- OWNER / GROUP MODAL -->
+<?php if(!empty($_SESSION['fm_admin'])):?>
+<div class="mod-ov" id="ownerOv">
+  <div class="mod mod-sm">
+    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="4"/><path d="M2 21v-1a7 7 0 0 1 14 0v1"/><path d="M17 11h5M19 9v4"/></svg></div><span class="mod-title">Owner &amp; Group</span><button class="btn btn-icon btn-g" id="ownerClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+    <form method="post" class="mod-body" style="display:flex;flex-direction:column;gap:10px">
+      <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>">
+      <input type="hidden" name="action" value="chown_item"><input type="hidden" name="item_name" id="ownerItem">
+      <div style="font-size:12px;color:var(--t2)">Item: <strong id="ownerItemLabel"></strong></div>
+      <input type="text" name="owner" id="ownerName" class="inp" placeholder="Owner name or UID">
+      <input type="text" name="group" id="groupName" class="inp" placeholder="Group name or GID">
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--t2);text-transform:none;letter-spacing:0"><input type="checkbox" name="recursive" value="1"> Apply recursively to contents</label>
+      <button type="submit" class="btn btn-p">Apply ownership</button>
+      <div style="font-size:10.5px;color:var(--t3)">The server account must have permission to change ownership.</div>
+    </form>
+  </div>
+</div>
+<?php endif;?>
+
 <!-- USERS MODAL -->
 <?php if(!empty($_SESSION['fm_admin'])):?>
 <div class="mod-ov" id="usersOv">
@@ -8168,7 +8629,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <div class="mod-body">
       <?php foreach(fm_load_users($usersFile) as $u):?>
       <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
-        <div style="font-size:13px;color:#e4e4e7"><strong><?=htmlspecialchars($u['user'])?></strong><?php if(!empty($u['admin'])):?><span style="color:#85898C;font-size:11px"> · admin</span><?php endif;?><?php if(!empty($u['readonly'])):?><span style="color:#f59e0b;font-size:11px"> · ro</span><?php endif;?><div style="color:#71717a;font-size:11px;margin-top:1px"><?=htmlspecialchars($u['root']?:'Full access')?></div></div>
+        <div style="font-size:13px;color:#e4e4e7"><strong><?=htmlspecialchars($u['user'])?></strong><?php if(!empty($u['admin'])):?><span style="color:#85898C;font-size:11px"> · admin</span><?php endif;?><?php if(!empty($u['readonly'])):?><span style="color:#f59e0b;font-size:11px"> · ro</span><?php endif;?><div style="color:#71717a;font-size:11px;margin-top:1px"><?=htmlspecialchars($u['root']?:'Full access')?> · quota: <?=htmlspecialchars(fm_fmt_quota(fm_user_quota_bytes($u)))?></div></div>
         <?php if($u['user']!=='admin'&&$u['user']!==$_SESSION['fm_user']):?>
         <form method="post" onsubmit="return confirm('Remove?')"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>"><input type="hidden" name="action" value="remove_user"><input type="hidden" name="target_user" value="<?=htmlspecialchars($u['user'])?>"><button class="btn btn-icon btn-g" style="color:#fca5a5"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></form>
         <?php endif;?>
@@ -8180,6 +8641,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <input type="text" name="new_user" placeholder="Username" required class="inp" style="width:100%">
         <input type="password" name="new_pass" placeholder="Password" required class="inp" style="width:100%">
         <input type="text" name="new_root" placeholder="Restrict folder (empty = full)" class="inp" style="width:100%">
+        <input type="number" name="new_quota" min="0" step="1" placeholder="Quota in MB (0 = unlimited)" class="inp" style="width:100%">
         <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--t2)"><input type="checkbox" name="new_readonly" value="1">Read-only</label>
         <button type="submit" class="btn btn-p" style="align-self:flex-start">Create user</button>
       </form>
@@ -8370,10 +8832,10 @@ function openMod(id){document.getElementById(id)?.classList.add('open');}
 function closeMod(id){document.getElementById(id)?.classList.remove('open');}
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
-  ['prevOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','speedOv'].forEach(closeMod);
+  ['prevOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','speedOv','wpNumbersOv'].forEach(closeMod);
   closeSheet();closeCtx();
 });
-['prevOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','speedOv'].forEach(id=>{
+['prevOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','speedOv','wpNumbersOv'].forEach(id=>{
   document.getElementById(id)?.addEventListener('click',e=>{if(e.target===document.getElementById(id))closeMod(id);});
 });
 
@@ -8646,6 +9108,9 @@ document.getElementById('bkZip')?.addEventListener('click',()=>{const s=selNames
 document.getElementById('bkTar')?.addEventListener('click',()=>{const s=selNames();if(!s.length)return;af('tar_create',{items:JSON.stringify(s)});});
 document.getElementById('bkCopy')?.addEventListener('click',()=>{const s=selNames();if(!s.length)return;const t=prompt('Copy to:',CWD);if(t)af('bulk_copy',{items:JSON.stringify(s),target:t.trim()});});
 document.getElementById('bkMove')?.addEventListener('click',()=>{const s=selNames();if(!s.length)return;const t=prompt('Move to:',CWD);if(t)af('bulk_move',{items:JSON.stringify(s),target:t.trim()});});
+document.getElementById('clipCopy')?.addEventListener('click',()=>{const s=selNames();if(!s.length){toast('Select at least one item first.');return;}af('copy_clipboard',{items:JSON.stringify(s)});});
+document.getElementById('clipCut')?.addEventListener('click',()=>{const s=selNames();if(!s.length){toast('Select at least one item first.');return;}af('cut_clipboard',{items:JSON.stringify(s)});});
+document.getElementById('clipPaste')?.addEventListener('click',()=>af('paste_clipboard',{}));
 
 /* Grid click to preview */
 document.getElementById('gvw')?.addEventListener('click',e=>{
@@ -8674,6 +9139,10 @@ function openPreview(url,type,fname){
   if(type==='image'){const img=document.createElement('img');img.src=url;prevBody.appendChild(img);}
   else if(type==='video'){const v=document.createElement('video');v.src=url;v.controls=true;v.autoplay=true;prevBody.appendChild(v);}
   else if(type==='pdf'){const fr=document.createElement('iframe');fr.src=url;prevBody.appendChild(fr);}
+  else if(['docx','xlsx','pptx'].includes((fname.split('.').pop()||'').toLowerCase())){
+    const pre=document.createElement('pre');pre.textContent='Extracting Office content…';prevBody.appendChild(pre);
+    fetch('?x=office_preview&f='+encodeURIComponent(fname)+'&dir='+encodeURIComponent(CWD)).then(r=>r.json()).then(d=>{pre.textContent=d.ok?(d.text||'No readable text was found in this document.'):d.error;}).catch(()=>{pre.textContent='Office preview is unavailable.';});
+  }
   else if(type==='markdown'){
     mdShowingSource=false;document.getElementById('prevMdToggleLabel').textContent='View Source';mdToggle.style.display='';
     const div=document.createElement('div');div.className='md-render';div.innerHTML='Loading…';prevBody.appendChild(div);
@@ -10092,10 +10561,37 @@ function appendLine(text,cls){
 ═══════════════════════════════════════ */
 const codeTA=document.querySelector('textarea.code');
 if(codeTA){
+  const edLines=document.getElementById('edLines'),edDirty=document.getElementById('edDirty'),edForm=codeTA.closest('form'),initialCode=codeTA.value;
+  const syncLines=()=>{if(edLines){const n=codeTA.value.split('\n').length;edLines.textContent=Array.from({length:n},(_,i)=>i+1).join('\n');edLines.scrollTop=codeTA.scrollTop;}};
+  const markDirty=()=>{if(edDirty)edDirty.classList.toggle('show',codeTA.value!==initialCode);};
+  codeTA.addEventListener('input',()=>{syncLines();markDirty();});
+  codeTA.addEventListener('scroll',()=>{if(edLines)edLines.scrollTop=codeTA.scrollTop;});
+  syncLines();
   codeTA.addEventListener('keydown',e=>{
     if(e.key==='Tab'){e.preventDefault();const s=codeTA.selectionStart,en=codeTA.selectionEnd;codeTA.value=codeTA.value.slice(0,s)+'    '+codeTA.value.slice(en);codeTA.selectionStart=codeTA.selectionEnd=s+4;}
     if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();codeTA.closest('form').submit();}
   });
+  document.getElementById('edFindNext')?.addEventListener('click',()=>{
+    const q=document.getElementById('edFind')?.value;if(!q)return;
+    const start=codeTA.selectionEnd,at=codeTA.value.indexOf(q,start);
+    const pos=at<0?codeTA.value.indexOf(q):at;
+    if(pos<0){toast('Text not found.');return;}codeTA.focus();codeTA.setSelectionRange(pos,pos+q.length);
+  });
+  document.getElementById('edReplaceOne')?.addEventListener('click',()=>{
+    const q=document.getElementById('edFind')?.value;if(!q)return;const r=document.getElementById('edReplace')?.value||'';
+    if(codeTA.value.slice(codeTA.selectionStart,codeTA.selectionEnd)===q){codeTA.setRangeText(r);syncLines();markDirty();}
+    else document.getElementById('edFindNext')?.click();
+  });
+  document.getElementById('edReplaceAll')?.addEventListener('click',()=>{
+    const q=document.getElementById('edFind')?.value;if(!q)return;const r=document.getElementById('edReplace')?.value||'';
+    const count=(codeTA.value.match(new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'))||[]).length;
+    if(count){codeTA.value=codeTA.value.split(q).join(r);syncLines();markDirty();toast(`${count} replacement(s) made.`);}else toast('Text not found.');
+  });
+  document.getElementById('edFormatJson')?.addEventListener('click',()=>{
+    try{codeTA.value=JSON.stringify(JSON.parse(codeTA.value),null,2);syncLines();markDirty();toast('JSON formatted.');}
+    catch{toast('The current file is not valid JSON.');}
+  });
+  window.addEventListener('beforeunload',e=>{if(codeTA.value!==initialCode){e.preventDefault();e.returnValue='';}});
 }
 
 /* ═══════════════════════════════════════
@@ -11089,6 +11585,151 @@ document.getElementById('wpAutomationBtn')?.addEventListener('click',()=>{openMo
 document.getElementById('wpAutomationClose')?.addEventListener('click',()=>closeMod('wpAutomationOv'));
 
 })(); // end WordPress Automation IIFE
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WORDPRESS NUMBERS CONTROL
+   Presentation-only overrides for common wp-admin counters.
+═══════════════════════════════════════════════════════════════════════════ */
+(function(){
+  let numbersCfg=null,numbersData=null;
+  const body=document.getElementById('wpNumbersBody');
+  if(!body)return;
+  const msg=(text,color='var(--t3)')=>`<div style="padding:18px 16px;color:${color};font-size:11.5px">${esc(text)}</div>`;
+  function numbersPost(url,fd){
+    if(!fd.has('cfg_b64'))fd.append('cfg_b64',cmsB64(numbersCfg||''));
+    return fetch(url,{method:'POST',body:fd,cache:'no-store'}).then(r=>r.json());
+  }
+  async function findNumbersSite(){
+    const scan=await fetch('?x=cmsscan',{cache:'no-store'}).then(r=>r.json());
+    const wp=(scan.sites||[]).filter(s=>s.type==='wordpress');
+    const preferred=wp.find(s=>s.config===scan.current_wp_config)||((wp.length===1)?wp[0]:null);
+    if(!preferred)return false;
+    numbersCfg=preferred.config;window.fmCmsConfig=numbersCfg;window.fmCmsType='wordpress';
+    return true;
+  }
+  function showNumbersPicker(scan){
+    const sites=(scan.sites||[]).filter(s=>s.type==='wordpress');
+    body.innerHTML=`
+      <div style="padding:13px 16px;border-bottom:1px solid var(--b2);font-size:12px;color:var(--t2)">
+        Choose a WordPress installation
+        <div style="font-size:10.5px;color:var(--t3);margin-top:4px">${sites.length} WordPress installation${sites.length===1?'':'s'} found.</div>
+      </div>
+      ${sites.length?sites.map((s,i)=>`<div class="wp-numbers-site" data-cfg="${esc(s.config)}" style="display:flex;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid var(--b2);cursor:pointer">
+        <div style="width:30px;height:30px;border-radius:8px;background:rgba(33,117,155,.16);display:grid;place-items:center;color:#5bc0de;font-size:15px;font-weight:800">${i+1}</div>
+        <div style="min-width:0;flex:1"><div style="font-size:12px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.dir)}</div><div style="font-size:10.5px;color:var(--t3);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.config)}</div></div>
+        <span style="color:var(--t3);font-size:18px">›</span>
+      </div>`).join(''):'<div class="empty" style="padding:32px"><p>No WordPress installation was found automatically.</p></div>'}
+      <div style="padding:14px 16px;border-top:1px solid var(--b2)">
+        <div style="font-size:11px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Manual path to wp-config.php</div>
+        <div style="display:flex;gap:8px"><input id="wpNumbersManual" class="inp" style="flex:1;font-size:12px;font-family:monospace" placeholder="/home/user/wp-config.php"><button class="btn btn-p" id="wpNumbersManualBtn">Open</button></div>
+      </div>`;
+    body.querySelectorAll('.wp-numbers-site').forEach(card=>card.addEventListener('click',()=>{
+      numbersCfg=card.dataset.cfg;window.fmCmsConfig=numbersCfg;window.fmCmsType='wordpress';loadNumbers();
+    }));
+    document.getElementById('wpNumbersManualBtn')?.addEventListener('click',()=>{
+      const p=document.getElementById('wpNumbersManual').value.trim();
+      if(!p||p.split(/[\\/]/).pop().toLowerCase()!=='wp-config.php'){toast('Enter the full path to wp-config.php.');return;}
+      numbersCfg=p;window.fmCmsConfig=numbersCfg;window.fmCmsType='wordpress';loadNumbers();
+    });
+    document.getElementById('wpNumbersManual')?.addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('wpNumbersManualBtn')?.click();});
+  }
+  async function loadNumbers(){
+    numbersCfg=window.fmCmsConfig||numbersCfg;
+    if(!numbersCfg||window.fmCmsType==='joomla'){
+      body.innerHTML=msg('Detecting WordPress installations…');
+      try{
+        const scan=await fetch('?x=cmsscan',{cache:'no-store'}).then(r=>r.json());
+        const wp=(scan.sites||[]).filter(s=>s.type==='wordpress');
+        const site=wp.find(s=>s.config===scan.current_wp_config)||((wp.length===1)?wp[0]:null);
+        if(site){numbersCfg=site.config;window.fmCmsConfig=numbersCfg;window.fmCmsType='wordpress';}
+        else{showNumbersPicker(scan);return;}
+      }catch(e){body.innerHTML=msg('CMS detection failed: '+String(e),'#fca5a5');return;}
+    }
+    body.innerHTML=msg('Reading the real WordPress counters…');
+    try{
+      const d=await numbersPost('?x=wp_numbers_control',new FormData());
+      if(d.error){body.innerHTML=msg(d.error,'#fca5a5');return;}
+      numbersData=d;renderNumbers();
+    }catch(e){body.innerHTML=msg('Could not load number controls: '+String(e),'#fca5a5');}
+  }
+  function renderNumbers(){
+    const defs=numbersData.definitions||[],over=numbersData.overrides||{};
+    const rows=defs.map(def=>`<div class="wp-number-row" style="display:grid;grid-template-columns:minmax(0,1fr) 120px 120px;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--b2)">
+      <div><div style="font-size:12px;font-weight:700;color:var(--t1)">${esc(def.label)}</div><div style="font-size:10.5px;color:var(--t3);margin-top:2px">${esc(def.description)}</div></div>
+      <div><div style="font-size:9.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">Real</div><div style="font-family:monospace;font-size:12px;color:var(--t2)">${def.actual===null?'—':Number(def.actual).toLocaleString()}</div></div>
+      <div><div style="font-size:9.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">Displayed</div><input class="inp wp-num-input" data-id="${esc(def.id)}" type="number" min="0" max="999999999" step="1" inputmode="numeric" style="width:100%;padding:6px 8px" value="${Object.prototype.hasOwnProperty.call(over,def.id)?esc(over[def.id]):''}" placeholder="Real"></div>
+    </div>`).join('');
+    const custom=(numbersData.custom||[]).map(item=>customRow(item)).join('');
+    body.innerHTML=`<div style="padding:11px 16px;border-bottom:1px solid var(--b2);font-size:11px;color:var(--t3)">WordPress: <span style="font-family:monospace;color:var(--t2)">${esc(numbersCfg)}</span></div>
+      <div style="padding:12px 16px 8px;color:var(--t2);font-size:11.5px;line-height:1.5">Set a displayed value for any counter. Leave it blank to show the real value. This affects wp-admin presentation only; database content is never changed.</div>
+      <div style="padding:0 16px"><div style="display:grid;grid-template-columns:minmax(0,1fr) 120px 120px;gap:10px;padding:0 0 5px;color:var(--t3);font-size:9.5px;text-transform:uppercase;letter-spacing:.5px"><span>Counter</span><span>Real value</span><span>Override</span></div>${rows}</div>
+      <div style="margin:14px 16px 0;padding:12px;border:1px solid var(--b2);border-radius:9px;background:rgba(255,255,255,.02)">
+        <div style="font-size:12px;font-weight:700;color:var(--t1);margin-bottom:4px">Email messages</div>
+        <div style="font-size:10.5px;color:var(--t3);line-height:1.45;margin-bottom:9px">WordPress core has no mailbox count. Enter the CSS selector of the email/plugin counter in wp-admin, then set the displayed number.</div>
+        <div style="display:grid;grid-template-columns:1fr 120px;gap:8px"><input id="wpNumbersEmailSelector" class="inp" value="${esc(numbersData.email_selector||'')}" placeholder="#email-widget .count, .mail-count"><input id="wpNumbersEmail" class="inp" type="number" min="0" max="999999999" step="1" inputmode="numeric" value="${Object.prototype.hasOwnProperty.call(over,'email_messages')?esc(over.email_messages):''}" placeholder="Displayed"></div>
+      </div>
+      <div style="margin:14px 16px 0;padding:12px;border:1px solid var(--b2);border-radius:9px;background:rgba(255,255,255,.02)">
+        <div style="display:flex;align-items:center;margin-bottom:4px"><div style="font-size:12px;font-weight:700;color:var(--t1);flex:1">Custom dashboard numbers</div><button class="btn btn-xs btn-g" id="wpNumbersAddCustom">+ Add</button></div>
+        <div style="font-size:10.5px;color:var(--t3);line-height:1.45;margin-bottom:9px">Target a number from a plugin or a specific wp-admin area with its CSS selector.</div>
+        <div id="wpNumbersCustomList">${custom||'<div id="wpNumbersCustomEmpty" style="font-size:10.5px;color:var(--t3);padding:5px 0">No custom counters.</div>'}</div>
+      </div>
+      <div style="display:flex;gap:8px;padding:14px 16px 4px;flex-wrap:wrap"><button class="btn btn-p" id="wpNumbersSave" style="flex:1;min-width:150px">Save displayed numbers</button><button class="btn btn-g" id="wpNumbersReset">Restore real values</button></div>
+      <div id="wpNumbersStatus" style="padding:7px 16px 12px;font-size:10.5px;color:var(--t3)">${numbersData.installed?'Control helper is installed.':'No control helper is installed yet.'}</div>`;
+    document.getElementById('wpNumbersAddCustom')?.addEventListener('click',()=>{
+      document.getElementById('wpNumbersCustomEmpty')?.remove();
+      document.getElementById('wpNumbersCustomList').insertAdjacentHTML('beforeend',customRow({}));
+      bindCustomRemove();
+    });
+    bindCustomRemove();
+    document.getElementById('wpNumbersSave')?.addEventListener('click',saveNumbers);
+    document.getElementById('wpNumbersReset')?.addEventListener('click',resetNumbers);
+  }
+  function customRow(item){
+    return `<div class="wp-custom-row" style="display:grid;grid-template-columns:1fr 1.25fr 110px 28px;gap:6px;margin-bottom:7px">
+      <input class="inp wp-custom-label" value="${esc(item.label||'')}" placeholder="Label">
+      <input class="inp wp-custom-selector" value="${esc(item.selector||'')}" placeholder=".plugin-counter">
+      <input class="inp wp-custom-value" type="number" min="0" max="999999999" step="1" inputmode="numeric" value="${item.value===undefined?'':esc(item.value)}" placeholder="Number">
+      <button type="button" class="btn btn-icon btn-red wp-custom-remove" title="Remove">×</button>
+    </div>`;
+  }
+  function bindCustomRemove(){
+    body.querySelectorAll('.wp-custom-remove').forEach(b=>b.onclick=()=>b.closest('.wp-custom-row')?.remove());
+  }
+  async function saveNumbers(){
+    const payload={};
+    body.querySelectorAll('.wp-num-input').forEach(input=>{if(input.value.trim()!=='')payload[input.dataset.id]=input.value.trim();});
+    const email=document.getElementById('wpNumbersEmail')?.value.trim()||'';
+    const selector=document.getElementById('wpNumbersEmailSelector')?.value.trim()||'';
+    if(email!=='')payload.email_messages=email;
+    if(selector!=='')payload.email_selector=selector;
+    payload.custom=[];
+    body.querySelectorAll('.wp-custom-row').forEach(row=>payload.custom.push({
+      label:row.querySelector('.wp-custom-label')?.value.trim()||'',
+      selector:row.querySelector('.wp-custom-selector')?.value.trim()||'',
+      value:row.querySelector('.wp-custom-value')?.value.trim()||''
+    }));
+    const btn=document.getElementById('wpNumbersSave'),status=document.getElementById('wpNumbersStatus');
+    btn.disabled=true;btn.textContent='Saving…';status.textContent='Installing the reversible WordPress admin helper…';
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('numbers_json',JSON.stringify(payload));
+    try{
+      const r=await numbersPost('?x=wp_numbers_control_save',fd);
+      if(!r.ok)throw new Error(r.error||'Could not save the number controls.');
+      toast(r.message||'Displayed numbers updated.');await loadNumbers();
+    }catch(e){status.style.color='#fca5a5';status.textContent=String(e);btn.disabled=false;btn.textContent='Save displayed numbers';}
+  }
+  async function resetNumbers(){
+    if(!confirm('Restore all real WordPress numbers and remove the reversible display helper?'))return;
+    const btn=document.getElementById('wpNumbersReset');btn.disabled=true;btn.textContent='Restoring…';
+    const fd=new FormData();fd.append('csrf_token',CSRF);
+    try{
+      const r=await numbersPost('?x=wp_numbers_control_reset',fd);
+      if(!r.ok)throw new Error(r.error||'Could not restore the real numbers.');
+      toast(r.message||'Real WordPress numbers restored.');await loadNumbers();
+    }catch(e){toast(String(e));btn.disabled=false;btn.textContent='Restore real values';}
+  }
+  document.getElementById('wpNumbersBtn')?.addEventListener('click',()=>{openMod('wpNumbersOv');loadNumbers();});
+  document.getElementById('wpNumbersClose')?.addEventListener('click',()=>closeMod('wpNumbersOv'));
+})();
 
 /* The initial admin/admin account must be replaced before the manager can be
    used. The server also rejects other POST actions while this flag is set, so
