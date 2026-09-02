@@ -2634,15 +2634,6 @@ class FileManager {
                 $real=$parent;
             }
         }
-        /* Inline background images and CSS-backed lazy loaders are common on
-           homepages and dashboards, even when there is no <img> element. */
-        preg_match_all('/url\s*\(\s*([\'"]?)([^\'")\s]+)\1\s*\)/i',$html,$cssUrls);
-        foreach($cssUrls[2]??[] as $raw){
-            $url=$this->wpImageUrl($raw,$base);if(!$url)continue;
-            $key=strtok($url,'?');$ext=strtolower(pathinfo(parse_url($key,PHP_URL_PATH)??'','extension'));
-            if(!in_array($ext,['jpg','jpeg','png','gif','webp','bmp','avif'],true)||isset($seen[$key]))continue;
-            $seen[$key]=1;$out[]=['url'=>$url,'source'=>$source.' (background)','label'=>basename(parse_url($key,PHP_URL_PATH)??$key),'width'=>null,'height'=>null];
-        }
         return $out;
     }
     private function wpSiteRoot($configPath){
@@ -4296,12 +4287,21 @@ FMNUM;
             }
             foreach($urls as $raw){
                 $url=$this->wpImageUrl($raw,$base);if(!$url)continue;
-                $key=strtok($url,'?');$ext=strtolower(pathinfo(parse_url($key,PHP_URL_PATH)??'','extension'));
+                $key=strtok($url,'?');$ext=strtolower(pathinfo(parse_url($key,PHP_URL_PATH)??'',PATHINFO_EXTENSION));
                 if(!in_array($ext,['jpg','jpeg','png','gif','webp','bmp','avif'],true))continue;
                 if(isset($seen[$key]))continue;$seen[$key]=1;
                 $out[]=['url'=>$url,'source'=>$source,'label'=>basename(parse_url($key,PHP_URL_PATH)??$key),
                     'width'=>null,'height'=>null];
             }
+        }
+        /* Inline background images and CSS-backed lazy loaders are common on
+           homepages and dashboards, even when there is no <img> element. */
+        preg_match_all('/url\s*\(\s*([\'"]?)([^\'")\s]+)\1\s*\)/i',$html,$cssUrls);
+        foreach($cssUrls[2]??[] as $raw){
+            $url=$this->wpImageUrl($raw,$base);if(!$url)continue;
+            $key=strtok($url,'?');$ext=strtolower(pathinfo(parse_url($key,PHP_URL_PATH)??'',PATHINFO_EXTENSION));
+            if(!in_array($ext,['jpg','jpeg','png','gif','webp','bmp','avif'],true)||isset($seen[$key]))continue;
+            $seen[$key]=1;$out[]=['url'=>$url,'source'=>$source.' (background)','label'=>basename(parse_url($key,PHP_URL_PATH)??$key),'width'=>null,'height'=>null];
         }
         return $out;
     }
@@ -7358,6 +7358,15 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 /* ══ ALERTS ══ */
 .alerts{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
 .alert{display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:var(--r);font-size:13px;border:1px solid transparent;animation:alertIn .3s var(--spring) both}
+.guardian-update-card{display:flex;align-items:flex-start;gap:14px;margin:0 0 12px;padding:16px 18px;border:1px solid rgba(245,158,11,.45);border-radius:12px;background:linear-gradient(105deg,rgba(245,158,11,.16),rgba(245,158,11,.06));color:#fcd34d;box-shadow:0 8px 24px rgba(0,0,0,.12);animation:alertIn .3s var(--spring) both}
+.guardian-update-card .guardian-update-icon{width:34px;height:34px;display:grid;place-items:center;flex:0 0 34px;border-radius:9px;background:rgba(245,158,11,.18);color:#fbbf24}
+.guardian-update-card .guardian-update-icon svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.guardian-update-card .guardian-update-copy{min-width:0;flex:1}
+.guardian-update-card .guardian-update-title{font-size:14px;font-weight:750;color:#fde68a;margin-bottom:4px}
+.guardian-update-card .guardian-update-text{font-size:11.5px;line-height:1.55;color:rgba(254,243,199,.78)}
+.guardian-update-card .guardian-update-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+.guardian-update-card .alert-x{align-self:flex-start}
+@media(max-width:620px){.guardian-update-card{flex-wrap:wrap}.guardian-update-card .guardian-update-actions{width:100%;margin-left:48px}}
 @keyframes alertIn{from{opacity:0;transform:translateY(-8px) scale(.97)}to{opacity:1;transform:none}}
 .alert svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;flex-shrink:0}
 .alert.success{background:rgba(34,197,94,.07);border-color:rgba(34,197,94,.2);color:#86efac}
@@ -9726,9 +9735,10 @@ function guardianShowUpdateNotice(){
   if(!content)return;
   const notice=document.createElement('div');
   notice.id='guardianUpdateNotice';
-  notice.className='alert warning';
+  notice.className='guardian-update-card';
   notice.setAttribute('role','status');
   notice.innerHTML='<svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><span>Guardian found a newer version of File Manager.</span><button type="button" class="btn btn-xs btn-g" style="margin-left:auto" id="guardianOpenUpdate">Review update</button><button type="button" class="alert-x" aria-label="Dismiss"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
+  notice.innerHTML='<div class="guardian-update-icon"><svg viewBox="0 0 24 24"><path d="M12 3 2.8 19a1.5 1.5 0 0 0 1.3 2.25h15.8A1.5 1.5 0 0 0 21.2 19L12 3Z"/><path d="M12 8v5M12 17h.01"/></svg></div><div class="guardian-update-copy"><div class="guardian-update-title">A new File Manager update is available</div><div class="guardian-update-text">Review the update details before downloading it. Your current files remain unchanged until you explicitly choose to apply the update.</div></div><div class="guardian-update-actions"><button type="button" class="btn btn-xs btn-g" id="guardianOpenUpdate">Review update</button><button type="button" class="alert-x" aria-label="Dismiss"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
   content.insertBefore(notice,content.firstChild);
   notice.querySelector('#guardianOpenUpdate')?.addEventListener('click',()=>{openMod('guardOv');guardLoad();});
   notice.querySelector('.alert-x')?.addEventListener('click',()=>notice.remove());
