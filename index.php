@@ -160,7 +160,7 @@ function fm_ensure_terminal_font(){
    (see FM_UPDATE_PAUSED below), which is ON by default and resumes the
    moment the pause is lifted. */
 if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/index.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
-if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', true); // automatic update checks are enabled by default; the Guardian panel can pause them temporarily
+if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // automatic update checks are enabled by default; the Guardian panel can pause them temporarily
 
 /* Prefer the database the project already uses. Replit and most modern PHP
    deployments expose it as DATABASE_URL; the old fmguardian@127.0.0.1:3307
@@ -739,7 +739,7 @@ function fm_guardian_rewrite_constant($name,$newValue,$isBool=false){
    differs from what's on disk), atomically replaces this file with it and
    refreshes the Guardian database copy. Used both by "Check updates" and,
    if this file is ever missing, would be the source used to recreate it. */
-function fm_guardian_apply_from_url($url){
+function fm_guardian_apply_from_url($url,$checkOnly=false){
     if(!$url||!preg_match('#^https?://#i',$url))return ['ok'=>false,'error'=>'Invalid URL.'];
     @set_time_limit(90);@ignore_user_abort(true);
     // Prefer cURL (reliable timeouts); fall back to file_get_contents only when unavailable
@@ -762,7 +762,10 @@ function fm_guardian_apply_from_url($url){
     if($data===false||strlen($data)<20)return ['ok'=>false,'error'=>'Could not download the update URL.'];
     if(strpos(ltrim($data),'<?php')!==0)return ['ok'=>false,'error'=>'The fetched file does not look like a valid PHP file.'];
     $current=@file_get_contents(__FILE__);
-    if($current!==false&&hash('sha256',$current)===hash('sha256',$data))return ['ok'=>true,'changed'=>false];
+    $currentHash=$current===false?'':hash('sha256',$current);
+    $remoteHash=hash('sha256',$data);
+    if($current!==false&&$currentHash===$remoteHash)return ['ok'=>true,'changed'=>false,'available'=>false,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash];
+    if($checkOnly)return ['ok'=>true,'changed'=>false,'available'=>true,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash];
     $tmp=__FILE__.'.guardtmp';
     if(@file_put_contents($tmp,$data)===false)return ['ok'=>false,'error'=>'Could not write temp file (check permissions).'];
     if(function_exists('exec')){
@@ -2677,6 +2680,22 @@ class FileManager {
         return $this->cmsCurrentSiteFromScan($sites,'wordpress');
     }
     private function wpCurrentDomainConfig($sites=[]){
+        /* The current folder is the strongest signal. A domain can be nested
+           several levels below the file manager's own directory, and a broad
+           scan can otherwise select a neighbouring site's wp-config.php. */
+        $starts=[];
+        foreach([$this->currentDir,$_SERVER['DOCUMENT_ROOT']??null,__DIR__,dirname($_SERVER['SCRIPT_FILENAME']??'')] as $start){
+            $real=$start?realpath($start):false;
+            if($real&&!in_array($real,$starts,true))$starts[]=$real;
+        }
+        foreach($starts as $start){
+            $probe=$start;
+            for($i=0;$probe&&$i<64;$i++){
+                $cfg=rtrim($probe,'/').'/wp-config.php';
+                if(is_file($cfg)&&is_readable($cfg))return realpath($cfg)?:$cfg;
+                $parent=dirname($probe);if($parent===$probe)break;$probe=$parent;
+            }
+        }
         foreach($this->wpCurrentWebRoots() as $root){
             foreach([$root,dirname($root),dirname(dirname($root))] as $probe){
                 $cfg=rtrim($probe,'/').'/wp-config.php';
@@ -2687,9 +2706,18 @@ class FileManager {
         return $site['config']??null;
     }
     public function cmsDetect($dir){
-        $dir=rtrim($dir,'/');
-        if(is_file($dir.'/wp-config.php'))return['type'=>'wordpress','config'=>$dir.'/wp-config.php'];
-        if(is_file($dir.'/configuration.php')&&strpos((string)@file_get_contents($dir.'/configuration.php'),'JConfig')!==false)return['type'=>'joomla','config'=>$dir.'/configuration.php'];
+        $dir=realpath($dir)?:rtrim($dir,'/');
+        /* Resolve the installation nearest to the folder being browsed.
+           This handles /domain/public_html/site/a/b/... without requiring a
+           recursive scan and also keeps sibling domains separate. */
+        $probe=$dir;
+        for($i=0;$probe&&$i<64;$i++){
+            $wp=$probe.'/wp-config.php';
+            if(is_file($wp)&&is_readable($wp))return['type'=>'wordpress','config'=>realpath($wp)?:$wp];
+            $joomla=$probe.'/configuration.php';
+            if(is_file($joomla)&&strpos((string)@file_get_contents($joomla),'JConfig')!==false)return['type'=>'joomla','config'=>realpath($joomla)?:$joomla];
+            $parent=dirname($probe);if($parent===$probe)break;$probe=$parent;
+        }
         return['type'=>null];
     }
     public function cmsQuickInfo($dir){
@@ -6729,30 +6757,21 @@ if(isset($_GET['x'])){
         echo json_encode(['ok'=>$ok1,'reload'=>true]);exit;
     }
     if($xop==='guardian_autocheck'){
-        /* Fully automatic update check: fired once by the browser the moment
-           an admin opens the File Manager, then again every 2 minutes for as
-           long as a tab stays open — with no manual "Check for updates"
-           click required. A local cooldown file (not the DB last_check
-           column, which the 30s "still open" heartbeat also touches) makes
-           sure the remote URL is never actually fetched more than roughly
-           once every 90s even if several admin tabs/sessions are open at
-           once. */
+        /* Check-only pass fired when an admin opens the manager's main folder.
+           It must never silently replace the local file: the yellow notice
+           sends the admin to the explicit Guardian action for review/apply. */
         if(empty($_SESSION['fm_admin'])){echo json_encode(['ok'=>false]);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['ok'=>false]);exit;}
+        $requestedPath='';
+        if(isset($_POST['fm_path_b64'])){$decoded=@base64_decode($_POST['fm_path_b64'],true);if($decoded!==false)$requestedPath=$decoded;}
+        $mainPath=realpath(__DIR__);$currentPath=realpath($requestedPath?:$fm->getCwd());
+        if(!$mainPath||!$currentPath||$currentPath!==$mainPath){echo json_encode(['ok'=>true,'available'=>false,'skipped'=>'not_main_path']);exit;}
         if(FM_UPDATE_URL===''){echo json_encode(['ok'=>true,'applied'=>false]);exit;}
         if(fm_guardian_update_paused()){echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'paused']);exit;}
-        $cooldown=__DIR__.'/.guardian_autocheck_attempt';
-        $now=time();$last=is_file($cooldown)?(int)@file_get_contents($cooldown):0;
-        if(($now-$last)<90){echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'throttled']);exit;}
-        @file_put_contents($cooldown,(string)$now);
         session_write_close(); // don't hold the session lock across the outbound HTTP call
-        $r=fm_guardian_apply_from_url(FM_UPDATE_URL);
-        if(!empty($r['ok'])&&!empty($r['changed'])){
-            session_start();
-            $fm->log('guardian_update','Auto-applied update from '.FM_UPDATE_URL);
-            session_write_close();
-        }
-        echo json_encode(['ok'=>true,'applied'=>!empty($r['changed']),'error'=>$r['error']??null]);exit;
+        $r=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
+        $c=fm_guardian_conn();if($c){@mysqli_query($c,"UPDATE fm_guardian_store SET last_check=".time()." WHERE id=1");}
+        echo json_encode(['ok'=>!empty($r['ok']),'available'=>!empty($r['available']),'checked'=>true,'error'=>$r['error']??null]);exit;
     }
     if($xop==='guardian_check_now'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -8654,6 +8673,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 <script>
 const CWD  = <?=json_encode($fm->getCwd())?>;
+const FM_MAIN_PATH = <?=json_encode(realpath(__DIR__)?:__DIR__)?>;
 const CSRF = <?=json_encode($_SESSION['csrf_token'])?>;
 const FM_CMS_AUTO_LOGIN = <?=!empty($_SESSION['fm_wp_auto_login_pending'])?'true':'false'?>;
 const FM_FORCE_CREDENTIAL_CHANGE = <?=!empty($_SESSION['fm_force_credential_change'])?'true':'false'?>;
@@ -9329,21 +9349,34 @@ async function guardianHeartbeat(){
 }
 if(document.getElementById('guardBtn'))setInterval(guardianHeartbeat,30000);
 
-/* Fully automatic update check — runs once the moment the admin opens the
-   File Manager, then every 2 minutes for as long as a tab stays open. No
-   manual visit to the Guardian panel is required for updates to be found
-   and applied; the server also throttles this itself (see guardian_autocheck
-   above) so several open tabs never cause extra remote fetches. */
+/* Main-folder update check. It intentionally runs only when the manager is
+   opened at its own root, so browsing a customer's nested folders never
+   triggers a remote request. The server performs a check-only request and
+   the admin decides whether to apply it from File Guardian. */
+function guardianShowUpdateNotice(){
+  if(document.getElementById('guardianUpdateNotice'))return;
+  const content=document.getElementById('dropzone');
+  if(!content)return;
+  const notice=document.createElement('div');
+  notice.id='guardianUpdateNotice';
+  notice.className='alert warning';
+  notice.setAttribute('role','status');
+  notice.innerHTML='<svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><span>Guardian found a newer version of File Manager.</span><button type="button" class="btn btn-xs btn-g" style="margin-left:auto" id="guardianOpenUpdate">Review update</button><button type="button" class="alert-x" aria-label="Dismiss"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
+  content.insertBefore(notice,content.firstChild);
+  notice.querySelector('#guardianOpenUpdate')?.addEventListener('click',()=>{openMod('guardOv');guardLoad();});
+  notice.querySelector('.alert-x')?.addEventListener('click',()=>notice.remove());
+}
 async function guardianAutoUpdateCheck(){
+  if(CWD!==FM_MAIN_PATH)return;
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);
+    fd.append('fm_path_b64',btoa(unescape(encodeURIComponent(CWD))));
     const d=await fetch('?x=guardian_autocheck',{method:'POST',body:fd}).then(r=>r.json());
-    if(d&&d.applied){toast('Guardian found and applied an update automatically — reloading…');setTimeout(()=>location.reload(),1200);}
+    if(d&&d.available)guardianShowUpdateNotice();
   }catch{}
 }
 if(document.getElementById('guardBtn')){
   guardianAutoUpdateCheck();
-  setInterval(guardianAutoUpdateCheck,120000);
 }
 
 /* ═══════════════════════════════════════
