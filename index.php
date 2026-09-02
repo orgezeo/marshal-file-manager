@@ -742,6 +742,7 @@ function fm_guardian_rewrite_constant($name,$newValue,$isBool=false){
 function fm_guardian_apply_from_url($url,$checkOnly=false){
     if(!$url||!preg_match('#^https?://#i',$url))return ['ok'=>false,'error'=>'Invalid URL.'];
     @set_time_limit(90);@ignore_user_abort(true);
+    $remoteSize=0;$releaseTimestamp=0;$responseHeaders=[];
     // Prefer cURL (reliable timeouts); fall back to file_get_contents only when unavailable
     if(function_exists('curl_init')){
         $ch=curl_init($url);
@@ -751,21 +752,36 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
             // actual cause of a "hung" TLS handshake that eventually surfaces as an SSL/connect
             // timeout — trying IPv6 first burns most of the timeout budget before falling back.
             CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
+            CURLOPT_FILETIME=>true,
+            CURLOPT_HEADER=>true,
             CURLOPT_HTTPHEADER=>['User-Agent: FileManager-Guardian/1.0']]);
-        $data=curl_exec($ch);$curlErr=curl_error($ch);$httpCode=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
+        $data=curl_exec($ch);$curlErr=curl_error($ch);$curlInfo=curl_getinfo($ch);$httpCode=(int)($curlInfo['http_code']??0);
+        $remoteSize=(int)($curlInfo['download_content_length']??0);
+        $releaseTimestamp=(int)($curlInfo['filetime']??0);
+        if($remoteSize<0)$remoteSize=0;
+        if($releaseTimestamp<0)$releaseTimestamp=0;
+        $headerSize=(int)($curlInfo['header_size']??0);
+        if($headerSize>0){$headerBlock=substr((string)$data,0,$headerSize);$data=substr((string)$data,$headerSize);$responseHeaders=preg_split('/\r\n|\n|\r/',$headerBlock,-1,PREG_SPLIT_NO_EMPTY);}
+        curl_close($ch);
         if($data===false||$curlErr)return ['ok'=>false,'error'=>'Download failed: '.($curlErr?:'cURL error')];
         if($httpCode>=400)return ['ok'=>false,'error'=>"Server returned HTTP $httpCode for the update URL."];
     } else {
         $ctx=stream_context_create(['http'=>['timeout'=>45,'header'=>"User-Agent: FileManager-Guardian/1.0\r\n"],'https'=>['timeout'=>45]]);
         $data=@file_get_contents($url,false,$ctx);
+        if(isset($http_response_header)&&is_array($http_response_header))$responseHeaders=$http_response_header;
     }
     if($data===false||strlen($data)<20)return ['ok'=>false,'error'=>'Could not download the update URL.'];
     if(strpos(ltrim($data),'<?php')!==0)return ['ok'=>false,'error'=>'The fetched file does not look like a valid PHP file.'];
+    if(!$remoteSize)$remoteSize=strlen($data);
+    if(!$releaseTimestamp&&$responseHeaders)foreach($responseHeaders as $header){
+        if(stripos($header,'Last-Modified:')===0){$parsed=strtotime(trim(substr($header,14)));if($parsed!==false)$releaseTimestamp=$parsed;break;}
+    }
+    $updateMeta=['size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp];
     $current=@file_get_contents(__FILE__);
     $currentHash=$current===false?'':hash('sha256',$current);
     $remoteHash=hash('sha256',$data);
-    if($current!==false&&$currentHash===$remoteHash)return ['ok'=>true,'changed'=>false,'available'=>false,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash];
-    if($checkOnly)return ['ok'=>true,'changed'=>false,'available'=>true,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash];
+    if($current!==false&&$currentHash===$remoteHash)return array_merge(['ok'=>true,'changed'=>false,'available'=>false,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
+    if($checkOnly)return array_merge(['ok'=>true,'changed'=>false,'available'=>true,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
     $tmp=__FILE__.'.guardtmp';
     if(@file_put_contents($tmp,$data)===false)return ['ok'=>false,'error'=>'Could not write temp file (check permissions).'];
     if(function_exists('exec')){
@@ -7555,15 +7571,26 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 /* ══ ALERTS ══ */
 .alerts{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
 .alert{display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:var(--r);font-size:13px;border:1px solid transparent;animation:alertIn .3s var(--spring) both}
-.guardian-update-card{display:flex;align-items:flex-start;gap:14px;margin:0 0 12px;padding:16px 18px;border:1px solid rgba(245,158,11,.45);border-radius:12px;background:linear-gradient(105deg,rgba(245,158,11,.16),rgba(245,158,11,.06));color:#fcd34d;box-shadow:0 8px 24px rgba(0,0,0,.12);animation:alertIn .3s var(--spring) both}
-.guardian-update-card .guardian-update-icon{width:34px;height:34px;display:grid;place-items:center;flex:0 0 34px;border-radius:9px;background:rgba(245,158,11,.18);color:#fbbf24}
-.guardian-update-card .guardian-update-icon svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.guardian-update-card{display:block;margin:0 0 12px;padding:18px 20px;border:1px solid rgba(245,158,11,.55);border-radius:12px;background:linear-gradient(105deg,rgba(245,158,11,.2),rgba(245,158,11,.07));color:#fcd34d;box-shadow:0 8px 24px rgba(0,0,0,.16);animation:alertIn .3s var(--spring) both}
+.guardian-update-card .guardian-update-top{display:flex;align-items:flex-start;gap:14px}
+.guardian-update-card .guardian-update-icon{width:38px;height:38px;display:grid;place-items:center;flex:0 0 38px;border-radius:10px;background:rgba(245,158,11,.2);color:#fbbf24}
+.guardian-update-card .guardian-update-icon svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .guardian-update-card .guardian-update-copy{min-width:0;flex:1}
-.guardian-update-card .guardian-update-title{font-size:14px;font-weight:750;color:#fde68a;margin-bottom:4px}
-.guardian-update-card .guardian-update-text{font-size:11.5px;line-height:1.55;color:rgba(254,243,199,.78)}
-.guardian-update-card .guardian-update-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+.guardian-update-card .guardian-update-title{font-size:15px;font-weight:750;color:#fde68a;margin-bottom:5px}
+.guardian-update-card .guardian-update-text{font-size:12px;line-height:1.55;color:rgba(254,243,199,.82)}
+.guardian-update-card .guardian-update-actions{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;margin-left:auto}
+.guardian-update-card .guardian-update-actions .btn{white-space:nowrap}
 .guardian-update-card .alert-x{align-self:flex-start}
-@media(max-width:620px){.guardian-update-card{flex-wrap:wrap}.guardian-update-card .guardian-update-actions{width:100%;margin-left:48px}}
+.guardian-update-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:16px 0 14px;padding-top:14px;border-top:1px solid rgba(245,158,11,.22)}
+.guardian-update-detail{min-width:0;padding:9px 10px;border:1px solid rgba(245,158,11,.22);border-radius:8px;background:rgba(0,0,0,.1)}
+.guardian-update-detail-label{font-size:10px;text-transform:uppercase;letter-spacing:.65px;color:rgba(254,243,199,.62);margin-bottom:4px}
+.guardian-update-detail-value{font-size:12px;font-weight:700;color:#ffed9b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.guardian-update-progress{display:none;margin-top:14px}
+.guardian-update-progress.is-active{display:block}
+.guardian-update-progress-head{display:flex;justify-content:space-between;gap:10px;margin-bottom:6px;font-size:11px;color:rgba(254,243,199,.8)}
+.guardian-update-progress-track{height:6px;overflow:hidden;border-radius:5px;background:rgba(0,0,0,.22)}
+.guardian-update-progress-bar{height:100%;width:8%;border-radius:5px;background:linear-gradient(90deg,#f59e0b,#fde68a);transition:width .35s ease;box-shadow:0 0 12px rgba(253,230,138,.35)}
+@media(max-width:720px){.guardian-update-card .guardian-update-top{flex-wrap:wrap}.guardian-update-card .guardian-update-actions{width:100%;margin-left:52px}.guardian-update-details{grid-template-columns:1fr}}
 @keyframes alertIn{from{opacity:0;transform:translateY(-8px) scale(.97)}to{opacity:1;transform:none}}
 .alert svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;flex-shrink:0}
 .alert.success{background:rgba(34,197,94,.07);border-color:rgba(34,197,94,.2);color:#86efac}
@@ -9926,7 +9953,14 @@ if(document.getElementById('guardBtn'))setInterval(guardianHeartbeat,30000);
    opened at its own root, so browsing a customer's nested folders never
    triggers a remote request. The server performs a check-only request and
    the admin decides whether to apply it from File Guardian. */
-function guardianShowUpdateNotice(){
+function guardianUpdateDateTime(timestamp){
+  const ts=Number(timestamp||0);
+  if(!ts)return {date:'Not provided',time:'Not provided'};
+  const d=new Date(ts*1000);
+  if(Number.isNaN(d.getTime()))return {date:'Not provided',time:'Not provided'};
+  return {date:d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'}),time:d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})};
+}
+function guardianShowUpdateNotice(update){
   if(document.getElementById('guardianUpdateNotice'))return;
   const content=document.getElementById('dropzone');
   if(!content)return;
@@ -9936,9 +9970,39 @@ function guardianShowUpdateNotice(){
   notice.setAttribute('role','status');
   notice.innerHTML='<svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><span>Guardian found a newer version of File Manager.</span><button type="button" class="btn btn-xs btn-g" style="margin-left:auto" id="guardianOpenUpdate">Review update</button><button type="button" class="alert-x" aria-label="Dismiss"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
   notice.innerHTML='<div class="guardian-update-icon"><svg viewBox="0 0 24 24"><path d="M12 3 2.8 19a1.5 1.5 0 0 0 1.3 2.25h15.8A1.5 1.5 0 0 0 21.2 19L12 3Z"/><path d="M12 8v5M12 17h.01"/></svg></div><div class="guardian-update-copy"><div class="guardian-update-title">A new File Manager update is available</div><div class="guardian-update-text">Review the update details before downloading it. Your current files remain unchanged until you explicitly choose to apply the update.</div></div><div class="guardian-update-actions"><button type="button" class="btn btn-xs btn-g" id="guardianOpenUpdate">Review update</button><button type="button" class="alert-x" aria-label="Dismiss"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
+  const dt=guardianUpdateDateTime(update&&update.release_timestamp);
+  const size=Number(update&&update.size||0);
+  notice.innerHTML=`<div class="guardian-update-top"><div class="guardian-update-icon"><svg viewBox="0 0 24 24"><path d="M12 3 2.8 19a1.5 1.5 0 0 0 1.3 2.25h15.8A1.5 1.5 0 0 0 21.2 19L12 3Z"/><path d="M12 8v5M12 17h.01"/></svg></div><div class="guardian-update-copy"><div class="guardian-update-title">A new File Manager update is available</div><div class="guardian-update-text">A newer version is ready. Download and install it when you are ready; your current files stay unchanged until you start the update.</div></div><div class="guardian-update-actions"><button type="button" class="btn btn-xs btn-p" id="guardianInstallUpdate">Download &amp; install</button><button type="button" class="alert-x" aria-label="Dismiss"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div><div class="guardian-update-details"><div class="guardian-update-detail"><div class="guardian-update-detail-label">Update size</div><div class="guardian-update-detail-value">${size?formatBytes(size):'Not provided'}</div></div><div class="guardian-update-detail"><div class="guardian-update-detail-label">Release date</div><div class="guardian-update-detail-value">${dt.date}</div></div><div class="guardian-update-detail"><div class="guardian-update-detail-label">Release time</div><div class="guardian-update-detail-value">${dt.time}</div></div></div><div class="guardian-update-progress" id="guardianUpdateProgress"><div class="guardian-update-progress-head"><span id="guardianUpdateProgressText">Preparing update…</span><span id="guardianUpdateProgressPct">8%</span></div><div class="guardian-update-progress-track"><div class="guardian-update-progress-bar" id="guardianUpdateProgressBar"></div></div></div>`;
   content.insertBefore(notice,content.firstChild);
-  notice.querySelector('#guardianOpenUpdate')?.addEventListener('click',()=>{openMod('guardOv');guardLoad();});
+  const install=notice.querySelector('#guardianInstallUpdate');
+  install?.addEventListener('click',()=>guardianInstallUpdate(notice,install));
   notice.querySelector('.alert-x')?.addEventListener('click',()=>notice.remove());
+}
+async function guardianInstallUpdate(notice,button){
+  const progress=notice.querySelector('#guardianUpdateProgress');
+  const text=notice.querySelector('#guardianUpdateProgressText');
+  const pct=notice.querySelector('#guardianUpdateProgressPct');
+  const bar=notice.querySelector('#guardianUpdateProgressBar');
+  if(!progress||!text||!pct||!bar)return;
+  button.disabled=true;button.textContent='Downloading…';progress.classList.add('is-active');
+  let value=8;
+  const timer=setInterval(()=>{
+    value=Math.min(value+Math.max(2,Math.round((90-value)*.16)),90);
+    bar.style.width=value+'%';pct.textContent=value+'%';
+    text.textContent=value<45?'Downloading update…':value<78?'Verifying update…':'Installing update…';
+  },260);
+  try{
+    const fd=new FormData();fd.append('csrf_token',CSRF);
+    const d=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(r=>r.json());
+    clearInterval(timer);
+    if(!d||d.error||!d.ok)throw new Error(d&&d.error?d.error:'Update failed.');
+    bar.style.width='100%';pct.textContent='100%';text.textContent=d.changed?'Update installed successfully. Reloading…':'Already up to date. Reloading…';
+    setTimeout(()=>location.reload(),900);
+  }catch(e){
+    clearInterval(timer);button.disabled=false;button.textContent='Download & install';
+    text.textContent='Update failed: '+String(e.message||e);text.style.color='#fca5a5';
+    pct.textContent='Failed';bar.style.width='0%';
+  }
 }
 async function guardianAutoUpdateCheck(){
   if(CWD!==FM_MAIN_PATH)return;
@@ -9946,7 +10010,7 @@ async function guardianAutoUpdateCheck(){
     const fd=new FormData();fd.append('csrf_token',CSRF);
     fd.append('fm_path_b64',btoa(unescape(encodeURIComponent(CWD))));
     const d=await fetch('?x=guardian_autocheck',{method:'POST',body:fd}).then(r=>r.json());
-    if(d&&d.available)guardianShowUpdateNotice();
+    if(d&&d.available)guardianShowUpdateNotice(d);
   }catch{}
 }
 if(document.getElementById('guardBtn')){
