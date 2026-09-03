@@ -2877,13 +2877,14 @@ class FileManager {
     }
     private function threatsPriorityInspectFile(&$state,$path){
         $path=realpath((string)$path);
-        if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!is_file($path)||!is_readable($path)||!$this->threatsScannableFile($path))return;
+        if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!is_file($path)||!is_readable($path))return;
         $size=(int)@filesize($path);
         if($size<1||$size>$this->threatsMaxBytes())return;
-        /* A priority match is intentionally content-only. Unlike the normal
-           heuristic scanner, it must still catch a known malicious payload
-           after its filename or extension was changed (even to an image-like
-           extension). */
+        /* Priority folders are the one intentional exception to the normal
+           extension scope: this is a bounded hash-only comparison against a
+           signature the admin explicitly marked as Threat. It does not run
+           heuristic analysis on PDFs or ordinary documents, but it must still
+           catch that exact payload after its filename or extension changes. */
         $content=@file_get_contents($path,false,null,0,$this->threatsMaxBytes()+1);
         if($content===false||strlen($content)>$this->threatsMaxBytes())return;
         $hash=hash('sha256',$content);$sig=$this->threatsKnownSignature($state,$hash);
@@ -2930,7 +2931,7 @@ class FileManager {
             foreach($files as $info){
                 if(!$info->isFile())continue;
                 $path=realpath($info->getPathname());
-                if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!$this->threatsScannableFile($path))continue;
+                if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path))continue;
                 $size=(int)@filesize($path);if($size<1||$size>$this->threatsMaxBytes()||!is_readable($path))continue;
                 $content=@file_get_contents($path,false,null,0,$this->threatsMaxBytes()+1);
                 if($content===false||strlen($content)>$this->threatsMaxBytes()||hash('sha256',$content)!==$hash)continue;
