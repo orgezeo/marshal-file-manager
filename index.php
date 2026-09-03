@@ -2918,7 +2918,20 @@ class FileManager {
         $dirs=$state['watch_dirs'];$n=count($dirs);if(!$n)return;
         $steps=0;
         while(microtime(true)<$deadline&&$steps<1&&$fileBudget>0&&$n){
-            $idx=((int)($state['watch_cursor']??0))%$n;$dir=$dirs[$idx];$state['watch_cursor']=($idx+1)%$n;$steps++;
+            /* Prioritize directories whose mtime changed so a fresh upload
+               is checked immediately instead of waiting for the full
+               round-robin pass. Keep the round-robin fallback because some
+               shared hosts expose only second-level mtimes. */
+            $round=((int)($state['watch_cursor']??0))%$n;$idx=null;
+            for($offset=0;$offset<$n;$offset++){
+                $probe=($round+$offset)%$n;$candidate=$dirs[$probe]??'';
+                if(!$candidate||!is_dir($candidate))continue;
+                $currentMtime=(int)@filemtime($candidate);
+                $savedMtime=(int)($state['dir_mtimes'][$candidate]??0);
+                if($currentMtime!==$savedMtime){$idx=$probe;break;}
+            }
+            if($idx===null)$idx=$round;
+            $dir=$dirs[$idx];$state['watch_cursor']=($idx+1)%$n;$steps++;
             if(!is_dir($dir))continue;
             $mtime=(int)@filemtime($dir);$old=(int)($state['dir_mtimes'][$dir]??0);
             /* Do not rely on directory mtime alone: some hosts expose
@@ -2926,7 +2939,8 @@ class FileManager {
                before the timestamp changes. A bounded directory listing is
                cheap and lets the known-path map catch that case too. */
             $state['dir_mtimes'][$dir]=$mtime;
-            $batch=$this->threatsReadDir(['path'=>$dir,'cursor'=>(int)($state['watch_dir_cursors'][$dir]??0)]);$entries=$batch['entries'];$nextCursor=$batch['cursor'];
+            $cursor=($mtime!==$old)?0:(int)($state['watch_dir_cursors'][$dir]??0);
+            $batch=$this->threatsReadDir(['path'=>$dir,'cursor'=>$cursor]);$entries=$batch['entries'];$nextCursor=$batch['cursor'];
             foreach($entries as $entryIndex=>$p){
                 if(is_dir($p)&&!in_array($p,$state['watch_dirs'],true)){
                     $state['watch_dirs'][]=$p;$state['dir_mtimes'][$p]=(int)@filemtime($p);$n=count($state['watch_dirs']);
