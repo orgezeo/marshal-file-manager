@@ -2692,7 +2692,7 @@ class FileManager {
             $d['dirs']=[['path'=>$base,'entries'=>null,'index'=>0,'batch'=>true]];
             $d['watch_dirs']=[];$d['watch_cursor']=0;$d['watch_dir_cursors']=[];$d['dir_mtimes']=[];
         }
-        $d['findings']=array_values(array_filter($d['findings'],fn($f)=>!$this->threatsSkip($f['path']??'')&&!$this->threatsNonTextExtension($f['path']??'')));
+        $d['findings']=array_values(array_filter($d['findings'],fn($f)=>!$this->threatsSkip($f['path']??'')&&$this->threatsScannableFile($f['path']??'')));
         $d['dirs']=array_values(array_filter($d['dirs'],fn($f)=>!$this->threatsSkip($f['path']??'')));
         $d['watch_dirs']=array_values(array_filter($d['watch_dirs'],fn($p)=>!$this->threatsSkip($p)));
         foreach(array_keys($d['known']) as $p)if($this->threatsSkip($p))unset($d['known'][$p]);
@@ -2738,8 +2738,27 @@ class FileManager {
         return in_array(strtolower(pathinfo((string)$path,PATHINFO_EXTENSION)),[
             'jpg','jpeg','jfif','png','apng','gif','webp','ico','bmp','tif','tiff','avif','heic','heif','raw','cr2','nef','orf','dng','psd','xcf','svg',
             'mp3','wav','flac','ogg','aac','m4a','mp4','avi','mkv','mov','webm',
-            'zip','rar','7z','tar','gz','bz2','tgz','xz','zst','lz','lz4','lzh','cab','arj','ace','iso','img','dmg','wim','jar','war','ear','apk','ipa','deb','rpm','tbz','tbz2','txz'
+            'zip','rar','7z','tar','gz','bz2','tgz','xz','zst','lz','lz4','lzh','cab','arj','ace','iso','img','dmg','wim','jar','war','ear','apk','ipa','deb','rpm','tbz','tbz2','txz',
+            'pdf','doc','docx','odt','xls','xlsx','ods','csv','ppt','pptx','odp','rtf'
         ],true);
+    }
+    private function threatsExecutableExtensions(){
+        return[
+            'php','phtml','php3','php4','php5','php7','php8','phar','inc',
+            'cgi','pl','pm','py','py3','rb','sh','bash','zsh','fish',
+            'asp','aspx','jsp','jspx','js','mjs','cjs','ts','wasm',
+            'exe','com','scr','msi','dll','so','dylib','bin','elf'
+        ];
+    }
+    private function threatsScannableFile($path){
+        $path=(string)$path;$ext=strtolower(pathinfo($path,PATHINFO_EXTENSION));
+        if(in_array($ext,$this->threatsExecutableExtensions(),true))return true;
+        if($this->threatsNonTextExtension($path))return false;
+        $rp=realpath($path);if(!$rp||!is_file($rp))return false;
+        $mode=@fileperms($rp);
+        if($mode!==false&&($mode&0111)!==0)return true;
+        $head=@file_get_contents($rp,false,null,0,256);
+        return is_string($head)&&preg_match('/^#![ \t]*\/(?:usr\/bin\/env[ \t]+)?(?:php|python[0-9.]*|perl|ruby|node|bash|sh|zsh|fish|pwsh|powershell)\b/im',$head)===1;
     }
     private function threatsExtensionRisk($path){
         $name=strtolower(basename((string)$path));$ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));
@@ -2858,7 +2877,7 @@ class FileManager {
     }
     private function threatsPriorityInspectFile(&$state,$path){
         $path=realpath((string)$path);
-        if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!is_file($path)||!is_readable($path))return;
+        if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!is_file($path)||!is_readable($path)||!$this->threatsScannableFile($path))return;
         $size=(int)@filesize($path);
         if($size<1||$size>$this->threatsMaxBytes())return;
         /* A priority match is intentionally content-only. Unlike the normal
@@ -2911,7 +2930,7 @@ class FileManager {
             foreach($files as $info){
                 if(!$info->isFile())continue;
                 $path=realpath($info->getPathname());
-                if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||$this->threatsNonTextExtension($path))continue;
+                if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!$this->threatsScannableFile($path))continue;
                 $size=(int)@filesize($path);if($size<1||$size>$this->threatsMaxBytes()||!is_readable($path))continue;
                 $content=@file_get_contents($path,false,null,0,$this->threatsMaxBytes()+1);
                 if($content===false||strlen($content)>$this->threatsMaxBytes()||hash('sha256',$content)!==$hash)continue;
@@ -2927,7 +2946,7 @@ class FileManager {
         return in_array($path,$state['whitelist_files'],true)||($hash!==''&&in_array($hash,$state['whitelist_hashes'],true));
     }
     private function threatsInspectFile(&$state,$path){
-        $path=realpath($path);if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!is_file($path))return;
+        $path=realpath($path);if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!is_file($path)||!$this->threatsScannableFile($path))return;
         $size=(int)@filesize($path);if($size<1||$size>$this->threatsMaxBytes()){$state['known'][$path]=['size'=>$size,'mtime'=>(int)@filemtime($path)];return;}
         $item=$this->threatsAnalyze($path);$hash=$item['hash']??'';
         $state['known'][$path]=['size'=>$size,'mtime'=>(int)@filemtime($path),'hash'=>$hash];
@@ -3175,7 +3194,7 @@ class FileManager {
         if($input[0]!==DIRECTORY_SEPARATOR)$input=$root.DIRECTORY_SEPARATOR.ltrim($input,'./'.DIRECTORY_SEPARATOR);
         $rp=realpath($input);
         if(!$rp||!is_file($rp)||!$this->threatsPathAllowed($rp)||$this->threatsSkip($rp))return['ok'=>false,'error'=>'The path must point to a file inside the site root.'];
-        if($this->threatsNonTextExtension($rp))return['ok'=>true,'skipped'=>true,'reason'=>'Images, media, and archives are not read.'];
+        if(!$this->threatsScannableFile($rp))return['ok'=>true,'skipped'=>true,'reason'=>'Only PHP and executable files are scanned.'];
         $size=(int)@filesize($rp);if($size<1)return['ok'=>true,'skipped'=>true,'reason'=>'The file is empty.'];
         if($size>$this->threatsMaxBytes())return['ok'=>true,'skipped'=>true,'reason'=>'The file is larger than the 3 MB scan limit.'];
         $state=$this->threatsLoadState();$this->threatsInspectFile($state,$rp);$this->threatsSaveState($state);
