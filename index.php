@@ -3314,10 +3314,18 @@ class FileManager {
             if(!$exists)$state['signatures'][]=['hash'=>$hash,'size'=>$item['size'],'reason'=>$item['reason'],'created'=>time(),'by'=>$_SESSION['fm_user']??''];
             $this->threatsRememberPriorityDir($state,$path);
         }
-        $deleted=$item&&$hash!==''?$this->threatsDeleteMatchingFiles($state,$hash):(@unlink($path)?1:0);
+        /* Do not recursively read the whole site inside the click request.
+           That made Threat unusably slow on large sites because every readable
+           file up to 3 MB was opened just to find same-content copies. The
+           selected file is removed immediately; its signature and priority
+           directory are saved first so the independent priority/background
+           passes remove any other current or future copies without blocking
+           this action. */
+        $deleted=@unlink($path)?1:0;
         $this->threatsRemoveFinding($state,$path);$this->threatsSaveState($state);
         $ok=$deleted>0;
-        return['ok'=>$ok,'deleted_count'=>$deleted,'error'=>$ok?'':'Could not delete the file.'];
+        return['ok'=>$ok,'deleted_count'=>$deleted,'background_monitoring'=>($item&&$hash!==''),
+            'error'=>$ok?'':'Could not delete the file.'];
     }
     public function threatsDownload($path){
         $path=realpath((string)$path);
@@ -12584,7 +12592,7 @@ function toast(msg,dur=2000){
       return `<div class="threat-file"><div class="threat-name" title="${esc(f.name)}">${esc(f.name)}</div><div class="threat-path" title="${esc(f.path)}">${esc(f.path)}</div></div><div class="threat-reason">${esc(f.reason||'Suspicious content')}<br><span class="threat-risk threat-risk-${riskClass}">${esc(severity)} risk · ${priority} · ${esc(extension)}</span></div><div class="threat-muted">${formatBytes(Number(f.size||0))}<br>${f.mtime?new Date(Number(f.mtime)*1000).toLocaleString():'—'}</div><div class="threat-muted">The file is not deleted until you choose Threat.<br>Safe adds its path and current content to the whitelist.</div><div class="threat-actions">${f.url?`<a class="btn btn-xs btn-g" href="${esc(f.url)}" target="_blank" rel="noopener" title="Open the public URL">Open site</a>`:''}<a class="btn btn-xs btn-g" href="${esc(downloadUrl)}" download title="Download this file">Download</a><a class="btn btn-xs btn-g" href="${esc(managerUrl)}" title="Open this file's folder in the File Manager">Go to path</a><button class="btn btn-xs btn-red threat-threat" data-path="${esc(f.path)}">Threat</button><button class="btn btn-xs btn-green threat-safe" data-path="${esc(f.path)}">Safe</button></div>`;
   }
   function bindFileRow(row){
-    row.querySelector('.threat-threat')?.addEventListener('click',async e=>{const btn=e.currentTarget;if(!confirm('Delete this file and every current readable file with the same content, then remember the signature for future uploads?'))return;btn.disabled=true;const r=await post('threats_file_action',{threat_action:'threat',path_b64:b64(btn.dataset.path)});if(!r.ok)toast(r.error||'Could not delete matching files.');else toast(`${Number(r.deleted_count||0)} matching current file(s) deleted; the signature was saved.`);loadFiles();});
+    row.querySelector('.threat-threat')?.addEventListener('click',async e=>{const btn=e.currentTarget;if(!confirm('Delete this file now and remember its content so priority/background monitoring removes matching copies?'))return;btn.disabled=true;const r=await post('threats_file_action',{threat_action:'threat',path_b64:b64(btn.dataset.path)});if(!r.ok)toast(r.error||'Could not delete the file.');else toast(`${Number(r.deleted_count||0)} file deleted; matching copies are queued for background removal.`);loadFiles();});
     row.querySelector('.threat-safe')?.addEventListener('click',async e=>{const btn=e.currentTarget;btn.disabled=true;const r=await post('threats_file_action',{threat_action:'safe',path_b64:b64(btn.dataset.path)});if(!r.ok)toast(r.error||'Could not whitelist the file.');else toast('File added to the whitelist.');loadFiles();});
   }
   function renderFiles(state){
