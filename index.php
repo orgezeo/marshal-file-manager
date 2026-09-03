@@ -2644,7 +2644,7 @@ class FileManager {
     private function threatsEmptyState(){
         $base=$this->root?:realpath(__DIR__)?:__DIR__;
         return[
-            'version'=>2,'scan_mode'=>2,'root'=>$base,'started'=>time(),'last_run'=>0,
+            'version'=>2,'scan_mode'=>2,'root'=>$base,'started'=>time(),'last_run'=>0,'scan_cycle'=>0,
             'complete'=>false,'dirs'=>[['path'=>$base,'entries'=>null,'index'=>0]],
             'watch_dirs'=>[],'watch_cursor'=>0,'watch_dir_cursors'=>[],'dir_mtimes'=>[],
             'priority_dirs'=>[],'priority_cursor'=>0,'priority_dir_cursors'=>[],
@@ -2685,6 +2685,7 @@ class FileManager {
         $d['priority_last_run']=(int)($d['priority_last_run']??0);
         $d['priority_last_path']=(string)($d['priority_last_path']??'');
         $d['priority_auto_deleted']=(int)($d['priority_auto_deleted']??0);
+         $d['scan_cycle']=max(0,(int)($d['scan_cycle']??0));
         /* Older states may contain full scandir() results in pending frames.
            Keep their findings/signatures, but restart traversal in batches. */
         if((int)($d['scan_mode']??0)!==2){
@@ -3047,6 +3048,19 @@ class FileManager {
     public function threatsTick($force=false,$severityFilter=''){
         if(empty($_SESSION['fm_admin']))return['ok'=>false,'error'=>'Admins only.'];
         $state=$this->threatsLoadState();
+         /* Reaching the end of the initial tree is not the end of monitoring.
+            Start another bounded full-tree cycle on the next active request so
+            new or changed files are eventually checked even when their parent
+            directory mtime did not change. The priority pass below remains
+            independent and runs before every general-scan slice. */
+         if(!empty($state['complete'])||empty($state['dirs'])){
+             $base=$this->threatsRoot();
+             if($base){
+                 $state['dirs']=[['path'=>$base,'entries'=>null,'index'=>0,'batch'=>true]];
+                 $state['complete']=false;
+                 $state['scan_cycle']=(int)($state['scan_cycle']??0)+1;
+             }
+         }
          /* The priority pass is independent from the general cursor. It runs
             first on every active tick, so a known payload in a remembered
             directory is checked even when the general scan is still traversing
@@ -3056,8 +3070,7 @@ class FileManager {
          /* Keep the ordinary endpoint cooperative while avoiding an
             unnecessarily slow one-file-per-poll scan. */
          $deadline=microtime(true)+($force?.45:.18);$fileBudget=6;
-        if(!$state['complete'])$this->threatsInitialSlice($state,$deadline,$fileBudget);
-        else $this->threatsWatchSlice($state,$deadline,$fileBudget);
+         $this->threatsInitialSlice($state,$deadline,$fileBudget);
         $state['last_run']=time();$this->threatsSaveState($state);
         $allFindings=$state['findings']??[];
         $findingCounts=['Critical'=>0,'High'=>0,'Medium'=>0,'Low'=>0];
@@ -3083,7 +3096,9 @@ class FileManager {
             'priority_dirs'=>count((array)($state['priority_dirs']??[])),
             'priority_last_run'=>(int)($state['priority_last_run']??0),
             'priority_last_path'=>(string)($state['priority_last_path']??''),
-            'priority_auto_deleted'=>(int)($state['priority_auto_deleted']??0)
+             'priority_auto_deleted'=>(int)($state['priority_auto_deleted']??0),
+             'continuous_monitoring'=>true,
+             'scan_cycle'=>(int)($state['scan_cycle']??0)
         ];
         foreach($view['findings'] as &$finding)$this->threatsApplyPriority($finding);
         unset($finding);$this->threatsSortFindings($view);
@@ -12424,8 +12439,8 @@ function toast(msg,dur=2000){
      const priorityDirs=Number(state.priority_dirs||0),priorityDeleted=Number(state.priority_auto_deleted||0);
     badge.textContent=count?count+' alert'+(count===1?'':'s')+(total!==count?' shown':''):state.complete?(total?'Alerts filtered':'Monitoring active'):'Scanning…';badge.style.color=count?'#fca5a5':'var(--t3)';
     const scanned=Number(state.scanned||0);
-     if(!state.complete){const current=state.last_path?state.last_path:'starting…';progress.innerHTML=`Scanning slowly in the background · ${scanned} file(s) checked · ${total} alert${total===1?'':'s'} found${total!==count?' · '+count+' shown':''} · current: <span style="font-family:monospace">${esc(current)}</span>`;}
-     else{const auto=Number(state.auto_deleted||0);progress.textContent='Initial scan complete. New or changed files are checked during this active session.'+(auto?' '+auto+' matching file(s) were auto-deleted from saved Threat signatures.':'');}
+     if(!state.complete||state.continuous_monitoring){const current=state.last_path?state.last_path:'starting…';const cycle=Number(state.scan_cycle||0);progress.innerHTML=`Continuous background scan · cycle ${cycle||1} · ${scanned} file(s) checked · ${total} alert${total===1?'':'s'} found${total!==count?' · '+count+' shown':''} · current: <span style="font-family:monospace">${esc(current)}</span>`;}
+     else{const auto=Number(state.auto_deleted||0);progress.textContent='Continuous monitoring is active. New and changed files are checked in recurring full-site cycles.'+(auto?' '+auto+' matching file(s) were auto-deleted from saved Threat signatures.':'');}
      const priorityInfo=document.getElementById('threatPriorityInfo');
      if(priorityInfo)priorityInfo.textContent=priorityDirs
        ? `Priority monitoring: ${priorityDirs} saved location${priorityDirs===1?'':'s'} checked before the general scan${priorityDeleted?' · '+priorityDeleted+' auto-deleted':''}.`
@@ -12465,8 +12480,8 @@ function toast(msg,dur=2000){
        list.appendChild(row);
     });
     existing.forEach((row,key)=>{if(!seen.has(key))row.remove();});
-     if(!items.length&&!list.querySelector('.threat-empty')){const empty=document.createElement('div');empty.className='threat-empty';empty.innerHTML=msg(state&&state.complete?'No suspicious files found.':'No suspicious files found yet. The scan continues in the background.');list.appendChild(empty);}
-     else if(!items.length&&list.querySelector('.threat-empty'))list.querySelector('.threat-empty').innerHTML=msg(state&&state.complete?'No suspicious files found.':'No suspicious files found yet. The scan continues in the background.');
+      if(!items.length&&!list.querySelector('.threat-empty')){const empty=document.createElement('div');empty.className='threat-empty';empty.innerHTML=msg('No suspicious files found yet. Continuous monitoring is active.');list.appendChild(empty);}
+      else if(!items.length&&list.querySelector('.threat-empty'))list.querySelector('.threat-empty').innerHTML=msg('No suspicious files found yet. Continuous monitoring is active.');
     if(items.length)list.querySelector('.threat-empty')?.remove();
   }
   function renderWhitelist(data){
