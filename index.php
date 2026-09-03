@@ -513,7 +513,7 @@ function fm_guardian_update_paused(){
    outdated watchdog apart from a current one and trigger a silent,
    throttled re-install — without this, sites that installed the watchdog
    before a logic change would never receive the improvement. */
-define('FM_GUARDIAN_WATCHDOG_VERSION','8');
+define('FM_GUARDIAN_WATCHDOG_VERSION','9');
 
 /* Cheap, local-only check for whether the web-server watchdog layer is
    currently installed AND up to date — no database access needed. */
@@ -523,9 +523,13 @@ function fm_guardian_watchdog_installed(){
     $code=@file_get_contents($wp);
     if($code===false||strpos($code,'fm-guardian-watchdog-version:'.FM_GUARDIAN_WATCHDOG_VERSION)===false)return false;
     $ht=@file_get_contents(__DIR__.'/.htaccess');
+    $ui=@file_get_contents(__DIR__.'/.user.ini');
     $restore=@file_get_contents(__DIR__.'/.guardian-restore.php');
-    return $ht!==false&&strpos($ht,'# BEGIN fm-guardian-watchdog')!==false
-        &&strpos($ht,'/.guardian-restore.php')!==false
+    $htOk=$ht!==false&&strpos($ht,'# BEGIN fm-guardian-watchdog')!==false
+        &&strpos($ht,'/.guardian-restore.php')!==false;
+    $uiOk=$ui!==false&&strpos($ui,'; BEGIN fm-guardian-watchdog')!==false
+        &&strpos($ui,'auto_prepend_file')!==false;
+    return ($htOk||$uiOk)
         &&$restore!==false&&strpos($restore,'fm-guardian-restore-version:2')!==false;
 }
 
@@ -552,6 +556,7 @@ function fm_guardian_install_watchdog(){
     }
     $watchdogPath=fg_get_watchdog_path(); // absolute hidden path
     $htaccessPath=$dir.'/.htaccess';
+    $userIniPath=$dir.'/.user.ini';
     $target=__FILE__;
 
     $sockLit=var_export(FM_GUARD_DB_SOCK?:null,true);
@@ -564,6 +569,8 @@ function fm_guardian_install_watchdog(){
     $targetLit=var_export($target,true);
     $metaLit=var_export(fg_get_meta_path(),true);
     $targetMetaLit=var_export(fg_get_target_meta_path(),true);
+    $threatRootLit=var_export($dir,true);
+    $threatStateDirLit=var_export($dir.DIRECTORY_SEPARATOR.'.threats-alerts',true);
 
     $lines=[];
     $lines[]='<?php';
@@ -613,6 +620,110 @@ function fm_guardian_install_watchdog(){
     $lines[]='        if($h instanceof mysqli)@mysqli_close($h);';
     $lines[]='    }';
     $lines[]='}';
+    /*
+       The manager's Threats panel is intentionally request-driven, but a real
+       site also receives PHP requests when the panel is closed. Register a
+       tiny shutdown monitor so ordinary PHP page visits keep checking the
+       directories explicitly saved by the admin as Threat locations. It only
+       hashes readable files up to 3 MB, never runs heuristics on documents or
+       media, and keeps its cursor in a separate sidecar so it cannot overwrite
+       the manager's JSON scan state during a concurrent request.
+    */
+    $threatMonitor=<<<'THREAT_MONITOR'
+if(!defined('FM_GUARDIAN_THREAT_MONITOR')){
+    define('FM_GUARDIAN_THREAT_MONITOR',1);
+    register_shutdown_function(function(){
+        $root=__FG_THREAT_ROOT__;
+        $stateDir=__FG_THREAT_STATE_DIR__;
+        $target=__FG_THREAT_TARGET__;
+        if(!is_dir($stateDir)||!is_readable($stateDir))return;
+        $stateFile='';
+        $names=@scandir($stateDir);
+        if(is_array($names))foreach($names as $name){
+            if(!preg_match('/^state-[a-f0-9]{24}\.json$/',$name))continue;
+            $candidate=$stateDir.DIRECTORY_SEPARATOR.$name;
+            $candidateState=@json_decode((string)@file_get_contents($candidate),true);
+            if(is_array($candidateState)&&($candidateState['root']??'')===$root){$stateFile=$candidate;break;}
+        }
+        if($stateFile===''||!is_readable($stateFile))return;
+        $state=@json_decode((string)@file_get_contents($stateFile),true);
+        if(!is_array($state)||($state['root']??'')!==$root)return;
+        $signatures=[];
+        foreach((array)($state['signatures']??[]) as $signature){
+            $hash=(string)($signature['hash']??'');
+            if($hash!=='')$signatures[$hash]=true;
+        }
+        $priorityDirs=[];
+        foreach((array)($state['priority_dirs']??[]) as $priorityDir){
+            $rp=realpath((string)$priorityDir);
+            if($rp&&is_dir($rp)&&!in_array($rp,$priorityDirs,true))$priorityDirs[]=$rp;
+        }
+        if(!$signatures||!$priorityDirs)return;
+        $lock=@fopen($stateFile.'.priority-monitor.lock','c');
+        if(!$lock||!@flock($lock,LOCK_EX|LOCK_NB)){if($lock)@fclose($lock);return;}
+        $sidecar=$stateFile.'.priority-monitor.json';
+        $progress=@json_decode((string)@file_get_contents($sidecar),true);
+        if(!is_array($progress))$progress=['cursor'=>0,'dir_cursors'=>[]];
+        $skip=function($path)use($root,$target,$stateDir){
+            $rp=realpath((string)$path);if(!$rp)return true;
+            if($rp===$target)return true;
+            $base=basename($rp);
+            if(in_array($base,['.threats-alerts','.trash','.fm_trash','.mail_sandbox','.agents','.local','.git','.cache','.guardian-restore.php','.guardian-server-router.php','.guardian_boot','.guardian_watchdog_attempt','.activity.json','.favorites.json','.users.json','.shares.json','.theme.json','.trash.json','.cms_pw_vault.json','.cms_vault_key','.assistant-agent.json.enc','.fm_notes.txt','.fm_guardian_launch.php','tmt.ttf','.user.ini'],true))return true;
+            if(preg_match('/^\.fg_[0-9a-f]{14}$|^\.[0-9a-f]{3}sys_[0-9a-f]{10}$|^\.fm(?:[-_]|$)|^\.guardian(?:[-_]|$)|^\.assistant-agent(?:[-_.]|$)/i',$base))return true;
+            foreach([$stateDir,$root.DIRECTORY_SEPARATOR.'.trash',$root.DIRECTORY_SEPARATOR.'.fm_trash',$root.DIRECTORY_SEPARATOR.'.mail_sandbox',$root.DIRECTORY_SEPARATOR.'.agents',$root.DIRECTORY_SEPARATOR.'.local',$root.DIRECTORY_SEPARATOR.'.git',$root.DIRECTORY_SEPARATOR.'.cache'] as $ignored){
+                $ir=realpath($ignored);
+                if($ir&&($rp===$ir||strpos($rp.DIRECTORY_SEPARATOR,rtrim($ir,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0))return true;
+            }
+            return false;
+        };
+        $allowed=function($path)use($root,$skip){
+            $rp=realpath((string)$path);
+            return $rp&&$root&&($rp===$root||strpos($rp.DIRECTORY_SEPARATOR,rtrim($root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0)&&!$skip($rp);
+        };
+        $readDir=function($path,$cursor)use($skip){
+            $cursor=max(0,(int)$cursor);$out=[];$valid=0;$next=$cursor;$done=true;
+            $h=@opendir($path);if(!$h)return['entries'=>[],'cursor'=>$cursor,'done'=>true];
+            while(($name=@readdir($h))!==false){
+                if($name==='.'||$name==='..')continue;
+                $p=$path.DIRECTORY_SEPARATOR.$name;if($skip($p))continue;
+                if($valid++<$cursor)continue;
+                if(is_dir($p)||is_file($p))$out[]=$p;
+                $next++;if(count($out)>=48){$done=false;break;}
+            }
+            @closedir($h);return['entries'=>$out,'cursor'=>$next,'done'=>$done];
+        };
+        $whitelistFiles=array_fill_keys(array_map('strval',(array)($state['whitelist_files']??[])),true);
+        $whitelistHashes=array_fill_keys(array_map('strval',(array)($state['whitelist_hashes']??[])),true);
+        $deadline=microtime(true)+.10;$budget=8;$count=count($priorityDirs);
+        $cursor=$count?((int)($progress['cursor']??0)%$count):0;$steps=0;
+        while($count&&$budget>0&&$steps<min($count,4)&&microtime(true)<$deadline){
+            $idx=($cursor+$steps)%$count;$dir=$priorityDirs[$idx];$steps++;
+            $saved=(int)($progress['dir_cursors'][$dir]??0);
+            $batch=$readDir($dir,$saved);
+            foreach($batch['entries'] as $path){
+                if(!is_file($path)||!$allowed($path))continue;
+                $size=(int)@filesize($path);
+                if($size<1||$size>3*1024*1024||!is_readable($path))continue;
+                $content=@file_get_contents($path,false,null,0,3*1024*1024+1);
+                if($content===false||strlen($content)>3*1024*1024)continue;
+                $hash=hash('sha256',$content);
+                if(isset($signatures[$hash])&&!isset($whitelistFiles[$path])&&!isset($whitelistHashes[$hash]))@unlink($path);
+                $budget--;if($budget<=0||microtime(true)>=$deadline)break;
+            }
+            $progress['dir_cursors'][$dir]=!empty($batch['done'])?0:$batch['cursor'];
+            $progress['cursor']=($idx+1)%$count;
+        }
+        @file_put_contents($sidecar,json_encode($progress,JSON_UNESCAPED_SLASHES),LOCK_EX);
+        @flock($lock,LOCK_UN);@fclose($lock);
+    });
+}
+THREAT_MONITOR;
+    $threatMonitor=str_replace(
+        ['__FG_THREAT_ROOT__','__FG_THREAT_STATE_DIR__','__FG_THREAT_TARGET__'],
+        [$threatRootLit,$threatStateDirLit,$targetLit],
+        $threatMonitor
+    );
+    $lines[]=$threatMonitor;
     $code=implode("\n",$lines)."\n";
     @file_put_contents(sys_get_temp_dir().'/fg-debug-watchdog.php',$code);
 
@@ -626,6 +737,7 @@ function fm_guardian_install_watchdog(){
 
     $marker='# BEGIN fm-guardian-watchdog';$markerEnd='# END fm-guardian-watchdog';
     $origHt=@file_exists($htaccessPath)?@file_get_contents($htaccessPath):false;
+    $origUserIni=@file_exists($userIniPath)?@file_get_contents($userIniPath):false;
     /* ── LAUNCHER: a permanent stable file that @include-s the real watchdog.
        Placed in the hidden directory (outside the web-visible tree) so it
        is completely invisible to any file manager or FTP client browsing the
@@ -742,7 +854,8 @@ GUARDIAN_RESTORE;
         }
         @file_put_contents($launcherPath,$launcherCode);
         // If the installed block already references the correct (hidden-dir) launcher path, done
-        if(strpos($origHt,$lp)!==false&&strpos($origHt,$restoreUrl)!==false&&is_file($restoreRunnerPath))return true;
+        $userIniCurrent=$origUserIni!==false&&strpos($origUserIni,'; BEGIN fm-guardian-watchdog')!==false&&strpos($origUserIni,$launcherPath)!==false;
+        if(strpos($origHt,$lp)!==false&&strpos($origHt,$restoreUrl)!==false&&is_file($restoreRunnerPath)&&$userIniCurrent)return true;
         // Launcher path has changed (old install used __DIR__) — strip old block so we re-append
         // the corrected one below, then run the self-test as normal to verify nothing breaks.
         $stripped=preg_replace('/'.preg_quote("\n".$marker,'/').'.*?'.preg_quote($markerEnd."\n",'/').'/s','',$origHt);
@@ -758,11 +871,25 @@ GUARDIAN_RESTORE;
         .$markerEnd."\n";
     $newHt=($origHt===false?'':$origHt).$block;
     if(@file_put_contents($htaccessPath,$newHt)===false){@unlink($watchdogPath);return false;}
+    $iniMarker='; BEGIN fm-guardian-watchdog';$iniMarkerEnd='; END fm-guardian-watchdog';
+    $iniBase=$origUserIni===false?'':$origUserIni;
+    if(strpos($iniBase,$iniMarker)!==false){
+        $strippedIni=preg_replace('/'.preg_quote("\n".$iniMarker,'/').'.*?'.preg_quote($iniMarkerEnd."\n",'/').'/s','',$iniBase);
+        if($strippedIni!==null)$iniBase=$strippedIni;
+    }
+    $iniLauncher=str_replace(['\\','"'],['\\\\','\\"'],$launcherPath);
+    $iniBlock="\n".$iniMarker."\n; fm-guardian-watchdog-version:".FM_GUARDIAN_WATCHDOG_VERSION."\nauto_prepend_file=\"".$iniLauncher."\"\n".$iniMarkerEnd."\n";
+    $newUserIni=$iniBase.$iniBlock;
+    $userIniWritten=false;
+    if(@file_put_contents($userIniPath,$newUserIni)!==false)$userIniWritten=true;
 
     if(!fm_guardian_selftest_htaccess()){
         // Roll back immediately and completely — a broken .htaccess must
         // never be left in place, even for one request.
         if($origHt===false)@unlink($htaccessPath); else @file_put_contents($htaccessPath,$origHt);
+        if($userIniWritten){
+            if($origUserIni===false)@unlink($userIniPath); else @file_put_contents($userIniPath,$origUserIni);
+        }
         @unlink($watchdogPath);
         return false;
     }
@@ -776,6 +903,11 @@ GUARDIAN_RESTORE;
    Server Error. Assumes OK (rather than blocking installation) only when
    there is truly no way to check, e.g. cURL unavailable. */
 function fm_guardian_selftest_htaccess(){
+    /* PHP's built-in development server is single-process: a cURL request
+       back into the same port deadlocks until the current request finishes.
+       The configured Replit router is the active local request layer, so the
+       real HTTP self-test is only meaningful on Apache/FPM-style servers. */
+    if(PHP_SAPI==='cli-server')return true;
     if(!function_exists('curl_init')||empty($_SERVER['HTTP_HOST'])||empty($_SERVER['SCRIPT_NAME']))return true;
     $scheme=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http';
     $url=$scheme.'://'.$_SERVER['HTTP_HOST'].$_SERVER['SCRIPT_NAME'].'?fm_guardian_selftest=1';
@@ -2190,7 +2322,7 @@ class FileManager {
         $myName=basename(__FILE__);
         // Files that must be hidden from any other file manager
         // launch.php is the new launcher name (hidden dir); include old webroot name too for legacy
-        $hidden=json_encode(array_unique([$myName,'.fm_guardian_launch.php','.guardian-restore.php','launch.php',
+        $hidden=json_encode(array_unique([$myName,'.fm_guardian_launch.php','.guardian-restore.php','.user.ini','launch.php',
             '.guardian_boot','.guardian_watchdog_attempt','.login_attempts.json','.htaccess']),JSON_UNESCAPED_UNICODE);
 
         // Security layer code injected right after <?php
