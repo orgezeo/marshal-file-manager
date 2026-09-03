@@ -2958,10 +2958,10 @@ class FileManager {
     public function threatsTick($force=false){
         if(empty($_SESSION['fm_admin']))return['ok'=>false,'error'=>'Admins only.'];
         $state=$this->threatsLoadState();
-        /* Keep this endpoint intentionally cooperative. One inspected file per
-           request prevents a large site from turning a polling request into a
-           long-running PHP worker or a 500/timeout under shared hosting. */
-        $deadline=microtime(true)+($force?.12:.05);$fileBudget=1;
+         /* Keep this endpoint cooperative while avoiding an unnecessarily
+            slow one-file-per-poll scan. Two files and a short time slice give
+            the UI medium progress without creating a long-running request. */
+         $deadline=microtime(true)+($force?.25:.10);$fileBudget=2;
         if(!$state['complete'])$this->threatsInitialSlice($state,$deadline,$fileBudget);
         else $this->threatsWatchSlice($state,$deadline,$fileBudget);
         $state['last_run']=time();$this->threatsSaveState($state);
@@ -12381,7 +12381,7 @@ function toast(msg,dur=2000){
     try{const cfg=window.fmCmsConfig||cmsCfg;if(!cmsCfg&&cfg)cmsCfg=cfg;const r=await post('threats_users',{config_path_b64:b64(cmsCfg)});if(seq!==requestSeq||tab!=='users'||!ov.classList.contains('open'))return;if(!r.ok&&!r.users){siteChoices=r.sites||siteChoices;userRenderKey='';body.dataset.threatView='users';body.innerHTML=sitePicker()+msg(r.error||'Could not load CMS users.','#fca5a5');bindCmsPicker();return;}renderUsers(r);}catch(e){if(seq!==requestSeq||tab!=='users'||!ov.classList.contains('open'))return;if(body.dataset.threatView!=='users')body.innerHTML=msg('CMS user request failed.','#fca5a5');}
   }
   function selectTab(next){requestSeq++;tab=next;userRenderKey='';document.querySelectorAll('.threats-tab').forEach(b=>b.classList.toggle('threats-tab-active',b.dataset.tab===tab));if(tab==='users'){body.dataset.threatView='';body.innerHTML=msg('Loading CMS users…');loadUsers();startPolling();}else{body.dataset.threatView='';body.innerHTML=msg('Running the next scan slice…');loadFiles();startPolling();}}
-  function startPolling(){clearInterval(timer);timer=setInterval(()=>{if(!ov.classList.contains('open'))return;if(tab==='files')loadFiles();else loadUsers();},tab==='users'?7000:4000);}
+  function startPolling(){clearInterval(timer);timer=setInterval(()=>{if(!ov.classList.contains('open'))return;if(tab==='files')loadFiles();else loadUsers();},tab==='users'?7000:3000);}
   document.getElementById('threatsBtn')?.addEventListener('click',()=>{openMod('threatsOv');tab='files';loadFiles();startPolling();});
   document.getElementById('threatsClose')?.addEventListener('click',()=>{closeMod('threatsOv');clearInterval(timer);});
   document.getElementById('threatsRefresh')?.addEventListener('click',()=>tab==='users'?loadUsers():loadFiles());
