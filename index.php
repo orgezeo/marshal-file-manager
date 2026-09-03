@@ -2620,8 +2620,8 @@ class FileManager {
        This is deliberately a cooperative background scanner. PHP requests
        are short-lived, so the cursor, known file metadata, findings,
        signatures, and CMS choices live in a private JSON directory. The
-       browser polls the endpoint while the manager is open; normal page
-       renders also advance one small slice for an active administrator. */
+       browser polls the endpoint while the manager is open; ordinary page
+       renders never start a scan. */
     private function threatsDir(){
         $d=__DIR__.'/.threats-alerts';
         if(!is_dir($d)){@mkdir($d,0700,true);}
@@ -2635,9 +2635,9 @@ class FileManager {
     private function threatsEmptyState(){
         $base=$this->root?:realpath(__DIR__)?:__DIR__;
         return[
-            'version'=>1,'root'=>$base,'started'=>time(),'last_run'=>0,
+            'version'=>1,'scan_mode'=>2,'root'=>$base,'started'=>time(),'last_run'=>0,
             'complete'=>false,'dirs'=>[['path'=>$base,'entries'=>null,'index'=>0]],
-            'watch_dirs'=>[],'watch_cursor'=>0,'dir_mtimes'=>[],
+            'watch_dirs'=>[],'watch_cursor'=>0,'watch_dir_cursors'=>[],'dir_mtimes'=>[],
             'known'=>[],'findings'=>[],'signatures'=>[],
             'whitelist_files'=>[],'whitelist_hashes'=>[],
             'user_signatures'=>[],'user_whitelist_names'=>[],'user_whitelist_fingerprints'=>[],
@@ -2649,8 +2649,15 @@ class FileManager {
         $d=is_file($f)?@json_decode((string)@file_get_contents($f),true):null;
         $base=$this->root?:realpath(__DIR__)?:__DIR__;
         if(!is_array($d)||($d['root']??'')!==$base)return $this->threatsEmptyState();
-        foreach(['dirs','watch_dirs','dir_mtimes','known','findings','signatures','whitelist_files','whitelist_hashes','user_signatures','user_whitelist_names','user_whitelist_fingerprints'] as $k){
+        foreach(['dirs','watch_dirs','watch_dir_cursors','dir_mtimes','known','findings','signatures','whitelist_files','whitelist_hashes','user_signatures','user_whitelist_names','user_whitelist_fingerprints'] as $k){
             if(!isset($d[$k])||!is_array($d[$k]))$d[$k]=[];
+        }
+        /* Older states may contain full scandir() results in pending frames.
+           Keep their findings/signatures, but restart traversal in batches. */
+        if((int)($d['scan_mode']??0)!==2){
+            $d['scan_mode']=2;$d['complete']=false;
+            $d['dirs']=[['path'=>$base,'entries'=>null,'index'=>0,'batch'=>true]];
+            $d['watch_dirs']=[];$d['watch_cursor']=0;$d['watch_dir_cursors']=[];$d['dir_mtimes']=[];
         }
         $d['findings']=array_values(array_filter($d['findings'],fn($f)=>!$this->threatsSkip($f['path']??'')&&!$this->threatsNonTextExtension($f['path']??'')));
         $d['dirs']=array_values(array_filter($d['dirs'],fn($f)=>!$this->threatsSkip($f['path']??'')));
@@ -2852,30 +2859,47 @@ class FileManager {
         $this->threatsSortFindings($state);
         $state['scanned']=(int)$state['scanned']+1;
     }
-    private function threatsReadDir(&$state,$frame){
-        $path=$frame['path']??'';if(!$path||!is_dir($path)||$this->threatsSkip($path))return[];
-        $entries=@scandir($path);if(!is_array($entries))return[];
-        $out=[];foreach($entries as $name){if($name==='.'||$name==='..')continue;$p=$path.DIRECTORY_SEPARATOR.$name;if($this->threatsSkip($p))continue;if(is_dir($p)||is_file($p))$out[]=$p;}
-        return $out;
+    private function threatsReadDir($frame){
+        $path=$frame['path']??'';$cursor=max(0,(int)($frame['cursor']??0));
+        if(!$path||!is_dir($path)||$this->threatsSkip($path))return['entries'=>[],'cursor'=>$cursor,'done'=>true];
+        $h=@opendir($path);if(!$h)return['entries'=>[],'cursor'=>$cursor,'done'=>true];
+        $out=[];$valid=0;$next=$cursor;$done=true;$limit=48;
+        while(($name=@readdir($h))!==false){
+            if($name==='.'||$name==='..')continue;
+            $p=$path.DIRECTORY_SEPARATOR.$name;
+            if($this->threatsSkip($p))continue;
+            if($valid++<$cursor)continue;
+            if(is_dir($p)||is_file($p))$out[]=$p;
+            $next++;
+            if(count($out)>=$limit){$done=false;break;}
+        }
+        @closedir($h);
+        return['entries'=>$out,'start'=>$cursor,'cursor'=>$next,'done'=>$done];
     }
-    private function threatsInitialSlice(&$state,$deadline){
-        while(microtime(true)<$deadline&&!empty($state['dirs'])){
+    private function threatsInitialSlice(&$state,$deadline,&$fileBudget){
+        $steps=0;
+        while(microtime(true)<$deadline&&$fileBudget>0&&$steps<12&&!empty($state['dirs'])){
+            $steps++;
             $last=count($state['dirs'])-1;$frame=&$state['dirs'][$last];
             if($frame['entries']===null){
-                $frame['entries']=$this->threatsReadDir($state,$frame);$frame['index']=0;
-                $state['watch_dirs'][]=$frame['path'];$state['dir_mtimes'][$frame['path']]=(int)@filemtime($frame['path']);
+                $batch=$this->threatsReadDir($frame);$frame['entries']=$batch['entries'];$frame['cursor']=$batch['cursor'];$frame['done']=$batch['done'];$frame['batch']=true;$frame['index']=0;
+                if(!in_array($frame['path'],$state['watch_dirs'],true))$state['watch_dirs'][]=$frame['path'];
+                $state['dir_mtimes'][$frame['path']]=(int)@filemtime($frame['path']);
             }
-            if(($frame['index']??0)>=count($frame['entries'])){array_pop($state['dirs']);unset($frame);continue;}
+            if(($frame['index']??0)>=count($frame['entries'])){
+                if(!empty($frame['batch'])&&!empty($frame['done'])){array_pop($state['dirs']);unset($frame);continue;}
+                $frame['entries']=null;$frame['index']=0;unset($frame);continue;
+            }
             $p=$frame['entries'][$frame['index']++];unset($frame);
-            if(is_dir($p))$state['dirs'][]=['path'=>$p,'entries'=>null,'index'=>0];
-            elseif(is_file($p))$this->threatsInspectFile($state,$p);
+            if(is_dir($p))$state['dirs'][]=['path'=>$p,'entries'=>null,'index'=>0,'batch'=>true];
+            elseif(is_file($p)){$this->threatsInspectFile($state,$p);$fileBudget--;}
         }
         if(empty($state['dirs']))$state['complete']=true;
     }
-    private function threatsWatchSlice(&$state,$deadline){
+    private function threatsWatchSlice(&$state,$deadline,&$fileBudget){
         $dirs=$state['watch_dirs'];$n=count($dirs);if(!$n)return;
         $steps=0;
-        while(microtime(true)<$deadline&&$steps<8&&$n){
+        while(microtime(true)<$deadline&&$steps<1&&$fileBudget>0&&$n){
             $idx=((int)($state['watch_cursor']??0))%$n;$dir=$dirs[$idx];$state['watch_cursor']=($idx+1)%$n;$steps++;
             if(!is_dir($dir))continue;
             $mtime=(int)@filemtime($dir);$old=(int)($state['dir_mtimes'][$dir]??0);
@@ -2884,30 +2908,42 @@ class FileManager {
                before the timestamp changes. A bounded directory listing is
                cheap and lets the known-path map catch that case too. */
             $state['dir_mtimes'][$dir]=$mtime;
-            $entries=$this->threatsReadDir($state,['path'=>$dir]);
-            foreach($entries as $p){
+            $batch=$this->threatsReadDir(['path'=>$dir,'cursor'=>(int)($state['watch_dir_cursors'][$dir]??0)]);$entries=$batch['entries'];$nextCursor=$batch['cursor'];
+            foreach($entries as $entryIndex=>$p){
                 if(is_dir($p)&&!in_array($p,$state['watch_dirs'],true)){
                     $state['watch_dirs'][]=$p;$state['dir_mtimes'][$p]=(int)@filemtime($p);$n=count($state['watch_dirs']);
-                    $state['dirs'][]=['path'=>$p,'entries'=>null,'index'=>0];$state['complete']=false;
+                    $state['dirs'][]=['path'=>$p,'entries'=>null,'index'=>0,'batch'=>true];$state['complete']=false;
                 }
                 elseif(is_file($p)){
                     $meta=$state['known'][$p]??null;$sz=(int)@filesize($p);$mt=(int)@filemtime($p);
-                    if(!$meta||$meta['size']!==$sz||$meta['mtime']!==$mt)$this->threatsInspectFile($state,$p);
+                    if(!$meta||$meta['size']!==$sz||$meta['mtime']!==$mt){$this->threatsInspectFile($state,$p);$fileBudget--; $nextCursor=(int)$batch['start']+$entryIndex+1;}
+                    if($fileBudget<=0)break;
                 }
             }
+            $state['watch_dir_cursors'][$dir]=!empty($batch['done'])?'':$nextCursor;
         }
     }
     public function threatsTick($force=false){
         if(empty($_SESSION['fm_admin']))return['ok'=>false,'error'=>'Admins only.'];
-        $state=$this->threatsLoadState();$deadline=microtime(true)+($force?.65:.28);
-        if(!$state['complete'])$this->threatsInitialSlice($state,$deadline);
-        else $this->threatsWatchSlice($state,$deadline);
+        $state=$this->threatsLoadState();
+        /* Keep this endpoint intentionally cooperative. One inspected file per
+           request prevents a large site from turning a polling request into a
+           long-running PHP worker or a 500/timeout under shared hosting. */
+        $deadline=microtime(true)+($force?.12:.05);$fileBudget=1;
+        if(!$state['complete'])$this->threatsInitialSlice($state,$deadline,$fileBudget);
+        else $this->threatsWatchSlice($state,$deadline,$fileBudget);
         $state['last_run']=time();$this->threatsSaveState($state);
-        $view=$state;
+        $view=[
+            'complete'=>(bool)($state['complete']??false),
+            'findings'=>$state['findings']??[],
+            'scanned'=>(int)($state['scanned']??0),
+            'auto_deleted'=>(int)($state['auto_deleted']??0),
+            'last_path'=>(string)($state['last_path']??''),
+            'last_reason'=>(string)($state['last_reason']??'')
+        ];
         foreach($view['findings'] as &$finding)$this->threatsApplyPriority($finding);
         unset($finding);$this->threatsSortFindings($view);
         $view['findings']=array_map(function($f){unset($f['content_b64']);return $f;},$view['findings']);
-        $view['signatures']=array_map(function($s){unset($s['content_b64']);return $s;},$state['signatures']);
         return['ok'=>true,'state'=>$view];
     }
     public function threatsConfig($configPath=''){
@@ -8157,9 +8193,8 @@ $fm->handle();
    non-share) page render by an already-authenticated admin — the very
    moment this qualifies as "the file manager page being opened". */
 if(!empty($_SESSION['auth'])&&!empty($_SESSION['fm_admin']))fm_guardian_first_run_bootstrap($fm);
-/* Advance the Threats Alerts cursor during a normal authenticated manager
-   page request too. The work is bounded and only runs for an active admin. */
-if(!isset($_GET['x'])&&!isset($_GET['raw'])&&!empty($_SESSION['auth'])&&!empty($_SESSION['fm_admin']))$fm->threatsTick(false);
+/* Threats Alerts advances only from its explicit, low-budget polling endpoint.
+   Never scan the site as a side effect of an ordinary manager page request. */
 
 /* ── User management ── */
 $userMsg=null;
@@ -12224,7 +12259,8 @@ function toast(msg,dur=2000){
     if(!state){badge.textContent='';return;}
     const count=(state.findings||[]).length;
     badge.textContent=count?count+' alert'+(count===1?'':'s'):state.complete?'Monitoring active':'Scanning…';badge.style.color=count?'#fca5a5':'var(--t3)';
-    if(!state.complete){const current=state.last_path?state.last_path:'starting…';progress.innerHTML=`Scanning slowly in the background · ${Number(state.scanned||0)} file(s) checked · current: <span style="font-family:monospace">${esc(current)}</span>`;}
+    const scanned=Number(state.scanned||0);
+    if(!state.complete){const current=state.last_path?state.last_path:'starting…';progress.innerHTML=`Scanning slowly in the background · ${scanned} file(s) checked · ${count} alert${count===1?'':'s'} found so far · current: <span style="font-family:monospace">${esc(current)}</span>`;}
     else{const auto=Number(state.auto_deleted||0);progress.textContent='Initial scan complete. New or changed files are checked during this active session.'+(auto?' '+auto+' matching file(s) were auto-deleted from saved Threat signatures.':'');}
   }
    function fileRowMarkup(f){
@@ -12242,7 +12278,7 @@ function toast(msg,dur=2000){
     let toolbar=body.querySelector('.threat-file-toolbar'),list=body.querySelector('.threat-file-list');
       if(!toolbar||!list){body.innerHTML=`<div class="threat-toolbar threat-file-toolbar"><div class="threat-file-info">Readable files up to 3 MB are inspected. Images and archives are not read. Alerts are sorted from highest to lowest risk.</div><div class="threat-scan-control"><label class="lbl">Scan one file</label><input id="threatManualPath" class="inp" placeholder="/path/to/file.php or uploads/file.php"><button class="btn btn-xs btn-p" id="threatManualScan">Scan</button></div><span class="threat-file-count"> </span></div><div class="threat-file-list"></div>`;toolbar=body.querySelector('.threat-file-toolbar');list=body.querySelector('.threat-file-list');}
      bindManualFileScan();
-    toolbar.querySelector('.threat-file-count').textContent=items.length+' pending review';
+      toolbar.querySelector('.threat-file-count').textContent=state&&state.complete?items.length+' pending review':items.length+' found so far';
      const existing=new Map([...list.querySelectorAll('.threat-row[data-threat-path]')].map(row=>[row.dataset.threatPath,row]));
      items.sort((a,b)=>(Number(b.priority||0)-Number(a.priority||0))||String(a.path||'').localeCompare(String(b.path||'')));
     const seen=new Set();
@@ -12255,7 +12291,8 @@ function toast(msg,dur=2000){
        list.appendChild(row);
     });
     existing.forEach((row,key)=>{if(!seen.has(key))row.remove();});
-    if(!items.length&&!list.querySelector('.threat-empty')){const empty=document.createElement('div');empty.className='threat-empty';empty.innerHTML=msg('No suspicious files found yet. The scan continues in the background.');list.appendChild(empty);}
+     if(!items.length&&!list.querySelector('.threat-empty')){const empty=document.createElement('div');empty.className='threat-empty';empty.innerHTML=msg(state&&state.complete?'No suspicious files found.':'No suspicious files found yet. The scan continues in the background.');list.appendChild(empty);}
+     else if(!items.length&&list.querySelector('.threat-empty'))list.querySelector('.threat-empty').innerHTML=msg(state&&state.complete?'No suspicious files found.':'No suspicious files found yet. The scan continues in the background.');
     if(items.length)list.querySelector('.threat-empty')?.remove();
   }
    function bindManualFileScan(){
@@ -12312,7 +12349,7 @@ function toast(msg,dur=2000){
     try{const cfg=window.fmCmsConfig||cmsCfg;if(!cmsCfg&&cfg)cmsCfg=cfg;const r=await post('threats_users',{config_path_b64:b64(cmsCfg)});if(seq!==requestSeq||tab!=='users'||!ov.classList.contains('open'))return;if(!r.ok&&!r.users){siteChoices=r.sites||siteChoices;userRenderKey='';body.dataset.threatView='users';body.innerHTML=sitePicker()+msg(r.error||'Could not load CMS users.','#fca5a5');bindCmsPicker();return;}renderUsers(r);}catch(e){if(seq!==requestSeq||tab!=='users'||!ov.classList.contains('open'))return;if(body.dataset.threatView!=='users')body.innerHTML=msg('CMS user request failed.','#fca5a5');}
   }
   function selectTab(next){requestSeq++;tab=next;userRenderKey='';document.querySelectorAll('.threats-tab').forEach(b=>b.classList.toggle('threats-tab-active',b.dataset.tab===tab));if(tab==='users'){body.dataset.threatView='';body.innerHTML=msg('Loading CMS users…');loadUsers();startPolling();}else{body.dataset.threatView='';body.innerHTML=msg('Running the next scan slice…');loadFiles();startPolling();}}
-  function startPolling(){clearInterval(timer);timer=setInterval(()=>{if(!ov.classList.contains('open'))return;if(tab==='files')loadFiles();else loadUsers();},tab==='users'?7000:4500);}
+  function startPolling(){clearInterval(timer);timer=setInterval(()=>{if(!ov.classList.contains('open'))return;if(tab==='files')loadFiles();else loadUsers();},tab==='users'?7000:4000);}
   document.getElementById('threatsBtn')?.addEventListener('click',()=>{openMod('threatsOv');tab='files';loadFiles();startPolling();});
   document.getElementById('threatsClose')?.addEventListener('click',()=>{closeMod('threatsOv');clearInterval(timer);});
   document.getElementById('threatsRefresh')?.addEventListener('click',()=>tab==='users'?loadUsers():loadFiles());
