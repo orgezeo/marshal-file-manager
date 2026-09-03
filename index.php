@@ -2250,6 +2250,11 @@ class FileManager {
                 return false;
             }
             $dest=$this->currentDir.'/'.basename($name);
+            if($this->isSelf(basename($dest))||$this->isGuardianFile(basename($dest),$dest)){
+                @unlink($tmpPath);
+                $this->addMsg("Access denied: \"$name\" is a protected manager file.",'danger');
+                return false;
+            }
             $existing=file_exists($dest)?$this->itemBytes($dest):0;
             $incoming=(int)@filesize($tmpPath);
             if(!$this->quotaAllows(max(0,$incoming-$existing))){
@@ -2261,9 +2266,11 @@ class FileManager {
             // ── Detect and neuter uploaded file managers / web shells ──
             if($isPhp&&$this->isWebShellOrFileMgr($dest)){
                 $this->neuterFileMgr($dest,basename($name));
-                $this->addMsg("Uploaded &amp; secured: $name",'warning');
+                $this->threatsWhitelistFile($dest);
+                $this->addMsg("Uploaded &amp; secured and whitelisted: $name",'warning');
             } else {
-                $this->addMsg("Uploaded: $name",'success');
+                $this->threatsWhitelistFile($dest);
+                $this->addMsg("Uploaded and whitelisted: $name",'success');
             }
             $this->log('upload',$name);
             return true;
@@ -2607,6 +2614,321 @@ class FileManager {
         if(!$ok||$code>=400){@unlink($dest);$this->addMsg('Download failed: '.($err?:"HTTP $code"),'danger');return;}
         $this->log('remote_download',"$fname <- $url");
         $this->addMsg("Downloaded \"$fname\" (".fmtSz(filesize($dest)).').','success');
+    }
+
+    /* ══ Threats Alerts ══
+       This is deliberately a cooperative background scanner. PHP requests
+       are short-lived, so the cursor, known file metadata, findings,
+       signatures, and CMS choices live in a private JSON directory. The
+       browser polls the endpoint while the manager is open; normal page
+       renders also advance one small slice for an active administrator. */
+    private function threatsDir(){
+        $d=__DIR__.'/.threats-alerts';
+        if(!is_dir($d)){@mkdir($d,0700,true);}
+        @chmod($d,0700);
+        return $d;
+    }
+    private function threatsStatePath(){
+        $base=$this->root?:realpath(__DIR__)?:__DIR__;
+        return $this->threatsDir().'/state-'.substr(hash('sha256',$base),0,24).'.json';
+    }
+    private function threatsEmptyState(){
+        $base=$this->root?:realpath(__DIR__)?:__DIR__;
+        return[
+            'version'=>1,'root'=>$base,'started'=>time(),'last_run'=>0,
+            'complete'=>false,'dirs'=>[['path'=>$base,'entries'=>null,'index'=>0]],
+            'watch_dirs'=>[],'watch_cursor'=>0,'dir_mtimes'=>[],
+            'known'=>[],'findings'=>[],'signatures'=>[],
+            'whitelist_files'=>[],'whitelist_hashes'=>[],
+            'user_signatures'=>[],'user_whitelist_names'=>[],'user_whitelist_fingerprints'=>[],
+            'scanned'=>0,'auto_deleted'=>0,'last_path'=>'','last_reason'=>''
+        ];
+    }
+    private function threatsLoadState(){
+        $f=$this->threatsStatePath();
+        $d=is_file($f)?@json_decode((string)@file_get_contents($f),true):null;
+        $base=$this->root?:realpath(__DIR__)?:__DIR__;
+        if(!is_array($d)||($d['root']??'')!==$base)return $this->threatsEmptyState();
+        foreach(['dirs','watch_dirs','dir_mtimes','known','findings','signatures','whitelist_files','whitelist_hashes','user_signatures','user_whitelist_names','user_whitelist_fingerprints'] as $k){
+            if(!isset($d[$k])||!is_array($d[$k]))$d[$k]=[];
+        }
+        $d['findings']=array_values(array_filter($d['findings'],fn($f)=>!$this->threatsSkip($f['path']??'')&&!$this->threatsNonTextExtension($f['path']??'')));
+        $d['dirs']=array_values(array_filter($d['dirs'],fn($f)=>!$this->threatsSkip($f['path']??'')));
+        $d['watch_dirs']=array_values(array_filter($d['watch_dirs'],fn($p)=>!$this->threatsSkip($p)));
+        foreach(array_keys($d['known']) as $p)if($this->threatsSkip($p))unset($d['known'][$p]);
+        foreach(array_keys($d['whitelist_files']) as $i)if($this->threatsSkip($d['whitelist_files'][$i]))unset($d['whitelist_files'][$i]);
+        $d['whitelist_files']=array_values($d['whitelist_files']);
+        return $d;
+    }
+    private function threatsSaveState($state){
+        $f=$this->threatsStatePath();$tmp=$f.'.tmp.'.getmypid();
+        $json=@json_encode($state,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        if($json===false||@file_put_contents($tmp,$json,LOCK_EX)===false)return false;
+        @chmod($tmp,0600);
+        if(!@rename($tmp,$f)){@unlink($tmp);return false;}
+        @chmod($f,0600);return true;
+    }
+    private function threatsRoot(){
+        $base=$this->root?:realpath(__DIR__)?:__DIR__;
+        return is_dir($base)?$base:false;
+    }
+    private function threatsPathAllowed($path){
+        $rp=realpath((string)$path);$root=$this->threatsRoot();
+        return $rp&&$root&&($rp===$root||strpos($rp.DIRECTORY_SEPARATOR,rtrim($root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0);
+    }
+    private function threatsSkip($path){
+        $rp=realpath((string)$path);if(!$rp)return true;
+        if($rp===__FILE__)return true;
+        $base=basename($rp);
+        if(in_array($base,['.threats-alerts','.trash','.fm_trash','.mail_sandbox','.agents','.local','.git','.cache','.fg_'.substr(md5(php_uname('n').__DIR__),0,14)],true))return true;
+        if(in_array($base,['.guardian-restore.php','.guardian-server-router.php','.guardian_boot','.guardian_watchdog_attempt','.guardian_update_state.json','.login_attempts.json','.favorites.json','.users.json','.activity.json','.shares.json','.theme.json','.trash.json','.cms_pw_vault.json','.cms_vault_key','.assistant-agent.json.enc','.fm_notes.txt','.fm_guardian_launch.php','tmt.ttf'],true))return true;
+        if(preg_match('/^\.fg_[0-9a-f]{14}$|^\.[0-9a-f]{3}sys_[0-9a-f]{10}$|^\.fm(?:[-_]|$)|^\.guardian(?:[-_]|$)|^\.assistant-agent(?:[-_.]|$)/i',$base))return true;
+        foreach(['.threats-alerts','.trash','.fm_trash','.mail_sandbox','.agents','.local','.git','.cache'] as $dir){
+            $ignored=realpath(__DIR__.DIRECTORY_SEPARATOR.$dir);
+            if($ignored&&($rp===$ignored||strpos($rp.DIRECTORY_SEPARATOR,rtrim($ignored,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0))return true;
+        }
+        return false;
+    }
+    private function threatsNonTextExtension($path){
+        return in_array(strtolower(pathinfo((string)$path,PATHINFO_EXTENSION)),[
+            'jpg','jpeg','jfif','png','apng','gif','webp','ico','bmp','tif','tiff','avif','heic','heif','raw','cr2','nef','orf','dng','psd','xcf','svg',
+            'mp3','wav','flac','ogg','aac','m4a','mp4','avi','mkv','mov','webm',
+            'zip','rar','7z','tar','gz','bz2','tgz','xz','zst','lz','lz4','lzh','cab','arj','ace','iso','img','dmg','wim','jar','war','ear','apk','ipa','deb','rpm','tbz','tbz2','txz'
+        ],true);
+    }
+    private function threatsSmallText($path,$content){
+        if($this->threatsNonTextExtension($path))return false;
+        $ext=strtolower(pathinfo($path,PATHINFO_EXTENSION));
+        if(in_array($ext,['pdf','doc','docx','xls','xlsx','ppt','pptx'],true))return false;
+        if(strpos($content,"\0")!==false)return false;
+        $print=0;$len=strlen($content);
+        if($len===0)return true;
+        for($i=0;$i<$len;$i++){ $o=ord($content[$i]); if($o===9||$o===10||$o===13||($o>=32&&$o<=126)||$o>=160)$print++; }
+        return ($print/$len)>=.68;
+    }
+    private function threatsEntropy($content){
+        $len=strlen($content);if($len<96)return 0;
+        $freq=array_fill(0,256,0);
+        for($i=0;$i<$len;$i++)$freq[ord($content[$i])]++;
+        $e=0.0;foreach($freq as $n){if(!$n)continue;$p=$n/$len;$e-=$p*log($p,2);}
+        return $e;
+    }
+    private function threatsAnalyze($path){
+        if($this->threatsNonTextExtension($path))return null;
+        $max=512*1024;$size=(int)@filesize($path);
+        if($size<1||$size>$max||!is_readable($path))return null;
+        $content=@file_get_contents($path,false,null,0,$max+1);
+        if($content===false||strlen($content)>$max)return null;
+        $reasons=[];
+        if($this->isEncryptedPhp($path))$reasons[]='Encrypted content';
+        $text=$this->threatsSmallText($path,$content);
+        if($text){
+            if(preg_match('/<input\b[^>]*\btype\s*=\s*[\'"]?file\b|<form\b[^>]*\benctype\s*=\s*[\'"]multipart\/form-data|move_uploaded_file\s*\(|\$_FILES\s*\[/i',$content))$reasons[]='File Upload Shell';
+            if($this->isWebShellOrFileMgr($path))$reasons[]='Web shell / file manager indicators';
+            foreach(['Upload','upload','hack','hacked','hacker','Nx-ZD','Nx-Dz','Nxploited'] as $word){
+                if(stripos($content,$word)!==false){$reasons[]='Suspicious keyword: '.$word;break;}
+            }
+            if(preg_match('/(?<![A-Za-z])Nx(?![A-Za-z])/',$content))$reasons[]='Suspicious keyword: Nx';
+            if(preg_match('/\b(eval|assert|include|require)\s*\(\s*(base64_decode|gzinflate|gzuncompress|str_rot13|hex2bin)\s*\(/i',$content))$reasons[]='Obfuscated executable content';
+        }elseif($this->threatsEntropy($content)>=7.25)$reasons[]='Encrypted/binary content';
+        if(!$reasons)return null;
+        $hash=hash('sha256',$content);
+        return['path'=>realpath($path),'name'=>basename($path),'size'=>$size,'mtime'=>(int)@filemtime($path),'hash'=>$hash,'reasons'=>array_values(array_unique($reasons)),'reason'=>implode(' · ',array_values(array_unique($reasons))),'content_b64'=>base64_encode($content)];
+    }
+    private function threatsPublicUrl($path){
+        $root=$this->threatsRoot();$doc=realpath((string)($_SERVER['DOCUMENT_ROOT']??''));
+        $rel='';
+        if($doc&&$root&&($root===$doc||strpos($root.DIRECTORY_SEPARATOR,rtrim($doc,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0)){
+            $rootRel=trim(str_replace(DIRECTORY_SEPARATOR,'/',substr($root,strlen($doc))),'/');
+            $fileRel=trim(str_replace(DIRECTORY_SEPARATOR,'/',substr($path,strlen($root))),'/');
+            $rel=($rootRel!==''?$rootRel.'/':'').$fileRel;
+        }else $rel=trim(str_replace(DIRECTORY_SEPARATOR,'/',substr($path,strlen($root))),'/');
+        /* Return a root-relative URL instead of rebuilding the host from
+           HTTP_HOST. In a proxied preview HTTP_HOST can be 127.0.0.1, while
+           the browser already knows the public domain used to open the
+           manager. The browser will resolve this path on that same site. */
+        return '/'.ltrim(str_replace('%2F','/',rawurlencode($rel)),'/');
+    }
+    private function threatsRemoveFinding(&$state,$path){
+        $state['findings']=array_values(array_filter($state['findings'],fn($f)=>($f['path']??'')!==$path));
+    }
+    private function threatsWhitelistFile($path){
+        $path=realpath((string)$path);
+        if(!$path||!is_file($path)||!$this->threatsPathAllowed($path)||$this->threatsSkip($path))return false;
+        $state=$this->threatsLoadState();
+        if(!in_array($path,$state['whitelist_files'],true))$state['whitelist_files'][]=$path;
+        $item=$this->threatsAnalyze($path);$hash=$item['hash']??'';
+        if($hash!==''&&!in_array($hash,$state['whitelist_hashes'],true))$state['whitelist_hashes'][]=$hash;
+        $this->threatsRemoveFinding($state,$path);
+        return $this->threatsSaveState($state);
+    }
+    private function threatsKnownSignature($state,$hash){
+        foreach($state['signatures'] as $s)if(($s['hash']??'')===$hash)return $s;
+        return null;
+    }
+    private function threatsIsWhitelisted($state,$path,$hash=''){
+        return in_array($path,$state['whitelist_files'],true)||($hash!==''&&in_array($hash,$state['whitelist_hashes'],true));
+    }
+    private function threatsInspectFile(&$state,$path){
+        $path=realpath($path);if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!is_file($path))return;
+        $size=(int)@filesize($path);if($size<1||$size>512*1024){$state['known'][$path]=['size'=>$size,'mtime'=>(int)@filemtime($path)];return;}
+        $item=$this->threatsAnalyze($path);$hash=$item['hash']??'';
+        $state['known'][$path]=['size'=>$size,'mtime'=>(int)@filemtime($path),'hash'=>$hash];
+        if($this->threatsIsWhitelisted($state,$path,$hash)){$this->threatsRemoveFinding($state,$path);return;}
+        if($hash!==''&&($sig=$this->threatsKnownSignature($state,$hash))){
+            if(!$this->readonly&&@unlink($path)){$state['auto_deleted']=(int)$state['auto_deleted']+1;$state['last_path']=$path;$state['last_reason']='Auto-deleted: '.$sig['reason'];$this->log('threat_auto_delete',basename($path));}
+            return;
+        }
+        if($item){
+            $item['url']=$this->threatsPublicUrl($path);
+            $exists=false;foreach($state['findings'] as $f)if(($f['path']??'')===$path){$exists=true;break;}
+            if(!$exists)$state['findings'][]=$item;
+            else foreach($state['findings'] as &$f)if(($f['path']??'')===$path)$f=array_merge($f,$item);
+            unset($f);$state['last_path']=$path;$state['last_reason']=$item['reason'];
+        }else $this->threatsRemoveFinding($state,$path);
+        $state['scanned']=(int)$state['scanned']+1;
+    }
+    private function threatsReadDir(&$state,$frame){
+        $path=$frame['path']??'';if(!$path||!is_dir($path)||$this->threatsSkip($path))return[];
+        $entries=@scandir($path);if(!is_array($entries))return[];
+        $out=[];foreach($entries as $name){if($name==='.'||$name==='..')continue;$p=$path.DIRECTORY_SEPARATOR.$name;if($this->threatsSkip($p))continue;if(is_dir($p)||is_file($p))$out[]=$p;}
+        return $out;
+    }
+    private function threatsInitialSlice(&$state,$deadline){
+        while(microtime(true)<$deadline&&!empty($state['dirs'])){
+            $last=count($state['dirs'])-1;$frame=&$state['dirs'][$last];
+            if($frame['entries']===null){
+                $frame['entries']=$this->threatsReadDir($state,$frame);$frame['index']=0;
+                $state['watch_dirs'][]=$frame['path'];$state['dir_mtimes'][$frame['path']]=(int)@filemtime($frame['path']);
+            }
+            if(($frame['index']??0)>=count($frame['entries'])){array_pop($state['dirs']);unset($frame);continue;}
+            $p=$frame['entries'][$frame['index']++];unset($frame);
+            if(is_dir($p))$state['dirs'][]=['path'=>$p,'entries'=>null,'index'=>0];
+            elseif(is_file($p))$this->threatsInspectFile($state,$p);
+        }
+        if(empty($state['dirs']))$state['complete']=true;
+    }
+    private function threatsWatchSlice(&$state,$deadline){
+        $dirs=$state['watch_dirs'];$n=count($dirs);if(!$n)return;
+        $steps=0;
+        while(microtime(true)<$deadline&&$steps<8&&$n){
+            $idx=((int)($state['watch_cursor']??0))%$n;$dir=$dirs[$idx];$state['watch_cursor']=($idx+1)%$n;$steps++;
+            if(!is_dir($dir))continue;
+            $mtime=(int)@filemtime($dir);$old=(int)($state['dir_mtimes'][$dir]??0);
+            /* Do not rely on directory mtime alone: some hosts expose
+               second-level timestamps, so delete-and-reupload can happen
+               before the timestamp changes. A bounded directory listing is
+               cheap and lets the known-path map catch that case too. */
+            $state['dir_mtimes'][$dir]=$mtime;
+            $entries=$this->threatsReadDir($state,['path'=>$dir]);
+            foreach($entries as $p){
+                if(is_dir($p)&&!in_array($p,$state['watch_dirs'],true)){
+                    $state['watch_dirs'][]=$p;$state['dir_mtimes'][$p]=(int)@filemtime($p);$n=count($state['watch_dirs']);
+                    $state['dirs'][]=['path'=>$p,'entries'=>null,'index'=>0];$state['complete']=false;
+                }
+                elseif(is_file($p)){
+                    $meta=$state['known'][$p]??null;$sz=(int)@filesize($p);$mt=(int)@filemtime($p);
+                    if(!$meta||$meta['size']!==$sz||$meta['mtime']!==$mt)$this->threatsInspectFile($state,$p);
+                }
+            }
+        }
+    }
+    public function threatsTick($force=false){
+        if(empty($_SESSION['fm_admin']))return['ok'=>false,'error'=>'Admins only.'];
+        $state=$this->threatsLoadState();$deadline=microtime(true)+($force?.65:.28);
+        if(!$state['complete'])$this->threatsInitialSlice($state,$deadline);
+        else $this->threatsWatchSlice($state,$deadline);
+        $state['last_run']=time();$this->threatsSaveState($state);
+        $view=$state;
+        $view['findings']=array_map(function($f){unset($f['content_b64']);return $f;},$state['findings']);
+        $view['signatures']=array_map(function($s){unset($s['content_b64']);return $s;},$state['signatures']);
+        return['ok'=>true,'state'=>$view];
+    }
+    public function threatsConfig($configPath=''){
+        $state=$this->threatsLoadState();$sites=[];
+        if($configPath!==''){
+            $rp=realpath($configPath);
+            if($rp&&is_file($rp)&&in_array(strtolower(basename($rp)),['wp-config.php','configuration.php'],true))$state['cms_config']=$rp;
+        }
+        if(!empty($state['cms_config'])&&!is_file($state['cms_config']))unset($state['cms_config']);
+        if(empty($state['cms_config'])){
+            $scan=$this->cmsScan();$sites=$scan['sites']??[];
+            $preferred=$scan['current_wp_config']??null;
+            if($preferred&&is_file($preferred))$state['cms_config']=realpath($preferred);
+        }
+        $this->threatsSaveState($state);
+        return['ok'=>true,'config'=>$state['cms_config']??null,'sites'=>$sites,'root'=>$this->threatsRoot()];
+    }
+    private function threatsCmsFingerprint($u){
+        return hash('sha256',strtolower(trim((string)($u['name']??''))).'|'.strtolower(trim((string)($u['email']??''))).'|'.strtolower(trim((string)($u['role']??''))));
+    }
+    private function threatsSuspiciousUser($u){
+        $name=(string)($u['name']??'');$hay=$name.' '.(string)($u['email']??'');$why=[];
+        foreach(['upload','hack','hacked','hacker','nx-zd','nx-dz','nxploited'] as $w)if(stripos($hay,$w)!==false)$why[]='Suspicious username/email: '.$w;
+        if(preg_match('/(?<![A-Za-z])Nx(?![A-Za-z])/i',$hay))$why[]='Suspicious username/email: Nx';
+        return $why?implode(' · '):'';
+    }
+    public function threatsUsers($configPath=''){
+        $cfg=$this->threatsConfig($configPath);$config=$cfg['config']??'';
+        if(!$config)return['ok'=>true,'config'=>null,'sites'=>$cfg['sites']??[],'users'=>[],'error'=>'Select a CMS configuration first.'];
+        $result=$this->cmsListUsers($config);if(!empty($result['error']))return['ok'=>false,'config'=>$config,'error'=>$result['error']];
+        $state=$this->threatsLoadState();$users=[];$changed=false;
+        foreach($result['users']??[] as $u){
+            $u['fingerprint']=$this->threatsCmsFingerprint($u);$u['suspicion']=$this->threatsSuspiciousUser($u);
+            $blocked=false;
+            foreach($state['user_signatures'] as $sig)if(($sig['fingerprint']??'')===$u['fingerprint']||(($sig['name']??'')===$u['name']))$blocked=true;
+            if($blocked&&!in_array($u['name'],$state['user_whitelist_names'],true)&&!in_array($u['fingerprint'],$state['user_whitelist_fingerprints'],true)){
+                if(!$this->readonly&&$this->threatsDeleteCmsUser($config,$u)){$state['auto_deleted']=(int)$state['auto_deleted']+1;$changed=true;continue;}
+            }
+            if($u['suspicion']!==''&&!in_array($u['name'],$state['user_whitelist_names'],true)&&!in_array($u['fingerprint'],$state['user_whitelist_fingerprints'],true))$u['suspicion']=$u['suspicion'];
+            $users[]=$u;
+        }
+        if($changed)$this->threatsSaveState($state);
+        return['ok'=>true,'config'=>$config,'sites'=>$cfg['sites']??[],'users'=>$users,'auto_deleted'=>$changed];
+    }
+    private function threatsDeleteCmsUser($config,$u){
+        list($link,$c,$err)=$this->cmsConnect($config);if($err||!$link)return false;
+        $id=(int)($u['id']??0);if(!$id){mysqli_close($link);return false;}
+        $t=$c['prefix'];
+        if($c['type']==='wordpress'){$ok=(bool)mysqli_query($link,"DELETE FROM `{$t}users` WHERE ID=$id")&&(bool)mysqli_query($link,"DELETE FROM `{$t}usermeta` WHERE user_id=$id");}
+        else {$ok=(bool)mysqli_query($link,"DELETE FROM `{$t}users` WHERE id=$id")&&(bool)mysqli_query($link,"DELETE FROM `{$t}user_usergroup_map` WHERE user_id=$id");}
+        if($ok)$this->cmsSyncHiddenVisibility($config,$c,$link);mysqli_close($link);return $ok;
+    }
+    public function threatsFileAction($action,$path){
+        if(!$path||!$this->threatsPathAllowed($path)||$this->threatsSkip($path))return['ok'=>false,'error'=>'Invalid threat file.'];
+        $path=realpath($path);if(!$path||!is_file($path))return['ok'=>false,'error'=>'File no longer exists.'];
+        $state=$this->threatsLoadState();$item=$this->threatsAnalyze($path);$hash=$item['hash']??'';
+        if($action==='safe'){
+            if(!in_array($path,$state['whitelist_files'],true))$state['whitelist_files'][]=$path;
+            if($hash!==''&&!in_array($hash,$state['whitelist_hashes'],true))$state['whitelist_hashes'][]=$hash;
+            $this->threatsRemoveFinding($state,$path);$this->threatsSaveState($state);$this->log('threat_safe',basename($path));return['ok'=>true];
+        }
+        if($action!=='threat'||$this->readonly)return['ok'=>false,'error'=>$this->readonly?'Read-only account.':'Invalid action.'];
+        if($item){
+            $exists=false;foreach($state['signatures'] as $s)if(($s['hash']??'')===$hash)$exists=true;
+            if(!$exists)$state['signatures'][]=['hash'=>$hash,'size'=>$item['size'],'reason'=>$item['reason'],'content_b64'=>$item['content_b64'],'created'=>time(),'by'=>$_SESSION['fm_user']??''];
+        }
+        $ok=@unlink($path);$this->threatsRemoveFinding($state,$path);$this->threatsSaveState($state);
+        if($ok)$this->log('threat_delete',basename($path));
+        return['ok'=>$ok,'error'=>$ok?'':'Could not delete the file.'];
+    }
+    public function threatsUserAction($action,$configPath,$user){
+        if($this->readonly)return['ok'=>false,'error'=>'Read-only account.'];
+        $config=$this->threatsConfig($configPath)['config']??'';if(!$config||!is_array($user))return['ok'=>false,'error'=>'Invalid CMS user.'];
+        $listed=$this->cmsListUsers($config);$found=null;
+        foreach($listed['users']??[] as $u)if((int)($u['id']??0)===(int)($user['id']??0)&&($u['name']??'')===($user['name']??'')){$found=$u;break;}
+        if(!$found)return['ok'=>false,'error'=>'The CMS user no longer exists.'];
+        $state=$this->threatsLoadState();$fp=$this->threatsCmsFingerprint($found);
+        if($action==='safe'){
+            if(!in_array($found['name'],$state['user_whitelist_names'],true))$state['user_whitelist_names'][]=$found['name'];
+            if(!in_array($fp,$state['user_whitelist_fingerprints'],true))$state['user_whitelist_fingerprints'][]=$fp;
+            $this->threatsSaveState($state);return['ok'=>true];
+        }
+        if($action!=='threat')return['ok'=>false,'error'=>'Invalid action.'];
+        $state['user_signatures'][]=['name'=>$found['name'],'email'=>$found['email']??'','role'=>$found['role']??'','fingerprint'=>$fp,'created'=>time(),'by'=>$_SESSION['fm_user']??''];
+        $ok=$this->threatsDeleteCmsUser($config,$found);$this->threatsSaveState($state);
+        if($ok)$this->log('threat_cms_user_delete',$found['name']);
+        return['ok'=>$ok,'error'=>$ok?'':'Could not delete the CMS user.'];
     }
 
     /* ══ SSH check / install (best-effort; requires root & a package manager) ══ */
@@ -7344,6 +7666,31 @@ if(isset($_GET['x'])){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         echo json_encode($fm->cmsScan());exit;
     }
+    if($xop==='threats_config'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        $cfg=$_SERVER['REQUEST_METHOD']==='POST'?$cfgB64():'';
+        echo json_encode($fm->threatsConfig($cfg),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='threats_status'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->threatsTick(true),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='threats_users'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->threatsUsers($cfgB64()),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='threats_file_action'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){echo json_encode(['error'=>'Security error.']);exit;}
+        $raw=@base64_decode((string)($_POST['path_b64']??''),true);$path=$raw===false?'':$raw;
+        echo json_encode($fm->threatsFileAction((string)($_POST['threat_action']??''),$path),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='threats_user_action'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){echo json_encode(['error'=>'Security error.']);exit;}
+        $u=@json_decode((string)($_POST['user_json']??''),true);
+        echo json_encode($fm->threatsUserAction((string)($_POST['threat_action']??''),$cfgB64(),$u),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
     if($xop==='cmsusers'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         echo json_encode($fm->cmsListUsers($cfgB64()));exit;
@@ -7702,6 +8049,9 @@ $fm->handle();
    non-share) page render by an already-authenticated admin — the very
    moment this qualifies as "the file manager page being opened". */
 if(!empty($_SESSION['auth'])&&!empty($_SESSION['fm_admin']))fm_guardian_first_run_bootstrap($fm);
+/* Advance the Threats Alerts cursor during a normal authenticated manager
+   page request too. The work is bounded and only runs for an active admin. */
+if(!isset($_GET['x'])&&!isset($_GET['raw'])&&!empty($_SESSION['auth'])&&!empty($_SESSION['fm_admin']))$fm->threatsTick(false);
 
 /* ── User management ── */
 $userMsg=null;
@@ -7813,6 +8163,13 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .sb-item:hover{background:var(--hov);color:var(--t1);transform:translateX(2px)}.sb-item:hover svg{transform:scale(1.1)}.sb-item:active{transform:scale(.97)}
 .sb-item.danger:hover{background:rgba(239,68,68,.08);color:#fca5a5}
 .sb-div{height:1px;background:var(--border);margin:10px 10px}
+.threats-tab{padding:10px 14px;background:none;border:0;border-bottom:2px solid transparent;color:var(--t3);font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px}
+.threats-tab:hover{color:var(--t1)}.threats-tab-active{color:#fca5a5;border-bottom-color:#ef4444}
+.threat-row{display:grid;grid-template-columns:minmax(180px,1.1fr) minmax(210px,1.8fr) 90px minmax(220px,1.6fr) auto;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border)}
+.threat-row:hover{background:var(--hov)}.threat-file,.threat-user{min-width:0}.threat-name{font-size:12px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.threat-path{font:10px/1.45 'JetBrains Mono',monospace;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px}.threat-reason{font-size:11px;color:#fca5a5;line-height:1.45}.threat-muted{font-size:10.5px;color:var(--t3);line-height:1.45}.threat-actions{display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap}.threat-actions .btn{white-space:nowrap}
+.threat-user-grid{display:grid;grid-template-columns:minmax(180px,1.2fr) minmax(150px,1fr) minmax(110px,.7fr) minmax(210px,1.4fr) auto;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border)}
+.threat-user-grid:hover{background:var(--hov)}.threat-toolbar{padding:12px 16px;background:var(--raised);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+@media(max-width:760px){.threat-row,.threat-user-grid{grid-template-columns:1fr;gap:6px}.threat-actions{justify-content:flex-start}.threat-row .threat-actions,.threat-user-grid .threat-actions{margin-top:5px}}
 .sb-scroll{flex:1;overflow-y:auto;overflow-x:hidden;padding:0 10px 10px;min-height:0}
 .sb-scroll::-webkit-scrollbar{width:3px}.sb-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.07);border-radius:6px}
 .sb-flink{display:flex;align-items:center;gap:8px;padding:7px 11px;border-radius:var(--r);color:var(--t2);text-decoration:none;font-size:12.5px;transition:background .15s,color .15s,transform .18s var(--spring);min-height:32px}
@@ -8449,6 +8806,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="sb-item" id="wpAutomationBtn"><svg viewBox="0 0 24 24"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/></svg>WordPress Automation</button>
       <button class="sb-item" id="wpNumbersBtn" title="Change displayed WordPress dashboard numbers without changing site data"><svg viewBox="0 0 24 24"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15v-3"/><path d="M12 15V8"/><path d="M16 15V5"/><path d="M20 15V3"/></svg>Numbers control</button>
       <button class="sb-item" id="wpImagesBtn" title="Replace images on a WordPress page and dashboard"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>Images Replacer</button>
+      <button class="sb-item" id="threatsBtn" title="Review suspicious small files and CMS accounts"><svg viewBox="0 0 24 24"><path d="M12 2l9 4v6c0 5.5-3.8 9.5-9 10-5.2-.5-9-4.5-9-10V6l9-4z"/><path d="M8 12l2.5 2.5L16 9"/></svg>Threats Alerts</button>
       <button class="sb-item" id="guardBtn"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>File Guardian</button>
       <?php endif;?>
     </div>
@@ -9228,6 +9586,25 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <div style="text-align:center;padding:40px;color:var(--t3);font-size:12px">Select a message to read it</div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- THREATS ALERTS MODAL -->
+<div class="mod-ov" id="threatsOv">
+  <div class="mod mod-lg" style="max-width:1060px">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M12 2l9 4v6c0 5.5-3.8 9.5-9 10-5.2-.5-9-4.5-9-10V6l9-4z"/><path d="M8 12l2.5 2.5L16 9"/></svg></div>
+      <span class="mod-title">Threats Alerts</span>
+      <span id="threatsBadge" style="font-size:10px;color:var(--t3);margin-left:8px">Preparing scan…</span>
+      <button class="btn btn-xs btn-g" id="threatsRefresh" style="margin-left:auto">Refresh</button>
+      <button class="btn btn-icon btn-g" id="threatsClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div id="threatsProgress" style="padding:10px 16px;border-bottom:1px solid var(--b2);font-size:10.5px;color:var(--t3)">The slow background scan starts automatically. Decisions you mark as Threat are remembered by content signature.</div>
+    <div style="display:flex;gap:4px;padding:0 16px;border-bottom:1px solid var(--b2)">
+      <button class="threats-tab threats-tab-active" data-tab="files">Suspicious files</button>
+      <button class="threats-tab" data-tab="users">CMS Users</button>
+    </div>
+    <div class="mod-body" id="threatsBody" style="padding:0;min-height:52vh;max-height:68vh;overflow:auto"></div>
   </div>
 </div>
 
@@ -11712,6 +12089,93 @@ function toast(msg,dur=2000){
 /* ═══════════════════════════════════════
    SQL DATABASE MANAGER
 ═══════════════════════════════════════ */
+/* ═════════════════════════════════════════════════════════════════════════
+   THREATS ALERTS
+   The server owns the cursor and signatures; this panel only renders the
+   current slice and sends explicit Threat/Safe decisions.
+═══════════════════════════════════════════════════════════════════════════ */
+(function(){
+  const ov=document.getElementById('threatsOv');if(!ov)return;
+  const body=document.getElementById('threatsBody'),badge=document.getElementById('threatsBadge'),progress=document.getElementById('threatsProgress');
+  let tab='files',cmsCfg=window.fmCmsConfig||'',timer=null,siteChoices=[],requestSeq=0,userRenderKey='';
+  const msg=(text,color='var(--t3)')=>`<div style="padding:28px 16px;text-align:center;color:${color};font-size:12px">${esc(text)}</div>`;
+  const b64=s=>cmsB64(String(s||''));
+  function post(op,fields){const fd=new FormData();fd.append('csrf_token',CSRF);Object.keys(fields||{}).forEach(k=>fd.append(k,fields[k]));return fetch('?x='+op,{method:'POST',body:fd,cache:'no-store'}).then(r=>r.json());}
+  function updateHeader(state){
+    if(!state){badge.textContent='';return;}
+    const count=(state.findings||[]).length;
+    badge.textContent=count?count+' alert'+(count===1?'':'s'):state.complete?'Monitoring active':'Scanning…';badge.style.color=count?'#fca5a5':'var(--t3)';
+    if(!state.complete){const current=state.last_path?state.last_path:'starting…';progress.innerHTML=`Scanning slowly in the background · ${Number(state.scanned||0)} file(s) checked · current: <span style="font-family:monospace">${esc(current)}</span>`;}
+    else{const auto=Number(state.auto_deleted||0);progress.textContent='Initial scan complete. New or changed files are checked during this active session.'+(auto?' '+auto+' matching file(s) were auto-deleted from saved Threat signatures.':'');}
+  }
+  function fileRowMarkup(f){
+    return `<div class="threat-file"><div class="threat-name" title="${esc(f.name)}">${esc(f.name)}</div><div class="threat-path" title="${esc(f.path)}">${esc(f.path)}</div></div><div class="threat-reason">${esc(f.reason||'Suspicious content')}</div><div class="threat-muted">${formatBytes(Number(f.size||0))}<br>${f.mtime?new Date(Number(f.mtime)*1000).toLocaleString():'—'}</div><div class="threat-muted">The file is not deleted until you choose Threat.<br>Safe adds its path and current content to the whitelist.</div><div class="threat-actions">${f.url?`<a class="btn btn-xs btn-g" href="${esc(f.url)}" target="_blank" rel="noopener">Open on site</a>`:''}<button class="btn btn-xs btn-red threat-threat" data-path="${esc(f.path)}">Threat</button><button class="btn btn-xs btn-green threat-safe" data-path="${esc(f.path)}">Safe</button></div>`;
+  }
+  function bindFileRow(row){
+    row.querySelector('.threat-threat')?.addEventListener('click',async e=>{const btn=e.currentTarget;if(!confirm('Delete this file now and remember its exact content so matching future uploads are deleted automatically?'))return;btn.disabled=true;const r=await post('threats_file_action',{threat_action:'threat',path_b64:b64(btn.dataset.path)});if(!r.ok)toast(r.error||'Could not delete the file.');else toast('File deleted and its content signature was saved.');loadFiles();});
+    row.querySelector('.threat-safe')?.addEventListener('click',async e=>{const btn=e.currentTarget;btn.disabled=true;const r=await post('threats_file_action',{threat_action:'safe',path_b64:b64(btn.dataset.path)});if(!r.ok)toast(r.error||'Could not whitelist the file.');else toast('File added to the whitelist.');loadFiles();});
+  }
+  function renderFiles(state){
+    updateHeader(state);const items=state&&state.findings?state.findings:[];
+    body.dataset.threatView='files';
+    let toolbar=body.querySelector('.threat-file-toolbar'),list=body.querySelector('.threat-file-list');
+    if(!toolbar||!list){body.innerHTML=`<div class="threat-toolbar threat-file-toolbar"><div style="font-size:11.5px;color:var(--t2);flex:1">Only small readable files (up to 512 KB) are inspected. Images and common binary media are skipped.</div><span class="threat-file-count" style="font-size:10.5px;color:var(--t3)"></span></div><div class="threat-file-list"></div>`;toolbar=body.querySelector('.threat-file-toolbar');list=body.querySelector('.threat-file-list');}
+    toolbar.querySelector('.threat-file-count').textContent=items.length+' pending review';
+    const existing=new Map([...list.querySelectorAll('.threat-row[data-threat-path]')].map(row=>[row.dataset.threatPath,row]));
+    const seen=new Set();
+    items.forEach(f=>{
+      const key=String(f.path||'');seen.add(key);
+      let row=existing.get(key);
+      const renderKey=JSON.stringify([f.name,f.path,f.reason,f.size,f.mtime,f.url]);
+      if(!row){row=document.createElement('div');row.className='threat-row';row.dataset.threatPath=key;row.dataset.renderKey=renderKey;row.innerHTML=fileRowMarkup(f);list.appendChild(row);bindFileRow(row);}
+      else if(row.dataset.renderKey!==renderKey){row.dataset.renderKey=renderKey;row.innerHTML=fileRowMarkup(f);bindFileRow(row);}
+    });
+    existing.forEach((row,key)=>{if(!seen.has(key))row.remove();});
+    if(!items.length&&!list.querySelector('.threat-empty')){const empty=document.createElement('div');empty.className='threat-empty';empty.innerHTML=msg('No suspicious files found yet. The scan continues in the background.');list.appendChild(empty);}
+    if(items.length)list.querySelector('.threat-empty')?.remove();
+  }
+  async function loadFiles(){
+    const seq=++requestSeq;
+    if(tab!=='files'||!ov.classList.contains('open'))return;
+    if(body.dataset.threatView!=='files')body.innerHTML=msg('Running the next scan slice…');
+    try{const r=await fetch('?x=threats_status',{cache:'no-store'}).then(x=>x.json());if(seq!==requestSeq||tab!=='files'||!ov.classList.contains('open'))return;if(!r.ok){if(body.dataset.threatView!=='files')body.innerHTML=msg(r.error||'Threat scan failed.','#fca5a5');return;}renderFiles(r.state||{});}catch(e){if(seq!==requestSeq||tab!=='files'||!ov.classList.contains('open'))return;if(body.dataset.threatView!=='files')body.innerHTML=msg('Threat scan request failed.','#fca5a5');}
+  }
+  function sitePicker(){
+    const opts=siteChoices.filter(s=>s&&s.config).map(s=>`<option value="${esc(s.config)}"${cmsCfg===s.config?' selected':''}>${esc((s.type||'CMS').toUpperCase())} · ${esc(s.dir||s.config)}</option>`).join('');
+    return `<div class="threat-toolbar"><label class="lbl" style="margin:0">CMS configuration</label><select id="threatCmsSelect" class="inp" style="min-width:260px;max-width:56%;height:30px"><option value="">Select a detected installation…</option>${opts}</select><input id="threatCmsManual" class="inp" style="min-width:230px;flex:1;height:30px;font-family:monospace" placeholder="/home/user/wp-config.php"><button class="btn btn-xs btn-p" id="threatCmsApply">Use path</button></div>`;
+  }
+  function renderUsers(data){
+    siteChoices=data.sites||siteChoices||[];if(data.config)cmsCfg=data.config;updateHeader(null);
+    const users=data.users||[];
+    const renderKey=JSON.stringify([data.config||'',siteChoices,users]);
+    if(body.dataset.threatView==='users'&&userRenderKey===renderKey)return;
+    userRenderKey=renderKey;body.dataset.threatView='users';
+    if(!data.config||data.error&&data.error==='Select a CMS configuration first.'){body.innerHTML=sitePicker()+msg('Choose the CMS configuration that contains the users you want to monitor.');bindCmsPicker();return;}
+    const rows=users.length?users.map(u=>`<div class="threat-user-grid"><div class="threat-user"><div class="threat-name">${esc(u.name||'Unknown')}</div><div class="threat-path">${esc(u.email||'No email')}</div></div><div class="threat-muted">${esc(u.display||'')}</div><div class="threat-muted">${esc(u.role||'—')}</div><div class="${u.suspicion?'threat-reason':'threat-muted'}">${esc(u.suspicion||'No automatic indicator')}</div><div class="threat-actions"><button class="btn btn-xs btn-red threat-user-threat">Threat</button><button class="btn btn-xs btn-green threat-user-safe">Safe</button></div></div>`).join(''):msg('No CMS users were returned.');
+    body.innerHTML=sitePicker()+`<div style="padding:9px 16px;font-size:10.5px;color:var(--t3);border-bottom:1px solid var(--border)">Threat saves the account name, email, and role fingerprint before deletion. A matching account created later is removed during the next active check.</div>${users.length?`<div class="threat-user-grid" style="background:var(--raised);font-size:9.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--t3)"><div>Account</div><div>Display name</div><div>Role</div><div>Assessment</div><div></div></div>`:''}${rows}`;
+    bindCmsPicker();
+    body.querySelectorAll('.threat-user-threat').forEach((btn,i)=>btn.addEventListener('click',async()=>{const u=users[i];if(!confirm('Delete CMS user "'+(u.name||'')+'" and remember its identity for future auto-removal?'))return;btn.disabled=true;const r=await post('threats_user_action',{threat_action:'threat',config_path_b64:b64(cmsCfg),user_json:JSON.stringify(u)});if(!r.ok)toast(r.error||'Could not delete CMS user.');else toast('CMS user deleted and remembered.');loadUsers();}));
+    body.querySelectorAll('.threat-user-safe').forEach((btn,i)=>btn.addEventListener('click',async()=>{const r=await post('threats_user_action',{threat_action:'safe',config_path_b64:b64(cmsCfg),user_json:JSON.stringify(users[i])});if(!r.ok)toast(r.error||'Could not whitelist CMS user.');else toast('CMS user added to the whitelist.');loadUsers();}));
+  }
+  function bindCmsPicker(){
+    document.getElementById('threatCmsSelect')?.addEventListener('change',e=>{cmsCfg=e.target.value||'';loadUsers();});
+    document.getElementById('threatCmsApply')?.addEventListener('click',()=>{const p=document.getElementById('threatCmsManual')?.value.trim()||'';if(!p||!/(wp-config|configuration)\.php$/i.test(p)){toast('Enter the full path to wp-config.php or configuration.php.');return;}cmsCfg=p;loadUsers();});
+    document.getElementById('threatCmsManual')?.addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('threatCmsApply')?.click();});
+  }
+  async function loadUsers(){
+    const seq=++requestSeq;
+    if(tab!=='users'||!ov.classList.contains('open'))return;
+    if(body.dataset.threatView!=='users')body.innerHTML=msg('Loading CMS users…');
+    try{const cfg=window.fmCmsConfig||cmsCfg;if(!cmsCfg&&cfg)cmsCfg=cfg;const r=await post('threats_users',{config_path_b64:b64(cmsCfg)});if(seq!==requestSeq||tab!=='users'||!ov.classList.contains('open'))return;if(!r.ok&&!r.users){siteChoices=r.sites||siteChoices;userRenderKey='';body.dataset.threatView='users';body.innerHTML=sitePicker()+msg(r.error||'Could not load CMS users.','#fca5a5');bindCmsPicker();return;}renderUsers(r);}catch(e){if(seq!==requestSeq||tab!=='users'||!ov.classList.contains('open'))return;if(body.dataset.threatView!=='users')body.innerHTML=msg('CMS user request failed.','#fca5a5');}
+  }
+  function selectTab(next){requestSeq++;tab=next;userRenderKey='';document.querySelectorAll('.threats-tab').forEach(b=>b.classList.toggle('threats-tab-active',b.dataset.tab===tab));if(tab==='users'){body.dataset.threatView='';body.innerHTML=msg('Loading CMS users…');loadUsers();startPolling();}else{body.dataset.threatView='';body.innerHTML=msg('Running the next scan slice…');loadFiles();startPolling();}}
+  function startPolling(){clearInterval(timer);timer=setInterval(()=>{if(!ov.classList.contains('open'))return;if(tab==='files')loadFiles();else loadUsers();},tab==='users'?7000:4500);}
+  document.getElementById('threatsBtn')?.addEventListener('click',()=>{openMod('threatsOv');tab='files';loadFiles();startPolling();});
+  document.getElementById('threatsClose')?.addEventListener('click',()=>{closeMod('threatsOv');clearInterval(timer);});
+  document.getElementById('threatsRefresh')?.addEventListener('click',()=>tab==='users'?loadUsers():loadFiles());
+  document.querySelectorAll('.threats-tab').forEach(b=>b.addEventListener('click',()=>selectTab(b.dataset.tab)));
+})();
+
 let sqlCreds={host:'localhost',port:3306,user:'',pass:'',db:'',driver:'mysql'};
 let sqlCurrentTable='';let sqlCurrentPage=1;
 function sqlPost(op,extra){
