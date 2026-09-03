@@ -2632,6 +2632,13 @@ class FileManager {
         $base=$this->root?:realpath(__DIR__)?:__DIR__;
         return $this->threatsDir().'/state-'.substr(hash('sha256',$base),0,24).'.json';
     }
+    private function threatsStateMaxBytes(){return 12*1024*1024;}
+    private function threatsCompactState(&$state){
+        foreach($state['findings']??[] as &$finding)unset($finding['content_b64']);
+        unset($finding);
+        foreach($state['signatures']??[] as &$signature)unset($signature['content_b64']);
+        unset($signature);
+    }
     private function threatsEmptyState(){
         $base=$this->root?:realpath(__DIR__)?:__DIR__;
         return[
@@ -2646,6 +2653,15 @@ class FileManager {
     }
     private function threatsLoadState(){
         $f=$this->threatsStatePath();
+        $size=is_file($f)?@filesize($f):0;
+        if($size!==false&&$size>$this->threatsStateMaxBytes()){
+            /* A previous version could persist a full Base64 copy for every
+               finding. Quarantine that metadata before PHP tries to decode it
+               and starts consuming hundreds of MB. User files are untouched. */
+            $quarantine=$f.'.oversize.'.time();
+            if(!@rename($f,$quarantine))@unlink($f);
+            return $this->threatsEmptyState();
+        }
         $d=is_file($f)?@json_decode((string)@file_get_contents($f),true):null;
         $base=$this->root?:realpath(__DIR__)?:__DIR__;
         if(!is_array($d)||($d['root']??'')!==$base)return $this->threatsEmptyState();
@@ -2667,9 +2683,11 @@ class FileManager {
         $d['whitelist_files']=array_values($d['whitelist_files']);
         foreach($d['findings'] as &$finding)$this->threatsApplyPriority($finding);
         unset($finding);$this->threatsSortFindings($d);
+        $this->threatsCompactState($d);
         return $d;
     }
-    private function threatsSaveState($state){
+    private function threatsSaveState(&$state){
+        $this->threatsCompactState($state);
         $f=$this->threatsStatePath();$tmp=$f.'.tmp.'.getmypid();
         $json=@json_encode($state,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
         if($json===false||@file_put_contents($tmp,$json,LOCK_EX)===false)return false;
@@ -2777,7 +2795,7 @@ class FileManager {
         }elseif($this->threatsEntropy($content)>=7.25)$reasons[]='Encrypted/binary content';
         if(!$reasons)return null;
         $hash=hash('sha256',$content);
-        $item=['path'=>realpath($path),'name'=>basename($path),'size'=>$size,'mtime'=>(int)@filemtime($path),'hash'=>$hash,'reasons'=>array_values(array_unique($reasons)),'reason'=>implode(' · ',array_values(array_unique($reasons))),'content_b64'=>base64_encode($content)];
+        $item=['path'=>realpath($path),'name'=>basename($path),'size'=>$size,'mtime'=>(int)@filemtime($path),'hash'=>$hash,'reasons'=>array_values(array_unique($reasons)),'reason'=>implode(' · ',array_values(array_unique($reasons)))];
         $this->threatsApplyPriority($item);
         return $item;
     }
@@ -3008,7 +3026,7 @@ class FileManager {
         if($action!=='threat'||$this->readonly)return['ok'=>false,'error'=>$this->readonly?'Read-only account.':'Invalid action.'];
         if($item){
             $exists=false;foreach($state['signatures'] as $s)if(($s['hash']??'')===$hash)$exists=true;
-            if(!$exists)$state['signatures'][]=['hash'=>$hash,'size'=>$item['size'],'reason'=>$item['reason'],'content_b64'=>$item['content_b64'],'created'=>time(),'by'=>$_SESSION['fm_user']??''];
+            if(!$exists)$state['signatures'][]=['hash'=>$hash,'size'=>$item['size'],'reason'=>$item['reason'],'created'=>time(),'by'=>$_SESSION['fm_user']??''];
         }
         $deleted=$item&&$hash!==''?$this->threatsDeleteMatchingFiles($state,$hash):(@unlink($path)?1:0);
         $this->threatsRemoveFinding($state,$path);$this->threatsSaveState($state);
