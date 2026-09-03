@@ -6104,12 +6104,36 @@ FMIMG;
        false candidates here just get discarded — the goal is coverage across
        every hosting layout (single site, addon domain, subdomain, CMS in a
        subfolder, migrated/stale siteurl), not precision. */
+    private function cmsLoginHostAllowed($host){
+        $host=trim((string)$host);
+        if($host==='')return false;
+        /*
+         * A reverse-proxied PHP request can expose the local listener as
+         * HTTP_HOST (for example 127.0.0.1) even though the browser reached
+         * the manager through a public domain. Never turn that internal host
+         * into a Login as URL; it can pass the local probe while being
+         * unreachable to the user and is not the CMS site's address.
+         */
+        $hostOnly=$host;
+        if($hostOnly[0]==='['){
+            $end=strpos($hostOnly,']');
+            if($end!==false)$hostOnly=substr($hostOnly,1,$end-1);
+        }elseif(substr_count($hostOnly,':')===1){
+            $hostOnly=(string)strtok($hostOnly,':');
+        }
+        $hostOnly=strtolower(rtrim(trim($hostOnly,'[]'),'.'));
+        if(in_array($hostOnly,['localhost','localhost.localdomain','ip6-localhost','ip6-loopback','0.0.0.0','::1'],true))return false;
+        if(filter_var($hostOnly,FILTER_VALIDATE_IP)!==false){
+            return filter_var($hostOnly,FILTER_VALIDATE_IP,FILTER_FLAG_NO_PRIV_RANGE|FILTER_FLAG_NO_RES_RANGE)!==false;
+        }
+        return true;
+    }
     private function cmsBuildCandidateUrls($dir,$storedUrl){
         $real=realpath($dir)?:rtrim($dir,'/');
         $urls=[];
         $add=function($scheme,$host,$rel='')use(&$urls){
             $host=trim((string)$host,'.');
-            if(!$host||strpos($host,' ')!==false)return;
+            if(!$host||strpos($host,' ')!==false||!$this->cmsLoginHostAllowed($host))return;
             $rel=$rel?('/'.trim($rel,'/')):'';
             $u=$scheme.'://'.$host.$rel;
             if(!in_array($u,$urls,true))$urls[]=$u;
@@ -6126,14 +6150,25 @@ FMIMG;
             $p=@parse_url($storedUrl);
             if($p&&!empty($p['host']))$addHost($p['host'],$p['path']??'');
         }
-        // 3) The current admin request's own host, if this folder sits under a known local web root.
-        $reqHost=$_SERVER['HTTP_HOST']??($_SERVER['SERVER_NAME']??null);
-        if($reqHost){
+        // 3) The current admin request's public host, if this folder sits
+        // under a known local web root. In a reverse proxy, HTTP_HOST may be
+        // the internal listener; X-Forwarded-Host is the browser-facing host.
+        $reqHosts=[];
+        foreach([$_SERVER['HTTP_X_FORWARDED_HOST']??null,
+                 $_SERVER['HTTP_X_ORIGINAL_HOST']??null,
+                 $_SERVER['HTTP_HOST']??($_SERVER['SERVER_NAME']??null)] as $rawHost){
+            foreach(explode(',',(string)$rawHost) as $reqHost){
+                $reqHost=trim($reqHost);
+                if($reqHost!==''&&!in_array($reqHost,$reqHosts,true))$reqHosts[]=$reqHost;
+            }
+        }
+        if($reqHosts){
             foreach([$_SERVER['DOCUMENT_ROOT']??null,$this->root] as $base){
                 if(!$base)continue;
                 $baseReal=rtrim(realpath($base)?:$base,'/');
                 if($baseReal&&($real===$baseReal||strpos($real,$baseReal.'/')===0)){
-                    $addHost($reqHost,substr($real,strlen($baseReal)));
+                    $rel=substr($real,strlen($baseReal));
+                    foreach($reqHosts as $reqHost)$addHost($reqHost,$rel);
                 }
             }
         }
