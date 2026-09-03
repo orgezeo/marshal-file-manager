@@ -2658,6 +2658,8 @@ class FileManager {
         foreach(array_keys($d['known']) as $p)if($this->threatsSkip($p))unset($d['known'][$p]);
         foreach(array_keys($d['whitelist_files']) as $i)if($this->threatsSkip($d['whitelist_files'][$i]))unset($d['whitelist_files'][$i]);
         $d['whitelist_files']=array_values($d['whitelist_files']);
+        foreach($d['findings'] as &$finding)$this->threatsApplyPriority($finding);
+        unset($finding);$this->threatsSortFindings($d);
         return $d;
     }
     private function threatsSaveState($state){
@@ -2672,6 +2674,7 @@ class FileManager {
         $base=$this->root?:realpath(__DIR__)?:__DIR__;
         return is_dir($base)?$base:false;
     }
+    private function threatsMaxBytes(){return 3*1024*1024;}
     private function threatsPathAllowed($path){
         $rp=realpath((string)$path);$root=$this->threatsRoot();
         return $rp&&$root&&($rp===$root||strpos($rp.DIRECTORY_SEPARATOR,rtrim($root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0);
@@ -2696,6 +2699,40 @@ class FileManager {
             'zip','rar','7z','tar','gz','bz2','tgz','xz','zst','lz','lz4','lzh','cab','arj','ace','iso','img','dmg','wim','jar','war','ear','apk','ipa','deb','rpm','tbz','tbz2','txz'
         ],true);
     }
+    private function threatsExtensionRisk($path){
+        $name=strtolower(basename((string)$path));$ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));
+        if(in_array($ext,['php','phtml','php3','php4','php5','php7','php8','phar','inc'],true))return 90;
+        if(in_array($ext,['cgi','pl','pm','py','py3','rb','sh','bash','zsh','fish','asp','aspx','jsp','jspx'],true))return 80;
+        if(in_array($ext,['js','mjs','cjs','ts'],true))return 55;
+        if(in_array($ext,['html','htm','xhtml','shtml'],true))return 25;
+        if($ext==='css')return 10;
+        if(in_array($ext,['env','ini','conf','config','yaml','yml','json','xml'],true)||in_array($name,['.env','.htaccess','web.config'],true))return 35;
+        return 15;
+    }
+    private function threatsApplyPriority(&$finding){
+        $reasons=$finding['reasons']??[];
+        if(!is_array($reasons))$reasons=($finding['reason']??'')!==''?[$finding['reason']]:[];
+        $score=$this->threatsExtensionRisk($finding['path']??$finding['name']??'');
+        foreach($reasons as $reason){
+            if(stripos($reason,'web shell')!==false)$score+=100;
+            elseif(stripos($reason,'file upload')!==false)$score+=95;
+            elseif(stripos($reason,'obfuscat')!==false)$score+=95;
+            elseif(stripos($reason,'encrypted')!==false)$score+=90;
+            elseif(stripos($reason,'binary')!==false)$score+=70;
+            elseif(stripos($reason,'suspicious keyword')!==false)$score+=35;
+            else $score+=20;
+        }
+        $score+=max(0,count($reasons)-1)*12;
+        $finding['priority']=min(999,(int)$score);
+        $finding['severity']=$finding['priority']>=190?'Critical':($finding['priority']>=140?'High':($finding['priority']>=90?'Medium':'Low'));
+        $finding['extension']=strtolower(pathinfo((string)($finding['name']??$finding['path']??''),PATHINFO_EXTENSION));
+    }
+    private function threatsSortFindings(&$state){
+        usort($state['findings'],function($a,$b){
+            $score=((int)($b['priority']??0))-((int)($a['priority']??0));
+            return $score!==0?$score:strcasecmp((string)($a['path']??''),(string)($b['path']??''));
+        });
+    }
     private function threatsSmallText($path,$content){
         if($this->threatsNonTextExtension($path))return false;
         $ext=strtolower(pathinfo($path,PATHINFO_EXTENSION));
@@ -2715,7 +2752,7 @@ class FileManager {
     }
     private function threatsAnalyze($path){
         if($this->threatsNonTextExtension($path))return null;
-        $max=512*1024;$size=(int)@filesize($path);
+        $max=$this->threatsMaxBytes();$size=(int)@filesize($path);
         if($size<1||$size>$max||!is_readable($path))return null;
         $content=@file_get_contents($path,false,null,0,$max+1);
         if($content===false||strlen($content)>$max)return null;
@@ -2733,7 +2770,9 @@ class FileManager {
         }elseif($this->threatsEntropy($content)>=7.25)$reasons[]='Encrypted/binary content';
         if(!$reasons)return null;
         $hash=hash('sha256',$content);
-        return['path'=>realpath($path),'name'=>basename($path),'size'=>$size,'mtime'=>(int)@filemtime($path),'hash'=>$hash,'reasons'=>array_values(array_unique($reasons)),'reason'=>implode(' · ',array_values(array_unique($reasons))),'content_b64'=>base64_encode($content)];
+        $item=['path'=>realpath($path),'name'=>basename($path),'size'=>$size,'mtime'=>(int)@filemtime($path),'hash'=>$hash,'reasons'=>array_values(array_unique($reasons)),'reason'=>implode(' · ',array_values(array_unique($reasons))),'content_b64'=>base64_encode($content)];
+        $this->threatsApplyPriority($item);
+        return $item;
     }
     private function threatsPublicUrl($path){
         $root=$this->threatsRoot();$doc=realpath((string)($_SERVER['DOCUMENT_ROOT']??''));
@@ -2771,7 +2810,7 @@ class FileManager {
     }
     private function threatsInspectFile(&$state,$path){
         $path=realpath($path);if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!is_file($path))return;
-        $size=(int)@filesize($path);if($size<1||$size>512*1024){$state['known'][$path]=['size'=>$size,'mtime'=>(int)@filemtime($path)];return;}
+        $size=(int)@filesize($path);if($size<1||$size>$this->threatsMaxBytes()){$state['known'][$path]=['size'=>$size,'mtime'=>(int)@filemtime($path)];return;}
         $item=$this->threatsAnalyze($path);$hash=$item['hash']??'';
         $state['known'][$path]=['size'=>$size,'mtime'=>(int)@filemtime($path),'hash'=>$hash];
         if($this->threatsIsWhitelisted($state,$path,$hash)){$this->threatsRemoveFinding($state,$path);return;}
@@ -2786,6 +2825,7 @@ class FileManager {
             else foreach($state['findings'] as &$f)if(($f['path']??'')===$path)$f=array_merge($f,$item);
             unset($f);$state['last_path']=$path;$state['last_reason']=$item['reason'];
         }else $this->threatsRemoveFinding($state,$path);
+        $this->threatsSortFindings($state);
         $state['scanned']=(int)$state['scanned']+1;
     }
     private function threatsReadDir(&$state,$frame){
@@ -2840,7 +2880,9 @@ class FileManager {
         else $this->threatsWatchSlice($state,$deadline);
         $state['last_run']=time();$this->threatsSaveState($state);
         $view=$state;
-        $view['findings']=array_map(function($f){unset($f['content_b64']);return $f;},$state['findings']);
+        foreach($view['findings'] as &$finding)$this->threatsApplyPriority($finding);
+        unset($finding);$this->threatsSortFindings($view);
+        $view['findings']=array_map(function($f){unset($f['content_b64']);return $f;},$view['findings']);
         $view['signatures']=array_map(function($s){unset($s['content_b64']);return $s;},$state['signatures']);
         return['ok'=>true,'state'=>$view];
     }
@@ -2911,6 +2953,19 @@ class FileManager {
         $ok=@unlink($path);$this->threatsRemoveFinding($state,$path);$this->threatsSaveState($state);
         if($ok)$this->log('threat_delete',basename($path));
         return['ok'=>$ok,'error'=>$ok?'':'Could not delete the file.'];
+    }
+    public function threatsScanFile($path){
+        $input=trim((string)$path);$root=$this->threatsRoot();
+        if($input===''||!$root)return['ok'=>false,'error'=>'Enter a file path.'];
+        if($input[0]!==DIRECTORY_SEPARATOR)$input=$root.DIRECTORY_SEPARATOR.ltrim($input,'./'.DIRECTORY_SEPARATOR);
+        $rp=realpath($input);
+        if(!$rp||!is_file($rp)||!$this->threatsPathAllowed($rp)||$this->threatsSkip($rp))return['ok'=>false,'error'=>'The path must point to a file inside the site root.'];
+        if($this->threatsNonTextExtension($rp))return['ok'=>true,'skipped'=>true,'reason'=>'Images, media, and archives are not read.'];
+        $size=(int)@filesize($rp);if($size<1)return['ok'=>true,'skipped'=>true,'reason'=>'The file is empty.'];
+        if($size>$this->threatsMaxBytes())return['ok'=>true,'skipped'=>true,'reason'=>'The file is larger than the 3 MB scan limit.'];
+        $state=$this->threatsLoadState();$this->threatsInspectFile($state,$rp);$this->threatsSaveState($state);
+        $found=null;foreach($state['findings'] as $item)if(($item['path']??'')===$rp){$found=$item;unset($found['content_b64']);break;}
+        return['ok'=>true,'skipped'=>false,'found'=>$found];
     }
     public function threatsUserAction($action,$configPath,$user){
         if($this->readonly)return['ok'=>false,'error'=>'Read-only account.'];
@@ -7685,6 +7740,12 @@ if(isset($_GET['x'])){
         $raw=@base64_decode((string)($_POST['path_b64']??''),true);$path=$raw===false?'':$raw;
         echo json_encode($fm->threatsFileAction((string)($_POST['threat_action']??''),$path),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
     }
+    if($xop==='threats_scan_file'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){echo json_encode(['error'=>'Security error.']);exit;}
+        $raw=@base64_decode((string)($_POST['path_b64']??''),true);$path=$raw===false?'':$raw;
+        echo json_encode($fm->threatsScanFile($path),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
     if($xop==='threats_user_action'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){echo json_encode(['error'=>'Security error.']);exit;}
@@ -8166,7 +8227,7 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .threats-tab{padding:10px 14px;background:none;border:0;border-bottom:2px solid transparent;color:var(--t3);font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px}
 .threats-tab:hover{color:var(--t1)}.threats-tab-active{color:#fca5a5;border-bottom-color:#ef4444}
 .threat-row{display:grid;grid-template-columns:minmax(180px,1.1fr) minmax(210px,1.8fr) 90px minmax(220px,1.6fr) auto;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border)}
-.threat-row:hover{background:var(--hov)}.threat-file,.threat-user{min-width:0}.threat-name{font-size:12px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.threat-path{font:10px/1.45 'JetBrains Mono',monospace;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px}.threat-reason{font-size:11px;color:#fca5a5;line-height:1.45}.threat-muted{font-size:10.5px;color:var(--t3);line-height:1.45}.threat-actions{display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap}.threat-actions .btn{white-space:nowrap}
+.threat-row:hover{background:var(--hov)}.threat-file,.threat-user{min-width:0}.threat-name{font-size:12px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.threat-path{font:10px/1.45 'JetBrains Mono',monospace;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px}.threat-reason{font-size:11px;color:#fca5a5;line-height:1.45}.threat-risk{display:inline-block;margin-top:4px;padding:2px 6px;border-radius:999px;font-size:9.5px;font-weight:800;letter-spacing:.02em}.threat-risk-critical{background:rgba(239,68,68,.2);color:#fecaca}.threat-risk-high{background:rgba(249,115,22,.18);color:#fed7aa}.threat-risk-medium{background:rgba(234,179,8,.16);color:#fef08a}.threat-risk-low{background:rgba(148,163,184,.14);color:#cbd5e1}.threat-muted{font-size:10.5px;color:var(--t3);line-height:1.45}.threat-actions{display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap}.threat-actions .btn{white-space:nowrap}
 .threat-user-grid{display:grid;grid-template-columns:minmax(180px,1.2fr) minmax(150px,1fr) minmax(110px,.7fr) minmax(210px,1.4fr) auto;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border)}
 .threat-user-grid:hover{background:var(--hov)}.threat-toolbar{padding:12px 16px;background:var(--raised);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 @media(max-width:760px){.threat-row,.threat-user-grid{grid-template-columns:1fr;gap:6px}.threat-actions{justify-content:flex-start}.threat-row .threat-actions,.threat-user-grid .threat-actions{margin-top:5px}}
@@ -12108,8 +12169,9 @@ function toast(msg,dur=2000){
     if(!state.complete){const current=state.last_path?state.last_path:'starting…';progress.innerHTML=`Scanning slowly in the background · ${Number(state.scanned||0)} file(s) checked · current: <span style="font-family:monospace">${esc(current)}</span>`;}
     else{const auto=Number(state.auto_deleted||0);progress.textContent='Initial scan complete. New or changed files are checked during this active session.'+(auto?' '+auto+' matching file(s) were auto-deleted from saved Threat signatures.':'');}
   }
-  function fileRowMarkup(f){
-    return `<div class="threat-file"><div class="threat-name" title="${esc(f.name)}">${esc(f.name)}</div><div class="threat-path" title="${esc(f.path)}">${esc(f.path)}</div></div><div class="threat-reason">${esc(f.reason||'Suspicious content')}</div><div class="threat-muted">${formatBytes(Number(f.size||0))}<br>${f.mtime?new Date(Number(f.mtime)*1000).toLocaleString():'—'}</div><div class="threat-muted">The file is not deleted until you choose Threat.<br>Safe adds its path and current content to the whitelist.</div><div class="threat-actions">${f.url?`<a class="btn btn-xs btn-g" href="${esc(f.url)}" target="_blank" rel="noopener">Open on site</a>`:''}<button class="btn btn-xs btn-red threat-threat" data-path="${esc(f.path)}">Threat</button><button class="btn btn-xs btn-green threat-safe" data-path="${esc(f.path)}">Safe</button></div>`;
+   function fileRowMarkup(f){
+     const severity=['Critical','High','Medium','Low'].includes(f.severity)?f.severity:'Low',riskClass=severity.toLowerCase(),priority=Number(f.priority||0),extension=f.extension?'.'+f.extension:'no extension';
+     return `<div class="threat-file"><div class="threat-name" title="${esc(f.name)}">${esc(f.name)}</div><div class="threat-path" title="${esc(f.path)}">${esc(f.path)}</div></div><div class="threat-reason">${esc(f.reason||'Suspicious content')}<br><span class="threat-risk threat-risk-${riskClass}">${esc(severity)} risk · ${priority} · ${esc(extension)}</span></div><div class="threat-muted">${formatBytes(Number(f.size||0))}<br>${f.mtime?new Date(Number(f.mtime)*1000).toLocaleString():'—'}</div><div class="threat-muted">The file is not deleted until you choose Threat.<br>Safe adds its path and current content to the whitelist.</div><div class="threat-actions">${f.url?`<a class="btn btn-xs btn-g" href="${esc(f.url)}" target="_blank" rel="noopener">Open on site</a>`:''}<button class="btn btn-xs btn-red threat-threat" data-path="${esc(f.path)}">Threat</button><button class="btn btn-xs btn-green threat-safe" data-path="${esc(f.path)}">Safe</button></div>`;
   }
   function bindFileRow(row){
     row.querySelector('.threat-threat')?.addEventListener('click',async e=>{const btn=e.currentTarget;if(!confirm('Delete this file now and remember its exact content so matching future uploads are deleted automatically?'))return;btn.disabled=true;const r=await post('threats_file_action',{threat_action:'threat',path_b64:b64(btn.dataset.path)});if(!r.ok)toast(r.error||'Could not delete the file.');else toast('File deleted and its content signature was saved.');loadFiles();});
@@ -12119,21 +12181,43 @@ function toast(msg,dur=2000){
     updateHeader(state);const items=state&&state.findings?state.findings:[];
     body.dataset.threatView='files';
     let toolbar=body.querySelector('.threat-file-toolbar'),list=body.querySelector('.threat-file-list');
-    if(!toolbar||!list){body.innerHTML=`<div class="threat-toolbar threat-file-toolbar"><div style="font-size:11.5px;color:var(--t2);flex:1">Only small readable files (up to 512 KB) are inspected. Images and common binary media are skipped.</div><span class="threat-file-count" style="font-size:10.5px;color:var(--t3)"></span></div><div class="threat-file-list"></div>`;toolbar=body.querySelector('.threat-file-toolbar');list=body.querySelector('.threat-file-list');}
+     if(!toolbar||!list){body.innerHTML=`<div class="threat-toolbar threat-file-toolbar"><div style="font-size:11.5px;color:var(--t2);flex:1">Readable files up to 3 MB are inspected. Images and archives are not read. Alerts are sorted from highest to lowest risk.</div><div style="display:flex;align-items:center;gap:6px;flex:1;min-width:300px"><label class="lbl" style="margin:0;white-space:nowrap">Scan one file</label><input id="threatManualPath" class="inp" style="height:30px;min-width:180px;flex:1;font-family:monospace" placeholder="/path/to/file.php or uploads/file.php"><button class="btn btn-xs btn-p" id="threatManualScan">Scan</button></div><span class="threat-file-count" style="font-size:10.5px;color:var(--t3)"></span></div><div class="threat-file-list"></div>`;toolbar=body.querySelector('.threat-file-toolbar');list=body.querySelector('.threat-file-list');}
+     bindManualFileScan();
     toolbar.querySelector('.threat-file-count').textContent=items.length+' pending review';
-    const existing=new Map([...list.querySelectorAll('.threat-row[data-threat-path]')].map(row=>[row.dataset.threatPath,row]));
+     const existing=new Map([...list.querySelectorAll('.threat-row[data-threat-path]')].map(row=>[row.dataset.threatPath,row]));
+     items.sort((a,b)=>(Number(b.priority||0)-Number(a.priority||0))||String(a.path||'').localeCompare(String(b.path||'')));
     const seen=new Set();
     items.forEach(f=>{
       const key=String(f.path||'');seen.add(key);
       let row=existing.get(key);
-      const renderKey=JSON.stringify([f.name,f.path,f.reason,f.size,f.mtime,f.url]);
-      if(!row){row=document.createElement('div');row.className='threat-row';row.dataset.threatPath=key;row.dataset.renderKey=renderKey;row.innerHTML=fileRowMarkup(f);list.appendChild(row);bindFileRow(row);}
-      else if(row.dataset.renderKey!==renderKey){row.dataset.renderKey=renderKey;row.innerHTML=fileRowMarkup(f);bindFileRow(row);}
+       const renderKey=JSON.stringify([f.name,f.path,f.reason,f.size,f.mtime,f.url,f.priority,f.severity,f.extension]);
+       if(!row){row=document.createElement('div');row.className='threat-row';row.dataset.threatPath=key;row.dataset.renderKey=renderKey;row.innerHTML=fileRowMarkup(f);bindFileRow(row);}
+       else if(row.dataset.renderKey!==renderKey){row.dataset.renderKey=renderKey;row.innerHTML=fileRowMarkup(f);bindFileRow(row);}
+       list.appendChild(row);
     });
     existing.forEach((row,key)=>{if(!seen.has(key))row.remove();});
     if(!items.length&&!list.querySelector('.threat-empty')){const empty=document.createElement('div');empty.className='threat-empty';empty.innerHTML=msg('No suspicious files found yet. The scan continues in the background.');list.appendChild(empty);}
     if(items.length)list.querySelector('.threat-empty')?.remove();
   }
+   function bindManualFileScan(){
+     const btn=document.getElementById('threatManualScan'),input=document.getElementById('threatManualPath');
+     if(!btn||!input||btn.dataset.bound)return;
+     btn.dataset.bound='1';
+     const scan=async()=>{
+       const path=input.value.trim();if(!path){toast('Enter a file path first.');input.focus();return;}
+       btn.disabled=true;
+       try{
+         const r=await post('threats_scan_file',{path_b64:b64(path)});
+         if(!r.ok)toast(r.error||'Could not scan this file.','#fca5a5');
+         else if(r.skipped)toast(r.reason||'This file was skipped.');
+         else toast(r.found?'Suspicious content found and added to the alerts.':'File checked; no suspicious content found.');
+         loadFiles();
+       }catch(e){toast('File scan request failed.','#fca5a5');}
+       finally{btn.disabled=false;}
+     };
+     btn.addEventListener('click',scan);
+     input.addEventListener('keydown',e=>{if(e.key==='Enter')scan();});
+   }
   async function loadFiles(){
     const seq=++requestSeq;
     if(tab!=='files'||!ov.classList.contains('open'))return;
