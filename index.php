@@ -2959,9 +2959,9 @@ class FileManager {
         if(empty($_SESSION['fm_admin']))return['ok'=>false,'error'=>'Admins only.'];
         $state=$this->threatsLoadState();
          /* Keep this endpoint cooperative while avoiding an unnecessarily
-            slow one-file-per-poll scan. Two files and a short time slice give
-            the UI medium progress without creating a long-running request. */
-         $deadline=microtime(true)+($force?.25:.10);$fileBudget=2;
+            slow one-file-per-poll scan. Six files and a sub-half-second time
+            slice speed up normal sites without creating a long request. */
+         $deadline=microtime(true)+($force?.45:.18);$fileBudget=6;
         if(!$state['complete'])$this->threatsInitialSlice($state,$deadline,$fileBudget);
         else $this->threatsWatchSlice($state,$deadline,$fileBudget);
         $state['last_run']=time();$this->threatsSaveState($state);
@@ -3000,7 +3000,7 @@ class FileManager {
         $name=(string)($u['name']??'');$hay=$name.' '.(string)($u['email']??'');$why=[];
         foreach(['upload','hack','hacked','hacker','nx-zd','nx-dz','nxploited'] as $w)if(stripos($hay,$w)!==false)$why[]='Suspicious username/email: '.$w;
         if(preg_match('/(?<![A-Za-z])Nx(?![A-Za-z])/i',$hay))$why[]='Suspicious username/email: Nx';
-        return $why?implode(' · '):'';
+        return $why?implode(' · ',$why):'';
     }
     public function threatsUsers($configPath=''){
         $cfg=$this->threatsConfig($configPath);$config=$cfg['config']??'';
@@ -12381,7 +12381,7 @@ function toast(msg,dur=2000){
     try{const cfg=window.fmCmsConfig||cmsCfg;if(!cmsCfg&&cfg)cmsCfg=cfg;const r=await post('threats_users',{config_path_b64:b64(cmsCfg)});if(seq!==requestSeq||tab!=='users'||!ov.classList.contains('open'))return;if(!r.ok&&!r.users){siteChoices=r.sites||siteChoices;userRenderKey='';body.dataset.threatView='users';body.innerHTML=sitePicker()+msg(r.error||'Could not load CMS users.','#fca5a5');bindCmsPicker();return;}renderUsers(r);}catch(e){if(seq!==requestSeq||tab!=='users'||!ov.classList.contains('open'))return;if(body.dataset.threatView!=='users')body.innerHTML=msg('CMS user request failed.','#fca5a5');}
   }
   function selectTab(next){requestSeq++;tab=next;userRenderKey='';document.querySelectorAll('.threats-tab').forEach(b=>b.classList.toggle('threats-tab-active',b.dataset.tab===tab));if(tab==='users'){body.dataset.threatView='';body.innerHTML=msg('Loading CMS users…');loadUsers();startPolling();}else{body.dataset.threatView='';body.innerHTML=msg('Running the next scan slice…');loadFiles();startPolling();}}
-  function startPolling(){clearInterval(timer);timer=setInterval(()=>{if(!ov.classList.contains('open'))return;if(tab==='files')loadFiles();else loadUsers();},tab==='users'?7000:3000);}
+  function startPolling(){clearInterval(timer);timer=setInterval(()=>{if(!ov.classList.contains('open'))return;if(tab==='files')loadFiles();else loadUsers();},tab==='users'?7000:2000);}
   document.getElementById('threatsBtn')?.addEventListener('click',()=>{openMod('threatsOv');tab='files';loadFiles();startPolling();});
   document.getElementById('threatsClose')?.addEventListener('click',()=>{closeMod('threatsOv');clearInterval(timer);});
   document.getElementById('threatsRefresh')?.addEventListener('click',()=>tab==='users'?loadUsers():loadFiles());
