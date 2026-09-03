@@ -3024,7 +3024,7 @@ class FileManager {
             $state['watch_dir_cursors'][$dir]=!empty($batch['done'])?'':$nextCursor;
         }
     }
-    public function threatsTick($force=false){
+    public function threatsTick($force=false,$severityFilter=''){
         if(empty($_SESSION['fm_admin']))return['ok'=>false,'error'=>'Admins only.'];
         $state=$this->threatsLoadState();
          /* The priority pass is independent from the general cursor. It runs
@@ -3039,9 +3039,23 @@ class FileManager {
         if(!$state['complete'])$this->threatsInitialSlice($state,$deadline,$fileBudget);
         else $this->threatsWatchSlice($state,$deadline,$fileBudget);
         $state['last_run']=time();$this->threatsSaveState($state);
+        $allFindings=$state['findings']??[];
+        $findingCounts=['Critical'=>0,'High'=>0,'Medium'=>0,'Low'=>0];
+        foreach($allFindings as $finding){
+            $level=['Critical','High','Medium','Low'];
+            $findingSeverity=in_array($finding['severity']??'', $level, true)?$finding['severity']:'Low';
+            $findingCounts[$findingSeverity]++;
+        }
+        $severityFilter=in_array($severityFilter,['Critical','High','Medium','Low'],true)?$severityFilter:'';
+        $visibleFindings=$severityFilter===''?$allFindings:array_values(array_filter($allFindings,function($finding)use($severityFilter){
+            return ($finding['severity']??'Low')===$severityFilter;
+        }));
         $view=[
             'complete'=>(bool)($state['complete']??false),
-            'findings'=>$state['findings']??[],
+            'findings'=>$visibleFindings,
+            'finding_total'=>count($allFindings),
+            'finding_counts'=>$findingCounts,
+            'severity_filter'=>$severityFilter,
             'scanned'=>(int)($state['scanned']??0),
             'auto_deleted'=>(int)($state['auto_deleted']??0),
             'last_path'=>(string)($state['last_path']??''),
@@ -3055,6 +3069,18 @@ class FileManager {
         unset($finding);$this->threatsSortFindings($view);
         $view['findings']=array_map(function($f){unset($f['content_b64']);return $f;},$view['findings']);
         return['ok'=>true,'state'=>$view];
+    }
+    public function threatsWhitelist(){
+        if(empty($_SESSION['fm_admin']))return['ok'=>false,'error'=>'Admins only.'];
+        $state=$this->threatsLoadState();$files=[];$existing=0;
+        foreach(array_values(array_unique((array)($state['whitelist_files']??[]))) as $path){
+            $rp=realpath((string)$path);
+            if(!$rp||!is_file($rp)||!$this->threatsPathAllowed($rp)||$this->threatsSkip($rp))continue;
+            $existing++;
+            $files[]=['path'=>$rp,'name'=>basename($rp),'size'=>(int)@filesize($rp),'mtime'=>(int)@filemtime($rp)];
+        }
+        usort($files,function($a,$b){return strcasecmp((string)($a['path']??''),(string)($b['path']??''));});
+        return['ok'=>true,'files'=>$files,'count'=>$existing,'hashes'=>count((array)($state['whitelist_hashes']??[]))];
     }
     public function threatsConfig($configPath=''){
         $state=$this->threatsLoadState();$sites=[];
@@ -7917,7 +7943,8 @@ if(isset($_GET['x'])){
     }
     if($xop==='threats_status'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
-        echo json_encode($fm->threatsTick(true),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+        $severity=isset($_GET['severity'])?trim((string)$_GET['severity']):'';
+        echo json_encode($fm->threatsTick(true,$severity),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
     }
     if($xop==='threats_download'){
         if(empty($_SESSION['fm_admin'])){http_response_code(403);exit;}
@@ -7939,6 +7966,10 @@ if(isset($_GET['x'])){
         if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){echo json_encode(['error'=>'Security error.']);exit;}
         $raw=@base64_decode((string)($_POST['path_b64']??''),true);$path=$raw===false?'':$raw;
         echo json_encode($fm->threatsScanFile($path),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='threats_whitelist'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode($fm->threatsWhitelist(),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
     }
     if($xop==='threats_user_action'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -8422,7 +8453,7 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .threat-row{display:grid;grid-template-columns:minmax(180px,1.2fr) minmax(200px,1.7fr) minmax(78px,.55fr) minmax(165px,1.25fr) minmax(270px,1.7fr);align-items:start;gap:10px;padding:13px 14px;border-bottom:1px solid var(--border)}
 .threat-row:hover{background:var(--hov)}.threat-file,.threat-user,.threat-reason,.threat-muted{min-width:0}.threat-name{font-size:12px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.threat-path{font:10px/1.45 'JetBrains Mono',monospace;color:var(--t3);overflow-wrap:anywhere;margin-top:3px}.threat-reason{font-size:11px;color:#fca5a5;line-height:1.45;overflow-wrap:anywhere}.threat-risk{display:inline-block;margin-top:4px;padding:2px 6px;border-radius:999px;font-size:9.5px;font-weight:800;letter-spacing:.02em}.threat-risk-critical{background:rgba(239,68,68,.2);color:#fecaca}.threat-risk-high{background:rgba(249,115,22,.18);color:#fed7aa}.threat-risk-medium{background:rgba(234,179,8,.16);color:#fef08a}.threat-risk-low{background:rgba(148,163,184,.14);color:#cbd5e1}.threat-muted{font-size:10.5px;color:var(--t3);line-height:1.45}.threat-actions{display:flex;flex-wrap:wrap;align-items:stretch;gap:5px;width:100%;min-width:0}.threat-actions .btn{flex:1 1 82px;min-width:82px;min-height:30px;white-space:normal;overflow:visible;text-overflow:clip;justify-content:center;padding:6px 7px;line-height:1.15;text-align:center}
 .threat-user-grid{display:grid;grid-template-columns:minmax(180px,1.2fr) minmax(150px,1fr) minmax(110px,.7fr) minmax(210px,1.4fr) auto;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border)}
-.threat-user-grid:hover{background:var(--hov)}.threat-toolbar{padding:12px 16px;background:var(--raised);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-wrap:wrap}.threat-file-toolbar{display:grid;grid-template-columns:minmax(220px,1fr) minmax(320px,1.35fr) auto;align-items:center}.threat-file-info{min-width:0;font-size:11.5px;color:var(--t2);line-height:1.45}.threat-scan-control{display:flex;align-items:center;gap:6px;min-width:0}.threat-scan-control .lbl{margin:0;white-space:nowrap}.threat-scan-control .inp{height:30px;min-width:0;flex:1;font-family:monospace}.threat-file-count{white-space:nowrap;font-size:10.5px;color:var(--t3)}
+.threat-user-grid:hover{background:var(--hov)}.threat-toolbar{padding:12px 16px;background:var(--raised);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-wrap:wrap}.threat-file-toolbar{display:grid;grid-template-columns:minmax(220px,1fr) minmax(320px,1.35fr) auto;align-items:center}.threat-file-info{min-width:0;font-size:11.5px;color:var(--t2);line-height:1.45}.threat-scan-control{display:flex;align-items:center;gap:6px;min-width:0}.threat-scan-control .lbl{margin:0;white-space:nowrap}.threat-scan-control .inp{height:30px;min-width:0;flex:1;font-family:monospace}.threat-file-count{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:10.5px;color:var(--t3)}.threat-filter-label{font-size:10px;color:var(--t3)}.threat-filter-select{height:30px;min-width:118px;padding:0 8px;font-size:11px}.threat-whitelist-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid var(--border)}.threat-whitelist-row:hover{background:var(--hov)}.threat-whitelist-status{font-size:10px;color:var(--green);white-space:nowrap}.threat-whitelist-meta{font-size:10.5px;color:var(--t3);white-space:nowrap}
 @media(max-width:900px){.threat-file-toolbar{grid-template-columns:1fr}.threat-file-count{justify-self:start}}
 @media(max-width:760px){.threat-row,.threat-user-grid{grid-template-columns:1fr;gap:6px}.threat-actions{justify-content:stretch}.threat-row .threat-actions,.threat-user-grid .threat-actions{margin-top:5px}}
 .ft tbody tr.threat-focus-hit{background:rgba(133,137,140,.16);outline:2px solid rgba(133,137,140,.6);outline-offset:-2px}
@@ -9858,6 +9889,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <div id="threatsProgress" style="padding:10px 16px;border-bottom:1px solid var(--b2);font-size:10.5px;color:var(--t3)">The slow background scan starts automatically. Decisions you mark as Threat are remembered by content signature, and that file's folder gets priority monitoring.</div>
     <div style="display:flex;gap:4px;padding:0 16px;border-bottom:1px solid var(--b2)">
       <button class="threats-tab threats-tab-active" data-tab="files">Suspicious files</button>
+      <button class="threats-tab" data-tab="whitelist">Whitelist</button>
       <button class="threats-tab" data-tab="users">CMS Users</button>
     </div>
     <div class="mod-body" id="threatsBody" style="padding:0;min-height:52vh;max-height:68vh;overflow:auto"></div>
@@ -12362,17 +12394,17 @@ function toast(msg,dur=2000){
 (function(){
   const ov=document.getElementById('threatsOv');if(!ov)return;
   const body=document.getElementById('threatsBody'),badge=document.getElementById('threatsBadge'),progress=document.getElementById('threatsProgress');
-  let tab='files',cmsCfg=window.fmCmsConfig||'',timer=null,siteChoices=[],requestSeq=0,userRenderKey='';
+  let tab='files',cmsCfg=window.fmCmsConfig||'',timer=null,siteChoices=[],requestSeq=0,userRenderKey='',severityFilter='Critical',lastFileState=null;
   const msg=(text,color='var(--t3)')=>`<div style="padding:28px 16px;text-align:center;color:${color};font-size:12px">${esc(text)}</div>`;
   const b64=s=>cmsB64(String(s||''));
   function post(op,fields){const fd=new FormData();fd.append('csrf_token',CSRF);Object.keys(fields||{}).forEach(k=>fd.append(k,fields[k]));return fetch('?x='+op,{method:'POST',body:fd,cache:'no-store'}).then(r=>r.json());}
   function updateHeader(state){
     if(!state){badge.textContent='';return;}
-    const count=(state.findings||[]).length;
+    const count=(state.findings||[]).length,total=Number(state.finding_total??count);
      const priorityDirs=Number(state.priority_dirs||0),priorityDeleted=Number(state.priority_auto_deleted||0);
-    badge.textContent=count?count+' alert'+(count===1?'':'s'):state.complete?'Monitoring active':'Scanning…';badge.style.color=count?'#fca5a5':'var(--t3)';
+    badge.textContent=count?count+' alert'+(count===1?'':'s')+(total!==count?' shown':''):state.complete?(total?'Alerts filtered':'Monitoring active'):'Scanning…';badge.style.color=count?'#fca5a5':'var(--t3)';
     const scanned=Number(state.scanned||0);
-     if(!state.complete){const current=state.last_path?state.last_path:'starting…';progress.innerHTML=`Scanning slowly in the background · ${scanned} file(s) checked · ${count} alert${count===1?'':'s'} found so far · current: <span style="font-family:monospace">${esc(current)}</span>`;}
+     if(!state.complete){const current=state.last_path?state.last_path:'starting…';progress.innerHTML=`Scanning slowly in the background · ${scanned} file(s) checked · ${total} alert${total===1?'':'s'} found${total!==count?' · '+count+' shown':''} · current: <span style="font-family:monospace">${esc(current)}</span>`;}
      else{const auto=Number(state.auto_deleted||0);progress.textContent='Initial scan complete. New or changed files are checked during this active session.'+(auto?' '+auto+' matching file(s) were auto-deleted from saved Threat signatures.':'');}
      const priorityInfo=document.getElementById('threatPriorityInfo');
      if(priorityInfo)priorityInfo.textContent=priorityDirs
@@ -12389,12 +12421,14 @@ function toast(msg,dur=2000){
     row.querySelector('.threat-safe')?.addEventListener('click',async e=>{const btn=e.currentTarget;btn.disabled=true;const r=await post('threats_file_action',{threat_action:'safe',path_b64:b64(btn.dataset.path)});if(!r.ok)toast(r.error||'Could not whitelist the file.');else toast('File added to the whitelist.');loadFiles();});
   }
   function renderFiles(state){
-    updateHeader(state);const items=state&&state.findings?state.findings:[];
+    lastFileState=state||{};updateHeader(state);const items=state&&state.findings?state.findings:[];
     body.dataset.threatView='files';
     let toolbar=body.querySelector('.threat-file-toolbar'),list=body.querySelector('.threat-file-list');
-      if(!toolbar||!list){body.innerHTML=`<div class="threat-toolbar threat-file-toolbar"><div class="threat-file-info">Readable files up to 3 MB are inspected. Images and archives are not read. Alerts are sorted from highest to lowest risk.<br><span id="threatPriorityInfo" style="color:var(--t3)">Priority monitoring starts automatically after you mark a suspicious file as Threat.</span></div><div class="threat-scan-control"><label class="lbl">Scan one file</label><input id="threatManualPath" class="inp" placeholder="/path/to/file.php or uploads/file.php"><button class="btn btn-xs btn-p" id="threatManualScan">Scan</button></div><span class="threat-file-count"> </span></div><div class="threat-file-list"></div>`;toolbar=body.querySelector('.threat-file-toolbar');list=body.querySelector('.threat-file-list');}
+      if(!toolbar||!list){body.innerHTML=`<div class="threat-toolbar threat-file-toolbar"><div class="threat-file-info">Readable files up to 3 MB are inspected. Images and archives are not read. Only the selected risk level is sent to and rendered in this page.<br><span id="threatPriorityInfo" style="color:var(--t3)">Priority monitoring starts automatically after you mark a suspicious file as Threat.</span></div><div class="threat-scan-control"><label class="lbl">Scan one file</label><input id="threatManualPath" class="inp" placeholder="/path/to/file.php or uploads/file.php"><button class="btn btn-xs btn-p" id="threatManualScan">Scan</button></div><div class="threat-file-count"><label class="threat-filter-label" for="threatSeverityFilter">Show</label><select id="threatSeverityFilter" class="inp threat-filter-select"><option value="Critical">Critical only</option><option value="High">High only</option><option value="Medium">Medium only</option><option value="Low">Low only</option><option value="">All levels</option></select><span id="threatFileCount"> </span></div></div><div class="threat-file-list"></div>`;toolbar=body.querySelector('.threat-file-toolbar');list=body.querySelector('.threat-file-list');}
      bindManualFileScan();
-      toolbar.querySelector('.threat-file-count').textContent=state&&state.complete?items.length+' pending review':items.length+' found so far';
+      const severitySelect=toolbar.querySelector('#threatSeverityFilter');if(severitySelect){severitySelect.value=severityFilter;severitySelect.onchange=()=>{severityFilter=severitySelect.value;loadFiles();};}
+      const countLabel=toolbar.querySelector('#threatFileCount'),total=Number(state?.finding_total??items.length);
+      if(countLabel)countLabel.textContent=state&&state.complete?`${items.length} shown${total!==items.length?' · '+total+' total':''}`:`${items.length} shown so far${total!==items.length?' · '+total+' total':''}`;
       const priorityInfo=toolbar.querySelector('#threatPriorityInfo'),priorityDirs=Number(state?.priority_dirs||0),priorityDeleted=Number(state?.priority_auto_deleted||0);
       if(priorityInfo)priorityInfo.textContent=priorityDirs
         ? `Priority monitoring: ${priorityDirs} saved location${priorityDirs===1?'':'s'} checked before the general scan${priorityDeleted?' · '+priorityDeleted+' auto-deleted':''}.`
@@ -12414,6 +12448,11 @@ function toast(msg,dur=2000){
      if(!items.length&&!list.querySelector('.threat-empty')){const empty=document.createElement('div');empty.className='threat-empty';empty.innerHTML=msg(state&&state.complete?'No suspicious files found.':'No suspicious files found yet. The scan continues in the background.');list.appendChild(empty);}
      else if(!items.length&&list.querySelector('.threat-empty'))list.querySelector('.threat-empty').innerHTML=msg(state&&state.complete?'No suspicious files found.':'No suspicious files found yet. The scan continues in the background.');
     if(items.length)list.querySelector('.threat-empty')?.remove();
+  }
+  function renderWhitelist(data){
+    updateHeader(null);const items=data&&Array.isArray(data.files)?data.files:[],count=Number(data?.count??items.length),hashes=Number(data?.hashes||0);
+    body.dataset.threatView='whitelist';
+    body.innerHTML=`<div class="threat-toolbar"><div class="threat-file-info"><strong>${count}</strong> whitelisted file${count===1?'':'s'} found. Their path and content are skipped by the threat scanner.<br><span style="color:var(--t3)">${hashes} whitelisted content signature${hashes===1?'':'s'} are stored.</span></div></div><div class="threat-file-list">${items.length?items.map(f=>`<div class="threat-whitelist-row"><div class="threat-file"><div class="threat-name" title="${esc(f.name||'')}">${esc(f.name||'Unknown file')}</div><div class="threat-path" title="${esc(f.path||'')}">${esc(f.path||'')}</div></div><div class="threat-whitelist-meta">${formatBytes(Number(f.size||0))}<br>${f.mtime?new Date(Number(f.mtime)*1000).toLocaleString():'—'}</div><div class="threat-whitelist-status">Whitelisted</div></div>`).join(''):msg('No whitelisted files found.')}</div>`;
   }
    function bindManualFileScan(){
      const btn=document.getElementById('threatManualScan'),input=document.getElementById('threatManualPath');
@@ -12438,7 +12477,13 @@ function toast(msg,dur=2000){
     const seq=++requestSeq;
     if(tab!=='files'||!ov.classList.contains('open'))return;
     if(body.dataset.threatView!=='files')body.innerHTML=msg('Running the next scan slice…');
-    try{const r=await fetch('?x=threats_status',{cache:'no-store'}).then(x=>x.json());if(seq!==requestSeq||tab!=='files'||!ov.classList.contains('open'))return;if(!r.ok){if(body.dataset.threatView!=='files')body.innerHTML=msg(r.error||'Threat scan failed.','#fca5a5');return;}renderFiles(r.state||{});}catch(e){if(seq!==requestSeq||tab!=='files'||!ov.classList.contains('open'))return;if(body.dataset.threatView!=='files')body.innerHTML=msg('Threat scan request failed.','#fca5a5');}
+     try{const r=await fetch('?x=threats_status&severity='+encodeURIComponent(severityFilter),{cache:'no-store'}).then(x=>x.json());if(seq!==requestSeq||tab!=='files'||!ov.classList.contains('open'))return;if(!r.ok){if(body.dataset.threatView!=='files')body.innerHTML=msg(r.error||'Threat scan failed.','#fca5a5');return;}renderFiles(r.state||{});}catch(e){if(seq!==requestSeq||tab!=='files'||!ov.classList.contains('open'))return;if(body.dataset.threatView!=='files')body.innerHTML=msg('Threat scan request failed.','#fca5a5');}
+  }
+  async function loadWhitelist(){
+    const seq=++requestSeq;
+    if(tab!=='whitelist'||!ov.classList.contains('open'))return;
+    if(body.dataset.threatView!=='whitelist')body.innerHTML=msg('Loading whitelist…');
+    try{const r=await fetch('?x=threats_whitelist',{cache:'no-store'}).then(x=>x.json());if(seq!==requestSeq||tab!=='whitelist'||!ov.classList.contains('open'))return;if(!r.ok){body.innerHTML=msg(r.error||'Whitelist request failed.','#fca5a5');return;}renderWhitelist(r);}catch(e){if(seq!==requestSeq||tab!=='whitelist'||!ov.classList.contains('open'))return;body.innerHTML=msg('Whitelist request failed.','#fca5a5');}
   }
   function sitePicker(){
     const opts=siteChoices.filter(s=>s&&s.config).map(s=>`<option value="${esc(s.config)}"${cmsCfg===s.config?' selected':''}>${esc((s.type||'CMS').toUpperCase())} · ${esc(s.dir||s.config)}</option>`).join('');
@@ -12468,11 +12513,11 @@ function toast(msg,dur=2000){
     if(body.dataset.threatView!=='users')body.innerHTML=msg('Loading CMS users…');
     try{const cfg=window.fmCmsConfig||cmsCfg;if(!cmsCfg&&cfg)cmsCfg=cfg;const r=await post('threats_users',{config_path_b64:b64(cmsCfg)});if(seq!==requestSeq||tab!=='users'||!ov.classList.contains('open'))return;if(!r.ok&&!r.users){siteChoices=r.sites||siteChoices;userRenderKey='';body.dataset.threatView='users';body.innerHTML=sitePicker()+msg(r.error||'Could not load CMS users.','#fca5a5');bindCmsPicker();return;}renderUsers(r);}catch(e){if(seq!==requestSeq||tab!=='users'||!ov.classList.contains('open'))return;if(body.dataset.threatView!=='users')body.innerHTML=msg('CMS user request failed.','#fca5a5');}
   }
-  function selectTab(next){requestSeq++;tab=next;userRenderKey='';document.querySelectorAll('.threats-tab').forEach(b=>b.classList.toggle('threats-tab-active',b.dataset.tab===tab));if(tab==='users'){body.dataset.threatView='';body.innerHTML=msg('Loading CMS users…');loadUsers();startPolling();}else{body.dataset.threatView='';body.innerHTML=msg('Running the next scan slice…');loadFiles();startPolling();}}
-  function startPolling(){clearInterval(timer);timer=setInterval(()=>{if(!ov.classList.contains('open'))return;if(tab==='files')loadFiles();else loadUsers();},tab==='users'?7000:2000);}
+  function selectTab(next){requestSeq++;tab=next;userRenderKey='';document.querySelectorAll('.threats-tab').forEach(b=>b.classList.toggle('threats-tab-active',b.dataset.tab===tab));if(tab==='users'){body.dataset.threatView='';body.innerHTML=msg('Loading CMS users…');loadUsers();startPolling();}else if(tab==='whitelist'){body.dataset.threatView='';body.innerHTML=msg('Loading whitelist…');loadWhitelist();startPolling();}else{body.dataset.threatView='';body.innerHTML=msg('Running the next scan slice…');loadFiles();startPolling();}}
+  function startPolling(){clearInterval(timer);timer=setInterval(()=>{if(!ov.classList.contains('open'))return;if(tab==='files')loadFiles();else if(tab==='whitelist')loadWhitelist();else loadUsers();},tab==='files'?2000:7000);}
   document.getElementById('threatsBtn')?.addEventListener('click',()=>{openMod('threatsOv');tab='files';loadFiles();startPolling();});
   document.getElementById('threatsClose')?.addEventListener('click',()=>{closeMod('threatsOv');clearInterval(timer);});
-  document.getElementById('threatsRefresh')?.addEventListener('click',()=>tab==='users'?loadUsers():loadFiles());
+  document.getElementById('threatsRefresh')?.addEventListener('click',()=>tab==='users'?loadUsers():tab==='whitelist'?loadWhitelist():loadFiles());
   document.querySelectorAll('.threats-tab').forEach(b=>b.addEventListener('click',()=>selectTab(b.dataset.tab)));
 })();
 
