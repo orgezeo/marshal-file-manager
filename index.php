@@ -2638,13 +2638,17 @@ class FileManager {
         unset($finding);
         foreach($state['signatures']??[] as &$signature)unset($signature['content_b64']);
         unset($signature);
+        if(isset($state['priority_dirs'])&&is_array($state['priority_dirs']))
+            $state['priority_dirs']=array_values(array_unique(array_slice($state['priority_dirs'],0,64)));
     }
     private function threatsEmptyState(){
         $base=$this->root?:realpath(__DIR__)?:__DIR__;
         return[
-            'version'=>1,'scan_mode'=>2,'root'=>$base,'started'=>time(),'last_run'=>0,
+            'version'=>2,'scan_mode'=>2,'root'=>$base,'started'=>time(),'last_run'=>0,
             'complete'=>false,'dirs'=>[['path'=>$base,'entries'=>null,'index'=>0]],
             'watch_dirs'=>[],'watch_cursor'=>0,'watch_dir_cursors'=>[],'dir_mtimes'=>[],
+            'priority_dirs'=>[],'priority_cursor'=>0,'priority_dir_cursors'=>[],
+            'priority_last_run'=>0,'priority_last_path'=>'','priority_auto_deleted'=>0,
             'known'=>[],'findings'=>[],'signatures'=>[],
             'whitelist_files'=>[],'whitelist_hashes'=>[],
             'user_signatures'=>[],'user_whitelist_names'=>[],'user_whitelist_fingerprints'=>[],
@@ -2665,9 +2669,22 @@ class FileManager {
         $d=is_file($f)?@json_decode((string)@file_get_contents($f),true):null;
         $base=$this->root?:realpath(__DIR__)?:__DIR__;
         if(!is_array($d)||($d['root']??'')!==$base)return $this->threatsEmptyState();
-        foreach(['dirs','watch_dirs','watch_dir_cursors','dir_mtimes','known','findings','signatures','whitelist_files','whitelist_hashes','user_signatures','user_whitelist_names','user_whitelist_fingerprints'] as $k){
+        foreach(['dirs','watch_dirs','watch_dir_cursors','dir_mtimes','priority_dirs','priority_dir_cursors','known','findings','signatures','whitelist_files','whitelist_hashes','user_signatures','user_whitelist_names','user_whitelist_fingerprints'] as $k){
             if(!isset($d[$k])||!is_array($d[$k]))$d[$k]=[];
         }
+        $priorityDirs=[];
+        foreach($d['priority_dirs'] as $priorityDir){
+            $priorityDir=realpath((string)$priorityDir);
+            if($priorityDir&&is_dir($priorityDir)&&!$this->threatsSkip($priorityDir)&&$this->threatsPathAllowed($priorityDir))
+                $priorityDirs[$priorityDir]=true;
+        }
+        $d['priority_dirs']=array_slice(array_keys($priorityDirs),0,64);
+        foreach(array_keys($d['priority_dir_cursors']) as $priorityDir)
+            if(!in_array($priorityDir,$d['priority_dirs'],true))unset($d['priority_dir_cursors'][$priorityDir]);
+        $d['priority_cursor']=max(0,(int)($d['priority_cursor']??0));
+        $d['priority_last_run']=(int)($d['priority_last_run']??0);
+        $d['priority_last_path']=(string)($d['priority_last_path']??'');
+        $d['priority_auto_deleted']=(int)($d['priority_auto_deleted']??0);
         /* Older states may contain full scandir() results in pending frames.
            Keep their findings/signatures, but restart traversal in batches. */
         if((int)($d['scan_mode']??0)!==2){
@@ -2830,6 +2847,58 @@ class FileManager {
         foreach($state['signatures'] as $s)if(($s['hash']??'')===$hash)return $s;
         return null;
     }
+    private function threatsRememberPriorityDir(&$state,$path){
+        $dir=realpath(dirname((string)$path));
+        if(!$dir||!is_dir($dir)||$this->threatsSkip($dir)||!$this->threatsPathAllowed($dir))return;
+        if(!in_array($dir,$state['priority_dirs'],true)){
+            array_unshift($state['priority_dirs'],$dir);
+            $state['priority_dirs']=array_slice(array_values($state['priority_dirs']),0,64);
+        }
+        if(!isset($state['priority_dir_cursors'][$dir]))$state['priority_dir_cursors'][$dir]='';
+    }
+    private function threatsPriorityInspectFile(&$state,$path){
+        $path=realpath((string)$path);
+        if(!$path||$this->threatsSkip($path)||!$this->threatsPathAllowed($path)||!is_file($path)||!is_readable($path))return;
+        $size=(int)@filesize($path);
+        if($size<1||$size>$this->threatsMaxBytes())return;
+        /* A priority match is intentionally content-only. Unlike the normal
+           heuristic scanner, it must still catch a known malicious payload
+           after its filename or extension was changed (even to an image-like
+           extension). */
+        $content=@file_get_contents($path,false,null,0,$this->threatsMaxBytes()+1);
+        if($content===false||strlen($content)>$this->threatsMaxBytes())return;
+        $hash=hash('sha256',$content);$sig=$this->threatsKnownSignature($state,$hash);
+        if(!$sig||$this->threatsIsWhitelisted($state,$path,$hash))return;
+        $state['priority_last_path']=$path;
+        if($this->readonly)return;
+        if(@unlink($path)){
+            $state['auto_deleted']=(int)$state['auto_deleted']+1;
+            $state['priority_auto_deleted']=(int)$state['priority_auto_deleted']+1;
+            $state['last_path']=$path;
+            $state['last_reason']='Priority auto-deleted: '.$sig['reason'];
+            unset($state['known'][$path]);$this->threatsRemoveFinding($state,$path);
+            $this->log('threat_priority_auto_delete',basename($path));
+        }
+    }
+    private function threatsPrioritySlice(&$state,$deadline){
+        $dirs=$state['priority_dirs'];$n=count($dirs);if(!$n)return;
+        $budget=8;$steps=0;$cursor=((int)($state['priority_cursor']??0))%$n;
+        while(microtime(true)<$deadline&&$budget>0&&$steps<min($n,4)){
+            $idx=($cursor+$steps)%$n;$dir=$dirs[$idx]??'';
+            $state['priority_cursor']=($idx+1)%$n;$steps++;
+            if(!$dir||!is_dir($dir))continue;
+            $savedCursor=$state['priority_dir_cursors'][$dir]??'';
+            $batch=$this->threatsReadDir(['path'=>$dir,'cursor'=>$savedCursor===''?0:(int)$savedCursor]);
+            foreach($batch['entries'] as $entry){
+                if(is_file($entry)){
+                    $this->threatsPriorityInspectFile($state,$entry);$budget--;
+                    if($budget<=0||microtime(true)>=$deadline)break;
+                }
+            }
+            $state['priority_dir_cursors'][$dir]=!empty($batch['done'])?'':$batch['cursor'];
+            $state['priority_last_run']=time();
+        }
+    }
     private function threatsDeleteMatchingFiles(&$state,$hash){
         $root=$this->threatsRoot();if(!$root||$hash==='')return 0;
         $deleted=0;
@@ -2958,9 +3027,14 @@ class FileManager {
     public function threatsTick($force=false){
         if(empty($_SESSION['fm_admin']))return['ok'=>false,'error'=>'Admins only.'];
         $state=$this->threatsLoadState();
-         /* Keep this endpoint cooperative while avoiding an unnecessarily
-            slow one-file-per-poll scan. Six files and a sub-half-second time
-            slice speed up normal sites without creating a long request. */
+         /* The priority pass is independent from the general cursor. It runs
+            first on every active tick, so a known payload in a remembered
+            directory is checked even when the general scan is still traversing
+            the rest of the site. */
+         $priorityDeadline=microtime(true)+($force?.16:.08);
+         $this->threatsPrioritySlice($state,$priorityDeadline);
+         /* Keep the ordinary endpoint cooperative while avoiding an
+            unnecessarily slow one-file-per-poll scan. */
          $deadline=microtime(true)+($force?.45:.18);$fileBudget=6;
         if(!$state['complete'])$this->threatsInitialSlice($state,$deadline,$fileBudget);
         else $this->threatsWatchSlice($state,$deadline,$fileBudget);
@@ -2971,7 +3045,11 @@ class FileManager {
             'scanned'=>(int)($state['scanned']??0),
             'auto_deleted'=>(int)($state['auto_deleted']??0),
             'last_path'=>(string)($state['last_path']??''),
-            'last_reason'=>(string)($state['last_reason']??'')
+            'last_reason'=>(string)($state['last_reason']??''),
+            'priority_dirs'=>count((array)($state['priority_dirs']??[])),
+            'priority_last_run'=>(int)($state['priority_last_run']??0),
+            'priority_last_path'=>(string)($state['priority_last_path']??''),
+            'priority_auto_deleted'=>(int)($state['priority_auto_deleted']??0)
         ];
         foreach($view['findings'] as &$finding)$this->threatsApplyPriority($finding);
         unset($finding);$this->threatsSortFindings($view);
@@ -3041,6 +3119,7 @@ class FileManager {
         if($item){
             $exists=false;foreach($state['signatures'] as $s)if(($s['hash']??'')===$hash)$exists=true;
             if(!$exists)$state['signatures'][]=['hash'=>$hash,'size'=>$item['size'],'reason'=>$item['reason'],'created'=>time(),'by'=>$_SESSION['fm_user']??''];
+            $this->threatsRememberPriorityDir($state,$path);
         }
         $deleted=$item&&$hash!==''?$this->threatsDeleteMatchingFiles($state,$hash):(@unlink($path)?1:0);
         $this->threatsRemoveFinding($state,$path);$this->threatsSaveState($state);
@@ -9776,7 +9855,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="btn btn-xs btn-g" id="threatsRefresh" style="margin-left:auto">Refresh</button>
       <button class="btn btn-icon btn-g" id="threatsClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div id="threatsProgress" style="padding:10px 16px;border-bottom:1px solid var(--b2);font-size:10.5px;color:var(--t3)">The slow background scan starts automatically. Decisions you mark as Threat are remembered by content signature.</div>
+    <div id="threatsProgress" style="padding:10px 16px;border-bottom:1px solid var(--b2);font-size:10.5px;color:var(--t3)">The slow background scan starts automatically. Decisions you mark as Threat are remembered by content signature, and that file's folder gets priority monitoring.</div>
     <div style="display:flex;gap:4px;padding:0 16px;border-bottom:1px solid var(--b2)">
       <button class="threats-tab threats-tab-active" data-tab="files">Suspicious files</button>
       <button class="threats-tab" data-tab="users">CMS Users</button>
@@ -12290,10 +12369,15 @@ function toast(msg,dur=2000){
   function updateHeader(state){
     if(!state){badge.textContent='';return;}
     const count=(state.findings||[]).length;
+     const priorityDirs=Number(state.priority_dirs||0),priorityDeleted=Number(state.priority_auto_deleted||0);
     badge.textContent=count?count+' alert'+(count===1?'':'s'):state.complete?'Monitoring active':'Scanning…';badge.style.color=count?'#fca5a5':'var(--t3)';
     const scanned=Number(state.scanned||0);
-    if(!state.complete){const current=state.last_path?state.last_path:'starting…';progress.innerHTML=`Scanning slowly in the background · ${scanned} file(s) checked · ${count} alert${count===1?'':'s'} found so far · current: <span style="font-family:monospace">${esc(current)}</span>`;}
-    else{const auto=Number(state.auto_deleted||0);progress.textContent='Initial scan complete. New or changed files are checked during this active session.'+(auto?' '+auto+' matching file(s) were auto-deleted from saved Threat signatures.':'');}
+     if(!state.complete){const current=state.last_path?state.last_path:'starting…';progress.innerHTML=`Scanning slowly in the background · ${scanned} file(s) checked · ${count} alert${count===1?'':'s'} found so far · current: <span style="font-family:monospace">${esc(current)}</span>`;}
+     else{const auto=Number(state.auto_deleted||0);progress.textContent='Initial scan complete. New or changed files are checked during this active session.'+(auto?' '+auto+' matching file(s) were auto-deleted from saved Threat signatures.':'');}
+     const priorityInfo=document.getElementById('threatPriorityInfo');
+     if(priorityInfo)priorityInfo.textContent=priorityDirs
+       ? `Priority monitoring: ${priorityDirs} saved location${priorityDirs===1?'':'s'} checked before the general scan${priorityDeleted?' · '+priorityDeleted+' auto-deleted':''}.`
+       : 'Priority monitoring starts automatically after you mark a suspicious file as Threat.';
   }
    function fileRowMarkup(f){
      const severity=['Critical','High','Medium','Low'].includes(f.severity)?f.severity:'Low',riskClass=severity.toLowerCase(),priority=Number(f.priority||0),extension=f.extension?'.'+f.extension:'no extension';
@@ -12308,9 +12392,13 @@ function toast(msg,dur=2000){
     updateHeader(state);const items=state&&state.findings?state.findings:[];
     body.dataset.threatView='files';
     let toolbar=body.querySelector('.threat-file-toolbar'),list=body.querySelector('.threat-file-list');
-      if(!toolbar||!list){body.innerHTML=`<div class="threat-toolbar threat-file-toolbar"><div class="threat-file-info">Readable files up to 3 MB are inspected. Images and archives are not read. Alerts are sorted from highest to lowest risk.</div><div class="threat-scan-control"><label class="lbl">Scan one file</label><input id="threatManualPath" class="inp" placeholder="/path/to/file.php or uploads/file.php"><button class="btn btn-xs btn-p" id="threatManualScan">Scan</button></div><span class="threat-file-count"> </span></div><div class="threat-file-list"></div>`;toolbar=body.querySelector('.threat-file-toolbar');list=body.querySelector('.threat-file-list');}
+      if(!toolbar||!list){body.innerHTML=`<div class="threat-toolbar threat-file-toolbar"><div class="threat-file-info">Readable files up to 3 MB are inspected. Images and archives are not read. Alerts are sorted from highest to lowest risk.<br><span id="threatPriorityInfo" style="color:var(--t3)">Priority monitoring starts automatically after you mark a suspicious file as Threat.</span></div><div class="threat-scan-control"><label class="lbl">Scan one file</label><input id="threatManualPath" class="inp" placeholder="/path/to/file.php or uploads/file.php"><button class="btn btn-xs btn-p" id="threatManualScan">Scan</button></div><span class="threat-file-count"> </span></div><div class="threat-file-list"></div>`;toolbar=body.querySelector('.threat-file-toolbar');list=body.querySelector('.threat-file-list');}
      bindManualFileScan();
       toolbar.querySelector('.threat-file-count').textContent=state&&state.complete?items.length+' pending review':items.length+' found so far';
+      const priorityInfo=toolbar.querySelector('#threatPriorityInfo'),priorityDirs=Number(state?.priority_dirs||0),priorityDeleted=Number(state?.priority_auto_deleted||0);
+      if(priorityInfo)priorityInfo.textContent=priorityDirs
+        ? `Priority monitoring: ${priorityDirs} saved location${priorityDirs===1?'':'s'} checked before the general scan${priorityDeleted?' · '+priorityDeleted+' auto-deleted':''}.`
+        : 'Priority monitoring starts automatically after you mark a suspicious file as Threat.';
      const existing=new Map([...list.querySelectorAll('.threat-row[data-threat-path]')].map(row=>[row.dataset.threatPath,row]));
      items.sort((a,b)=>(Number(b.priority||0)-Number(a.priority||0))||String(a.path||'').localeCompare(String(b.path||'')));
     const seen=new Set();
