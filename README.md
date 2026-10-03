@@ -26,15 +26,21 @@
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Optional Web Installer](#optional-web-installer)
 - [First Login](#first-login)
 - [Usage](#usage)
   - [File Manager](#file-manager)
   - [Terminal](#terminal)
+  - [Assistant Agent](#assistant-agent)
   - [Server Information](#server-information)
   - [Database Manager](#database-manager)
   - [cPanel Management](#cpanel-management)
   - [WebMail](#webmail)
+  - [SMTP Sender](#smtp-sender)
   - [CMS Management](#cms-management)
+    - [CMS Installer](#cms-installer)
+    - [WordPress tools](#wordpress-tools)
+  - [Threat Alerts](#threat-alerts)
   - [SSH Access](#ssh-access)
   - [File Guardian](#file-guardian)
 - [Configuration and Runtime Files](#configuration-and-runtime-files)
@@ -61,6 +67,7 @@ The application is intentionally self-contained:
 - It can run from a normal document root or a subdirectory.
 - It supports both dark and light themes.
 - It is responsive for desktop, tablet, and mobile screens.
+- An optional `setup_mfm.php` web installer can download and install the manager; it is separate from the single-file application and should be removed or protected after use.
 
 The application should be installed only on a server that you own or are explicitly authorized to administer.
 
@@ -104,6 +111,8 @@ The application should be installed only on a server that you own or are explici
 - PHP information page.
 - Network speed test.
 - Theme preference persistence.
+- Assistant Agent for guided server inspection and requested administrative actions.
+- Slow, bounded threat scanning for suspicious files, plus CMS-user review and whitelisting.
 
 ### Hosting, CMS, and mail tools
 
@@ -113,8 +122,14 @@ The application should be installed only on a server that you own or are explici
 - CMS user listing and management.
 - CMS roles, passwords, visibility, plugins, themes, extensions, and maintenance mode.
 - One-click CMS administrator login bridges where supported.
-- WordPress cron inspection, execution, deletion, and email scheduling.
+- WordPress core-version checks and updates from WordPress.org.
+- WordPress Site Health checks and a reversible, explicitly selected status override.
+- WordPress dashboard number presentation controls that do not change stored site counts.
+- WordPress image replacement with protected originals and individual or batch restore.
+- WordPress cron inspection, execution, deletion, and one-time email scheduling.
+- CMS Installer for new WordPress or Joomla sites in empty directories.
 - Optional visible WordPress file-recovery helper.
+- Dedicated single-recipient SMTP Sender for administrative messages.
 - Mailbox discovery across common hosting, Dovecot, Exim/Postfix, Plesk, cPanel, and account-local layouts.
 - IMAP mailbox browsing, folders, messages, attachments, flags, deletion, and SMTP sending.
 - SSH installation status and SSH user management.
@@ -145,7 +160,13 @@ The exact extensions available depend on the host and the tools you use:
 - `pdo` and `pdo_pgsql` for PostgreSQL-backed Guardian storage
 - `imap` for WebMail
 
-The application checks capability availability at runtime. A missing optional extension disables only the dependent feature; it does not make the file manager unusable.
+Some tools have additional requirements:
+
+- The CMS Installer needs `mysqli`, outbound HTTPS access, and `tar` available through PHP `exec`; Joomla also requires `mbstring`.
+- WordPress core updates need outbound HTTPS through cURL and the PHP ZIP extension.
+- Assistant Agent needs outbound HTTPS access to its AI service.
+
+The application checks capability availability at runtime. A missing optional extension or server command disables or limits only the dependent feature; it does not make the file manager unusable. The web installer reports missing optional PHP extensions and continues without trying to install system packages.
 
 ## Installation
 
@@ -204,9 +225,29 @@ https://example.com/marshal-fm/
 
 The application is served through `index.php`; no framework routing or build command is required.
 
+### Optional Web Installer
+
+`setup_mfm.php` is an optional browser-based alternative to copying `index.php` yourself. Upload it to the directory where the manager should live, protect that directory, and open `https://your-domain/path/setup_mfm.php`.
+
+The installer:
+
+- Downloads the default manager source from the project's raw GitHub branch over HTTPS. A different source must still use `raw.githubusercontent.com` and a branch URL ending in `/index.php`.
+- Lets you choose the destination PHP filename in the same directory. It refuses to overwrite an existing file.
+- Checks that the downloaded file looks like the expected Marshal File Manager source and runs a PHP syntax check when the host allows it.
+- Reports unavailable PHP extensions without trying to install packages or run privileged system commands.
+- Starts the installed manager with the fixed initial `admin` / `admin` credentials; the manager requires you to replace them on the first sign-in.
+- Deletes itself after a successful installation when the host permits it.
+
+**Protect this installer while it is present:** it is publicly reachable and does not require an existing File Manager login. Run it only in the intended directory, preferably behind an IP/VPN or HTTP-authentication restriction. If installation fails, or the installer reports that it could not delete itself, remove `setup_mfm.php` manually before leaving the directory online.
+
 ## First Login
 
-The login form uses the users stored in `.users.json`. A user record contains a username, a password hash, and optional access flags such as:
+On a fresh installation without `.users.json`, the manager creates the initial `admin` / `admin` account. The first sign-in is blocked until you choose a new username and password:
+
+- Username: 3–64 characters, beginning with a letter and then using letters, numbers, `.`, `_`, or `-`.
+- Password: at least 12 characters.
+
+Do not leave the default credentials in place. Once setup is complete, the login form uses the users stored in `.users.json`. A user record contains a username, a password hash, and optional access flags such as:
 
 - `admin`
 - `readonly`
@@ -232,7 +273,7 @@ Generate a password hash with PHP:
 php -r 'echo password_hash("replace-this-password", PASSWORD_DEFAULT), PHP_EOL;'
 ```
 
-Replace the example hash, protect the file, and log in through the browser. Do not commit real credentials or production runtime files to GitHub.
+Replace the example hash, protect the file, and log in through the browser if you provision accounts manually. Do not commit real credentials or production runtime files to GitHub.
 
 Failed logins are tracked per client and username, and repeated failures trigger a temporary lockout. Authenticated sessions expire after a period of inactivity.
 
@@ -264,6 +305,14 @@ Terminal commands run with the operating-system privileges of the PHP process. T
 - Review destructive commands before execution.
 - Prefer the file manager operations when a command is not necessary.
 - Restrict the application with a trusted network boundary.
+
+### Assistant Agent
+
+Open **Assistant Agent** from Tools to ask questions about the current server or request work in the authorized workspace. It receives live context such as the PHP version, server type, current directory, and detected CMS, and it can propose or run manager-side shell and file actions. A new conversation begins with a read-only environment check; later actions run one at a time and their actual results are returned to the Agent.
+
+Assistant actions are not a separate security boundary. The manager executes an action returned by the Agent; there is no additional per-action approval prompt. Actions run with the server-side permissions available to the manager and PHP process. Use the Agent only behind trusted access controls, give destructive instructions deliberately, and verify its reported results.
+
+Conversation history is stored locally in encrypted runtime files, but prompts and the results returned from requested actions are also sent to the Assistant's AI service so it can answer. Do not submit passwords, API keys, tokens, private keys, or other secrets, and do not ask the Agent to print them.
 
 ### Server Information
 
@@ -319,11 +368,29 @@ Supported mailbox actions include:
 
 Mailbox discovery and mailbox access are separate capabilities. A mailbox may be valid while automatic discovery is unavailable; in that case use the available manual connection or hosting-panel configuration.
 
+### SMTP Sender
+
+**SMTP Sender** is a separate administrator tool for sending one message directly through an SMTP server. Enter the server host and port, choose no encryption, TLS, or SSL, and provide authentication when the server requires it. The tool can test the connection before sending and supports plain-text or HTML content, an optional Reply-To address, priority, and one attachment up to 5 MB.
+
+Each send has exactly one recipient. Sending is limited to five messages per ten minutes in the current session; there is no recipient list, BCC, bulk campaign, or credential rotation. SMTP credentials are submitted for the request and are not saved by the tool. Use it only for authorized administrative messages.
+
 ### CMS Management
 
 The CMS tools are intended for sites you own or administer. Configuration discovery supports common WordPress and Joomla layouts.
 
-#### WordPress
+#### CMS Installer
+
+Administrators can open **CMS Installer** to install a new WordPress or Joomla site inside the authorized File Manager workspace. The installer checks PHP and storage requirements, downloads the latest compatible official package over HTTPS, inspects the archive, and requires a new empty target directory. It refuses to overwrite an existing CMS or other non-empty target.
+
+Provide the site title, database host and port, database name and account, table prefix, and CMS administrator username, password, and email. The database account must be able to use the selected database and may need permission to create it. The installer verifies the MySQL connection before copying files; it does not save the supplied database credentials in a separate File Manager settings file.
+
+WordPress setup is completed automatically when the server supports it. If the files and configuration are ready but automatic database setup does not finish, open `/wp-admin/install.php` in the new site. Joomla installation is attempted through its bundled CLI installer; if that cannot complete, open `/installation/` to finish the official web installer and create the tables and administrator account.
+
+The installer needs `mysqli`, outbound HTTPS access and `tar` through PHP `exec`; Joomla additionally needs `mbstring`. It requires at least 100 MB of reported free disk space. If a failure occurs after the installer has created the target, it attempts to remove that newly created target and its temporary package files.
+
+#### WordPress tools
+
+The WordPress tools include:
 
 - Inspect WordPress users.
 - Create and delete users.
@@ -332,10 +399,16 @@ The CMS tools are intended for sites you own or administer. Configuration discov
 - List, activate, deactivate, and delete plugins.
 - Switch and delete themes.
 - Inspect and manage maintenance mode.
+- Check the installed core version and available official versions, then update WordPress core from WordPress.org. The update preserves `wp-config.php` and `wp-content`, and keeps a recovery copy of the previous core during the update. The updater requires cURL and PHP ZIP support.
+- Review live Site Health checks. An optional Site Health control can explicitly set the displayed status to Good, Should be improved, or Critical problems. This is a deliberate presentation override, not a repair or a live health result; choose **Auto** to remove the override and return to WordPress's real tests.
+- Set selected dashboard count displays (posts, pages, comments, users, media, drafts, pending, or scheduled items), an optional email-count selector, or up to ten custom CSS-selector counts. This changes numbers shown in the WordPress administrator interface only; it does not change posts, comments, users, or database counts. Reset the control to remove the helper and show the real numbers again.
+- Find images on a selected WordPress page or scan the all-site inventory, including media-library and dashboard assets. Replace an individual image, paste an image URL or server path that was not listed, or apply one replacement image to the current result set. Replacement uploads are limited to 25 MB and must be readable supported image files. The chosen bytes are written to the original image's server path and filename/extension; a protected copy of the original is made before the first replacement. Restore images individually or restore all originals.
 - Inspect and run scheduled WP-Cron events.
 - Delete selected cron events.
-- Schedule an email through WP-Cron.
+- Schedule a one-time email through WP-Cron.
 - Install or remove an optional visible file-recovery helper.
+
+Image discovery is page-scoped by default. **Selected page only** reads that page's image references; **All site images** can also include the media library and dashboard assets. Batch replacement operates on the images currently listed, with an upper limit of 5,000 targets. Use a compatible replacement format because the file is copied byte-for-byte rather than converted.
 
 #### Joomla
 
@@ -346,6 +419,14 @@ The CMS tools are intended for sites you own or administer. Configuration discov
 - Use the administrator-login bridge where the site layout and permissions allow it.
 
 CMS list views are read-only. Changes are performed only through their explicit action buttons.
+
+### Threat Alerts
+
+**Threats Alerts** provides a slow, bounded scan of the authorized workspace and a separate review of detected CMS users. It inspects readable text or executable/script files up to 3 MB, assigns risk levels from file type and suspicious content indicators, and can scan a single path on request. Images and archives are not read as text. This is heuristic triage—not a full antivirus scanner or a guarantee that a site is clean.
+
+For a file finding, review its path and reason, then mark it **Safe** to add its path/content signature to the whitelist or **Threat** to delete it. A Threat decision is destructive: the file is permanently removed (not moved to Trash), its content signature is remembered, and matching copies can be removed by priority monitoring. Only mark a file Threat after verifying it.
+
+The **CMS Users** tab lets you choose a detected WordPress or Joomla configuration and review account identity, role, and automatic indicators. Marking an account **Threat** deletes it and remembers its identity for removal if a matching account is created during a later active check. Marking it **Safe** whitelists the account. These actions change the CMS directly, so verify the selected installation and account first.
 
 ### SSH Access
 
@@ -404,6 +485,8 @@ The application keeps small runtime files beside `index.php`:
 | `.fm_trash/` | Recoverable deleted items and metadata. |
 | `.cms_pw_vault.json` | Encrypted CMS password vault data. |
 | `.cms_vault_key` | Key material used by the CMS password vault; protect it carefully. |
+| `.assistant-agent.json.enc` and `.assistant-agent-config.enc` | Encrypted Assistant Agent conversations and per-user conversation settings. |
+| `.assistant-agent-debug-*.log` | Bounded diagnostic timings, state transitions, sizes, hashes, and error labels; conversation text, commands, command output, and credentials are excluded. |
 | `.mail_sandbox/` | Local mailbox sandbox data when that mode is available. |
 | `.guardian_watchdog_attempt` | Guardian/watchdog state marker. |
 | `.guardian-restore.php` | Generated hosted recovery endpoint when Guardian installs one. |
@@ -461,6 +544,7 @@ Implemented protections include:
 - Temporary-file validation and PHP linting before Guardian updates.
 - Expiring share-link validation.
 - No-cache headers for authenticated and dynamic responses.
+- Threat-alert file and CMS-user actions require explicit administrator decisions, but a decision marked **Threat** is intentionally destructive and can affect matching files or future matching accounts.
 
 ### Required production protections
 
@@ -488,6 +572,9 @@ Some features require more privilege than ordinary shared hosting provides:
 - cPanel administration requires valid API access and provider permission.
 - Database operations require reachable drivers and valid credentials.
 - WebMail requires IMAP/SMTP support and mailbox credentials or provider discovery.
+- The CMS Installer requires a writable empty target directory, MySQL access through `mysqli`, outbound HTTPS, `tar`/`exec`, and the CMS-specific PHP extensions noted above.
+- The optional `setup_mfm.php` installer is publicly reachable while present. Restrict it before use and remove it manually if self-deletion fails.
+- Assistant Agent use requires outbound HTTPS to its AI service. Its replies can be delayed or unavailable if that service or the network is unavailable.
 - Guardian watchdog installation requires a writable and correctly configured server location.
 - File ownership and mode changes may fail when PHP does not own the target file.
 
@@ -501,6 +588,7 @@ Check the PHP error log, confirm that PHP is executing the file, and verify that
 
 ### Login always fails
 
+- On a fresh install, sign in with the initial `admin` / `admin` credentials and complete the required username/password change.
 - Confirm `.users.json` is valid JSON.
 - Confirm the username matches exactly.
 - Confirm the stored value is a PHP `password_hash()` result.
@@ -514,6 +602,18 @@ Check `upload_max_filesize`, `post_max_size`, available disk space, directory ow
 ### A database is not detected
 
 Confirm the relevant configuration file is readable and that `mysqli`, `pdo`, or `pdo_pgsql` is installed as needed. You can also connect using the database manager's available manual connection path.
+
+### CMS installation is unavailable or incomplete
+
+Check that the target is a new empty directory inside the authorized workspace, the database account can connect and use the selected database, at least 100 MB of free space is available, and PHP can reach the official download site over HTTPS. The installer needs `mysqli`, `tar` and enabled `exec`; Joomla also needs `mbstring`. If files were installed but automatic CMS setup did not finish, use the WordPress `/wp-admin/install.php` or Joomla `/installation/` page shown by the result.
+
+### WordPress core update is unavailable
+
+The updater requires outbound cURL access to WordPress.org and PHP ZIP support. Check the PHP error log and filesystem permissions if the safety backup or core files cannot be written. Do not remove the temporary recovery copy until the site has been checked after an update.
+
+### Threat Alerts reports a suspicious file
+
+The scanner uses file-type and content heuristics, so a finding is not proof of malware and no finding is not proof that a site is clean. Review the file before choosing **Threat**: that action permanently deletes it and can remove later copies with the same content signature. Use **Safe** for a trusted false positive.
 
 ### WebMail shows no mailboxes
 
@@ -560,14 +660,15 @@ Marshal File Manager is intentionally distributed as a single PHP application fi
 ```text
 .
 ├── index.php   # Complete application: authentication, backend, UI, and JavaScript
+├── setup_mfm.php # Optional web installer; remove after use if it remains
 └── Readme.md   # Project documentation
 ```
 
-That is the complete core project. The application does not require a framework, package manager, frontend build process, or separate backend directory.
+`index.php` is the complete core application. `setup_mfm.php` is an optional, separate bootstrap installer and is not required after `index.php` has been installed. The application does not require a framework, package manager, frontend build process, or separate backend directory.
 
 Some optional runtime files may appear beside `index.php` after the application is used. They store local settings, activity data, Trash items, share links, or Guardian recovery data. They are generated by the running application and are not additional source-code components of the file manager. Replit workflow files and documentation screenshots are also environment/documentation assets, not application dependencies.
 
-The source intentionally keeps the main UI and server actions together in `index.php`, making deployment as simple as uploading that one file to a PHP-enabled server.
+The source intentionally keeps the main UI and server actions together in `index.php`, making manual deployment as simple as uploading that one file to a PHP-enabled server. The optional web installer is a convenience for obtaining and placing that application file; it does not change the core deployment model.
 
 ## Limitations and Responsible Use
 
@@ -594,6 +695,11 @@ Before submitting a change:
 5. Test the affected feature on a non-production server.
 6. Document new permissions, extensions, environment variables, or provider-specific behavior.
 
+## License
+
+This project is provided under the **Marshal File Manager Personal Use License** in the [`LICENSE`](LICENSE) file.
+
+The license permits personal use on a server or website owned or controlled by the user, subject to the license terms. It does not permit modifying, rebranding, selling, redistributing, republishing, or presenting the project as someone else's work. Any unauthorized access, hacking, abuse, or unlawful use is strictly prohibited.
 
 ## Community
 
