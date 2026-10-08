@@ -5037,15 +5037,79 @@ class FileManager {
         return str_replace(DIRECTORY_SEPARATOR,'/',$path);
     }
 
+    private function sshAppendLoginKeyAsSudo($account,$publicKey){
+        if(!function_exists('proc_open'))return['error'=>'Passwordless SSH setup needs proc_open to write the key as the target account.'];
+        $sudo=trim((string)@shell_exec('command -v sudo 2>/dev/null'));
+        if($sudo===''||!is_executable($sudo))return['error'=>'The PHP process cannot write this account home. Run PHP as the account owner/root or allow non-interactive sudo to this exact Linux account.'];
+        $script=<<<'SH'
+set -eu
+dir=$1
+file=$2
+[ ! -L "$dir" ] || { echo 'The SSH directory is a symbolic link.' >&2; exit 20; }
+if [ -e "$dir" ] && [ ! -d "$dir" ]; then echo 'The SSH path is not a directory.' >&2; exit 21; fi
+umask 077
+mkdir -p "$dir" || { echo 'Could not create the account SSH directory.' >&2; exit 22; }
+[ ! -L "$dir" ] || { echo 'The SSH directory is a symbolic link.' >&2; exit 20; }
+chmod 700 "$dir" || { echo 'Could not secure the account SSH directory.' >&2; exit 23; }
+[ ! -L "$file" ] || { echo 'authorized_keys is a symbolic link.' >&2; exit 24; }
+if [ -e "$file" ] && [ ! -f "$file" ]; then echo 'authorized_keys is not a regular file.' >&2; exit 25; fi
+: >> "$file" || { echo 'Could not create or write authorized_keys.' >&2; exit 26; }
+chmod 600 "$file" || { echo 'Could not secure authorized_keys.' >&2; exit 26; }
+IFS= read -r key || { echo 'Could not receive the generated public key.' >&2; exit 27; }
+[ -n "$key" ] || { echo 'The generated public key was empty.' >&2; exit 27; }
+if command -v flock >/dev/null 2>&1; then
+    exec 9>>"$file"
+    flock -x 9 || { echo 'Could not lock authorized_keys safely.' >&2; exit 28; }
+    printf '%s\n' "$key" >&9
+else
+    printf '%s\n' "$key" >> "$file" || { echo 'Could not append the generated key.' >&2; exit 26; }
+fi
+grep -Fqx -- "$key" "$file" || { echo 'The generated key could not be verified.' >&2; exit 29; }
+SH;
+        $cmd=[$sudo,'-n','-u',$account['username'],'--','/bin/sh','-c',$script,'ssh-key-install',$account['home'].'/.ssh',$account['home'].'/.ssh/authorized_keys'];
+        $pipes=[];$proc=@proc_open($cmd,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes);
+        if(!is_resource($proc))return['error'=>'Could not start the account-safe SSH key writer.'];
+        $input=rtrim($publicKey)."\n";
+        $sent=@fwrite($pipes[0],$input);
+        @fclose($pipes[0]);
+        $stdout=stream_get_contents($pipes[1]);@fclose($pipes[1]);
+        $stderr=stream_get_contents($pipes[2]);@fclose($pipes[2]);
+        $exit=proc_close($proc);
+        if($exit===0)return['ok'=>true];
+        if($exit===20||$exit===24)return['error'=>'Refusing to write through a symbolic link in the SSH key directory.'];
+        if($exit===22)return['error'=>'Could not create the account SSH directory. Check that the target account home is writable by that account.'];
+        if($exit===28)return['error'=>'Could not lock authorized_keys safely; no key was accepted.'];
+        if($sent!==strlen($input))return['error'=>'Could not send the complete generated public key to the account-safe writer.'];
+        $detail=trim((string)$stderr);
+        return['error'=>$detail!==''?'Could not install the passwordless SSH key: '.substr($detail,0,300):'Could not install the passwordless SSH key. Confirm sudo permits this PHP process to switch to the target account without a password.'];
+    }
+
     private function sshAppendLoginKey($account,$publicKey){
         $home=$account['home'];$dir=$home.'/.ssh';$file=$dir.'/authorized_keys';
         if(is_link($dir)||is_link($file))return['error'=>'Refusing to write through a symbolic link in the SSH key directory.'];
-        if(!is_dir($dir)&&!@mkdir($dir,0700,true)&&!is_dir($dir))return['error'=>'Could not create the account SSH directory.'];
         $euid=function_exists('posix_geteuid')?@posix_geteuid():null;
-        if($euid!==0&&$euid!==(int)$account['uid'])
-            return['error'=>'The PHP process must own this account home or run as root to install a passwordless SSH key.'];
-        @chmod($dir,0700);
-        if(!is_file($file)&&!@touch($file))return['error'=>'Could not create authorized_keys for this account.'];
+        if($euid===null){
+            $uidOut=[];$uidExit=1;@exec('id -u 2>/dev/null',$uidOut,$uidExit);
+            if($uidExit===0&&isset($uidOut[0])&&ctype_digit(trim($uidOut[0])))$euid=(int)trim($uidOut[0]);
+        }
+        if($euid!==0&&$euid!==(int)$account['uid']){
+            $runner=$this->sshTerminalRunner($account);
+            if(($runner['mode']??'')==='self')$euid=(int)$account['uid'];
+            elseif(($runner['mode']??'')==='sudo')return$this->sshAppendLoginKeyAsSudo($account,$publicKey);
+            else return['error'=>'The PHP process cannot write this account home. Run PHP as the account owner/root or allow non-interactive sudo to this exact Linux account.'];
+        }
+        if(!is_dir($dir)&&!@mkdir($dir,0700,true)&&!is_dir($dir)){
+            clearstatcache(true,$home);
+            return['error'=>'Could not create the account SSH directory. The PHP process needs write permission to '.$home.'.'];
+        }
+        clearstatcache(true,$dir);
+        if(is_link($dir)||!is_dir($dir))return['error'=>'The account SSH path is not a safe directory.'];
+        if(!@chmod($dir,0700)||((@fileperms($dir)&0777)!==0700))return['error'=>'Could not secure the account SSH directory with mode 0700.'];
+        if(is_link($file))return['error'=>'Refusing to write through a symbolic link in the SSH key directory.'];
+        if(!is_file($file)&&!@touch($file))return['error'=>'Could not create authorized_keys for this account. Check the account home permissions.'];
+        clearstatcache(true,$file);
+        if(is_link($file)||!is_file($file))return['error'=>'authorized_keys is not a safe regular file.'];
+        if(!@chmod($file,0600)||((@fileperms($file)&0777)!==0600))return['error'=>'Could not secure authorized_keys with mode 0600.'];
         $fp=@fopen($file,'ab');
         if(!$fp)return['error'=>'Could not write authorized_keys. The PHP process needs permission to manage this account.'];
         $line=rtrim($publicKey)."\n";
@@ -5056,11 +5120,11 @@ class FileManager {
         }
         @fclose($fp);
         if(!$ok)return['error'=>'Could not safely append the SSH public key.'];
-        @chmod($file,0600);
         if($euid===0){
             @chown($dir,$account['uid']);@chgrp($dir,$account['gid']);
             @chown($file,$account['uid']);@chgrp($file,$account['gid']);
         }
+        clearstatcache(true,$dir);clearstatcache(true,$file);
         if(function_exists('fileowner')&&(@fileowner($file)!==(int)$account['uid']||@fileowner($dir)!==(int)$account['uid'])){
             if(preg_match('/\s(mfm-login-as-[a-f0-9]{24})$/',trim($publicKey),$m))$this->sshRevokeManagedKeyLine($account,$m[1]);
             return['error'=>'authorized_keys is not owned by the target Linux account; the generated key was not accepted.'];
@@ -16869,14 +16933,27 @@ async function loadSshStatus(){
 }
 
 /* ── User Management tab ── */
+function sshOpenBrowserTerminal(username){
+  const url=new URL(location.href);
+  url.search='';url.hash='';
+  url.searchParams.set('terminal','1');
+  url.searchParams.set('ssh_user',username);
+  let tab=null;
+  try{tab=window.open(url.toString(),'_blank');}catch{}
+  if(tab){tab.opener=null;toast('Opened the browser terminal as '+username+'.',3500);return;}
+  // Mobile browsers and embedded webviews often block a second tab. Continue
+  // in the current tab so Login as still works from the original user gesture.
+  location.assign(url.toString());
+}
+
 function sshLoginChoiceDialog(username,host){
   document.getElementById('sshLoginChoiceOv')?.remove();
   const ov=document.createElement('div');
   ov.className='mod-ov open';ov.id='sshLoginChoiceOv';
   ov.innerHTML=`<div class="mod mod-md" role="dialog" aria-modal="true" aria-labelledby="sshLoginChoiceTitle">
-    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="5"/><path d="M21 2l-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg></div><span class="mod-title" id="sshLoginChoiceTitle">Login as ${esc(username)}</span><button type="button" class="btn btn-icon btn-g" data-close><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="5"/><path d="M21 2l-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg></div><span class="mod-title" id="sshLoginChoiceTitle">SSH options — ${esc(username)}</span><button type="button" class="btn btn-icon btn-g" data-close><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
     <div class="mod-body" style="display:flex;flex-direction:column;gap:10px">
-      <div style="font-size:12px;color:var(--t2);line-height:1.6">Choose where to open this Linux account. Browser terminal access depends on the server's permission to switch users.</div>
+      <div style="font-size:12px;color:var(--t2);line-height:1.6">The Login as button opens the browser terminal immediately without asking for this account's password. These options are for other SSH connection methods.</div>
       <button type="button" class="btn btn-s" data-choice="browser" ${RO?'disabled':''} style="justify-content:flex-start;padding:11px 12px"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg><span style="text-align:left"><strong>Terminal inside this browser</strong><small style="display:block;color:var(--t3);font-weight:400;margin-top:3px">Runs as the Linux account if server permissions allow; interactive TTY programs may not work.</small></span></button>
       <button type="button" class="btn btn-s" data-choice="local" ${host?'':'disabled'} style="justify-content:flex-start;padding:11px 12px"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M7 8l3 3-3 3M13 14h4"/></svg><span style="text-align:left"><strong>Open this device's SSH app (may ask for password)</strong><small style="display:block;color:var(--t3);font-weight:400;margin-top:3px">Uses existing keys only; this option does not install a key on the device.</small></span></button>
       <button type="button" class="btn btn-s" data-choice="setup" ${host&&!RO?'':'disabled'} style="justify-content:flex-start;padding:11px 12px"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 17v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"/></svg><span style="text-align:left"><strong>Set up passwordless SSH for this device</strong><small style="display:block;color:var(--t3);font-weight:400;margin-top:3px">Creates and installs a key, then downloads launchers. Extract the ZIP and run the matching launcher, not the regular SSH app.</small></span></button>
@@ -16888,9 +16965,7 @@ function sshLoginChoiceDialog(username,host){
   ov.querySelector('[data-close]')?.addEventListener('click',close);
   ov.addEventListener('click',ev=>{if(ev.target===ov)close();});
   ov.querySelector('[data-choice="browser"]')?.addEventListener('click',()=>{
-    const url=new URL(location.href);url.search='';url.searchParams.set('terminal','1');url.searchParams.set('ssh_user',username);
-    const tab=window.open(url.toString(),'_blank');if(tab)tab.opener=null;
-    else toast('Allow pop-ups for this site to open the browser terminal.',5000);
+    sshOpenBrowserTerminal(username);
     close();
   });
   ov.querySelector('[data-choice="local"]')?.addEventListener('click',async()=>{
@@ -16953,10 +17028,11 @@ async function loadSshUsers(){
     let rows=users.map(u=>{
       const shellShort=u.shell.split('/').pop();
       const noInteractiveShell=['nologin','false','sync','halt','shutdown',''].includes(shellShort);
-      const loginDisabled=!!u.locked||noInteractiveShell;
-      const loginTitle=u.locked?'Unlock this account before connecting.':
+      const loginDisabled=!!u.locked||noInteractiveShell||RO;
+      const loginTitle=RO?'Read-only account: terminal execution is disabled.':
+        u.locked?'Unlock this account before connecting.':
         noInteractiveShell?'This account does not have an interactive shell.':
-        'Choose browser terminal, an existing SSH app, or passwordless SSH setup.';
+        'Open the browser terminal immediately as this Linux account without entering its password.';
       const sudoBadge=u.sudo?`<span style="background:rgba(239,68,68,.15);color:#fca5a5;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700">SUDO</span>`:'';
       const lockBadge=u.locked?`<span style="background:rgba(251,146,60,.12);color:#fb923c;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700">LOCKED</span>`:
         `<span style="background:rgba(134,239,172,.1);color:#86efac;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700">ACTIVE</span>`;
@@ -16970,7 +17046,8 @@ async function loadSshUsers(){
         <td style="padding:10px 8px">${sudoBadge}</td>
         <td style="padding:10px 8px">${keyBadge}</td>
         <td style="padding:10px 14px;text-align:right">
-          <button class="btn btn-s ssh-login-btn" data-u="${esc(u.username)}" data-host="${esc(sshHost)}" title="${esc(loginTitle)}" ${loginDisabled?'disabled':''} style="font-size:11px;padding:4px 10px">Login as</button>
+          <button class="btn btn-s ssh-login-btn" data-u="${esc(u.username)}" title="${esc(loginTitle)}" ${loginDisabled?'disabled':''} style="font-size:11px;padding:4px 10px">Login as</button>
+          <button class="btn btn-s ssh-options-btn" data-u="${esc(u.username)}" data-host="${esc(sshHost)}" title="Passwordless SSH setup and key revocation" style="font-size:11px;padding:4px 8px"><svg viewBox="0 0 24 24" style="width:13px;height:13px;vertical-align:-2px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="M21 2l-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg> Keys</button>
           <button class="btn btn-s ssh-edit-btn" data-u='${JSON.stringify(u).replace(/'/g,"&#39;")}' style="font-size:11px;padding:4px 10px">Manage</button>
           <button class="btn btn-s ssh-del-btn" data-u="${esc(u.username)}" style="font-size:11px;padding:4px 10px;margin-left:4px;color:#fca5a5;border-color:rgba(239,68,68,.3)">Delete</button>
         </td>
@@ -17023,6 +17100,9 @@ async function loadSshUsers(){
     });
 
     el.querySelectorAll('.ssh-login-btn:not(:disabled)').forEach(btn=>{
+      btn.addEventListener('click',()=>sshOpenBrowserTerminal(btn.dataset.u||''));
+    });
+    el.querySelectorAll('.ssh-options-btn').forEach(btn=>{
       btn.addEventListener('click',()=>sshLoginChoiceDialog(btn.dataset.u||'',btn.dataset.host||''));
     });
 
