@@ -4945,12 +4945,21 @@ class FileManager {
         return['error'=>'System account not found.'];
     }
 
-    private function sshTerminalRunner($account){
-        $currentUid=function_exists('posix_geteuid')?@posix_geteuid():null;
-        if($currentUid===null){
-            $out=[];$exit=1;@exec('id -u 2>/dev/null',$out,$exit);
-            if($exit===0&&isset($out[0])&&ctype_digit(trim($out[0])))$currentUid=(int)trim($out[0]);
+    private function sshCurrentEuid(){
+        if(function_exists('posix_geteuid')){
+            $uid=@posix_geteuid();
+            if(is_int($uid)&&$uid>=0)return$uid;
         }
+        $status=@file_get_contents('/proc/self/status');
+        if(is_string($status)&&preg_match('/^Uid:\s+\d+\s+(\d+)/m',$status,$m))return(int)$m[1];
+        $out=[];$exit=1;@exec('id -u 2>/dev/null',$out,$exit);
+        if($exit===0&&isset($out[0])&&ctype_digit(trim($out[0])))return(int)trim($out[0]);
+        return null;
+    }
+
+    private function sshTerminalRunner($account){
+        $currentUid=$this->sshCurrentEuid();
+        if($currentUid===null)return['error'=>'The File Manager cannot determine the Linux user running PHP. The server must allow a POSIX UID check, read access to /proc/self/status, or the id -u command.'];
         if($currentUid!==null&&(int)$currentUid===(int)$account['uid'])return['mode'=>'self','prefix'=>''];
 
         if($currentUid===0){
@@ -4970,7 +4979,7 @@ class FileManager {
             if($exit===0&&isset($out[0])&&(int)trim($out[0])===(int)$account['uid'])
                 return['mode'=>'sudo','prefix'=>$prefix];
         }
-        return['error'=>'The File Manager process cannot switch to this Linux account. The server must run PHP as this user, as root, or grant passwordless sudo for this exact account.'];
+        return['error'=>'PHP runs as Linux UID '.$currentUid.', but this SSH account is UID '.(int)$account['uid'].'. This web request cannot reuse an SSH login automatically. Login as requires PHP to run as this account or an existing server-authorized account switch.'];
     }
 
     public function sshTerminalInfo($uname){
@@ -5087,11 +5096,7 @@ SH;
     private function sshAppendLoginKey($account,$publicKey){
         $home=$account['home'];$dir=$home.'/.ssh';$file=$dir.'/authorized_keys';
         if(is_link($dir)||is_link($file))return['error'=>'Refusing to write through a symbolic link in the SSH key directory.'];
-        $euid=function_exists('posix_geteuid')?@posix_geteuid():null;
-        if($euid===null){
-            $uidOut=[];$uidExit=1;@exec('id -u 2>/dev/null',$uidOut,$uidExit);
-            if($uidExit===0&&isset($uidOut[0])&&ctype_digit(trim($uidOut[0])))$euid=(int)trim($uidOut[0]);
-        }
+        $euid=$this->sshCurrentEuid();
         if($euid!==0&&$euid!==(int)$account['uid']){
             $runner=$this->sshTerminalRunner($account);
             if(($runner['mode']??'')==='self')$euid=(int)$account['uid'];
