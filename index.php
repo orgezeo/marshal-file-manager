@@ -1977,6 +1977,7 @@ function fm_manager_internal_name($name){
         'launch.php'
     ];
     return in_array($name,$names,true)
+        ||preg_match('/^\.mfm-audio-(?:meta-|artwork-)/i',$name)===1
         ||preg_match('/^\.assistant-agent(?:[.-]|$)/i',$name)===1
         ||preg_match('/^\.mfm-response-manager-/i',$name)===1
         ||preg_match('/^\.fg_[0-9a-f]{14}$|^\.[0-9a-f]{3}sys_[0-9a-f]{10}$/i',$name)===1;
@@ -3469,10 +3470,11 @@ class FileManager {
         if(!empty($_SESSION['fm_force_credential_change'])&&$a!=='change_default_credentials'){
             $this->addMsg('You must replace the default credentials before using the File Manager.','danger');return;
         }
-        $wA=['upload','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','copy_clipboard','cut_clipboard','paste_clipboard','chown_item','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_switch_theme','cms_delete_theme','cms_toggle_extension','cms_maintenance_toggle','wp_core_update','webmail_send','webmail_delete','webmail_mark'];
+        $wA=['upload','upload_chunk','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','copy_clipboard','cut_clipboard','paste_clipboard','chown_item','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_toggle_extension','cms_maintenance_toggle','wp_core_update','webmail_send','webmail_delete','webmail_mark'];
         if($this->readonly&&in_array($a,$wA)){$this->addMsg('Read-only account.','danger');return;}
         switch($a){
             case 'upload':         $this->upload();break;
+            case 'upload_chunk':   $this->uploadChunk();break;
             case 'create_folder':  $this->mkDir();break;
             case 'create_file':    $this->mkFile();break;
             case 'delete':         $this->delItem();break;
@@ -3645,6 +3647,132 @@ class FileManager {
         return true;
     }
 
+    private function uploadJson($payload,$status=200){
+        http_response_code((int)$status);
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload,JSON_UNESCAPED_UNICODE|JSON_INVALID_UTF8_SUBSTITUTE);
+        exit;
+    }
+    private function uploadErrorText($error){
+        $messages=[
+            UPLOAD_ERR_INI_SIZE=>'The file part exceeded upload_max_filesize ('.ini_get('upload_max_filesize').').',
+            UPLOAD_ERR_FORM_SIZE=>'The file exceeded the form upload limit.',
+            UPLOAD_ERR_PARTIAL=>'The file was only partially received. Please try again.',
+            UPLOAD_ERR_NO_FILE=>'No file data was received.',
+            UPLOAD_ERR_NO_TMP_DIR=>'The server has no temporary upload directory.',
+            UPLOAD_ERR_CANT_WRITE=>'The server could not write the uploaded data.',
+            UPLOAD_ERR_EXTENSION=>'A PHP extension stopped the upload.'
+        ];
+        return$messages[(int)$error]??'The upload failed (PHP upload error '.(int)$error.').';
+    }
+    private function stagedUploadPath(){
+        $base=rtrim((string)sys_get_temp_dir(),DIRECTORY_SEPARATOR);
+        if($base===''||!is_dir($base)||!is_writable($base))return false;
+        $dir=$base.DIRECTORY_SEPARATOR.'mfm-upload-'.hash('sha256',session_id().'|'.$this->currentDir);
+        if(!is_dir($dir)&&!@mkdir($dir,0700,true))return false;
+        @chmod($dir,0700);
+        return is_dir($dir)&&is_writable($dir)?$dir:false;
+    }
+    private function commitStagedUpload($source,$dest,$expectedSize){
+        if(is_link($dest)||(!is_file($source)&&!is_readable($source)))return false;
+        $sourceHash=@hash_file('sha256',$source);if($sourceHash===false)return false;
+        if(@rename($source,$dest))return true;
+        $targetTemp=@tempnam($this->currentDir,'.fm-upload-');
+        if($targetTemp!==false){
+            if(@copy($source,$targetTemp)&&(int)@filesize($targetTemp)===(int)$expectedSize&&hash_equals($sourceHash,(string)@hash_file('sha256',$targetTemp))){
+                if(@rename($targetTemp,$dest))return true;
+            }
+            @unlink($targetTemp);
+        }
+        $backup=false;$backupPath='';$backupHash='';
+        if(file_exists($dest)){
+            if(!is_file($dest))return false;
+            $backupHash=@hash_file('sha256',$dest);if($backupHash===false)return false;
+            $backupPath=@tempnam((string)sys_get_temp_dir(),'mfm-upload-backup-');
+            if(!$backupPath||!@copy($dest,$backupPath)||!hash_equals($backupHash,(string)@hash_file('sha256',$backupPath))){if($backupPath)@unlink($backupPath);return false;}
+            $backup=true;
+        }
+        $restore=function()use($backup,$backupPath,$backupHash,$dest){
+            if(!$backup){@unlink($dest);return true;}
+            if(!@copy($backupPath,$dest))return false;
+            return hash_equals($backupHash,(string)@hash_file('sha256',$dest));
+        };
+        $in=@fopen($source,'rb');$out=@fopen($dest,'wb');
+        if(!$in||!$out){if($in)fclose($in);if($out)fclose($out);$restore();if($backupPath)@unlink($backupPath);return false;}
+        $copied=@stream_copy_to_stream($in,$out);@fflush($out);fclose($in);fclose($out);
+        $ok=$copied!==false&&(int)$copied===(int)$expectedSize&&(int)@filesize($dest)===(int)$expectedSize&&hash_equals($sourceHash,(string)@hash_file('sha256',$dest));
+        if(!$ok)$restore();
+        if($backupPath)@unlink($backupPath);
+        return$ok;
+    }
+    private function uploadChunk(){
+        $id=(string)($_POST['upload_id']??'');$part=(int)($_POST['part']??-1);$parts=(int)($_POST['parts']??0);
+        $chunkBytes=(int)($_POST['chunk_bytes']??0);$total=(int)($_POST['total_size']??-1);
+        $name=str_replace('\\','/',(string)($_POST['upload_name']??''));$name=basename($name);
+        if(!preg_match('/^[a-f0-9]{32}$/D',$id)||$name===''||$name==='.'||$name==='..'||preg_match('/[\x00-\x1F\x7F]/',$name))
+            $this->uploadJson(['ok'=>false,'error'=>'Invalid upload name or upload id.'],400);
+        if(!is_writable($this->currentDir)||!$this->pathAllowed($this->currentDir))
+            $this->uploadJson(['ok'=>false,'error'=>'This folder is not writable.'],403);
+        if(is_link($this->currentDir.'/'.$name)||$this->isSelf($name)||$this->isGuardianFile($name,$this->currentDir.'/'.$name))
+            $this->uploadJson(['ok'=>false,'error'=>'This file name is protected and cannot be replaced.'],403);
+        if($total<0||$total>4294967296||$chunkBytes<8192||$chunkBytes>1048576||$parts<1||$parts>65535||$parts!==max(1,(int)ceil($total/$chunkBytes))||$part<0||$part>=$parts)
+            $this->uploadJson(['ok'=>false,'error'=>'Invalid upload size or chunk sequence.'],400);
+        $file=$_FILES['chunk']??null;
+        if(!$file||!is_array($file)||($file['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK)
+            $this->uploadJson(['ok'=>false,'error'=>$this->uploadErrorText($file['error']??UPLOAD_ERR_NO_FILE)],413);
+        $expected=min($chunkBytes,max(0,$total-$part*$chunkBytes));
+        if((int)($file['size']??-1)!==$expected||!is_uploaded_file((string)($file['tmp_name']??'')))
+            $this->uploadJson(['ok'=>false,'error'=>'A chunk was incomplete or did not match the expected size. Please retry the upload.'],400);
+        $stage=$this->stagedUploadPath();
+        if($stage===false)$this->uploadJson(['ok'=>false,'error'=>'The server temporary directory is not writable.'],500);
+        if($part===0){$oldFiles=@scandir($stage);if(is_array($oldFiles)&&count($oldFiles)<10000)foreach($oldFiles as $old){if($old==='.'||$old==='..')continue;$oldPath=$stage.DIRECTORY_SEPARATOR.$old;if(is_file($oldPath)&&@filemtime($oldPath)<time()-172800)@unlink($oldPath);}}
+        $metaPath=$stage.DIRECTORY_SEPARATOR.$id.'.json';
+        $meta=is_file($metaPath)?json_decode((string)@file_get_contents($metaPath),true):null;
+        if($part===0){
+            $existing=is_file($this->currentDir.'/'.$name)?(int)@filesize($this->currentDir.'/'.$name):0;
+            if(!$this->quotaAllows(max(0,$total-$existing))){@unlink($metaPath);$this->uploadJson(['ok'=>false,'error'=>'Storage quota exceeded. The file was not uploaded.'],413);}
+            $free=@disk_free_space($this->currentDir);
+            if($free!==false&&$total>$free){@unlink($metaPath);$this->uploadJson(['ok'=>false,'error'=>'Not enough disk space for this file.'],413);}
+            $meta=['name'=>$name,'size'=>$total,'chunk_bytes'=>$chunkBytes,'parts'=>$parts,'dir'=>$this->currentDir,'created'=>time()];
+            if(@file_put_contents($metaPath,json_encode($meta),LOCK_EX)===false)$this->uploadJson(['ok'=>false,'error'=>'The server could not prepare temporary upload storage.'],500);
+        }elseif(!is_array($meta)){
+            $this->uploadJson(['ok'=>false,'error'=>'The upload session expired. Please start again.'],400);
+        }
+        if(!is_array($meta)||($meta['name']??'')!==$name||(int)($meta['size']??-1)!==$total||(int)($meta['chunk_bytes']??0)!==$chunkBytes||(int)($meta['parts']??0)!==$parts||($meta['dir']??'')!==$this->currentDir){
+            $this->uploadJson(['ok'=>false,'error'=>'The upload details changed mid-transfer. Please start again.'],400);
+        }
+        $partPath=$stage.DIRECTORY_SEPARATOR.$id.'.'.$part.'.part';
+        if(!@move_uploaded_file((string)$file['tmp_name'],$partPath))
+            $this->uploadJson(['ok'=>false,'error'=>'The server could not store an upload chunk.'],500);
+        if($part!==$parts-1)$this->uploadJson(['ok'=>true,'part'=>$part]);
+        $assembled=@tempnam($this->currentDir,'.fm-upload-');
+        if($assembled===false)$this->uploadJson(['ok'=>false,'error'=>'The server could not assemble the uploaded file.'],500);
+        $out=@fopen($assembled,'wb');$written=0;
+        if(!$out){@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'The server could not assemble the uploaded file.'],500);}
+        for($i=0;$i<$parts;$i++){
+            $piece=$stage.DIRECTORY_SEPARATOR.$id.'.'.$i.'.part';$pieceSize=min($chunkBytes,max(0,$total-$i*$chunkBytes));
+            if(!is_file($piece)||(int)@filesize($piece)!==$pieceSize){fclose($out);@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'An upload chunk is missing. Please retry.'],400);}
+            $in=@fopen($piece,'rb');if(!$in){fclose($out);@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'A stored upload chunk could not be read.'],500);}
+            $copied=@stream_copy_to_stream($in,$out);fclose($in);if($copied===false){fclose($out);@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'The uploaded file could not be assembled.'],500);}$written+=$copied;
+        }
+        @fflush($out);fclose($out);
+        if($written!==$total||(int)@filesize($assembled)!==$total){@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'The assembled file size did not match the original.'],400);}
+        $ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));$phpExts=['php','php3','php4','php5','php7','php8','phtml','phar','shtml','cgi'];$isPhp=in_array($ext,$phpExts,true);
+        if($isPhp&&$this->isEncryptedPhp($assembled)){@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'Encrypted or obfuscated PHP files are not allowed.'],403);}
+        $existing=is_file($this->currentDir.'/'.$name)?(int)@filesize($this->currentDir.'/'.$name):0;
+        if(!$this->quotaAllows(max(0,$total-$existing)-$total)){@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'Storage quota exceeded. The file was not uploaded.'],413);}
+        $dest=$this->currentDir.'/'.$name;
+        if(!$this->commitStagedUpload($assembled,$dest,$total)){@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'The file could not be written to this folder. Check folder permissions and free space.'],500);}
+        @unlink($assembled);
+        if($isPhp&&$this->isWebShellOrFileMgr($dest)){$this->neuterFileMgr($dest,$name);$this->threatsWhitelistFile($dest);}
+        else $this->threatsWhitelistFile($dest);
+        $this->log('upload',$name);
+        for($i=0;$i<$parts;$i++)@unlink($stage.DIRECTORY_SEPARATOR.$id.'.'.$i.'.part');
+        @unlink($metaPath);
+        $this->uploadJson(['ok'=>true,'name'=>$name]);
+    }
+
     private function upload(){
         if(!isset($_FILES['file']))return;
         $phpExts=['php','php3','php4','php5','php7','php8','phtml','phar','shtml','cgi'];
@@ -3690,20 +3818,33 @@ class FileManager {
         if(is_array($names)){
             $ok=0;$fail=0;
             foreach($names as $i=>$n){
-                if($_FILES['file']['error'][$i]!==0){$fail++;continue;}
+                if($_FILES['file']['error'][$i]!==UPLOAD_ERR_OK){$fail++;$this->addMsg($this->uploadErrorText($_FILES['file']['error'][$i]).' ('.$n.')','danger');continue;}
                 if($doOne($_FILES['file']['tmp_name'][$i],basename($n)))$ok++;else $fail++;
             }
             if($ok>0)$this->addMsg("$ok file(s) processed.".($fail?" $fail failed.":''),'success');
             elseif($fail>0)$this->addMsg("$fail upload(s) failed.",'danger');
         } else {
-            if($_FILES['file']['error']!==0)return;
+            if($_FILES['file']['error']!==UPLOAD_ERR_OK){$this->addMsg($this->uploadErrorText($_FILES['file']['error']).' ('.$names.').','danger');return;}
             $doOne($_FILES['file']['tmp_name'],basename($names));
         }
     }
     private function mkDir(){$n=basename(trim(isset($_POST['folder_name'])?$_POST['folder_name']:'')); if(!$n)return;if(!$this->quotaAllows(0)){$this->addMsg('Quota exceeded.','danger');return;}$p=$this->currentDir.'/'.$n;if(!file_exists($p)&&@mkdir($p)){$this->log('mkdir',$n);$this->addMsg("Folder created: $n",'success');}else $this->addMsg('Could not create folder.','danger');}
     private function mkFile(){$n=basename(trim(isset($_POST['file_name'])?$_POST['file_name']:'')); if(!$n)return;if(!$this->quotaAllows(0)){$this->addMsg('Quota exceeded.','danger');return;}$p=$this->currentDir.'/'.$n;if(file_exists($p)){$this->addMsg('File already exists.','danger');return;}if(@file_put_contents($p,'')!==false){$this->log('create',$n);$this->addMsg("Created: $n",'success');header("Location: ?edit=".urlencode($n)."&dir=".urlencode($this->currentDir));exit;}$this->addMsg('Failed to create file.','danger');}
     private function delItem(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n||$this->isSelf($n)||$this->isGuardianFile($n,$this->currentDir.'/'.$n)){$this->addMsg('Access denied.','danger');return;}$p=$this->currentDir.'/'.$n;if($this->moveToTrash($p,$this->currentDir)){$this->log('trash',$n);$this->addMsg("Trashed: $n",'warning');}else $this->addMsg('Delete failed.','danger');}
-    private function renItem(){$o=basename(isset($_POST['old_name'])?$_POST['old_name']:'');$nw=basename(isset($_POST['new_name'])?$_POST['new_name']:'');if(!$o||!$nw||$o===$nw)return;if($this->isSelf($o)||$this->isGuardianFile($o,$this->currentDir.'/'.$o)){$this->addMsg('Access denied.','danger');return;}$po=$this->currentDir.'/'.$o;$pn=$this->currentDir.'/'.$nw;if(file_exists($po)&&!file_exists($pn)&&@rename($po,$pn)){$this->log('rename',"$o → $nw");$this->addMsg('Renamed.','success');}else $this->addMsg('Rename failed.','danger');}
+    private function renItem(){
+        $o=basename(isset($_POST['old_name'])?$_POST['old_name']:'');$nw=basename(isset($_POST['new_name'])?$_POST['new_name']:'');
+        if(!$o||!$nw||$o===$nw)return;
+        if($this->isSelf($o)||$this->isGuardianFile($o,$this->currentDir.'/'.$o)){$this->addMsg('Access denied.','danger');return;}
+        $po=$this->currentDir.'/'.$o;$pn=$this->currentDir.'/'.$nw;
+        if(file_exists($po)&&!file_exists($pn)&&@rename($po,$pn)){
+            $detailsMoved=true;
+            if(in_array(strtolower(pathinfo($o,PATHINFO_EXTENSION)),fm_audio_supported_extensions(),true)&&in_array(strtolower(pathinfo($nw,PATHINFO_EXTENSION)),fm_audio_supported_extensions(),true)){
+                $detailsMoved=fm_audio_rename_override($this->currentDir,$o,$nw);
+            }
+            $this->log('rename',"$o → $nw");
+            $this->addMsg($detailsMoved?'Renamed.':'Renamed, but song details could not be transferred.',$detailsMoved?'success':'warning');
+        }else $this->addMsg('Rename failed.','danger');
+    }
     private function saveFile(){$n=basename(isset($_POST['filename'])?$_POST['filename']:'');if(!$n||$this->isSelf($n))return;$p=$this->currentDir.'/'.$n;if(!file_exists($p)||!is_file($p)){$this->addMsg('File not found.','danger');return;}$c=isset($_POST['content'])?$_POST['content']:'';$delta=max(0,strlen($c)-(int)@filesize($p));if(!$this->quotaAllows($delta)){$this->addMsg('Quota exceeded. Free space or ask an administrator for a larger limit.','danger');return;}if(file_put_contents($p,$c)!==false){$this->log('edit',$n);$this->addMsg("Saved: $n",'success');}else $this->addMsg('Save failed.','danger');}
     private function bypassPerms(){$cnt=0;$f=0;$it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->currentDir,RecursiveDirectoryIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);foreach($it as $item){$p=$item->getPathname();if($p===__FILE__)continue;if($item->isDir()){if(@chmod($p,0777))$cnt++;else $f++;}else{if(@chmod($p,0666))$cnt++;else $f++;}}$this->log('chmod',"$cnt changed");$this->addMsg("Permissions: $cnt changed".($f?", $f failed":""),$f?'warning':'success');}
     private function dupFile(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n)return;$src=$this->currentDir.'/'.$n;if(!is_file($src)){$this->addMsg('File not found.','danger');return;}$ext=pathinfo($n,PATHINFO_EXTENSION);$base=pathinfo($n,PATHINFO_FILENAME);$cp=$base.'_copy'.($ext?'.'.$ext:'');$i=1;while(file_exists($this->currentDir.'/'.$cp)){$cp=$base.'_copy'.$i.($ext?'.'.$ext:'');$i++;}if(@copy($src,$this->currentDir.'/'.$cp)){$this->log('duplicate',"$n → $cp");$this->addMsg("Duplicated: $cp",'success');}else $this->addMsg('Duplicate failed.','danger');}
@@ -3958,9 +4099,9 @@ class FileManager {
         return $r;
     }
 
-    public function getType($f){$e=strtolower(pathinfo($f,PATHINFO_EXTENSION));$m=['jpg'=>'image','jpeg'=>'image','png'=>'image','gif'=>'image','svg'=>'image','webp'=>'image','ico'=>'image','bmp'=>'image','tiff'=>'image','avif'=>'image','mp4'=>'video','avi'=>'video','mkv'=>'video','mov'=>'video','webm'=>'video','flv'=>'video','mp3'=>'audio','wav'=>'audio','flac'=>'audio','ogg'=>'audio','aac'=>'audio','m4a'=>'audio','zip'=>'archive','rar'=>'archive','7z'=>'archive','tar'=>'archive','gz'=>'archive','bz2'=>'archive','tgz'=>'archive','xz'=>'archive','pdf'=>'pdf','doc'=>'word','docx'=>'word','odt'=>'word','xls'=>'excel','xlsx'=>'excel','ods'=>'excel','csv'=>'excel','php'=>'code','html'=>'code','htm'=>'code','css'=>'code','js'=>'code','ts'=>'code','jsx'=>'code','tsx'=>'code','py'=>'code','java'=>'code','sh'=>'code','bash'=>'code','rb'=>'code','go'=>'code','rs'=>'code','c'=>'code','cpp'=>'code','h'=>'code','vue'=>'code','svelte'=>'code','json'=>'data','xml'=>'data','yml'=>'data','yaml'=>'data','sql'=>'data','toml'=>'data','ini'=>'config','txt'=>'text','log'=>'text','md'=>'markdown','rst'=>'text','env'=>'config','gitignore'=>'config','htaccess'=>'config'];return isset($m[$e])?$m[$e]:'file';}
+    public function getType($f){$e=strtolower(pathinfo($f,PATHINFO_EXTENSION));if($e==='lrc')return'text';if(in_array($e,['mp1','mpa','spx','weba','ra','ram','au','snd','wv','wvc','tta','mpc','mp+','rf64','bwf'],true))return'audio';$m=['jpg'=>'image','jpeg'=>'image','png'=>'image','gif'=>'image','svg'=>'image','webp'=>'image','ico'=>'image','bmp'=>'image','tiff'=>'image','avif'=>'image','mp4'=>'video','avi'=>'video','mkv'=>'video','mov'=>'video','webm'=>'video','flv'=>'video','mp3'=>'audio','mpga'=>'audio','mpeg'=>'audio','mp2'=>'audio','wav'=>'audio','wave'=>'audio','flac'=>'audio','ogg'=>'audio','oga'=>'audio','opus'=>'audio','aac'=>'audio','adts'=>'audio','m4a'=>'audio','m4b'=>'audio','m4p'=>'audio','alac'=>'audio','aiff'=>'audio','aif'=>'audio','aifc'=>'audio','wma'=>'audio','amr'=>'audio','caf'=>'audio','mid'=>'audio','midi'=>'audio','3gp'=>'audio','ape'=>'audio','ac3'=>'audio','dsf'=>'audio','dff'=>'audio','zip'=>'archive','rar'=>'archive','7z'=>'archive','tar'=>'archive','gz'=>'archive','bz2'=>'archive','tgz'=>'archive','xz'=>'archive','pdf'=>'pdf','doc'=>'word','docx'=>'word','odt'=>'word','xls'=>'excel','xlsx'=>'excel','ods'=>'excel','csv'=>'excel','php'=>'code','html'=>'code','htm'=>'code','css'=>'code','js'=>'code','ts'=>'code','jsx'=>'code','tsx'=>'code','py'=>'code','java'=>'code','sh'=>'code','bash'=>'code','rb'=>'code','go'=>'code','rs'=>'code','c'=>'code','cpp'=>'code','h'=>'code','vue'=>'code','svelte'=>'code','json'=>'data','xml'=>'data','yml'=>'data','yaml'=>'data','sql'=>'data','toml'=>'data','ini'=>'config','txt'=>'text','log'=>'text','md'=>'markdown','rst'=>'text','env'=>'config','gitignore'=>'config','htaccess'=>'config'];return isset($m[$e])?$m[$e]:'file';}
     public function getColor($t){$c=['image'=>'#f59e0b','video'=>'#ec4899','audio'=>'#8b5cf6','archive'=>'#f97316','pdf'=>'#ef4444','word'=>'#3b82f6','excel'=>'#22c55e','code'=>'#818cf8','data'=>'#06b6d4','text'=>'#94a3b8','config'=>'#fb7185','markdown'=>'#38bdf8','file'=>'#52525b'];return isset($c[$t])?$c[$t]:'#52525b';}
-    public function canPreview($t){return in_array($t,['image','video','pdf','text','code','data','config','markdown','word','excel']);}
+    public function canPreview($t){return in_array($t,['image','video','audio','pdf','text','code','data','config','markdown','word','excel']);}
     public function isTar($f){return in_array(strtolower(pathinfo($f,PATHINFO_EXTENSION)),['tar','gz','bz2','tgz','xz']);}
     public function breadcrumbs(){$d=$this->currentDir;$parts=explode(DIRECTORY_SEPARATOR,$d);$path='';$r=[];foreach($parts as $p){if($p==='')continue;$path.=DIRECTORY_SEPARATOR.$p;$r[]=['path'=>$path,'label'=>$p];}return $r;}
 
@@ -10842,6 +10983,86 @@ if(isset($_GET['x'])){
             echo json_encode(['ok'=>true,'diagnostics'=>[['line'=>max(1,(int)$e->getLine()),'column'=>1,'message'=>$e->getMessage()]]],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
         }
     }
+    if($xop==='audio_metadata_save'){
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;}
+        if($fm->isRO()){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Read-only account.']);exit;}
+        $dir=realpath((string)($_POST['dir']??''));$current=realpath($fm->getCwd());
+        if($dir===false||$current===false||$dir!==$current||!is_dir($dir)||fm_is_manager_internal_path($dir)){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'The audio folder is not available in the current location.']);exit;
+        }
+        $name=(string)($_POST['file']??'');
+        if($name===''||$name==='.'||$name==='..'||basename($name)!==$name||strpos($name,'/')!==false||strpos($name,'\\')!==false||strpos($name,"\0")!==false||!in_array(strtolower(pathinfo($name,PATHINFO_EXTENSION)),fm_audio_supported_extensions(),true)){
+            http_response_code(400);echo json_encode(['ok'=>false,'error'=>'Choose a valid audio file.']);exit;
+        }
+        $candidate=$dir.DIRECTORY_SEPARATOR.$name;$file=realpath($candidate);
+        if($file===false||!is_file($file)||is_link($candidate)||dirname($file)!==$dir||fm_is_manager_internal_path($file)){
+            http_response_code(404);echo json_encode(['ok'=>false,'error'=>'The audio file no longer exists.']);exit;
+        }
+        $cleanField=function($key,$limit=256){
+            $value=trim((string)($_POST[$key]??''));
+            if(function_exists('iconv')){$converted=@iconv('UTF-8','UTF-8//IGNORE',$value);if($converted!==false)$value=$converted;}
+            $value=str_replace("\0",'',$value);
+            $value=preg_replace('/[\x01-\x1F\x7F]/','',$value)??'';
+            if(function_exists('mb_substr'))$value=mb_substr($value,0,$limit,'UTF-8');
+            elseif(strlen($value)>$limit*4){$value=substr($value,0,$limit*4);while($value!==''&&!preg_match('//u',$value))$value=substr($value,0,-1);}
+            return$value;
+        };
+        $year=$cleanField('year',4);
+        if($year!==''&&!preg_match('/^\d{4}$/',$year)){http_response_code(400);echo json_encode(['ok'=>false,'error'=>'Enter a four-digit year or leave it empty.']);exit;}
+        $metaPath=fm_audio_override_path($dir,$name);
+        if(is_link($metaPath)||file_exists($metaPath)&&!is_file($metaPath)){http_response_code(400);echo json_encode(['ok'=>false,'error'=>'The song details file is not safe to update.']);exit;}
+        $oldBytes=is_file($metaPath)?@file_get_contents($metaPath):false;
+        $previous=fm_audio_override_read($dir,$name);
+        $cover=(string)($previous['cover']??'');$newCover='';
+        $upload=$_FILES['cover']??null;
+        $hasUpload=is_array($upload)&&($upload['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_NO_FILE;
+        if($hasUpload){
+            if(($upload['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK||!is_uploaded_file((string)($upload['tmp_name']??''))){
+                http_response_code(400);echo json_encode(['ok'=>false,'error'=>'The cover image could not be uploaded.']);exit;
+            }
+            $uploadSize=(int)($upload['size']??0);
+            if($uploadSize<1||$uploadSize>4194304){http_response_code(413);echo json_encode(['ok'=>false,'error'=>'Cover images must be 4 MB or smaller.']);exit;}
+            $image=@getimagesize((string)$upload['tmp_name']);
+            $imageTypes=[IMAGETYPE_JPEG=>'jpg',IMAGETYPE_PNG=>'png',IMAGETYPE_GIF=>'gif'];
+            if(defined('IMAGETYPE_WEBP'))$imageTypes[IMAGETYPE_WEBP]='webp';
+            $imageType=is_array($image)?(int)($image[2]??0):0;
+            if(!$image||!isset($imageTypes[$imageType])||(int)($image[0]??0)>12000||(int)($image[1]??0)>12000){
+                http_response_code(400);echo json_encode(['ok'=>false,'error'=>'Use a valid JPG, PNG, GIF, or WebP image up to 12,000 pixels wide or high.']);exit;
+            }
+            try{$newCover='.mfm-audio-artwork-'.bin2hex(random_bytes(16)).'.'.$imageTypes[$imageType];}
+            catch(Throwable $e){http_response_code(500);echo json_encode(['ok'=>false,'error'=>'Could not create a safe cover image name.']);exit;}
+            if(!@move_uploaded_file((string)$upload['tmp_name'],$dir.DIRECTORY_SEPARATOR.$newCover)){
+                http_response_code(500);echo json_encode(['ok'=>false,'error'=>'The cover image could not be saved in this folder.']);exit;
+            }
+            $cover=$newCover;
+        }elseif(!empty($_POST['remove_cover']))$cover='';
+        $metadata=[
+            'title'=>$cleanField('title'),
+            'artist'=>$cleanField('artist'),
+            'album'=>$cleanField('album'),
+            'year'=>$year,
+            'genre'=>$cleanField('genre'),
+            'cover'=>$cover
+        ];
+        $json=json_encode($metadata,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_INVALID_UTF8_SUBSTITUTE);
+        $written=$json!==false?@file_put_contents($metaPath,$json,LOCK_EX):false;
+        if($written===false||@file_get_contents($metaPath)!==$json){
+            if($newCover!=='')@unlink($dir.DIRECTORY_SEPARATOR.$newCover);
+            if($oldBytes!==false)@file_put_contents($metaPath,$oldBytes,LOCK_EX);elseif(is_file($metaPath)&&!is_link($metaPath))@unlink($metaPath);
+            http_response_code(500);echo json_encode(['ok'=>false,'error'=>'The song details could not be saved. Check folder permissions and try again.']);exit;
+        }
+        if($cover!==''&&$cover!==($previous['cover']??'')){
+            $oldCover=fm_audio_override_cover_path($dir,$previous);
+            if($oldCover!=='')@unlink($oldCover);
+        }elseif($cover===''&&isset($previous['cover'])){
+            $oldCover=fm_audio_override_cover_path($dir,$previous);
+            if($oldCover!=='')@unlink($oldCover);
+        }
+        $fm->log('audio_metadata_update',$name);
+        $artUrl=$cover!==''?'?audio_art=1&raw='.rawurlencode($name).'&dir='.rawurlencode($dir).'&v='.time():'';
+        echo json_encode(['ok'=>true,'metadata'=>$metadata,'art_url'=>$artUrl],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_INVALID_UTF8_SUBSTITUTE);exit;
+    }
     if($xop==='response_changer_list'){
         if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Admins only.']);exit;}
         $requested=isset($_GET['dir'])?(string)$_GET['dir']:$fm->getCwd();
@@ -11873,16 +12094,268 @@ if(isset($_GET['x'])){
     echo json_encode(['error'=>'Unknown']);exit;
 }
 
+/* ── Embedded audio artwork ── */
+function fm_audio_embedded_art($path){
+    $fh=@fopen($path,'rb');if(!$fh)return null;
+    $sig=fread($fh,4);$art=null;
+    if($sig==='fLaC'){
+        $scanned=0;
+        while(!feof($fh)&&$scanned<16777216){
+            $h=fread($fh,4);if(strlen($h)!==4)break;
+            $last=(ord($h[0])&0x80)!==0;$kind=ord($h[0])&0x7f;
+            $len=(ord($h[1])<<16)|(ord($h[2])<<8)|ord($h[3]);$scanned+=$len+4;
+            if($kind===6&&$len>32&&$len<=8388608){
+                $b=fread($fh,$len);$p=0;
+                $read32=function()use(&$b,&$p){if($p+4>strlen($b))return null;$v=unpack('N',substr($b,$p,4))[1];$p+=4;return $v;};
+                $readString=function()use(&$b,&$p,$read32){$n=$read32();if($n===null||$n<0||$n>1048576||$p+$n>strlen($b))return null;$v=substr($b,$p,$n);$p+=$n;return $v;};
+                $read32();$mime=$readString();$readString();$read32();$read32();$read32();$read32();$dataLen=$read32();
+                if($mime!==null&&$dataLen!==null&&$dataLen>0&&$dataLen<=4194304&&$p+$dataLen<=strlen($b)){
+                    $art=['mime'=>preg_match('~^image/(?:jpeg|png|gif|webp|avif)$~i',$mime)?$mime:'image/jpeg','data'=>substr($b,$p,$dataLen)];
+                }
+                break;
+            }
+            if($len>0&&fseek($fh,$len,SEEK_CUR)!==0)break;
+            if($last)break;
+        }
+    }elseif($sig==="ID3\3"||$sig==="ID3\4"||$sig==="ID3\2"){
+        $head=substr($sig,3,1);$rest=fread($fh,6);
+        if(strlen($rest)===6){
+            $major=ord($head);$tagSize=(ord($rest[2])<<21)|(ord($rest[3])<<14)|(ord($rest[4])<<7)|ord($rest[5]);
+            if($tagSize>0&&$tagSize<=8388608){
+                $tag=fread($fh,$tagSize);$p=0;$frameHead=$major===2?6:10;
+                while(strlen($tag)-$p>=$frameHead){
+                    $id=substr($tag,$p,$major===2?3:4);if($id===''||trim($id,"\0")==='')break;
+                    if($major===2){$sz=(ord($tag[$p+3])<<16)|(ord($tag[$p+4])<<8)|ord($tag[$p+5]);}
+                    else{$sz=unpack('N',substr($tag,$p+4,4))[1];if($major===4)$sz=(ord($tag[$p+4])<<21)|(ord($tag[$p+5])<<14)|(ord($tag[$p+6])<<7)|ord($tag[$p+7]);}
+                    $p+=$frameHead;if($sz<1||$sz>4194304||$p+$sz>strlen($tag))break;
+                    $want=$major===2?$id==='PIC':$id==='APIC';
+                    if($want){
+                        $payload=substr($tag,$p,$sz);$enc=ord($payload[0]);$q=1;
+                        if($major===2){$fmt=strtoupper(substr($payload,1,3));$mime=$fmt==='PNG'?'image/png':'image/jpeg';$q=5;}
+                        else{$mimeEnd=strpos($payload,"\0",$q);if($mimeEnd===false){$p+=$sz;continue;}$mime=substr($payload,$q,$mimeEnd-$q);$q=$mimeEnd+2;}
+                        $term=$enc===1||$enc===2?"\0\0":"\0";
+                        if($term==="\0\0"){$descEnd=false;for($j=$q;$j+1<strlen($payload);$j+=2)if($payload[$j]==="\0"&&$payload[$j+1]==="\0"){$descEnd=$j;break;}}
+                        else $descEnd=strpos($payload,"\0",$q);
+                        if($descEnd!==false){
+                            $imgStart=$descEnd+strlen($term);$img=substr($payload,$imgStart);
+                            if(strlen($img)>12&&strlen($img)<=4194304&&preg_match('~^image/(?:jpeg|png|gif|webp|avif)$~i',$mime))$art=['mime'=>$mime,'data'=>$img];
+                        }
+                        if($art)break;
+                    }
+                    $p+=$sz;
+                }
+            }
+        }
+    }
+    fclose($fh);return $art;
+}
+function fm_audio_artwork_map($dir){
+    $map=['tracks'=>[],'album'=>'','lyrics'=>[]];$items=@scandir($dir);if(!$items)return$map;
+    $imageExt=['jpg','jpeg','png','webp','gif','avif','bmp','tif','tiff'];$albumNames=['cover','folder','album','front','artwork'];
+    $audioExt='mp1|mp2|mp3|mpa|mpga|mpeg|wav|wave|rf64|bwf|flac|ogg|oga|opus|spx|aac|adts|m4a|m4b|m4p|alac|aiff|aif|aifc|wma|amr|caf|mid|midi|3gp|ape|ac3|dsf|dff|weba|ra|ram|au|snd|wv|wvc|tta|mpc|mp\+';
+    foreach($items as $name){
+        if($name==='.'||$name==='..'||$name===''||$name[0]==='.')continue;
+        $path=$dir.DIRECTORY_SEPARATOR.$name;$ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));
+        if(!is_file($path)||is_link($path)||fm_is_manager_internal_path($path))continue;
+        if($ext==='lrc'){
+            $base=strtolower(pathinfo($name,PATHINFO_FILENAME));$url='?audio_lyrics=1&raw='.urlencode($name).'&dir='.urlencode($dir);
+            if(!isset($map['lyrics'][$base]))$map['lyrics'][$base]=$url;
+            if(preg_match('/\.('.$audioExt.')$/i',$base)){$short=preg_replace('/\.('.$audioExt.')$/i','',$base);if($short!==''&&!isset($map['lyrics'][$short]))$map['lyrics'][$short]=$url;}
+            continue;
+        }
+        if(!in_array($ext,$imageExt,true))continue;
+        $base=strtolower(pathinfo($name,PATHINFO_FILENAME));
+        $url='?raw='.urlencode($name).'&dir='.urlencode($dir);
+        if(!isset($map['tracks'][$base]))$map['tracks'][$base]=$url;
+        if(preg_match('/\.('.$audioExt.')$/i',$base)){$short=preg_replace('/\.('.$audioExt.')$/i','',$base);if($short!==''&&!isset($map['tracks'][$short]))$map['tracks'][$short]=$url;}
+        if($map['album']===''&&in_array($base,$albumNames,true))$map['album']=$url;
+    }
+    return$map;
+}
+function fm_ini_bytes($value){
+    $value=trim((string)$value);if($value===''||$value==='-1')return PHP_INT_MAX;
+    if(!preg_match('/^([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?)b?$/i',$value,$m))return PHP_INT_MAX;
+    $n=(float)$m[1];$unit=strtolower($m[2]??'');$power=[''=>0,'k'=>1,'m'=>2,'g'=>3,'t'=>4,'p'=>5,'e'=>6][$unit]??0;
+    return(int)min(PHP_INT_MAX,$n*pow(1024,$power));
+}
+function fm_upload_chunk_bytes(){
+    $maxUpload=fm_ini_bytes(ini_get('upload_max_filesize'));$postLimit=trim((string)ini_get('post_max_size'));$maxPost=$postLimit==='0'?PHP_INT_MAX:fm_ini_bytes($postLimit);
+    $usable=min($maxUpload,$maxPost>65536?$maxPost-65536:$maxPost);
+    return min(1048576,max(8192,(int)floor($usable*.60)));
+}
+function fm_audio_tag_text($raw){
+    if($raw==='')return'';
+    $enc=ord($raw[0]);$text=substr($raw,1);
+    if($enc===0&&function_exists('iconv'))$text=@iconv('ISO-8859-1','UTF-8//IGNORE',$text);
+    elseif(($enc===1||$enc===2)&&function_exists('iconv'))$text=@iconv($enc===1?'UTF-16':'UTF-16BE','UTF-8//IGNORE',$text);
+    elseif($enc===3&&function_exists('iconv'))$text=@iconv('UTF-8','UTF-8//IGNORE',$text);
+    if($text===false||$text===null)$text='';
+    $text=str_replace("\0",'',$text);
+    if(!function_exists('iconv'))$text=preg_replace('/[^\x09\x0A\x0D\x20-\x7E]/','',$text);
+    return trim(preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u','',(string)$text)??'');
+}
+function fm_audio_embedded_tags($path){
+    $tags=['title'=>'','artist'=>'','album'=>'','year'=>'','genre'=>''];$fh=@fopen($path,'rb');if(!$fh)return$tags;
+    $sig=fread($fh,4);
+    if($sig==="ID3\2"||$sig==="ID3\3"||$sig==="ID3\4"){
+        $major=ord($sig[3]);$rest=fread($fh,6);
+        if(strlen($rest)===6){
+            $size=(ord($rest[2])<<21)|(ord($rest[3])<<14)|(ord($rest[4])<<7)|ord($rest[5]);
+            if($size>0&&$size<=4194304){
+                $data=fread($fh,$size);$p=0;$header=$major===2?6:10;
+                while(strlen($data)-$p>=$header){
+                    $id=substr($data,$p,$major===2?3:4);if(trim($id,"\0")==='')break;
+                    if($major===2)$frameSize=(ord($data[$p+3])<<16)|(ord($data[$p+4])<<8)|ord($data[$p+5]);
+                    else{$frameSize=unpack('N',substr($data,$p+4,4))[1];if($major===4)$frameSize=(ord($data[$p+4])<<21)|(ord($data[$p+5])<<14)|(ord($data[$p+6])<<7)|ord($data[$p+7]);}
+                    $p+=$header;if($frameSize<1||$frameSize>1048576||$p+$frameSize>strlen($data))break;
+                    $fields=$major===2?['TT2'=>'title','TP1'=>'artist','TAL'=>'album','TYE'=>'year','TCO'=>'genre']:['TIT2'=>'title','TPE1'=>'artist','TALB'=>'album','TDRC'=>'year','TYER'=>'year','TCON'=>'genre'];
+                    $key=$fields[$id]??'';
+                    if($key!==''){
+                        $value=fm_audio_tag_text(substr($data,$p,$frameSize));
+                        if($key==='year'&&preg_match('/\b\d{4}\b/',$value,$yearMatch))$value=$yearMatch[0];
+                        if($value!=='')$tags[$key]=$value;
+                    }
+                    $p+=$frameSize;
+                    if($tags['title']!==''&&$tags['artist']!==''&&$tags['album']!==''&&$tags['year']!==''&&$tags['genre']!=='')break;
+                }
+            }
+        }
+    }elseif($sig==='fLaC'){
+        $scanned=0;$fieldMap=['title'=>'title','artist'=>'artist','album'=>'album','date'=>'year','year'=>'year','genre'=>'genre'];
+        while(!feof($fh)&&$scanned<8388608){
+            $h=fread($fh,4);if(strlen($h)!==4)break;
+            $last=(ord($h[0])&0x80)!==0;$kind=ord($h[0])&0x7f;$len=(ord($h[1])<<16)|(ord($h[2])<<8)|ord($h[3]);$scanned+=$len+4;
+            if($kind===4&&$len>8&&$len<=4194304){
+                $b=fread($fh,$len);$pos=0;
+                if(strlen($b)<8)break;
+                $vendor=unpack('V',substr($b,$pos,4))[1];$pos+=4+$vendor;
+                if($pos+4>strlen($b))break;
+                $count=unpack('V',substr($b,$pos,4))[1];$pos+=4;
+                for($i=0;$i<min($count,2000)&&$pos+4<=strlen($b);$i++){
+                    $n=unpack('V',substr($b,$pos,4))[1];$pos+=4;if($n<1||$n>65536||$pos+$n>strlen($b))break;
+                    $entry=substr($b,$pos,$n);$pos+=$n;$eq=strpos($entry,'=');if($eq===false)continue;
+                    $key=strtolower(substr($entry,0,$eq));
+                    $field=$fieldMap[$key]??'';
+                    if($field!==''){
+                        $value=substr($entry,$eq+1);
+                        if(function_exists('iconv'))$value=@iconv('UTF-8','UTF-8//IGNORE',$value);
+                        $value=trim(str_replace("\0",'',(string)$value));
+                        if($field==='year'&&preg_match('/\b\d{4}\b/',$value,$yearMatch))$value=$yearMatch[0];
+                        if($value!==''&&$tags[$field]==='')$tags[$field]=$value;
+                    }
+                }
+                break;
+            }
+            if($len>0&&fseek($fh,$len,SEEK_CUR)!==0)break;
+            if($last)break;
+        }
+    }
+    fclose($fh);return$tags;
+}
+function fm_audio_supported_extensions(){
+    return['mp1','mp2','mp3','mpa','mpga','mpeg','wav','wave','rf64','bwf','flac','ogg','oga','opus','spx','aac','adts','m4a','m4b','m4p','alac','aiff','aif','aifc','wma','amr','caf','mid','midi','3gp','ape','ac3','dsf','dff','weba','ra','ram','au','snd','wv','wvc','tta','mpc','mp+'];
+}
+function fm_audio_override_path($dir,$name){
+    return rtrim((string)$dir,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.'.mfm-audio-meta-'.hash('sha256',(string)$name).'.json';
+}
+function fm_audio_rename_override($dir,$oldName,$newName){
+    $oldPath=fm_audio_override_path($dir,$oldName);$newPath=fm_audio_override_path($dir,$newName);
+    if(!is_file($oldPath))return true;
+    if(is_link($oldPath)||is_link($newPath)||file_exists($newPath))return false;
+    if(@rename($oldPath,$newPath))return true;
+    $contents=@file_get_contents($oldPath);
+    if($contents===false)return false;
+    $written=@file_put_contents($newPath,$contents,LOCK_EX);
+    if($written===strlen($contents)&&@file_get_contents($newPath)===$contents){@unlink($oldPath);return true;}
+    if(is_file($newPath)&&!is_link($newPath))@unlink($newPath);
+    return false;
+}
+function fm_audio_override_read($dir,$name){
+    $path=fm_audio_override_path($dir,$name);
+    if(is_link($path)||!is_file($path)||@filesize($path)>65536)return[];
+    $data=@json_decode((string)@file_get_contents($path),true);
+    return is_array($data)?$data:[];
+}
+function fm_audio_override_cover_path($dir,$metadata){
+    $name=is_array($metadata)?(string)($metadata['cover']??''):'';
+    if(!preg_match('/^\.mfm-audio-artwork-[a-f0-9]{32}\.(?:jpg|png|gif|webp)$/i',$name))return'';
+    $path=rtrim((string)$dir,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.$name;
+    return !is_link($path)&&is_file($path)?$path:'';
+}
+
 /* ── Raw ── */
+if(isset($_GET['audio_lyrics'],$_GET['raw'])){
+    $fn=basename((string)$_GET['raw']);$dir=isset($_GET['dir'])?realpath((string)$_GET['dir']):realpath(__DIR__);
+    $root=realpath((string)($_SESSION['fm_root']??__DIR__));$fp=$dir!==false?realpath($dir.DIRECTORY_SEPARATOR.$fn):false;
+    $inside=$fp&&$root&&($fp===$root||strpos($fp.DIRECTORY_SEPARATOR,rtrim($root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0);
+    if($inside&&is_file($fp)&&!is_link($dir.DIRECTORY_SEPARATOR.$fn)&&!fm_is_manager_internal_path($fp)&&strtolower(pathinfo($fn,PATHINFO_EXTENSION))==='lrc'&&$fp!==__FILE__){
+        $size=(int)@filesize($fp);if($size>524288){http_response_code(413);exit;}
+        $text=@file_get_contents($fp,false,null,0,524288);if($text===false){http_response_code(404);exit;}
+        if(substr($text,0,2)==="\xFF\xFE"||substr($text,0,2)==="\xFE\xFF"){if(function_exists('iconv'))$text=@iconv('UTF-16','UTF-8//IGNORE',$text)?:'';}
+        elseif(substr($text,0,3)==="\xEF\xBB\xBF")$text=substr($text,3);
+        header('Content-Type: text/plain; charset=utf-8');header('X-Content-Type-Options: nosniff');header('Cache-Control: private, max-age=300');header('Content-Length: '.strlen($text));echo$text;exit;
+    }
+    http_response_code(404);exit;
+}
+if(isset($_GET['audio_meta'],$_GET['raw'])){
+    $fn=basename((string)$_GET['raw']);$dir=isset($_GET['dir'])?realpath((string)$_GET['dir']):__DIR__;if($dir===false)$dir=__DIR__;
+    $fp=realpath($dir.'/'.$fn);$root=realpath((string)($_SESSION['fm_root']??__DIR__));
+    $inside=$fp&&$root&&($fp===$root||strpos($fp.DIRECTORY_SEPARATOR,rtrim($root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0);
+    if($inside&&is_file($fp)&&!is_link($dir.'/'.$fn)&&$fp!==__FILE__&&!fm_is_manager_internal_path($fp)&&in_array(strtolower(pathinfo($fn,PATHINFO_EXTENSION)),fm_audio_supported_extensions(),true)){
+        $tags=fm_audio_embedded_tags($fp);$custom=fm_audio_override_read($dir,$fn);
+        foreach(['title','artist','album','year','genre'] as $field)if(array_key_exists($field,$custom)&&is_string($custom[$field]))$tags[$field]=$custom[$field];
+        $tags['has_custom_cover']=fm_audio_override_cover_path($dir,$custom)!=='';
+        header('Content-Type: application/json; charset=utf-8');header('Cache-Control: private, no-store, max-age=0');
+        echo json_encode($tags,JSON_UNESCAPED_UNICODE|JSON_INVALID_UTF8_SUBSTITUTE);exit;
+    }
+    http_response_code(404);exit;
+}
+if(isset($_GET['audio_art'],$_GET['raw'])){
+    $fn=basename((string)$_GET['raw']);$dir=isset($_GET['dir'])?realpath((string)$_GET['dir']):__DIR__;if($dir===false)$dir=__DIR__;
+    $fp=realpath($dir.'/'.$fn);$root=realpath((string)($_SESSION['fm_root']??__DIR__));
+    $inside=$fp&&$root&&($fp===$root||strpos($fp.DIRECTORY_SEPARATOR,rtrim($root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0);
+    if($inside&&is_file($fp)&&!is_link($dir.'/'.$fn)&&$fp!==__FILE__&&!fm_is_manager_internal_path($fp)&&in_array(strtolower(pathinfo($fn,PATHINFO_EXTENSION)),fm_audio_supported_extensions(),true)){
+        $customPath=fm_audio_override_cover_path($dir,fm_audio_override_read($dir,$fn));
+        if($customPath!==''){
+            $mime=['jpg'=>'image/jpeg','png'=>'image/png','gif'=>'image/gif','webp'=>'image/webp'][strtolower(pathinfo($customPath,PATHINFO_EXTENSION))]??'application/octet-stream';
+            header('Content-Type: '.$mime);header('Content-Length: '.(string)@filesize($customPath));header('X-Content-Type-Options: nosniff');header('Cache-Control: private, no-cache, must-revalidate');readfile($customPath);exit;
+        }
+        if(in_array(strtolower(pathinfo($fn,PATHINFO_EXTENSION)),['mp3','mpga','mpeg','flac'],true)){
+            $art=fm_audio_embedded_art($fp);
+            if($art){header('Content-Type: '.$art['mime']);header('Content-Length: '.strlen($art['data']));header('X-Content-Type-Options: nosniff');header('Cache-Control: private, max-age=3600');echo $art['data'];exit;}
+        }
+    }
+    http_response_code(404);exit;
+}
 if(isset($_GET['raw'])){
     $fn=basename($_GET['raw']);$dir=isset($_GET['dir'])?realpath($_GET['dir']):__DIR__;if($dir===false)$dir=__DIR__;
     $fp=realpath($dir.'/'.$fn);
     if($fp&&is_file($fp)&&$fp!==__FILE__){
         $mime=function_exists('mime_content_type')?@mime_content_type($fp):'application/octet-stream';
         if(!$mime)$mime='application/octet-stream';
-        header('Content-Type: '.$mime);header('Content-Length: '.filesize($fp));
-        if(isset($_GET['dl']))header('Content-Disposition: attachment; filename="'.$fn.'"');
-        readfile($fp);exit;
+        $ext=strtolower(pathinfo($fn,PATHINFO_EXTENSION));$audioMimes=['mp1'=>'audio/mpeg','mpa'=>'audio/mpeg','mp3'=>'audio/mpeg','mpga'=>'audio/mpeg','mpeg'=>'audio/mpeg','mp2'=>'audio/mpeg','wav'=>'audio/wav','wave'=>'audio/wav','rf64'=>'audio/wav','bwf'=>'audio/wav','flac'=>'audio/flac','ogg'=>'audio/ogg','oga'=>'audio/ogg','opus'=>'audio/ogg','spx'=>'audio/ogg','aac'=>'audio/aac','adts'=>'audio/aac','m4a'=>'audio/mp4','m4b'=>'audio/mp4','m4p'=>'audio/mp4','alac'=>'audio/mp4','aiff'=>'audio/aiff','aif'=>'audio/aiff','aifc'=>'audio/aiff','wma'=>'audio/x-ms-wma','amr'=>'audio/amr','caf'=>'audio/x-caf','mid'=>'audio/midi','midi'=>'audio/midi','3gp'=>'audio/3gpp','ape'=>'audio/ape','ac3'=>'audio/ac3','dsf'=>'audio/dsf','dff'=>'audio/dff','weba'=>'audio/webm','ra'=>'audio/vnd.rn-realaudio','ram'=>'audio/vnd.rn-realaudio','au'=>'audio/basic','snd'=>'audio/basic','wv'=>'audio/wavpack','wvc'=>'audio/wavpack','tta'=>'audio/x-tta','mpc'=>'audio/x-musepack','mp+'=>'audio/x-musepack'];
+        $isAudio=in_array($ext,['mp1','mpa','mp3','mpga','mpeg','mp2','wav','wave','rf64','bwf','flac','ogg','oga','opus','spx','aac','adts','m4a','m4b','m4p','alac','aiff','aif','aifc','wma','amr','caf','mid','midi','3gp','ape','ac3','dsf','dff','weba','ra','ram','au','snd','wv','wvc','tta','mpc','mp+'],true);
+        if($isAudio)$mime=$audioMimes[$ext]??'application/octet-stream';
+        $size=(int)@filesize($fp);header('Content-Type: '.$mime);header('X-Content-Type-Options: nosniff');
+        if(isset($_GET['dl']))header("Content-Disposition: attachment; filename*=UTF-8''".rawurlencode($fn));
+        if($isAudio&&!isset($_GET['dl'])){
+            header('Accept-Ranges: bytes');$start=0;$end=max(0,$size-1);$status=200;
+            if(isset($_SERVER['HTTP_RANGE'])&&preg_match('/^bytes=(\d*)-(\d*)$/',trim((string)$_SERVER['HTTP_RANGE']),$match)){
+                if($size<1||($match[1]===''&&$match[2]==='')){http_response_code(416);header('Content-Range: bytes */'.$size);header('Content-Length: 0');exit;}
+                if($match[1]===''){$suffix=(int)$match[2];if($suffix<1){http_response_code(416);header('Content-Range: bytes */'.$size);header('Content-Length: 0');exit;}$start=max(0,$size-$suffix);}
+                else $start=(int)$match[1];
+                $end=$match[2]===''?$size-1:min((int)$match[2],$size-1);
+                if($start>=$size||$end<$start){http_response_code(416);header('Content-Range: bytes */'.$size);header('Content-Length: 0');exit;}
+                $status=206;http_response_code(206);header('Content-Range: bytes '.$start.'-'.$end.'/'.$size);
+            }
+            $length=$size>0?$end-$start+1:0;header('Content-Length: '.$length);
+            if(($_SERVER['REQUEST_METHOD']??'GET')!=='HEAD'&&$length>0){
+                $stream=@fopen($fp,'rb');if($stream){@fseek($stream,$start);$remaining=$length;while($remaining>0&&!feof($stream)&&!connection_aborted()){$chunk=fread($stream,min(8192,$remaining));if($chunk===false||$chunk==='')break;echo $chunk;$remaining-=strlen($chunk);}fclose($stream);}
+            }
+            exit;
+        }
+        header('Content-Length: '.$size);
+        if(($_SERVER['REQUEST_METHOD']??'GET')!=='HEAD')readfile($fp);exit;
     }
     http_response_code(404);exit;
 }
@@ -12154,10 +12627,6 @@ a.nt:hover{color:var(--link)}
 .filter-bar::-webkit-scrollbar{display:none}
 .fb-btn{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:20px;font-size:11.5px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--t2);cursor:pointer;white-space:nowrap;transition:all .15s;-webkit-user-select:none;user-select:none}
 .fb-btn:hover{background:var(--hov);color:var(--t1);border-color:var(--border2)}.fb-btn.active{background:rgba(133,137,140,.12);color:var(--link);border-color:rgba(133,137,140,.3)}
-
-/* ══ BULK BAR ══ */
-.bulk-bar{position:absolute;left:50%;bottom:14px;transform:translate(-50%,130%);background:var(--raised);border:1px solid var(--border2);border-radius:13px;padding:7px 9px;display:flex;align-items:center;gap:6px;box-shadow:0 16px 48px rgba(0,0,0,.6);transition:transform .28s var(--spring);z-index:80}
-.bulk-bar.show{transform:translate(-50%,0)}.bkc{font-size:12px;color:var(--t1);font-weight:700;padding:0 5px;white-space:nowrap}
 
 /* ══ STATUS BAR ══ */
  .bar{grid-area:bar;background:linear-gradient(90deg,var(--indigo2),#606467);display:flex;align-items:center;padding:0 12px;gap:16px;overflow:hidden}
@@ -13002,8 +13471,6 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   /* Hide table actions, use sheet instead */
   .acts{display:none}
   .bar{padding:0 10px;gap:10px;overflow-x:auto;overflow-y:hidden;white-space:nowrap}.bs{font-size:10px;flex-shrink:0}.br{gap:10px;flex-shrink:0}
-  .bulk-bar{width:calc(100% - 20px);left:10px;right:10px;transform:translate(0,130%);flex-wrap:wrap;padding:10px;gap:6px}
-  .bulk-bar.show{transform:translate(0,0)}.bulk-bar .btn{min-height:40px}
   .mod,.prev-box{max-height:90dvh}
   .info-g{grid-template-columns:1fr}
   textarea.code{min-height:360px}
@@ -13031,6 +13498,186 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   .toolbar .tb-row{gap:5px}
   .toolbar .tb-row .inp{min-width:0}
   .content{padding:8px}
+}
+
+/* ══ LOCAL AUDIO PLAYER ══ */
+.fm-audio-file-icon{position:relative;overflow:hidden}
+.fm-audio-file-icon .fm-track-art{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit}
+.gi-ic .fm-track-art{width:100%;height:100%;border-radius:inherit;object-fit:cover}
+.fm-music-dock{display:none;position:fixed;z-index:275;left:calc(var(--sw) + 14px);right:14px;bottom:var(--bh);height:62px;max-width:920px;margin-left:auto;align-items:center;gap:14px;padding:7px 12px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(28,29,30,.96);box-shadow:0 12px 40px rgba(0,0,0,.48);backdrop-filter:blur(18px);color:#fff;transition:opacity .28s ease,transform .4s cubic-bezier(.22,.8,.2,1)}
+.fm-music-dock.visible{display:flex;animation:fmDockIn .3s cubic-bezier(.2,.8,.2,1) both}
+@keyframes fmDockIn{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.fm-music-dock.fm-dock-expanding{opacity:0;transform:translate3d(0,22px,0) scale(.975);pointer-events:none}
+.fm-music-dock.fm-dock-in-front{z-index:710;opacity:var(--fm-dock-handoff-opacity,0);transition:none}
+.fm-music-mini-track{display:flex;align-items:center;gap:10px;min-width:0;flex:1;padding:0;border:0;background:none;color:inherit;text-align:left;cursor:pointer}
+.fm-music-mini-art{position:relative;display:grid;place-items:center;width:44px;height:44px;flex:0 0 44px;border-radius:7px;background:linear-gradient(140deg,#343735,#161817);overflow:hidden}
+.fm-music-mini-art:before{content:"";width:14px;height:14px;border:2px solid #8b928d;border-radius:50%;opacity:.7}
+.fm-music-mini-art img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.fm-music-mini-copy{display:flex;flex-direction:column;min-width:0;gap:2px}
+.fm-music-mini-copy strong,.fm-music-mini-copy span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fm-music-mini-copy strong{font-size:12px;font-weight:650;color:#fff}
+.fm-music-mini-copy span{font-size:10px;color:rgba(255,255,255,.62)}
+.fm-music-mini-controls{display:flex;align-items:center;gap:11px;flex-shrink:0}
+.fm-music-icon,.fm-music-mini-play,.fm-music-play,.fm-music-download,.fm-music-queue-toggle{display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:#b8bdb9;cursor:pointer;transition:color .16s,transform .16s,background .16s}
+.fm-music-icon:hover,.fm-music-download:hover,.fm-music-queue-toggle:hover{color:#fff}
+.fm-music-icon:active,.fm-music-mini-play:active,.fm-music-play:active{transform:scale(.92)}
+.fm-music-icon svg,.fm-music-mini-play svg,.fm-music-play svg,.fm-music-download svg,.fm-music-queue-toggle svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.fm-music-mini-play{width:34px;height:34px;border-radius:50%;background:#f3f5f4;color:#171a18}
+.fm-music-mini-play:hover{background:#1ed760;color:#07190c}
+.fm-music-mini-play svg{width:18px;height:18px;fill:currentColor;stroke:none}
+.fm-music-mini-controls .fm-music-double-skip{width:32px;height:36px;border-radius:9px}
+.fm-music-mini-controls .fm-music-double-skip svg{width:23px;height:23px}
+.fm-icon-pause{display:none}
+.fm-playing .fm-icon-play{display:none}.fm-playing .fm-icon-pause{display:block}
+.fm-music-mini-progress{position:absolute;bottom:0;left:12px;right:12px;height:2px;border-radius:2px;background:rgba(255,255,255,.17);overflow:hidden}
+.fm-music-mini-progress span{display:block;width:0;height:100%;background:#1ed760;transition:width .12s linear}
+.fm-music-layer{display:none;position:fixed;inset:0;z-index:480;pointer-events:none}
+.fm-music-layer.open{display:block}
+.shell.fm-music-side-open .main{margin-right:var(--agent-w);transition:margin-right .2s var(--out)}
+.fm-music-panel{position:fixed;z-index:1;top:var(--th);right:0;bottom:var(--bh);width:var(--agent-w);min-width:320px;min-height:0;display:flex;flex-direction:column;overflow:hidden;border-left:1px solid var(--border2);border-radius:0;background:linear-gradient(165deg,#252927 0%,#171918 48%,#111312 100%);box-shadow:-18px 0 48px rgba(0,0,0,.26);color:#fff;pointer-events:auto;opacity:1;transform:translateX(105%);transform-origin:right center;visibility:hidden;transition:transform .28s var(--spring),visibility 0s linear .28s;will-change:transform}
+.fm-music-layer.open .fm-music-panel{transform:translateX(0);visibility:visible;transition:transform .28s var(--spring),visibility 0s}
+.fm-music-layer.closing .fm-music-panel{opacity:1;transform:translateX(105%)}
+.fm-music-head{position:relative;z-index:12;height:54px;min-height:54px;display:flex;align-items:center;gap:10px;padding:0 14px;border-bottom:1px solid rgba(255,255,255,.08);color:#f5f6f5;font-size:12px;font-weight:650}
+.fm-music-head>span{flex:1;min-width:0}
+.fm-music-minimize{width:34px;height:34px;border-radius:50%;color:#e6e9e7}
+.fm-music-minimize svg{width:20px;height:20px}
+.fm-music-options{position:relative;flex:0 0 auto}
+.fm-music-options>summary{display:flex;align-items:center;justify-content:center;width:32px;height:32px;list-style:none;border-radius:8px;color:#c8ceca;cursor:pointer;transition:color .16s,background .16s}
+.fm-music-options>summary::-webkit-details-marker{display:none}
+.fm-music-options>summary::marker{content:""}
+.fm-music-options>summary:hover,.fm-music-options[open]>summary{background:rgba(255,255,255,.09);color:#fff}
+.fm-music-options>summary svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
+.fm-music-options-popover{position:absolute;top:calc(100% + 9px);right:0;z-index:15;width:min(270px,calc(100vw - 30px));padding:13px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:#202320;box-shadow:0 14px 36px rgba(0,0,0,.46);color:#f4f6f4}
+.fm-music-options:not([open])>.fm-music-options-popover{display:none}
+.fm-music-queue-toggle{gap:6px;padding:6px 8px;border-radius:7px;font-size:10px}
+.fm-music-queue-toggle svg{width:16px;height:16px}
+.fm-music-queue-toggle b{min-width:18px;padding:1px 4px;border-radius:9px;background:rgba(255,255,255,.1);color:#fff;font-size:9px}
+.fm-music-scroll{min-height:0;flex:1;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.2) transparent}
+.fm-music-now{padding:22px 22px 16px}
+.fm-music-cover{position:relative;display:grid;place-items:center;width:100%;aspect-ratio:1;margin:0 auto 18px;border-radius:7px;background:linear-gradient(145deg,#343936,#161917);box-shadow:0 18px 38px rgba(0,0,0,.34);overflow:hidden}
+.fm-music-cover-note{width:50px;height:50px;fill:none;stroke:#8a928c;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round;opacity:.75}
+.fm-music-cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.fm-music-track-meta{display:flex;align-items:center;gap:12px;min-width:0}
+.fm-music-track-meta>div{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+.fm-music-track-meta strong,.fm-music-track-meta span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fm-music-track-meta strong{font-size:17px;line-height:1.3;font-weight:730;color:#fff}
+.fm-music-track-meta span{font-size:12px;color:rgba(255,255,255,.62)}
+.fm-music-download{width:36px;height:36px;flex:0 0 36px;border-radius:50%}
+.fm-music-download svg{width:19px;height:19px}
+.fm-music-progress-wrap{margin-top:17px}
+.fm-music-seek{display:block;width:100%;height:4px;margin:0;appearance:none;-webkit-appearance:none;border:0;border-radius:4px;background:linear-gradient(to right,#1ed760 0%,#1ed760 var(--fm-progress,0%),rgba(255,255,255,.22) var(--fm-progress,0%),rgba(255,255,255,.22) 100%);cursor:pointer}
+.fm-music-seek::-webkit-slider-thumb{width:12px;height:12px;appearance:none;-webkit-appearance:none;border:0;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.35);opacity:0;transition:opacity .15s}
+.fm-music-progress-wrap:hover .fm-music-seek::-webkit-slider-thumb{opacity:1}
+.fm-music-seek::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#fff;opacity:0}
+.fm-music-progress-wrap:hover .fm-music-seek::-moz-range-thumb{opacity:1}
+.fm-music-time{display:flex;justify-content:space-between;margin-top:7px;color:rgba(255,255,255,.55);font-size:9px;font-variant-numeric:tabular-nums}
+.fm-music-controls{display:flex;align-items:center;justify-content:center;gap:18px;margin:16px 0 12px}
+.fm-music-skip{width:39px;height:39px;border-radius:11px}
+.fm-music-skip svg{width:23px;height:23px;fill:currentColor;stroke:none}
+.fm-music-play{position:relative;width:48px;height:48px;border-radius:50%;background:#f3f5f4;color:#111513}
+.fm-music-play:hover{background:#1ed760;color:#06160a;transform:scale(1.045)}
+.fm-music-play svg{width:25px;height:25px;fill:currentColor;stroke:none}
+.fm-music-toggle{position:relative;width:28px;height:32px}
+.fm-music-toggle svg{width:17px;height:17px}
+.fm-music-toggle.active{color:#1ed760}
+.fm-music-toggle.active:after{content:"";position:absolute;bottom:1px;width:4px;height:4px;border-radius:50%;background:#1ed760}
+.fm-repeat-one{display:none;position:absolute;top:3px;right:1px;padding:0 2px;border-radius:4px;background:#1ed760;color:#09210e;font-size:8px;font-weight:800}
+.fm-music-toggle.repeat-one .fm-repeat-one{display:block}
+.fm-music-queue{margin-left:-22px;margin-right:-22px;padding:4px 18px 18px}
+.fm-music-queue-heading{display:flex;align-items:end;justify-content:space-between;gap:12px;margin:5px 2px 8px}
+.fm-music-queue-heading>div{display:flex;flex-direction:column;gap:2px}
+.fm-music-queue-heading span{color:rgba(255,255,255,.5);font-size:8px;font-weight:700;letter-spacing:.08em}
+.fm-music-queue-heading strong{font-size:13px;font-weight:700}
+.fm-music-queue-heading>span{font-size:9px;letter-spacing:0}
+.fm-music-queue-list{display:flex;flex-direction:column}
+.fm-music-lyrics{margin:0 18px 12px;padding:12px 13px;border:1px solid rgba(255,255,255,.09);border-radius:11px;background:rgba(255,255,255,.035)}
+.fm-music-lyrics[hidden],#fmMusicLyricsToggle[hidden]{display:none}
+.fm-music-lyrics-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 2px 8px}
+.fm-music-lyrics-heading strong{font-size:12px}.fm-music-lyrics-heading span{color:rgba(255,255,255,.46);font-size:9px}
+.fm-music-lyrics-body{display:flex;flex-direction:column;gap:2px;max-height:min(30dvh,240px);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.18) transparent}
+.fm-music-lyric{width:100%;padding:6px 5px;border:0;border-radius:5px;background:transparent;color:rgba(255,255,255,.54);font:inherit;font-size:12px;font-weight:500;line-height:1.55;text-align:left;cursor:pointer;transition:color .18s,background .18s}
+.fm-music-lyric:hover{background:rgba(255,255,255,.055);color:#fff}
+.fm-music-lyric.current{color:#fff;background:rgba(30,215,96,.1);font-weight:700}
+.fm-music-queue-empty{padding:15px 7px;color:rgba(255,255,255,.55);font-size:11px}
+.fm-music-queue-row{display:flex;align-items:center;gap:10px;width:100%;min-height:49px;padding:5px 6px;border:0;border-radius:7px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:background .14s}
+.fm-music-queue-row:hover{background:rgba(255,255,255,.075)}
+.fm-music-queue-row.current{background:rgba(30,215,96,.1)}
+.fm-music-queue-art{position:relative;display:grid;place-items:center;width:36px;height:36px;flex:0 0 36px;border-radius:4px;background:linear-gradient(145deg,#373c38,#1c201d);overflow:hidden}
+.fm-music-queue-art:before{content:"";width:12px;height:12px;border:1.5px solid #929991;border-radius:50%}
+.fm-music-queue-art img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.fm-music-queue-meta{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.fm-music-queue-meta strong,.fm-music-queue-meta span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fm-music-queue-meta strong{font-size:11px;font-weight:600;color:#f7f8f7}
+.fm-music-queue-meta span{font-size:9px;color:rgba(255,255,255,.52)}
+.fm-music-queue-row.current .fm-music-queue-meta strong{color:#1ed760}
+.fm-music-queue-state{width:16px;color:#1ed760;font-size:11px;text-align:center}
+.fm-music-double-skip svg{width:27px;height:27px;fill:currentColor;stroke:currentColor;stroke-width:.75;stroke-linecap:round;stroke-linejoin:round;paint-order:stroke fill}
+.fm-music-double-skip:hover{background:rgba(255,255,255,.075)}
+.fm-music-layer .fm-track-art{max-width:none}
+.fm-audio-edit-overlay{display:none;position:fixed;inset:0;z-index:760;align-items:center;justify-content:center;padding:18px;background:rgba(0,0,0,.72);backdrop-filter:blur(6px)}
+.fm-audio-edit-overlay.open{display:flex}
+.fm-audio-edit-dialog{width:min(100%,480px);max-height:min(92dvh,760px);overflow:auto;padding:20px;border:1px solid rgba(255,255,255,.13);border-radius:16px;background:linear-gradient(155deg,#292d2a,#171918 62%,#111312);box-shadow:0 24px 80px rgba(0,0,0,.65);color:#f4f6f4}
+.fm-audio-edit-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+.fm-audio-edit-head h2{margin:0;font-size:17px}
+.fm-audio-edit-fields{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.fm-audio-edit-field{display:flex;flex-direction:column;gap:5px;min-width:0}
+.fm-audio-edit-field.full{grid-column:1/-1}
+.fm-audio-edit-field label{font-size:10px;font-weight:650;color:rgba(255,255,255,.68)}
+.fm-audio-edit-field input{width:100%;min-width:0}
+.fm-audio-edit-art{display:flex;align-items:center;gap:12px}
+.fm-audio-edit-art img,.fm-audio-edit-art-placeholder{width:72px;height:72px;flex:0 0 72px;border-radius:8px;object-fit:cover;background:rgba(255,255,255,.07)}
+.fm-audio-edit-dialog [hidden]{display:none!important}
+.fm-audio-edit-art-placeholder{display:grid;place-items:center;color:rgba(255,255,255,.35)}
+.fm-audio-edit-art-placeholder svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:1.5}
+.fm-audio-edit-note{margin:8px 0 0;color:rgba(255,255,255,.48);font-size:10px;line-height:1.5}
+.fm-audio-edit-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.fm-music-extra-controls{display:flex;flex-direction:column;align-items:stretch;gap:12px;margin:0}
+.fm-music-options-seek{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.fm-music-extra-controls button,.fm-music-extra-controls select{height:34px;border:1px solid rgba(255,255,255,.13);border-radius:7px;background:rgba(255,255,255,.055);color:#f4f6f4;font:inherit;font-size:11px}
+.fm-music-extra-controls button{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:100%;padding:0 8px;cursor:pointer}
+.fm-music-extra-controls button svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.fm-music-extra-controls button:hover,.fm-music-extra-controls select:hover{background:rgba(255,255,255,.11)}
+.fm-music-extra-controls label{display:grid;grid-template-columns:56px minmax(0,1fr);align-items:center;gap:8px;color:rgba(255,255,255,.68);font-size:10px}
+.fm-music-extra-controls select{width:100%;padding:0 8px}
+.fm-music-extra-controls option{background:#202320;color:#fff}
+.fm-music-extra-controls .fm-music-volume{width:auto}
+.fm-music-volume input{width:100%;height:18px;accent-color:#1ed760}
+.fm-music-cache-status{min-height:14px;margin:2px 0 0;padding-top:9px;border-top:1px solid rgba(255,255,255,.09);color:rgba(255,255,255,.52);font-size:9px;line-height:1.45;text-align:left}
+@media(max-width:768px){
+  .fm-music-dock{left:8px;right:8px;bottom:calc(var(--bh) + env(safe-area-inset-bottom));height:62px;max-width:none;margin:0;padding:7px 10px;border-radius:11px}
+  .shell.fm-music-side-open .main{margin-right:0}
+  .fm-music-mini-controls{gap:8px}
+  .fm-music-mini-controls .fm-music-icon{display:inline-flex}
+  .fm-music-layer.open{position:fixed;z-index:700;inset:0;isolation:isolate;background:transparent;pointer-events:auto}
+  .fm-music-layer.open:before{content:"";position:fixed;z-index:0;inset:0;pointer-events:none;background:linear-gradient(160deg,#292e2a 0%,#151716 52%,#111312 100%);opacity:var(--fm-player-scrim-opacity,1);transition:opacity .42s cubic-bezier(.22,.8,.2,1)}
+  .fm-music-layer.closing:before{opacity:0}
+  .fm-music-layer.dragging:before{transition:none}
+  .fm-music-layer.dragging .fm-music-panel{transition:none!important;animation:none!important}
+  .fm-music-panel{inset:0;width:100%;min-width:0;height:100dvh;max-height:100dvh;top:0;right:0;bottom:0;border:0;border-radius:24px 24px 0 0;background:transparent;box-shadow:none;transform:translate3d(0,15vh,0) scale(.96);transform-origin:center bottom}
+  .fm-music-panel.fm-player-entering{animation:fmPlayerLiftIn .46s cubic-bezier(.22,.8,.2,1) both}
+  @keyframes fmPlayerLiftIn{from{opacity:0;transform:translate3d(0,15vh,0) scale(.96);border-radius:24px 24px 0 0}to{opacity:1;transform:none;border-radius:0}}
+  .fm-music-layer.open .fm-music-panel{transform:none}
+  .fm-music-layer.closing .fm-music-panel{opacity:0;transform:translate3d(0,100%,0) scale(.96)}
+  .fm-music-head{height:calc(58px + env(safe-area-inset-top));min-height:calc(58px + env(safe-area-inset-top));padding:env(safe-area-inset-top) 17px 0}
+  .fm-music-now{padding:clamp(20px,7vw,34px) clamp(20px,7vw,34px) 18px}
+  .fm-music-cover{width:100%;min-width:0;max-width:none;margin-bottom:clamp(18px,4vh,32px)}
+  .fm-music-track-meta strong{font-size:clamp(17px,4.8vw,21px)}
+  .fm-music-controls{gap:clamp(15px,5vw,27px);margin:clamp(18px,4vh,30px) 0 17px}
+  .fm-music-play{width:54px;height:54px}
+  .fm-music-play svg{width:28px;height:28px}
+  .fm-music-queue{margin-left:calc(0px - clamp(20px,7vw,34px));margin-right:calc(0px - clamp(20px,7vw,34px));padding:0 23px calc(24px + env(safe-area-inset-bottom))}
+  .fm-music-queue-list{max-height:28dvh;overflow:auto}
+  .fm-music-queue-toggle{min-height:36px}
+  .fm-music-seek::-webkit-slider-thumb{opacity:1}
+}
+@media(max-width:380px){
+  .fm-music-now{padding:18px}
+  .fm-music-cover{width:100%}
+  .fm-music-controls{gap:13px}
+  .fm-music-queue{margin-left:-18px;margin-right:-18px;padding-left:16px;padding-right:16px}
+}
+@media(prefers-reduced-motion:reduce){
+  .fm-music-dock,.fm-music-panel,.fm-music-icon,.fm-music-mini-play,.fm-music-play{animation:none!important;transition:none!important}
 }
 </style>
 </head>
@@ -13440,7 +14087,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
             </tr>
           </thead>
           <tbody>
-          <?php $tags=$fm->getTagsFor($fm->getCwd());?>
+          <?php $tags=$fm->getTagsFor($fm->getCwd());$audioArtMap=fm_audio_artwork_map($fm->getCwd());?>
           <?php foreach($list['folders'] as $f):
             $perms=substr(sprintf('%o',fileperms($fm->getCwd().'/'.$f['name'])),-4);
           ?>
@@ -13468,12 +14115,21 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
             $perms=substr(sprintf('%o',fileperms($fm->getCwd().'/'.$f['name'])),-4);
             $prev=$fm->canPreview($type);$isTar=$fm->isTar($f['name']);
             $rawUrl='?raw='.urlencode($f['name']).'&dir='.urlencode($fm->getCwd());
+          $audioStem=strtolower(pathinfo($f['name'],PATHINFO_FILENAME));$audioFullName=strtolower($f['name']);
+          $audioSidecar=$type==='audio'?($audioArtMap['tracks'][$audioFullName]??$audioArtMap['tracks'][$audioStem]??$audioArtMap['album']):'';
+          $audioLyrics=$type==='audio'?($audioArtMap['lyrics'][$audioFullName]??$audioArtMap['lyrics'][$audioStem]??''):'';
+             $audioEmbedded=$type==='audio'&&in_array($ext,['mp3','mpga','mpeg','flac'],true)?'?audio_art=1&raw='.urlencode($f['name']).'&dir='.urlencode($fm->getCwd()):'';
+             $audioDefaultArt=$audioEmbedded?:$audioSidecar;
+             $audioOverride=$type==='audio'?fm_audio_override_read($fm->getCwd(),$f['name']):[];
+             $audioCustomArt=fm_audio_override_cover_path($fm->getCwd(),$audioOverride)!==''?'?audio_art=1&raw='.urlencode($f['name']).'&dir='.urlencode($fm->getCwd()):'';
+             $audioArt=$audioCustomArt?:$audioDefaultArt;
           ?>
           <tr data-name="<?=he($f['name'])?>" data-isdir="0" data-type="<?=$type?>" tabindex="0">
             <td class="cc"><input type="checkbox" class="rck item-ck" value="<?=he($f['name'])?>"></td>
-            <td><div class="nc" <?php if($prev):?>data-preview="<?=he($rawUrl)?>" data-type="<?=$type?>" data-fname="<?=he($f['name'])?>"<?php endif;?>
+            <td><div class="nc" <?php if($prev):?>data-preview="<?=he($rawUrl)?>" data-type="<?=$type?>" data-fname="<?=he($f['name'])?>"<?php endif;?> <?php if($type==='audio'):?>data-art="<?=he($audioArt)?>" data-art-default="<?=he($audioDefaultArt)?>" data-art-fallback="<?=he($audioSidecar)?>" data-lyrics="<?=he($audioLyrics)?>" data-audio-size="<?=max(0,(int)$f['size'])?>" data-audio-mtime="<?=max(0,(int)$f['mtime'])?>"<?php endif;?>
               data-ctx-name="<?=he($f['name'])?>" data-ctx-isdir="0" data-ctx-type="<?=$type?>" data-ctx-raw="<?=he($rawUrl)?>" data-ctx-perm="<?=he($perms)?>">
-              <div class="ib" style="background:<?=$color?>18">
+              <div class="ib <?=$type==='audio'?'fm-audio-file-icon':''?>" style="background:<?=$color?>18">
+                <?php if($type==='audio'):?><img class="fm-track-art" src="<?=he($audioArt)?>" <?php if($audioSidecar):?>data-fallback="<?=he($audioSidecar)?>"<?php endif;?> alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=''}else{this.style.display='none'}"><?php endif;?>
                 <?php if($type==='image'):?><img src="<?=$rawUrl?>" style="width:34px;height:34px;border-radius:9px;object-fit:cover" loading="lazy" onerror="this.style.display='none';this.nextSibling&&(this.nextSibling.style.display='block')"><?php endif;?>
                 <?=svgFile($type)?>
               </div>
@@ -13515,14 +14171,23 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
            $type=$isDir?'folder':$item['type'];$color=$isDir?'#85898C':$fm->getColor($type);
           $rawUrl='?raw='.urlencode($item['name']).'&dir='.urlencode($fm->getCwd());
           $prev=!$isDir&&$fm->canPreview($type);
+          $audioStem=strtolower(pathinfo($item['name'],PATHINFO_FILENAME));$audioFullName=strtolower($item['name']);
+          $audioSidecar=$type==='audio'?($audioArtMap['tracks'][$audioFullName]??$audioArtMap['tracks'][$audioStem]??$audioArtMap['album']):'';
+          $audioLyrics=$type==='audio'?($audioArtMap['lyrics'][$audioFullName]??$audioArtMap['lyrics'][$audioStem]??''):'';
+          $audioExt=strtolower(pathinfo($item['name'],PATHINFO_EXTENSION));
+          $audioEmbedded=$type==='audio'&&in_array($audioExt,['mp3','mpga','mpeg','flac'],true)?'?audio_art=1&raw='.urlencode($item['name']).'&dir='.urlencode($fm->getCwd()):'';
+          $audioDefaultArt=$audioEmbedded?:$audioSidecar;
+          $audioOverride=$type==='audio'?fm_audio_override_read($fm->getCwd(),$item['name']):[];
+          $audioCustomArt=fm_audio_override_cover_path($fm->getCwd(),$audioOverride)!==''?'?audio_art=1&raw='.urlencode($item['name']).'&dir='.urlencode($fm->getCwd()):'';
+          $audioArt=$audioCustomArt?:$audioDefaultArt;
         ?>
-        <div class="gi" data-name="<?=he($item['name'])?>" data-isdir="<?=$isDir?1:0?>"
+        <div class="gi" data-name="<?=he($item['name'])?>" data-isdir="<?=$isDir?1:0?>" data-type="<?=$type?>" <?php if($type==='audio'):?>data-art="<?=he($audioArt)?>" data-art-default="<?=he($audioDefaultArt)?>" data-art-fallback="<?=he($audioSidecar)?>" data-lyrics="<?=he($audioLyrics)?>" data-audio-size="<?=max(0,(int)$item['size'])?>" data-audio-mtime="<?=max(0,(int)$item['mtime'])?>"<?php endif;?>
           <?php if(!$isDir&&$prev):?>data-preview="<?=he($rawUrl)?>" data-type="<?=$type?>" data-fname="<?=he($item['name'])?>"
           <?php elseif($isDir):?>onclick="location.href='?dir=<?=urlencode($fm->getCwd().'/'.$item['name'])?>'"<?php endif;?>
           data-ctx-name="<?=he($item['name'])?>" data-ctx-isdir="<?=$isDir?1:0?>" data-ctx-raw="<?=$isDir?'':he($rawUrl)?>">
           <input type="checkbox" class="rck item-ck gi-ck" value="<?=he($item['name'])?>" onclick="event.stopPropagation()">
           <div class="gi-ic" style="background:<?=$color?>18">
-            <?php if(!$isDir&&$type==='image'):?><img src="<?=$rawUrl?>" class="gi-th" loading="lazy" onerror="this.style.display='none'"><?php elseif($isDir):?><?=svgFolder()?><?php else:?><?=svgFile($type)?><?php endif;?>
+            <?php if(!$isDir&&$type==='image'):?><img src="<?=$rawUrl?>" class="gi-th" loading="lazy" onerror="this.style.display='none'"><?php elseif(!$isDir&&$type==='audio'):?><img src="<?=he($audioArt)?>" class="gi-th fm-track-art" <?php if($audioSidecar):?>data-fallback="<?=he($audioSidecar)?>"<?php endif;?> alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=''}else{this.style.display='none'}"><?php elseif($isDir):?><?=svgFolder()?><?php else:?><?=svgFile($type)?><?php endif;?>
           </div>
           <div class="gi-n"><?=htmlspecialchars($item['name'])?></div>
           <div class="gi-m"><?=$isDir?'DIR':fmtSz($item['size'])?></div>
@@ -13531,16 +14196,6 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       </div>
     </div>
 
-    <!-- BULK BAR -->
-    <div class="bulk-bar" id="bulkBar">
-      <span class="bkc" id="bulkCount">0</span>
-      <button type="button" class="btn btn-xs btn-g" id="bkZip"><svg viewBox="0 0 24 24"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/></svg>ZIP</button>
-      <button type="button" class="btn btn-xs btn-g" id="bkTar"><svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>TAR.GZ</button>
-      <button type="button" class="btn btn-xs btn-blue" id="bkCopy"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy</button>
-      <button type="button" class="btn btn-xs btn-amb" id="bkMove"><svg viewBox="0 0 24 24"><polyline points="16 3 21 3 21 8"/><line x1="21" y1="3" x2="14" y2="10"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>Move</button>
-      <button type="button" class="btn btn-xs btn-g" id="bkChmod"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Chmod</button>
-      <button type="button" class="btn btn-xs btn-red" id="bkDel"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>Delete</button>
-    </div>
     <?php endif;?>
   </div><!-- .content -->
 </main>
@@ -13588,6 +14243,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="ctx-sep"></div>
   <div class="ctx-item" id="ctx-open"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Open</div>
   <div class="ctx-item" id="ctx-edit"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit</div>
+  <div class="ctx-item" id="ctx-audio-info" style="display:none"><svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/><path d="M4 21h16"/></svg>Edit song details</div>
   <div class="ctx-item" id="ctx-dl"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Download</div>
   <div class="ctx-item" id="ctx-prev"><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Preview</div>
   <div class="ctx-sep"></div>
@@ -13628,6 +14284,111 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <div class="prev-body" id="prevBody"></div>
   </div>
 </div>
+
+<!-- LOCAL AUDIO PLAYER -->
+<div class="fm-music-dock" id="fmMusicDock" aria-label="Audio player" aria-hidden="true">
+  <button type="button" class="fm-music-mini-track" id="fmMusicMiniOpen" aria-label="Open full audio player">
+    <span class="fm-music-mini-art"><img id="fmMusicMiniArt" alt="" hidden></span>
+    <span class="fm-music-mini-copy"><strong id="fmMusicMiniTitle">Not playing</strong><span id="fmMusicMiniArtist">Choose an audio file</span></span>
+  </button>
+  <div class="fm-music-mini-controls">
+    <button type="button" class="fm-music-icon fm-music-double-skip" id="fmMusicMiniPrev" title="Previous track" aria-label="Previous track"><svg viewBox="0 0 24 24"><path d="M10.05 6.3Q11 5.6 11 6.7v10.6q0 1.1-.95.4L3.6 12.55q-.7-.55 0-1.1l6.45-5.15Zm10 0Q21 5.6 21 6.7v10.6q0 1.1-.95.4l-6.45-5.15q-.7-.55 0-1.1l6.45-5.15Z"/></svg></button>
+    <button type="button" class="fm-music-mini-play" id="fmMusicMiniPlay" title="Play" aria-label="Play"><svg class="fm-icon-play" viewBox="0 0 24 24"><path d="m8 5 12 7-12 7z"/></svg><svg class="fm-icon-pause" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM15 5h4v14h-4z"/></svg></button>
+    <button type="button" class="fm-music-icon fm-music-double-skip" id="fmMusicMiniNext" title="Next track" aria-label="Next track"><svg viewBox="0 0 24 24"><path d="M13.95 6.3Q13 5.6 13 6.7v10.6q0 1.1.95.4l6.45-5.15q.7-.55 0-1.1l-6.45-5.15Zm-10 0Q3 5.6 3 6.7v10.6q0 1.1.95.4l6.45-5.15q.7-.55 0-1.1L3.95 6.3Z"/></svg></button>
+  </div>
+  <div class="fm-music-mini-progress"><span id="fmMusicMiniProgress"></span></div>
+</div>
+<div class="fm-music-layer" id="fmMusicLayer" aria-hidden="true">
+  <aside class="fm-music-panel" id="fmMusicPanel" aria-label="Now playing">
+    <header class="fm-music-head">
+      <button type="button" class="fm-music-icon fm-music-minimize" id="fmMusicMinimize" title="Minimize player" aria-label="Minimize player"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+      <span id="fmMusicViewTitle">Now playing</span>
+        <button type="button" class="fm-music-queue-toggle" id="fmMusicLyricsToggle" aria-expanded="false" hidden><svg viewBox="0 0 24 24"><path d="M4 6h16M4 11h16M4 16h10"/><path d="M4 21h8"/></svg><span>Lyrics</span></button>
+      <button type="button" class="fm-music-queue-toggle" id="fmMusicQueueToggle" aria-expanded="true"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><path d="m17 16 3 2-3 2"/></svg><span>Queue</span><b id="fmMusicQueueCount">0</b></button>
+      <details class="fm-music-options" id="fmMusicOptions">
+        <summary title="Playback options" aria-label="Playback options" aria-controls="fmMusicOptionsMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v.01M12 12v.01M12 19v.01"/></svg></summary>
+        <div class="fm-music-options-popover" id="fmMusicOptionsMenu" aria-label="Playback options">
+          <div class="fm-music-extra-controls">
+            <div class="fm-music-options-seek">
+              <button type="button" id="fmMusicBack10" title="Back 10 seconds" aria-label="Back 10 seconds"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.2 6"/><path d="M3 4v7h7"/><path d="M12 7v5l3 2"/></svg><span>10 sec</span></button>
+              <button type="button" id="fmMusicForward10" title="Forward 10 seconds" aria-label="Forward 10 seconds"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11a9 9 0 1 0-2.2 6"/><path d="M21 4v7h-7"/><path d="M12 7v5l3 2"/></svg><span>10 sec</span></button>
+            </div>
+            <label for="fmMusicSpeed">Speed
+              <select id="fmMusicSpeed" aria-label="Playback speed">
+                <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="0.9">0.9×</option>
+                <option value="1">1×</option><option value="1.1">1.1×</option><option value="1.25">1.25×</option>
+                <option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option>
+              </select>
+            </label>
+            <label class="fm-music-volume" for="fmMusicVolume">Volume
+              <input id="fmMusicVolume" type="range" min="0" max="100" value="100" aria-label="Volume">
+            </label>
+            <div class="fm-music-cache-status" id="fmMusicCacheStatus" role="status" aria-live="polite">Songs you play are saved in this browser.</div>
+          </div>
+        </div>
+      </details>
+    </header>
+    <div class="fm-music-scroll">
+      <div class="fm-music-now">
+        <div class="fm-music-cover" id="fmMusicCover">
+          <svg class="fm-music-cover-note" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          <img id="fmMusicCoverArt" alt="" hidden>
+        </div>
+        <div class="fm-music-track-meta"><div><strong id="fmMusicTitle">Select a song</strong><span id="fmMusicArtist">Audio from this folder</span></div><button type="button" class="fm-music-download" id="fmMusicDownload" title="Download current track" aria-label="Download current track"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></svg></button></div>
+        <div class="fm-music-progress-wrap">
+          <input id="fmMusicSeek" class="fm-music-seek" type="range" min="0" max="1000" value="0" aria-label="Seek through track">
+          <div class="fm-music-time"><span id="fmMusicElapsed">0:00</span><span id="fmMusicDuration">0:00</span></div>
+        </div>
+        <div class="fm-music-controls">
+          <button type="button" class="fm-music-icon fm-music-toggle" id="fmMusicShuffle" title="Shuffle off" aria-label="Shuffle off"><svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M4 4l5 5m4 6 3 3"/></svg></button>
+          <button type="button" class="fm-music-icon fm-music-skip fm-music-double-skip" id="fmMusicPrev" title="Previous track" aria-label="Previous track"><svg viewBox="0 0 24 24"><path d="M10.05 6.3Q11 5.6 11 6.7v10.6q0 1.1-.95.4L3.6 12.55q-.7-.55 0-1.1l6.45-5.15Zm10 0Q21 5.6 21 6.7v10.6q0 1.1-.95.4l-6.45-5.15q-.7-.55 0-1.1l6.45-5.15Z"/></svg></button>
+          <button type="button" class="fm-music-play" id="fmMusicPlay" title="Play" aria-label="Play"><svg class="fm-icon-play" viewBox="0 0 24 24"><path d="m8 5 12 7-12 7z"/></svg><svg class="fm-icon-pause" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM15 5h4v14h-4z"/></svg></button>
+          <button type="button" class="fm-music-icon fm-music-skip fm-music-double-skip" id="fmMusicNext" title="Next track" aria-label="Next track"><svg viewBox="0 0 24 24"><path d="M13.95 6.3Q13 5.6 13 6.7v10.6q0 1.1.95.4l6.45-5.15q.7-.55 0-1.1l-6.45-5.15Zm-10 0Q3 5.6 3 6.7v10.6q0 1.1.95.4l6.45-5.15q.7-.55 0-1.1L3.95 6.3Z"/></svg></button>
+          <button type="button" class="fm-music-icon fm-music-toggle" id="fmMusicRepeat" title="Repeat off" aria-label="Repeat off"><svg viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg><span class="fm-repeat-one">1</span></button>
+        </div>
+        <section class="fm-music-queue" id="fmMusicQueue">
+          <div class="fm-music-queue-heading"><div><span>PLAYING FROM THIS FOLDER</span><strong>All songs</strong></div><span id="fmMusicQueueSummary"></span></div>
+          <div class="fm-music-queue-list" id="fmMusicQueueList"></div>
+        </section>
+      </div>
+      <section class="fm-music-lyrics" id="fmMusicLyrics" hidden aria-label="Song lyrics">
+        <div class="fm-music-lyrics-heading"><strong>Lyrics</strong><span id="fmMusicLyricsSource">Synced lyrics</span></div>
+        <div class="fm-music-lyrics-body" id="fmMusicLyricsBody"></div>
+      </section>
+    </div>
+  </aside>
+</div>
+<audio id="fmMusicAudio" preload="metadata"></audio>
+<?php if(!$fm->isRO()):?>
+<div class="fm-audio-edit-overlay" id="fmAudioEditOverlay" aria-hidden="true">
+  <section class="fm-audio-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="fmAudioEditHeading">
+    <div class="fm-audio-edit-head">
+      <h2 id="fmAudioEditHeading">Edit song details</h2>
+      <button type="button" class="btn btn-icon btn-g" id="fmAudioEditClose" aria-label="Close"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div class="fm-audio-edit-fields">
+      <div class="fm-audio-edit-field full"><label for="fmAudioEditTitle">Title</label><input class="inp" id="fmAudioEditTitle" maxlength="256" autocomplete="off"></div>
+      <div class="fm-audio-edit-field"><label for="fmAudioEditArtist">Artist</label><input class="inp" id="fmAudioEditArtist" maxlength="256" autocomplete="off"></div>
+      <div class="fm-audio-edit-field"><label for="fmAudioEditAlbum">Album</label><input class="inp" id="fmAudioEditAlbum" maxlength="256" autocomplete="off"></div>
+      <div class="fm-audio-edit-field"><label for="fmAudioEditYear">Year</label><input class="inp" id="fmAudioEditYear" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" autocomplete="off"></div>
+      <div class="fm-audio-edit-field"><label for="fmAudioEditGenre">Genre</label><input class="inp" id="fmAudioEditGenre" maxlength="256" autocomplete="off"></div>
+      <div class="fm-audio-edit-field full">
+        <label>Cover image</label>
+        <div class="fm-audio-edit-art">
+          <img id="fmAudioEditArtPreview" alt="Current cover" hidden>
+          <span class="fm-audio-edit-art-placeholder" id="fmAudioEditArtPlaceholder"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m20 15-5-5L5 20"/></svg></span>
+          <div class="fm-audio-edit-field"><input class="inp" id="fmAudioEditCover" type="file" accept="image/jpeg,image/png,image/gif,image/webp"><button type="button" class="btn btn-xs btn-g" id="fmAudioEditRemoveCover">Remove custom cover</button></div>
+        </div>
+      </div>
+    </div>
+    <p class="fm-audio-edit-note">Changes are saved alongside the audio file; its audio data is not rewritten. Renaming the file remains available from the file actions.</p>
+    <div class="fm-audio-edit-actions">
+      <button type="button" class="btn btn-sm btn-g" id="fmAudioEditCancel">Cancel</button>
+      <button type="button" class="btn btn-sm btn-p" id="fmAudioEditSave">Save changes</button>
+    </div>
+  </section>
+</div>
+<?php endif;?>
 
 <!-- TERMINAL MODAL -->
 <?php if(!$fm->isRO()):?>
@@ -14576,6 +15337,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 const CWD  = <?=json_encode($fm->getCwd())?>;
 const FM_MAIN_PATH = <?=json_encode(realpath(__DIR__)?:__DIR__)?>;
 const CSRF = <?=json_encode($_SESSION['csrf_token'])?>;
+const FM_AUDIO_CACHE_SCOPE = <?=json_encode(hash('sha256',(string)($_SESSION['fm_user']??'')."\0".(string)($_SESSION['fm_root']??'')))?>;
+const FM_UPLOAD_CHUNK_BYTES = <?=fm_upload_chunk_bytes()?>;
 const FM_SSH_TERMINAL_USER = <?=json_encode($sshTerminalUser,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)?>;
 const FM_SSH_TERMINAL_REQUEST_ERROR = <?=json_encode($sshTerminalRequestError,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)?>;
 const FM_CMS_AUTO_LOGIN = <?=!empty($_SESSION['fm_wp_auto_login_pending'])?'true':'false'?>;
@@ -16107,7 +16870,8 @@ function showCtx(x,y,data){
   const isDir=data.isDir;const isRO=RO;
   // Show/hide items
   qs('ctx-open').style.display='flex';
-  qs('ctx-edit').style.display=isDir?'none':'flex';
+  qs('ctx-edit').style.display=(isDir||data.type==='audio')?'none':'flex';
+  qs('ctx-audio-info').style.display=(!isDir&&data.type==='audio'&&!isRO)?'flex':'none';
   qs('ctx-dl').style.display=isDir?'none':'flex';
   qs('ctx-prev').style.display=(data.raw&&!isDir)?'flex':'none';
   qs('ctx-hash').style.display=isDir?'none':'flex';
@@ -16148,6 +16912,7 @@ document.addEventListener('scroll',closeCtx,true);
 // Context menu actions
 qs('ctx-open')?.addEventListener('click',()=>{closeCtx();doAction('open',ctxData.name,ctxData);});
 qs('ctx-edit')?.addEventListener('click',()=>{closeCtx();doAction('edit',ctxData.name);});
+qs('ctx-audio-info')?.addEventListener('click',()=>{closeCtx();fmMusicOpenEditor(ctxData.name);});
 qs('ctx-dl')?.addEventListener('click',()=>{closeCtx();doAction('dl',ctxData.name,ctxData);});
 qs('ctx-prev')?.addEventListener('click',()=>{closeCtx();doAction('prev',ctxData.name,ctxData);});
 qs('ctx-path')?.addEventListener('click',()=>{closeCtx();doAction('path',ctxData.name);});
@@ -16171,7 +16936,7 @@ function openSheet(name,isDir,raw,type,size){
   const g=document.getElementById('sh-grid');
   const btns=[
     {icon:'<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',label:'Open',cls:'',act:()=>doAction('open',name,{isDir,raw,type})},
-    !isDir?{icon:'<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',label:'Edit',cls:'sh-blue',act:()=>doAction('edit',name)}:null,
+    !isDir&&!RO?{icon:type==='audio'?'<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>':'<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',label:type==='audio'?'Song details':'Edit',cls:'sh-blue',act:()=>type==='audio'?fmMusicOpenEditor(name):doAction('edit',name)}:null,
     !isDir?{icon:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',label:'Download',cls:'sh-blue',act:()=>{if(raw)location.href=raw+'&dl=1';}}:null,
     {icon:'<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',label:'Copy Path',cls:'',act:()=>{navigator.clipboard.writeText(CWD+'/'+name).then(()=>toast('Path copied!'));}},
     (!isDir&&['text','code','data','config','markdown'].includes(type))?{icon:'<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',label:'Copy Content',cls:'',act:()=>copyFileContent(name)}:null,
@@ -16224,8 +16989,6 @@ document.querySelectorAll('tr[data-name],.gi[data-name]').forEach(attachLongPres
    MULTI-SELECT & BULK
 ═══════════════════════════════════════ */
 const checkAll=document.getElementById('checkAll');
-const bulkBar=document.getElementById('bulkBar');
-const bulkCount=document.getElementById('bulkCount');
 const selStat=document.getElementById('selStat');
 const selCount=document.getElementById('selCount');
 function getChecks(){return Array.from(document.querySelectorAll('.item-ck'));}
@@ -16235,8 +16998,6 @@ function refreshBulk(){
   document.querySelectorAll('tr[data-name],.gi[data-name]').forEach(row=>{
     const cb=row.querySelector('.item-ck');row.classList.toggle('selected',!!(cb&&cb.checked));
   });
-  if(sel.length>0){bulkBar.classList.add('show');if(bulkCount)bulkCount.textContent=sel.length+' selected';}
-  else bulkBar.classList.remove('show');
   if(selStat){selStat.style.display=sel.length>0?'flex':'none';if(selCount)selCount.textContent=sel.length;}
 }
 checkAll?.addEventListener('change',()=>{getChecks().forEach(c=>c.checked=checkAll.checked);refreshBulk();});
@@ -16258,6 +17019,572 @@ document.getElementById('clipCopy')?.addEventListener('click',()=>{const s=selNa
 document.getElementById('clipCut')?.addEventListener('click',()=>{const s=selNames();if(!s.length){toast('Select at least one item first.');return;}af('cut_clipboard',{items:JSON.stringify(s)});});
 document.getElementById('clipPaste')?.addEventListener('click',()=>af('paste_clipboard',{}));
 
+/* ══ LOCAL AUDIO PLAYER ══ */
+const fmMusicAudio=document.getElementById('fmMusicAudio');
+const fmMusicDock=document.getElementById('fmMusicDock');
+const fmMusicLayer=document.getElementById('fmMusicLayer');
+let fmMusicTracks=[],fmMusicIndex=-1,fmMusicShuffle=false,fmMusicRepeat=0,fmMusicSeeking=false,fmMusicCloseTimer=0,fmMusicOpenTimer=0,fmMusicDragTimer=0,fmMusicLyricEntries=[],fmMusicLyricIndex=-1,fmMusicLyricLoad=0;
+const fmMusicDrag={active:false,dragging:false,startX:0,startY:0,startTime:0,lastY:0,lastTime:0,velocity:0,pull:0};
+const fmMusicTagCache=new Map();
+const fmMusicTagRequests=new Set();
+const fmMusicCacheWrites=new Map();
+const fmMusicCacheValues=[0.5,0.75,0.9,1,1.1,1.25,1.5,1.75,2];
+let fmMusicCacheDbPromise=null,fmMusicActiveObjectUrl='',fmMusicPlaybackRequest=0;
+function fmMusicSetting(key,fallback){
+  try{const value=localStorage.getItem('mfm-music-'+FM_AUDIO_CACHE_SCOPE+'-'+key);return value===null?fallback:value;}catch(error){return fallback;}
+}
+function fmMusicStoreSetting(key,value){
+  try{localStorage.setItem('mfm-music-'+FM_AUDIO_CACHE_SCOPE+'-'+key,String(value));}catch(error){}
+}
+let fmMusicPlaybackRate=Number(fmMusicSetting('speed','1'));
+if(!fmMusicCacheValues.includes(fmMusicPlaybackRate))fmMusicPlaybackRate=1;
+let fmMusicVolume=Number(fmMusicSetting('volume','1'));
+if(!Number.isFinite(fmMusicVolume))fmMusicVolume=1;
+fmMusicVolume=Math.max(0,Math.min(1,fmMusicVolume));
+function fmMusicCacheKey(track){return FM_AUDIO_CACHE_SCOPE+'|'+track.url;}
+function fmMusicCacheVersion(track){return String(Math.max(0,Number(track.size)||0))+':'+String(Math.max(0,Number(track.mtime)||0));}
+function fmMusicOpenCache(){
+  if(!('indexedDB'in window))return Promise.resolve(null);
+  if(!fmMusicCacheDbPromise)fmMusicCacheDbPromise=new Promise(resolve=>{
+    let settled=false;
+    const finish=db=>{if(settled)return;settled=true;resolve(db);};
+    try{
+      const request=indexedDB.open('mfm-audio-playback-cache',1);
+      request.onupgradeneeded=()=>{const db=request.result;if(!db.objectStoreNames.contains('tracks'))db.createObjectStore('tracks',{keyPath:'key'});};
+      request.onsuccess=()=>finish(request.result);
+      request.onerror=()=>finish(null);
+      request.onblocked=()=>finish(null);
+    }catch(error){finish(null);}
+  });
+  return fmMusicCacheDbPromise;
+}
+async function fmMusicReadCachedTrack(track){
+  const db=await fmMusicOpenCache();if(!db)return null;
+  return new Promise(resolve=>{
+    let settled=false;const finish=value=>{if(settled)return;settled=true;resolve(value);};
+    try{
+      const tx=db.transaction('tracks','readonly'),request=tx.objectStore('tracks').get(fmMusicCacheKey(track));
+      request.onsuccess=()=>{
+        const record=request.result;
+        if(record&&record.version===fmMusicCacheVersion(track)&&record.blob instanceof Blob){finish(record.blob);return;}
+        if(record)fmMusicDeleteCachedTrack(track);
+        finish(null);
+      };
+      request.onerror=()=>finish(null);tx.onabort=()=>finish(null);
+    }catch(error){finish(null);}
+  });
+}
+async function fmMusicDeleteCachedTrack(track){
+  const db=await fmMusicOpenCache();if(!db)return;
+  try{const tx=db.transaction('tracks','readwrite');tx.objectStore('tracks').delete(fmMusicCacheKey(track));}catch(error){}
+}
+async function fmMusicWriteCachedTrack(track,blob){
+  const db=await fmMusicOpenCache();if(!db)return false;
+  return new Promise(resolve=>{
+    let settled=false;const finish=value=>{if(settled)return;settled=true;resolve(value);};
+    try{
+      const tx=db.transaction('tracks','readwrite');
+      tx.objectStore('tracks').put({key:fmMusicCacheKey(track),version:fmMusicCacheVersion(track),blob,size:blob.size,savedAt:Date.now(),name:track.name});
+      tx.oncomplete=()=>finish(true);tx.onerror=()=>finish(false);tx.onabort=()=>finish(false);
+    }catch(error){finish(false);}
+  });
+}
+function fmMusicCacheTrack(track){
+  const key=fmMusicCacheKey(track);
+  if(fmMusicCacheWrites.has(key))return fmMusicCacheWrites.get(key);
+  const operation=(async()=>{
+    const db=await fmMusicOpenCache();if(!db)return false;
+    const cached=await fmMusicReadCachedTrack(track);if(cached)return true;
+    try{
+      const response=await fetch(track.url,{credentials:'same-origin',cache:'no-store',headers:{Accept:'audio/*,*/*;q=0.8'}});
+      if(!response.ok)throw new Error('Audio download failed.');
+      const blob=await response.blob();
+      if(!blob.size||(track.size>0&&blob.size!==track.size))throw new Error('Audio file changed while being saved.');
+      return await fmMusicWriteCachedTrack(track,blob);
+    }catch(error){return false;}
+  })().finally(()=>fmMusicCacheWrites.delete(key));
+  fmMusicCacheWrites.set(key,operation);return operation;
+}
+function fmMusicSetCacheStatus(message){
+  const status=document.getElementById('fmMusicCacheStatus');if(status)status.textContent=message;
+}
+function fmMusicMeta(filename,url=''){
+  const clean=String(filename||'').replace(/\.[^.]+$/,'').replace(/[_]+/g,' ').trim();
+  const split=clean.match(/^(.{1,80}?)\s+[-–—]\s+(.+)$/);
+  const parsed=split?{title:split[2].trim()||clean,artist:split[1].trim()||'Local file'}:{title:clean||filename||'Audio track',artist:'Local file'};
+  const tagged=url?fmMusicTagCache.get(url):null;
+  return tagged?{title:tagged.title||parsed.title,artist:tagged.artist||parsed.artist}:parsed;
+}
+function fmMusicCollect(){
+  const found=new Map();
+  document.querySelectorAll('.nc[data-type="audio"][data-preview]').forEach(el=>{
+    const name=el.dataset.fname||'';if(!name||found.has(name))return;
+    found.set(name,{name,url:el.dataset.preview,size:Number(el.dataset.audioSize)||0,mtime:Number(el.dataset.audioMtime)||0,art:el.dataset.art||'',defaultArt:el.dataset.artDefault||el.dataset.art||'',fallback:el.dataset.artFallback||'',lyrics:el.dataset.lyrics||''});
+  });
+  fmMusicTracks=Array.from(found.values());
+  const count=document.getElementById('fmMusicQueueCount'),summary=document.getElementById('fmMusicQueueSummary');
+  if(count)count.textContent=String(fmMusicTracks.length);
+  if(summary)summary.textContent=fmMusicTracks.length?`${fmMusicTracks.length} ${fmMusicTracks.length===1?'track':'tracks'}`:'No audio files';
+}
+function fmMusicHydrateTags(track){
+  if(!track||fmMusicTagRequests.has(track.url))return;
+  fmMusicTagRequests.add(track.url);
+  const url=track.url+(track.url.includes('?')?'&':'?')+'audio_meta=1';
+  fetch(url,{headers:{Accept:'application/json'}}).then(response=>{if(!response.ok)throw new Error('tag read unavailable');return response.json();}).then(tags=>{
+    if(!tags||typeof tags!=='object')return;
+    const fallback=fmMusicMeta(track.name),current=fmMusicTagCache.get(track.url)||{};
+    const tagged={title:String(tags.title||current.title||fallback.title).trim(),artist:String(tags.artist||current.artist||fallback.artist).trim(),album:String(tags.album||current.album||'').trim(),year:String(tags.year||current.year||'').trim(),genre:String(tags.genre||current.genre||'').trim(),hasCustomCover:!!tags.has_custom_cover};
+    fmMusicTagCache.set(track.url,tagged);
+    if(fmMusicTracks[fmMusicIndex]?.url===track.url){
+      fmMusicApplyMeta(track);
+    }
+  }).catch(()=>{});
+}
+let fmMusicEditTrackName='',fmMusicEditTrackUrl='',fmMusicEditHasCover=false,fmMusicEditClearCover=false,fmMusicEditPreviewUrl='',fmMusicEditPreviewRequest=0;
+function fmMusicEditPreview(url,fallback=''){
+  const image=document.getElementById('fmAudioEditArtPreview'),placeholder=document.getElementById('fmAudioEditArtPlaceholder');
+  if(fmMusicEditPreviewUrl&&fmMusicEditPreviewUrl.startsWith('blob:'))URL.revokeObjectURL(fmMusicEditPreviewUrl);
+  fmMusicEditPreviewUrl=url||'';
+  const request=++fmMusicEditPreviewRequest;
+  if(!image){if(placeholder)placeholder.hidden=!!url;return;}
+  image.hidden=true;image.onerror=null;image.onload=null;image.removeAttribute('src');
+  const sources=[...new Set([url,fallback].filter(Boolean))];let sourceIndex=0;
+  const showNext=()=>{
+    if(request!==fmMusicEditPreviewRequest)return;
+    if(sourceIndex>=sources.length){image.hidden=true;if(placeholder)placeholder.hidden=false;return;}
+    if(placeholder)placeholder.hidden=true;
+    image.hidden=false;image.src=sources[sourceIndex++];
+  };
+  image.onerror=showNext;
+  image.onload=()=>{if(request===fmMusicEditPreviewRequest){image.hidden=false;if(placeholder)placeholder.hidden=true;}};
+  if(!sources.length){image.hidden=true;if(placeholder)placeholder.hidden=false;return;}
+  showNext();
+}
+async function fmMusicOpenEditor(name){
+  if(!document.getElementById('fmAudioEditOverlay')){toast('Song details are unavailable in read-only mode.');return;}
+  fmMusicCollect();
+  const track=fmMusicTracks.find(item=>item.name===name);
+  if(!track){toast('This audio file is not available in the current folder.');return;}
+  const fallback=fmMusicMeta(track.name,track.url);
+  let metadata=fmMusicTagCache.get(track.url)||{title:fallback.title,artist:fallback.artist,album:'',year:'',genre:'',hasCustomCover:false};
+  try{
+    const url=track.url+(track.url.includes('?')?'&':'?')+'audio_meta=1';
+    const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'});
+    if(response.ok){
+      const tags=await response.json();
+      metadata={title:String(tags.title||metadata.title||fallback.title),artist:String(tags.artist||metadata.artist||fallback.artist),album:String(tags.album||''),year:String(tags.year||''),genre:String(tags.genre||''),hasCustomCover:!!tags.has_custom_cover};
+      fmMusicTagCache.set(track.url,metadata);
+      fmMusicRenderQueue();
+    }
+  }catch(error){}
+  fmMusicEditTrackName=track.name;fmMusicEditTrackUrl=track.url;fmMusicEditHasCover=!!metadata.hasCustomCover;fmMusicEditClearCover=false;
+  document.getElementById('fmAudioEditTitle').value=metadata.title||fallback.title;
+  document.getElementById('fmAudioEditArtist').value=metadata.artist||fallback.artist;
+  document.getElementById('fmAudioEditAlbum').value=metadata.album||'';
+  document.getElementById('fmAudioEditYear').value=metadata.year||'';
+  document.getElementById('fmAudioEditGenre').value=metadata.genre||'';
+  document.getElementById('fmAudioEditCover').value='';
+  const removeButton=document.getElementById('fmAudioEditRemoveCover');
+  if(removeButton){removeButton.hidden=!fmMusicEditHasCover;removeButton.textContent='Remove custom cover';}
+  const editArt=track.art||track.defaultArt||track.fallback||'';
+  fmMusicEditPreview(editArt,track.art?(track.defaultArt||track.fallback||''):'');
+  const overlay=document.getElementById('fmAudioEditOverlay');overlay.classList.add('open');overlay.setAttribute('aria-hidden','false');
+  window.setTimeout(()=>document.getElementById('fmAudioEditTitle')?.focus(),30);
+}
+function fmMusicCloseEditor(){
+  const overlay=document.getElementById('fmAudioEditOverlay');if(!overlay)return;
+  overlay.classList.remove('open');overlay.setAttribute('aria-hidden','true');
+  document.getElementById('fmAudioEditCover').value='';
+  fmMusicEditPreview('');
+}
+function fmMusicApplyEditedTrack(name,metadata,artUrl){
+  const oldTrack=fmMusicTracks.find(item=>item.name===name);
+  if(!oldTrack)return;
+  const fallbackArt=oldTrack.defaultArt||oldTrack.fallback||'';
+  const nextArt=artUrl||fallbackArt;
+  document.querySelectorAll('.nc[data-fname],.gi[data-name]').forEach(row=>{
+    const rowName=row.dataset.fname||row.dataset.name;
+    if(rowName!==name)return;
+    row.dataset.art=nextArt;row.dataset.artFallback=artUrl?fallbackArt:oldTrack.fallback;
+    const image=row.querySelector('.fm-track-art');
+    if(image){
+      image.dataset.fallback=artUrl?fallbackArt:oldTrack.fallback;
+      image.style.display=nextArt?'':'none';
+      if(nextArt)image.src=nextArt;
+    }
+  });
+  fmMusicTagCache.set(oldTrack.url,{title:metadata.title,artist:metadata.artist,album:metadata.album,year:metadata.year,genre:metadata.genre,hasCustomCover:!!artUrl});
+  fmMusicCollect();
+  const updated=fmMusicTracks.find(item=>item.name===name);
+  if(!updated)return;
+  if(fmMusicTracks[fmMusicIndex]?.name===name){
+    fmMusicSetArt(document.getElementById('fmMusicCoverArt'),updated.art,updated.fallback);
+    fmMusicSetArt(document.getElementById('fmMusicMiniArt'),updated.art,updated.fallback);
+    fmMusicApplyMeta(updated);
+  }else fmMusicRenderQueue();
+}
+document.getElementById('fmAudioEditClose')?.addEventListener('click',fmMusicCloseEditor);
+document.getElementById('fmAudioEditCancel')?.addEventListener('click',fmMusicCloseEditor);
+document.getElementById('fmAudioEditOverlay')?.addEventListener('click',e=>{if(e.target===e.currentTarget)fmMusicCloseEditor();});
+document.getElementById('fmAudioEditCover')?.addEventListener('change',e=>{
+  const file=e.currentTarget.files?.[0];if(!file)return;
+  fmMusicEditClearCover=false;
+  const removeButton=document.getElementById('fmAudioEditRemoveCover');
+  if(removeButton){removeButton.hidden=false;removeButton.textContent='Remove custom cover';}
+  fmMusicEditPreview(URL.createObjectURL(file));
+});
+document.getElementById('fmAudioEditRemoveCover')?.addEventListener('click',()=>{
+  const input=document.getElementById('fmAudioEditCover');
+  if(input)input.value='';
+  fmMusicEditClearCover=!fmMusicEditClearCover;
+  const removeButton=document.getElementById('fmAudioEditRemoveCover');
+  if(removeButton)removeButton.textContent=fmMusicEditClearCover?'Keep current cover':'Remove custom cover';
+  const track=fmMusicTracks.find(item=>item.name===fmMusicEditTrackName);
+  const previewArt=fmMusicEditClearCover?(track?.defaultArt||track?.fallback||''):(track?.art||track?.defaultArt||track?.fallback||'');
+  fmMusicEditPreview(previewArt,fmMusicEditClearCover?(track?.fallback||''):(track?.defaultArt||track?.fallback||''));
+});
+document.getElementById('fmAudioEditSave')?.addEventListener('click',async()=>{
+  const year=document.getElementById('fmAudioEditYear').value.trim();
+  if(year!==''&&!/^\d{4}$/.test(year)){toast('Enter a four-digit year or leave it empty.');return;}
+  const save=document.getElementById('fmAudioEditSave');save.disabled=true;
+  try{
+    const form=new FormData();
+    form.append('csrf_token',CSRF);form.append('dir',CWD);form.append('file',fmMusicEditTrackName);
+    ['title','artist','album','year','genre'].forEach(key=>form.append(key,document.getElementById('fmAudioEdit'+key[0].toUpperCase()+key.slice(1)).value.trim()));
+    const cover=document.getElementById('fmAudioEditCover').files?.[0];
+    if(cover)form.append('cover',cover);
+    else if(fmMusicEditClearCover)form.append('remove_cover','1');
+    const response=await fetch('?x=audio_metadata_save',{method:'POST',body:form,credentials:'same-origin',cache:'no-store'});
+    const result=await response.json();
+    if(!response.ok||!result.ok)throw new Error(result.error||'Song details could not be saved.');
+    fmMusicApplyEditedTrack(fmMusicEditTrackName,result.metadata||{},result.art_url||'');
+    fmMusicEditHasCover=!!result.art_url;fmMusicEditClearCover=false;
+    fmMusicCloseEditor();toast('Song details saved.');
+  }catch(error){toast(error.message||'Song details could not be saved.');}
+  finally{save.disabled=false;}
+});
+function fmMusicSetArt(img,primary,fallback){
+  if(!img)return;
+  img.onerror=null;img.hidden=true;img.removeAttribute('src');
+  if(!primary&&!fallback)return;
+  img.hidden=false;
+  let usedFallback=false;
+  img.onerror=()=>{
+    if(!usedFallback&&fallback&&primary!==fallback){usedFallback=true;img.src=fallback;return;}
+    img.hidden=true;
+  };
+  img.onload=()=>{img.hidden=false;};
+  img.src=primary||fallback;
+}
+function fmMusicFormatTime(seconds){
+  if(!Number.isFinite(seconds)||seconds<0)return'0:00';
+  const n=Math.floor(seconds),h=Math.floor(n/3600),m=Math.floor((n%3600)/60),s=n%60;
+  return h?`${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${m}:${String(s).padStart(2,'0')}`;
+}
+function fmMusicApplyMeta(track){
+  const meta=fmMusicMeta(track.name,track.url),title=document.getElementById('fmMusicTitle'),artist=document.getElementById('fmMusicArtist'),miniTitle=document.getElementById('fmMusicMiniTitle'),miniArtist=document.getElementById('fmMusicMiniArtist');
+  if(title)title.textContent=meta.title;if(artist)artist.textContent=meta.artist;if(miniTitle)miniTitle.textContent=meta.title;if(miniArtist)miniArtist.textContent=meta.artist;
+  fmMusicRenderQueue();
+}
+function fmMusicParseLrc(source){
+  const entries=[],meta={};let offset=0;
+  for(const original of String(source||'').replace(/\r\n?/g,'\n').split('\n').slice(0,10000)){
+    const line=original.trim();if(!line)continue;
+    const tag=line.match(/^\[(ti|ar|al|by|offset):([^\]]*)\]$/i);
+    if(tag){const key=tag[1].toLowerCase();if(key==='offset')offset=(parseInt(tag[2],10)||0)/1000;else meta[key]=tag[2].trim();continue;}
+    const found=[...line.matchAll(/\[(\d{1,3}):([0-5]?\d)(?:[.:](\d{1,3}))?\]/g)];
+    const text=line.replace(/\[(\d{1,3}):([0-5]?\d)(?:[.:](\d{1,3}))?\]/g,'').replace(/<\d{1,3}:[0-5]?\d(?:[.:]\d{1,3})?>/g,'').trim();
+    if(found.length){
+      for(const m of found){const fraction=(m[3]||'').padEnd(3,'0').slice(0,3);entries.push({time:Math.max(0,Number(m[1])*60+Number(m[2])+Number('0.'+fraction)+offset),text:text||'♪'});}
+    }else if(text&&!/^\[[a-z]+:/i.test(text))entries.push({time:null,text});
+  }
+  entries.sort((a,b)=>(a.time??Infinity)-(b.time??Infinity));
+  return{entries,meta};
+}
+function fmMusicRenderLyrics(){
+  const body=document.getElementById('fmMusicLyricsBody');if(!body)return;
+  body.replaceChildren();fmMusicLyricIndex=-1;
+  if(!fmMusicLyricEntries.length){const empty=document.createElement('div');empty.className='fm-music-queue-empty';empty.textContent='No readable lyric lines in this LRC file.';body.appendChild(empty);return;}
+  fmMusicLyricEntries.forEach((entry,index)=>{
+    const line=document.createElement('button');line.type='button';line.className='fm-music-lyric';line.textContent=entry.text;
+    if(entry.time===null)line.disabled=true;else line.addEventListener('click',()=>{fmMusicAudio.currentTime=entry.time;fmMusicSyncLyrics(true);});
+    body.appendChild(line);
+  });
+}
+function fmMusicSyncLyrics(scroll=false){
+  if(!fmMusicLyricEntries.length)return;
+  const time=Number.isFinite(fmMusicAudio.currentTime)?fmMusicAudio.currentTime:0;let lo=0,hi=fmMusicLyricEntries.length-1,active=-1;
+  while(lo<=hi){const mid=(lo+hi)>>1,t=fmMusicLyricEntries[mid].time;if(t===null){hi=mid-1;continue;}if(t<=time){active=mid;lo=mid+1;}else hi=mid-1;}
+  if(active===fmMusicLyricIndex&&!scroll)return;
+  const body=document.getElementById('fmMusicLyricsBody');if(!body)return;
+  body.querySelectorAll('.fm-music-lyric.current').forEach(el=>{el.classList.remove('current');el.removeAttribute('aria-current');});
+  fmMusicLyricIndex=active;if(active<0)return;
+  const line=body.children[active];if(line){line.classList.add('current');line.setAttribute('aria-current','true');if(scroll&&document.getElementById('fmMusicLyrics')?.hidden===false)line.scrollIntoView({block:'nearest',behavior:'smooth'});}
+}
+function fmMusicLoadLyrics(track){
+  const token=++fmMusicLyricLoad,button=document.getElementById('fmMusicLyricsToggle'),section=document.getElementById('fmMusicLyrics'),list=document.getElementById('fmMusicLyricsBody');
+  fmMusicLyricEntries=[];fmMusicLyricIndex=-1;if(button){button.hidden=true;button.setAttribute('aria-expanded','false');}if(section)section.hidden=true;if(list)list.replaceChildren();
+  if(!track?.lyrics)return;
+  fetch(track.lyrics,{headers:{Accept:'text/plain'}}).then(response=>{if(!response.ok)throw new Error('Lyrics could not be loaded.');return response.text();}).then(text=>{
+    if(token!==fmMusicLyricLoad||fmMusicTracks[fmMusicIndex]?.url!==track.url)return;
+    const parsed=fmMusicParseLrc(text);fmMusicLyricEntries=parsed.entries;fmMusicRenderLyrics();
+    if(button){button.hidden=false;button.setAttribute('aria-expanded','false');}
+    const fallback=fmMusicMeta(track.name),current=fmMusicTagCache.get(track.url)||{};
+    const titleFromTags=current.title&&current.title!==fallback.title,artistFromTags=current.artist&&current.artist!=='Local file'&&current.artist!==fallback.artist;
+    fmMusicTagCache.set(track.url,{title:titleFromTags?current.title:(parsed.meta.ti||current.title||fallback.title),artist:artistFromTags?current.artist:(parsed.meta.ar||current.artist||fallback.artist)});
+    fmMusicApplyMeta(track);
+  }).catch(()=>{});
+}
+function fmMusicRenderQueue(){
+  const list=document.getElementById('fmMusicQueueList');if(!list)return;
+  list.replaceChildren();
+  if(!fmMusicTracks.length){const empty=document.createElement('div');empty.className='fm-music-queue-empty';empty.textContent='No audio files in this folder.';list.appendChild(empty);return;}
+  fmMusicTracks.forEach((track,index)=>{
+    const meta=fmMusicMeta(track.name,track.url),row=document.createElement('button');
+    row.type='button';row.className='fm-music-queue-row'+(index===fmMusicIndex?' current':'');
+    row.setAttribute('aria-label',`Play ${meta.title} by ${meta.artist}`);
+    const art=document.createElement('span');art.className='fm-music-queue-art';
+    const img=document.createElement('img');img.alt='';img.hidden=true;art.appendChild(img);fmMusicSetArt(img,track.art,track.fallback);
+    const copy=document.createElement('span');copy.className='fm-music-queue-meta';
+    const title=document.createElement('strong');title.textContent=meta.title;
+    const artist=document.createElement('span');artist.textContent=meta.artist;
+    copy.append(title,artist);
+    const state=document.createElement('span');state.className='fm-music-queue-state';state.textContent=index===fmMusicIndex&& !fmMusicAudio.paused?'♫':'';
+    row.append(art,copy,state);row.addEventListener('click',()=>fmMusicPlayTrack(index,true));list.appendChild(row);
+  });
+}
+function fmMusicUpdateButtons(){
+  const playing=!fmMusicAudio.paused;
+  ['fmMusicPlay','fmMusicMiniPlay'].forEach(id=>{const b=document.getElementById(id);if(!b)return;b.classList.toggle('fm-playing',playing);b.title=playing?'Pause':'Play';b.setAttribute('aria-label',playing?'Pause':'Play');});
+  const sh=document.getElementById('fmMusicShuffle');sh?.classList.toggle('active',fmMusicShuffle);if(sh){sh.title=fmMusicShuffle?'Shuffle on':'Shuffle off';sh.setAttribute('aria-label',sh.title);}
+  const rp=document.getElementById('fmMusicRepeat');rp?.classList.toggle('active',fmMusicRepeat>0);rp?.classList.toggle('repeat-one',fmMusicRepeat===2);
+  if(rp){rp.title=fmMusicRepeat===0?'Repeat off':fmMusicRepeat===1?'Repeat all':'Repeat one';rp.setAttribute('aria-label',rp.title);}
+  fmMusicRenderQueue();
+}
+function fmMusicUpdateProgress(){
+  const duration=Number.isFinite(fmMusicAudio.duration)?fmMusicAudio.duration:0;
+  const current=Number.isFinite(fmMusicAudio.currentTime)?fmMusicAudio.currentTime:0;
+  const ratio=duration?Math.min(1,current/duration):0,percent=(ratio*100).toFixed(2)+'%';
+  const seek=document.getElementById('fmMusicSeek');if(seek){seek.max='1000';if(!fmMusicSeeking)seek.value=String(Math.round(ratio*1000));seek.style.setProperty('--fm-progress',percent);}
+  const elapsed=document.getElementById('fmMusicElapsed'),total=document.getElementById('fmMusicDuration'),mini=document.getElementById('fmMusicMiniProgress');
+  if(elapsed)elapsed.textContent=fmMusicFormatTime(current);if(total)total.textContent=fmMusicFormatTime(duration);if(mini)mini.style.width=percent;
+}
+function fmMusicOpenPanel(){
+  window.clearTimeout(fmMusicCloseTimer);window.clearTimeout(fmMusicOpenTimer);window.clearTimeout(fmMusicDragTimer);
+  const panel=document.getElementById('fmMusicPanel');
+  fmMusicLayer.classList.remove('closing','dragging');fmMusicLayer.style.removeProperty('--fm-player-scrim-opacity');
+  if(panel){panel.classList.remove('fm-player-entering');panel.style.removeProperty('transform');panel.style.removeProperty('opacity');panel.style.removeProperty('transition');}
+  fmMusicDock.classList.remove('fm-dock-in-front','fm-dock-expanding');fmMusicDock.style.removeProperty('--fm-dock-handoff-opacity');fmMusicDock.style.removeProperty('transition');
+  document.querySelector('.shell')?.classList.add('fm-music-side-open');
+  fmMusicLayer.classList.add('open');fmMusicLayer.setAttribute('aria-hidden','false');fmMusicDock.classList.add('visible','fm-dock-expanding');fmMusicDock.setAttribute('aria-hidden','false');
+  if(panel){void panel.offsetHeight;panel.classList.add('fm-player-entering');}
+  fmMusicOpenTimer=window.setTimeout(()=>panel?.classList.remove('fm-player-entering'),470);
+  const queueToggle=document.getElementById('fmMusicQueueToggle');
+  queueToggle?.setAttribute('aria-expanded','true');
+}
+function fmMusicClearGestureStyles(){
+  const panel=document.getElementById('fmMusicPanel');
+  if(panel){panel.classList.remove('fm-player-entering');panel.style.removeProperty('transform');panel.style.removeProperty('opacity');panel.style.removeProperty('transition');}
+  fmMusicLayer.style.removeProperty('--fm-player-scrim-opacity');
+  fmMusicDock.style.removeProperty('--fm-dock-handoff-opacity');fmMusicDock.style.removeProperty('transition');
+}
+function fmMusicResetDrag(animate=true){
+  const panel=document.getElementById('fmMusicPanel');
+  fmMusicDrag.active=false;fmMusicDrag.dragging=false;fmMusicDrag.pull=0;
+  window.clearTimeout(fmMusicDragTimer);fmMusicLayer.classList.remove('dragging');fmMusicDock.classList.remove('fm-dock-in-front');
+  if(!panel||!animate){fmMusicClearGestureStyles();return;}
+  panel.style.transition='transform .42s cubic-bezier(.22,.8,.2,1),opacity .28s ease';
+  panel.style.transform='translate3d(0,0,0) scale(1)';panel.style.opacity='1';
+  fmMusicLayer.style.setProperty('--fm-player-scrim-opacity','1');
+  fmMusicDragTimer=window.setTimeout(fmMusicClearGestureStyles,460);
+}
+function fmMusicMinimize(fromGesture=false){
+  if(!fmMusicLayer.classList.contains('open'))return;
+  if(fmMusicOptions)fmMusicOptions.open=false;
+  window.clearTimeout(fmMusicCloseTimer);window.clearTimeout(fmMusicOpenTimer);window.clearTimeout(fmMusicDragTimer);
+  const panel=document.getElementById('fmMusicPanel');
+  fmMusicDrag.active=false;fmMusicDrag.dragging=false;fmMusicDock.classList.remove('fm-dock-expanding');fmMusicLayer.classList.remove('dragging');fmMusicLayer.classList.add('closing');panel?.classList.remove('fm-player-entering');
+  fmMusicDock.classList.add('visible');fmMusicDock.setAttribute('aria-hidden','false');
+  if(fromGesture&&panel){
+    fmMusicDock.classList.add('fm-dock-in-front');fmMusicDock.style.setProperty('--fm-dock-handoff-opacity','1');
+    panel.style.transition='none';void panel.offsetHeight;
+    panel.style.transition='transform .42s cubic-bezier(.22,.8,.2,1),opacity .32s ease';
+    panel.style.transform='translate3d(0,100%,0) scale(.96)';panel.style.opacity='0';
+    fmMusicLayer.style.setProperty('--fm-player-scrim-opacity','0');
+  }else{
+    fmMusicDock.classList.remove('fm-dock-in-front');fmMusicDock.style.removeProperty('--fm-dock-handoff-opacity');
+    fmMusicClearGestureStyles();
+  }
+  fmMusicCloseTimer=window.setTimeout(()=>{
+    fmMusicLayer.classList.remove('open','closing','dragging');fmMusicLayer.setAttribute('aria-hidden','true');
+    document.querySelector('.shell')?.classList.remove('fm-music-side-open');
+    fmMusicDock.classList.remove('fm-dock-in-front','fm-dock-expanding');fmMusicClearGestureStyles();
+  },460);
+}
+function fmMusicPlayTrack(index,openPanel=true){
+  fmMusicCollect();
+  if(index<0||index>=fmMusicTracks.length)return;
+  fmMusicIndex=index;const track=fmMusicTracks[index],meta=fmMusicMeta(track.name,track.url);
+  const request=++fmMusicPlaybackRequest,oldObjectUrl=fmMusicActiveObjectUrl;
+  fmMusicActiveObjectUrl='';
+  fmMusicAudio.pause();fmMusicAudio.removeAttribute('src');fmMusicAudio.load();
+  if(oldObjectUrl)URL.revokeObjectURL(oldObjectUrl);
+  const title=document.getElementById('fmMusicTitle'),artist=document.getElementById('fmMusicArtist'),miniTitle=document.getElementById('fmMusicMiniTitle'),miniArtist=document.getElementById('fmMusicMiniArtist');
+  if(title)title.textContent=meta.title;if(artist)artist.textContent=meta.artist;if(miniTitle)miniTitle.textContent=meta.title;if(miniArtist)miniArtist.textContent=meta.artist;
+  fmMusicSetArt(document.getElementById('fmMusicCoverArt'),track.art,track.fallback);
+  fmMusicSetArt(document.getElementById('fmMusicMiniArt'),track.art,track.fallback);
+  const download=document.getElementById('fmMusicDownload');
+  if(download)download.onclick=()=>{const a=document.createElement('a');a.href=track.url+(track.url.includes('?')?'&':'?')+'dl=1';a.download=track.name;document.body.appendChild(a);a.click();a.remove();};
+  fmMusicUpdateProgress();
+  if(openPanel)fmMusicOpenPanel();
+  fmMusicDock.classList.add('visible');fmMusicDock.setAttribute('aria-hidden','false');fmMusicRenderQueue();
+  fmMusicHydrateTags(track);fmMusicLoadLyrics(track);
+  fmMusicSetCacheStatus('Checking for a saved copy…');
+  fmMusicReadCachedTrack(track).then(cachedBlob=>{
+    if(request!==fmMusicPlaybackRequest)return;
+    const useCached=blob=>{
+      let source=track.url;
+      if(blob){source=URL.createObjectURL(blob);fmMusicActiveObjectUrl=source;}
+      fmMusicAudio.src=source;fmMusicAudio.playbackRate=fmMusicPlaybackRate;fmMusicAudio.load();
+      let play;
+      try{play=fmMusicAudio.play();}catch(error){play=Promise.reject(error);}
+      Promise.resolve(play).then(fmMusicUpdateButtons).catch(error=>{
+        if(request!==fmMusicPlaybackRequest)return;
+        fmMusicUpdateButtons();
+        if(fmMusicAudio.error?.code===4)toast('This audio format is not supported by the current browser.');
+        else if(error?.name==='NotAllowedError')fmMusicSetCacheStatus('Press Play to start audio playback.');
+        else toast('The audio could not be played. Check the file format and server access.');
+      });
+    };
+    if(cachedBlob){
+      fmMusicSetCacheStatus('Playing the copy saved in this browser.');
+      useCached(cachedBlob);return;
+    }
+    useCached(null);
+    if(!('indexedDB'in window)){fmMusicSetCacheStatus('Browser storage is unavailable; streaming only.');return;}
+    fmMusicSetCacheStatus('Streaming now · saving a copy for next time…');
+    fmMusicCacheTrack(track).then(saved=>{
+      if(request!==fmMusicPlaybackRequest)return;
+      fmMusicSetCacheStatus(saved?'Saved in this browser for your next listen.':'Could not save a browser copy; check available storage.');
+    });
+  }).catch(()=>{
+    if(request!==fmMusicPlaybackRequest)return;
+    fmMusicAudio.src=track.url;fmMusicAudio.playbackRate=fmMusicPlaybackRate;fmMusicAudio.load();
+    fmMusicSetCacheStatus('Browser storage is unavailable; streaming only.');
+    fmMusicAudio.play().then(fmMusicUpdateButtons).catch(()=>toast('The audio could not be played. Check the file format and server access.'));
+  });
+}
+function fmMusicSeekBy(seconds){
+  if(!Number.isFinite(fmMusicAudio.duration)||fmMusicAudio.duration<=0)return;
+  fmMusicAudio.currentTime=Math.max(0,Math.min(fmMusicAudio.duration,fmMusicAudio.currentTime+seconds));
+}
+function fmMusicSetRate(value){
+  const rate=Number(value);if(!fmMusicCacheValues.includes(rate))return;
+  fmMusicPlaybackRate=rate;fmMusicAudio.playbackRate=rate;fmMusicAudio.preservesPitch=true;
+  fmMusicStoreSetting('speed',rate);
+  const select=document.getElementById('fmMusicSpeed');if(select)select.value=String(rate);
+}
+function fmMusicSetVolume(value){
+  const volume=Math.max(0,Math.min(1,Number(value)/100));if(!Number.isFinite(volume))return;
+  fmMusicVolume=volume;fmMusicAudio.volume=volume;fmMusicAudio.muted=false;
+  fmMusicStoreSetting('volume',volume);
+}
+const fmMusicSpeedSelect=document.getElementById('fmMusicSpeed');
+if(fmMusicSpeedSelect){fmMusicSpeedSelect.value=String(fmMusicPlaybackRate);fmMusicSpeedSelect.addEventListener('change',()=>fmMusicSetRate(fmMusicSpeedSelect.value));}
+const fmMusicVolumeSlider=document.getElementById('fmMusicVolume');
+fmMusicAudio.volume=fmMusicVolume;
+if(fmMusicVolumeSlider){fmMusicVolumeSlider.value=String(Math.round(fmMusicVolume*100));fmMusicVolumeSlider.addEventListener('input',()=>fmMusicSetVolume(fmMusicVolumeSlider.value));}
+document.getElementById('fmMusicBack10')?.addEventListener('click',()=>fmMusicSeekBy(-10));
+document.getElementById('fmMusicForward10')?.addEventListener('click',()=>fmMusicSeekBy(10));
+const fmMusicOptions=document.getElementById('fmMusicOptions');
+document.addEventListener('pointerdown',e=>{if(fmMusicOptions?.open&&!fmMusicOptions.contains(e.target))fmMusicOptions.open=false;});
+function fmMusicTogglePlayback(){
+  if(fmMusicIndex<0){fmMusicCollect();if(fmMusicTracks.length)fmMusicPlayTrack(0);return;}
+  if(fmMusicAudio.paused)fmMusicAudio.play().then(fmMusicUpdateButtons).catch(()=>toast('The audio could not be played.'));
+  else fmMusicAudio.pause();
+}
+function fmMusicStep(direction,ended=false){
+  if(fmMusicIndex<0||!fmMusicTracks.length)return;
+  if(direction<0&&fmMusicAudio.currentTime>3&&!ended){fmMusicAudio.currentTime=0;return;}
+  let next;
+  if(fmMusicShuffle&&fmMusicTracks.length>1){do{next=Math.floor(Math.random()*fmMusicTracks.length);}while(next===fmMusicIndex);}
+  else{next=fmMusicIndex+direction;if(next>=fmMusicTracks.length)next=fmMusicRepeat===1?0:-1;if(next<0)next=fmMusicRepeat===1?fmMusicTracks.length-1:(direction<0?0:-1);}
+  if(next<0){fmMusicAudio.pause();fmMusicAudio.currentTime=0;fmMusicUpdateButtons();fmMusicUpdateProgress();return;}
+  fmMusicPlayTrack(next,false);
+}
+const fmMusicGesturePanel=document.getElementById('fmMusicPanel');
+fmMusicGesturePanel?.addEventListener('touchstart',e=>{
+  if(!window.matchMedia('(max-width: 768px)').matches||!fmMusicLayer.classList.contains('open')||fmMusicLayer.classList.contains('closing')||e.touches.length!==1)return;
+  if(e.target.closest?.('#fmMusicSeek,input[type="range"]'))return;
+  const touch=e.touches[0];
+  fmMusicDrag.active=true;fmMusicDrag.dragging=false;fmMusicDrag.startX=touch.clientX;fmMusicDrag.startY=touch.clientY;fmMusicDrag.startTime=performance.now();fmMusicDrag.lastY=touch.clientY;fmMusicDrag.lastTime=fmMusicDrag.startTime;fmMusicDrag.velocity=0;fmMusicDrag.pull=0;
+},{passive:true});
+fmMusicGesturePanel?.addEventListener('touchmove',e=>{
+  if(!fmMusicDrag.active||e.touches.length!==1)return;
+  const touch=e.touches[0],dx=touch.clientX-fmMusicDrag.startX,dy=touch.clientY-fmMusicDrag.startY;
+  if(!fmMusicDrag.dragging){
+    if(Math.abs(dx)>12&&Math.abs(dx)>Math.max(0,dy)*1.15){fmMusicDrag.active=false;return;}
+    if(dy<10||dy<Math.abs(dx)*1.08)return;
+    fmMusicDrag.dragging=true;fmMusicLayer.classList.add('dragging');fmMusicDock.classList.remove('fm-dock-expanding');fmMusicDock.classList.add('visible','fm-dock-in-front');fmMusicDock.style.transition='none';
+    document.getElementById('fmMusicPanel')?.classList.remove('fm-player-entering');
+  }
+  if(e.cancelable)e.preventDefault();
+  const moveTime=performance.now(),moveElapsed=Math.max(1,moveTime-fmMusicDrag.lastTime);
+  fmMusicDrag.velocity=(touch.clientY-fmMusicDrag.lastY)/moveElapsed;
+  const pull=Math.min(Math.max(0,dy),Math.max(220,window.innerHeight*.92)),progress=Math.min(1,pull/Math.max(1,window.innerHeight*.62));
+  fmMusicDrag.pull=pull;fmMusicDrag.lastY=touch.clientY;fmMusicDrag.lastTime=moveTime;
+  const panel=document.getElementById('fmMusicPanel');
+  if(panel){panel.style.transform=`translate3d(0,${pull}px,0) scale(${(1-progress*.035).toFixed(4)})`;panel.style.opacity=String(1-progress*.08);}
+  fmMusicLayer.style.setProperty('--fm-player-scrim-opacity',String((1-progress*.88).toFixed(3)));
+  fmMusicDock.style.setProperty('--fm-dock-handoff-opacity',String((.08+progress*.92).toFixed(3)));
+},{passive:false});
+fmMusicGesturePanel?.addEventListener('touchend',()=>{
+  if(!fmMusicDrag.active)return;
+  const wasDragging=fmMusicDrag.dragging,pull=fmMusicDrag.pull,velocity=fmMusicDrag.velocity*Math.exp(-Math.max(0,performance.now()-fmMusicDrag.lastTime)/130);
+  fmMusicDrag.active=false;
+  if(!wasDragging){fmMusicDrag.pull=0;return;}
+  if(pull>=Math.max(100,Math.min(180,window.innerHeight*.14))||(pull>48&&velocity>.65))fmMusicMinimize(true);
+  else fmMusicResetDrag(true);
+},{passive:true});
+fmMusicGesturePanel?.addEventListener('touchcancel',()=>{
+  if(fmMusicDrag.dragging)fmMusicResetDrag(true);
+  else{fmMusicDrag.active=false;fmMusicDrag.pull=0;}
+},{passive:true});
+document.getElementById('fmMusicMiniOpen')?.addEventListener('click',fmMusicOpenPanel);
+document.getElementById('fmMusicMinimize')?.addEventListener('click',fmMusicMinimize);
+document.getElementById('fmMusicMiniPlay')?.addEventListener('click',fmMusicTogglePlayback);
+document.getElementById('fmMusicPlay')?.addEventListener('click',fmMusicTogglePlayback);
+document.getElementById('fmMusicMiniPrev')?.addEventListener('click',()=>fmMusicStep(-1));
+document.getElementById('fmMusicPrev')?.addEventListener('click',()=>fmMusicStep(-1));
+document.getElementById('fmMusicMiniNext')?.addEventListener('click',()=>fmMusicStep(1));
+document.getElementById('fmMusicNext')?.addEventListener('click',()=>fmMusicStep(1));
+document.getElementById('fmMusicShuffle')?.addEventListener('click',()=>{fmMusicShuffle=!fmMusicShuffle;fmMusicUpdateButtons();});
+document.getElementById('fmMusicRepeat')?.addEventListener('click',()=>{fmMusicRepeat=(fmMusicRepeat+1)%3;fmMusicAudio.loop=fmMusicRepeat===2;fmMusicUpdateButtons();});
+document.getElementById('fmMusicQueueToggle')?.addEventListener('click',()=>{
+  document.getElementById('fmMusicQueue')?.scrollIntoView({behavior:'smooth',block:'start'});
+});
+document.getElementById('fmMusicLyricsToggle')?.addEventListener('click',e=>{
+  const section=document.getElementById('fmMusicLyrics'),show=!!section?.hidden;
+  if(section)section.hidden=!show;e.currentTarget.setAttribute('aria-expanded',String(show));
+  if(show)fmMusicSyncLyrics(true);
+});
+document.getElementById('fmMusicSeek')?.addEventListener('input',e=>{
+  fmMusicSeeking=true;const duration=Number.isFinite(fmMusicAudio.duration)?fmMusicAudio.duration:0,ratio=Number(e.currentTarget.value)/1000;
+  if(duration)fmMusicAudio.currentTime=duration*ratio;e.currentTarget.style.setProperty('--fm-progress',(ratio*100)+'%');
+});
+document.getElementById('fmMusicSeek')?.addEventListener('change',()=>{fmMusicSeeking=false;fmMusicUpdateProgress();});
+fmMusicAudio.addEventListener('timeupdate',()=>{fmMusicUpdateProgress();fmMusicSyncLyrics();});
+fmMusicAudio.addEventListener('loadedmetadata',fmMusicUpdateProgress);
+fmMusicAudio.addEventListener('play',fmMusicUpdateButtons);
+fmMusicAudio.addEventListener('pause',fmMusicUpdateButtons);
+fmMusicAudio.addEventListener('ended',()=>{if(fmMusicRepeat===2)return;fmMusicStep(1,true);});
+fmMusicAudio.addEventListener('error',()=>{if(fmMusicAudio.currentSrc)fmMusicUpdateButtons();});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&document.getElementById('fmAudioEditOverlay')?.classList.contains('open')){fmMusicCloseEditor();return;}
+  if(e.key==='Escape'&&fmMusicOptions?.open){fmMusicOptions.open=false;fmMusicOptions.querySelector('summary')?.focus();return;}
+  if(e.key==='Escape'&&fmMusicLayer.classList.contains('open'))fmMusicMinimize();
+});
+
 /* Grid click to preview */
 document.getElementById('gvw')?.addEventListener('click',e=>{
   const gi=e.target.closest('.gi[data-preview]');
@@ -16278,6 +17605,7 @@ const prevOv=document.getElementById('prevOv');
 const prevBody=document.getElementById('prevBody');
 let mdRawText='',mdShowingSource=false;
 function openPreview(url,type,fname){
+  if(type==='audio'){fmMusicCollect();const found=fmMusicTracks.findIndex(t=>t.name===fname);if(found>=0)fmMusicPlayTrack(found,true);return;}
   document.getElementById('prevName').textContent=fname;
   document.getElementById('prevDl').href=url+'&dl=1';
   prevBody.innerHTML='';
@@ -18368,31 +19696,52 @@ document.querySelectorAll('.alert-x').forEach(btn=>{
 /* ═══════════════════════════════════════
    DRAG & DROP UPLOAD
 ═══════════════════════════════════════ */
-function uploadWithProgress(files){
+async function uploadWithProgress(files){
   if(!files||!files.length)return;
-  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','upload');
-  for(const f of files)fd.append('file[]',f);
+  const selected=Array.from(files),totalBytes=selected.reduce((n,f)=>n+(Number(f.size)||0),0),chunkBytes=Math.max(8192,Math.min(1048576,FM_UPLOAD_CHUNK_BYTES||524288));
   const bar=document.createElement('div');
   bar.style.cssText='position:fixed;left:50%;bottom:calc(var(--bh,26px) + 12px);transform:translateX(-50%);background:var(--raised);border:1px solid var(--border2);color:var(--t1);padding:10px 18px;border-radius:10px;font-size:12.5px;font-weight:500;z-index:9999;min-width:240px;box-shadow:0 8px 32px rgba(0,0,0,.5)';
-  bar.innerHTML='<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>Uploading…</span><span id="upSpeedTxt">0 MB/s</span></div><div style="height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden"><div id="upSpeedBar" style="height:100%;width:0%;background:#85898C;transition:width .1s"></div></div>';
+  bar.innerHTML='<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:6px"><span id="upNameTxt" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Preparing upload…</span><span id="upSpeedTxt" style="flex:none">0%</span></div><div style="height:4px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden"><div id="upSpeedBar" style="height:100%;width:0%;background:#85898C;transition:width .1s"></div></div>';
   document.body.appendChild(bar);
-  const xhr=new XMLHttpRequest();
-  let lastT=performance.now(),lastLoaded=0;
-  xhr.upload.addEventListener('progress',e=>{
-    if(!e.lengthComputable)return;
-    const now=performance.now(),dt=(now-lastT)/1000;
-    if(dt>0.15){
-      const speed=((e.loaded-lastLoaded)/dt)/1048576;
-      document.getElementById('upSpeedTxt').textContent=speed.toFixed(1)+' MB/s';
-      lastT=now;lastLoaded=e.loaded;
+  const progressText=bar.querySelector('#upNameTxt'),progressPct=bar.querySelector('#upSpeedTxt'),progressBar=bar.querySelector('#upSpeedBar');
+  let completed=0,success=0,lastTime=performance.now(),lastLoaded=0,failed=false;
+  const makeId=()=>{if(window.crypto?.randomUUID)return window.crypto.randomUUID().replace(/-/g,'');let s='';for(let i=0;i<32;i++)s+=Math.floor(Math.random()*16).toString(16);return s;};
+  const sendPart=(file,fileIndex,part,parts,id)=>{
+    lastTime=performance.now();lastLoaded=0;
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','upload_chunk');fd.append('upload_id',id);fd.append('upload_name',file.name);fd.append('total_size',String(file.size));fd.append('chunk_bytes',String(chunkBytes));fd.append('parts',String(parts));fd.append('part',String(part));
+    fd.append('chunk',file.slice(part*chunkBytes,Math.min(file.size,(part+1)*chunkBytes)),file.name);
+    return new Promise((resolve,reject)=>{
+      const xhr=new XMLHttpRequest();
+      xhr.upload.addEventListener('progress',e=>{
+        const partLoaded=e.lengthComputable?Math.min(file.size-part*chunkBytes,e.loaded):0;
+        const loaded=Math.min(totalBytes,completed+part*chunkBytes+partLoaded),pct=totalBytes?Math.floor(loaded/totalBytes*100):Math.floor((fileIndex+(part+1)/parts)/selected.length*100);
+        const now=performance.now(),dt=(now-lastTime)/1000;
+        if(dt>.2){progressPct.textContent=pct+'% · '+(((e.loaded-lastLoaded)/dt)/1048576).toFixed(1)+' MB/s';lastTime=now;lastLoaded=e.loaded;}
+        progressBar.style.width=Math.max(0,Math.min(100,pct))+'%';
+      });
+      xhr.addEventListener('load',()=>{
+        let data={};try{data=JSON.parse(xhr.responseText||'{}');}catch(_){}
+        if(xhr.status>=200&&xhr.status<300&&data.ok)resolve(data);
+        else reject(new Error(data.error||`Upload failed (HTTP ${xhr.status||0}).`));
+      });
+      xhr.addEventListener('error',()=>reject(new Error('Network error while uploading.')));
+      xhr.addEventListener('abort',()=>reject(new Error('Upload was cancelled.')));
+      xhr.open('POST',location.href);xhr.send(fd);
+    });
+  };
+  try{
+    for(let i=0;i<selected.length;i++){
+      const file=selected[i],parts=Math.max(1,Math.ceil(file.size/chunkBytes)),id=makeId();
+      for(let part=0;part<parts;part++){
+        progressText.textContent=`${i+1}/${selected.length} · ${file.name}`;
+        await sendPart(file,i,part,parts,id);
+      }
+      completed+=file.size;success++;
     }
-    const pct=Math.round(e.loaded/e.total*100);
-    document.getElementById('upSpeedBar').style.width=pct+'%';
-  });
-  xhr.addEventListener('loadend',()=>{bar.remove();location.reload();});
-  xhr.addEventListener('error',()=>{bar.remove();toast('Upload failed.');});
-  xhr.open('POST',location.href);
-  xhr.send(fd);
+  }catch(error){failed=true;toast('Upload failed: '+(error?.message||'Please try again.'));}
+  bar.remove();
+  if(!failed)toast(`${success} file${success===1?'':'s'} uploaded.`);
+  if(success>0)window.setTimeout(()=>location.reload(),failed?800:450);
 }
 const dz=document.getElementById('dropzone');
 if(dz){
