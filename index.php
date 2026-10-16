@@ -2425,6 +2425,86 @@ function fm_response_changer_store_manager($settings,&$error=null){
 
 if(session_status()===PHP_SESSION_NONE) session_start();
 fm_response_changer_manager_guard();
+/* Best-effort, same-account CPU sampling for the public desktop login screen.
+   Only aggregate percentages leave PHP; process IDs and command names stay in
+   this session. Hosts that hide procfs or POSIX UIDs report unavailable. */
+function fm_login_cpu_snapshot(){
+    if(!function_exists('posix_geteuid')||!is_readable('/proc/stat'))return null;
+    $procStat=@file_get_contents('/proc/stat');
+    if(!is_string($procStat)||!preg_match('/^cpu\s+([0-9 ]+)/m',$procStat,$cpuMatch))return null;
+    $cpuFields=preg_split('/\s+/',trim($cpuMatch[1]));
+    $totalTicks=0;foreach(array_slice($cpuFields,0,8)as $field)$totalTicks+=(int)$field;
+    if($totalTicks<1)return null;
+    preg_match_all('/^cpu[0-9]+\s/m',$procStat,$cpuMatches);
+    $cores=max(1,count($cpuMatches[0]));
+    $uid=(int)@posix_geteuid();
+    $pids=@scandir('/proc');
+    if(!is_array($pids))return null;
+    $processes=[];$scanned=0;
+    foreach($pids as $pid){
+        if(!ctype_digit($pid)||$pid==='0')continue;
+        if(++$scanned>1500)break;
+        $status=@file_get_contents('/proc/'.$pid.'/status',false,null,0,2048);
+        if(!is_string($status)||!preg_match('/^Uid:\s+(\d+)/m',$status,$uidMatch)||(int)$uidMatch[1]!==$uid)continue;
+        $stat=@file_get_contents('/proc/'.$pid.'/stat',false,null,0,4096);
+        if(!is_string($stat)||($close=strrpos($stat,')'))===false)continue;
+        $parts=preg_split('/\s+/',trim(substr($stat,$close+1)));
+        if(!isset($parts[12]))continue;
+        $processes[(string)$pid]=(int)$parts[11]+(int)$parts[12];
+    }
+    $self=(string)getmypid();
+    if(!isset($processes[$self])){
+        $stat=@file_get_contents('/proc/'.$self.'/stat',false,null,0,4096);
+        if(is_string($stat)&&($close=strrpos($stat,')'))!==false){
+            $parts=preg_split('/\s+/',trim(substr($stat,$close+1)));
+            if(isset($parts[12]))$processes[$self]=(int)$parts[11]+(int)$parts[12];
+        }
+    }
+    return['time'=>microtime(true),'total'=>$totalTicks,'cores'=>$cores,'processes'=>$processes,'self'=>$self];
+}
+if(isset($_GET['x'])&&$_GET['x']==='login_metrics'){
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    if(!empty($_SESSION['auth'])&&$_SESSION['auth']===true){http_response_code(401);echo json_encode(['available'=>false]);exit;}
+    $csrf=(string)($_POST['login_csrf']??'');
+    if($_SERVER['REQUEST_METHOD']!=='POST'||$csrf===''||!hash_equals((string)($_SESSION['login_csrf']??''),$csrf)){
+        http_response_code(403);echo json_encode(['available'=>false,'reason'=>'security']);exit;
+    }
+    $now=microtime(true);
+    if(!empty($_SESSION['fm_login_metrics_last'])&&($now-(float)$_SESSION['fm_login_metrics_last'])<1.5){
+        http_response_code(429);echo json_encode(['available'=>false,'reason'=>'rate']);exit;
+    }
+    $_SESSION['fm_login_metrics_last']=$now;
+    $current=fm_login_cpu_snapshot();
+    if(!$current){
+        echo json_encode(['available'=>false,'reason'=>'unsupported']);exit;
+    }
+    $previous=$_SESSION['fm_login_metrics_snapshot']??null;
+    $site=[];$manager=[];$sampled=false;
+    if(is_array($previous)&&isset($previous['time'],$previous['total'],$previous['processes'])){
+        $elapsed=$current['time']-(float)$previous['time'];
+        $totalDelta=$current['total']-(int)$previous['total'];
+        if($elapsed>0&&$elapsed<30&&$totalDelta>0){
+            $sampled=true;$managerPids=$_SESSION['fm_login_metrics_manager_pids']??[];
+            $managerPids[]=$current['self'];
+            $managerPids=array_slice(array_values(array_unique(array_map('strval',$managerPids))),-5);
+            foreach($current['processes']as $pid=>$ticks){
+                if(!isset($previous['processes'][$pid]))continue;
+                $delta=$ticks-(int)$previous['processes'][$pid];
+                if($delta<0)continue;
+                $pct=max(0,min(100,($delta/$totalDelta)*$current['cores']*100));
+                $site[]=$pct;
+                if(in_array((string)$pid,$managerPids,true))$manager[]=$pct;
+            }
+            rsort($site,SORT_NUMERIC);rsort($manager,SORT_NUMERIC);
+            $site=array_slice($site,0,5);$manager=array_slice($manager,0,5);
+            $_SESSION['fm_login_metrics_manager_pids']=$managerPids;
+        }
+    }
+    if(!isset($_SESSION['fm_login_metrics_manager_pids']))$_SESSION['fm_login_metrics_manager_pids']=[$current['self']];
+    $_SESSION['fm_login_metrics_snapshot']=['time'=>$current['time'],'total'=>$current['total'],'processes'=>$current['processes']];
+    echo json_encode(['available'=>true,'sampled'=>$sampled,'site'=>$site,'manager'=>$manager],JSON_UNESCAPED_SLASHES);exit;
+}
 /* AJAX endpoints must never fall through to the HTML login page. A session
    can expire while a CMS/terminal window is open; return JSON so the browser
    can show the real auth error instead of "Unexpected token <". Also convert
@@ -2496,7 +2576,8 @@ if(isset($_POST['login_pass'])){
             $_SESSION['fm_readonly']=!empty($u['readonly']);$_SESSION['fm_admin']=!empty($u['admin'])||empty($u['readonly']);$_SESSION['fm_quota']=fm_user_quota_bytes($u);
             $_SESSION['csrf_token']=bin2hex(random_bytes(32));
             $_SESSION['fm_force_credential_change']=!empty($_SESSION['fm_admin'])&&fm_user_requires_credential_change($u);
-            $_SESSION['fm_wp_auto_login_pending']=!empty($_SESSION['fm_admin']);unset($_SESSION['login_csrf']);
+            $_SESSION['fm_wp_auto_login_pending']=!empty($_SESSION['fm_admin']);$_SESSION['fm_login_transition']=true;
+            unset($_SESSION['login_csrf'],$_SESSION['fm_login_metrics_snapshot'],$_SESSION['fm_login_metrics_manager_pids'],$_SESSION['fm_login_metrics_last']);
             header("Location: ".$scriptName);exit;
         } else {
             if($ok)fm_record_failure($ckey);
@@ -2514,6 +2595,10 @@ if($fmApiRequest&&(!isset($_SESSION['auth'])||$_SESSION['auth']!==true)){
     echo json_encode(['error'=>'Session expired. Please sign in again.','reauthenticated'=>false]);exit;
 }
 if(!isset($_SESSION['auth'])||$_SESSION['auth']!==true){ ?>
+<?php
+$desktopLoginStep=!empty($loginError)&&isset($_POST['login_user'])?'password':'username';
+$desktopLoginUsername=isset($_POST['login_user'])?trim((string)$_POST['login_user']):'';
+?>
 <!DOCTYPE html><html lang="en" data-theme="<?=htmlspecialchars($currentTheme)?>"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign In - Marshal FM</title>
@@ -2538,19 +2623,416 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
 .err{display:flex;align-items:center;gap:10px;padding:12px 14px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:10px;color:#fca5a5;font-size:13px;margin-bottom:18px;animation:shake .4s both}
 @keyframes shake{0%,100%{transform:none}20%,60%{transform:translateX(-4px)}40%,80%{transform:translateX(4px)}}
 .err svg{width:16px;height:16px;stroke:#ef4444;fill:none;stroke-width:2;stroke-linecap:round;flex-shrink:0}
+.login-footer-mark{display:none}
+:root{--login-accent-rgb:45,128,213}
+.login-wallpaper,.login-actions,.login-settings-panel,.login-help-panel{display:none}
+@font-face{font-family:'LoginClockTMT';src:url('https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/fonts/terminal/tmt.ttf') format('truetype');font-style:normal;font-weight:400;font-display:swap}
+@media(min-width:761px){
+ body{display:block;min-height:100vh;height:100vh;padding:0;overflow:hidden;background:#070b12;isolation:isolate}
+ body::before,body::after{content:"";position:fixed;inset:0;pointer-events:none}
+ body::before{z-index:0;background:#070b12}
+ body::after{z-index:2;background:linear-gradient(180deg,rgba(4,10,20,.30),rgba(3,8,17,.46)),radial-gradient(ellipse at center,transparent 12%,rgba(2,7,16,.34) 100%)}
+ .login-wallpaper{display:block;position:fixed;inset:0;z-index:1;background-position:center;background-repeat:no-repeat;background-size:cover;filter:blur(2.5px) brightness(.72) saturate(.82);transform:scale(1.025);opacity:0;pointer-events:none;transition:opacity .82s ease,filter .3s ease,transform .3s ease;will-change:opacity}
+ .login-wallpaper.is-visible{opacity:1}
+ body.login-no-wallpaper-blur .login-wallpaper{filter:brightness(.72) saturate(.82);transform:scale(1.01)}
+ .login-shell{position:fixed;inset:0;z-index:3}
+ .linux-topbar{position:absolute;inset:0 0 auto;height:34px;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:0 18px;background:rgba(3,10,24,.94);border-bottom:1px solid rgba(96,151,221,.14);color:#d9e5f5;font:12px/1.1 ui-monospace,SFMono-Regular,Consolas,monospace;font-weight:700;letter-spacing:.035em;box-shadow:0 2px 14px rgba(0,0,0,.2)}
+ .linux-date{justify-self:start;align-self:center;color:rgba(203,218,238,.76);white-space:nowrap;font:400 12px/1 'LoginClockTMT',ui-monospace,monospace;letter-spacing:.035em}
+ .linux-clock{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:rgba(211,225,243,.78);white-space:nowrap;font:400 13px/1 'LoginClockTMT',ui-monospace,monospace;letter-spacing:.045em;font-variant-numeric:tabular-nums}
+ .cpu-groups{position:absolute;top:0;right:0;display:flex;align-items:stretch;gap:3px;height:100%}
+ .cpu-group{display:flex;align-items:stretch;height:100%}
+ .cpu-bars{height:100%;display:flex;align-items:flex-end;gap:2px}
+ .cpu-bars i{display:block;width:4px;height:2px;min-height:2px;background:#279bff;opacity:.96}
+ .cpu-group.manager .cpu-bars i{background:#25e77b}
+ .login-center{position:absolute;inset:34px 0 0;display:grid;place-items:center;padding:16px 20px 28px}
+ .card{width:min(360px,calc(100vw - 40px));max-width:360px;padding:0;background:transparent;border:0;border-radius:0;box-shadow:none;backdrop-filter:none;animation:desktopLoginIn .46s ease-out both}
+ @keyframes desktopLoginIn{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
+ .login-logo-mobile{display:none}
+ .login-logo-desktop{width:140px;height:140px;margin:0 auto 26px;border-radius:50%;display:flex;align-items:center;justify-content:center;overflow:hidden;background:rgba(130,174,229,.12);border:0;box-shadow:0 10px 36px rgba(0,0,0,.34),0 0 25px rgba(74,148,232,.16);backdrop-filter:blur(15px);-webkit-backdrop-filter:blur(15px)}
+ .login-logo-desktop img{width:86px;height:86px;object-fit:contain;border-radius:50%}
+ .login-footer-mark{display:block;position:absolute;left:50%;bottom:28px;width:58px;height:58px;transform:translateX(-50%);object-fit:contain;opacity:.9;filter:drop-shadow(0 2px 8px rgba(0,0,0,.34))}
+ .login-actions{display:flex;position:absolute;right:28px;bottom:28px;z-index:12;gap:9px}
+ .login-action{width:42px;height:42px;display:grid;place-items:center;border:1px solid rgba(155,187,225,.2);border-radius:12px;background:rgba(7,15,29,.78);color:#d8e7fa;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.22);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);transition:background .16s,border-color .16s,transform .16s}
+ .login-action:hover{background:rgba(20,39,66,.9);border-color:rgba(155,187,225,.38);transform:translateY(-2px)}
+ .login-action:focus-visible,.login-panel-close:focus-visible,.login-setting-toggle:focus-visible,.wallpaper-tile:focus-visible{outline:2px solid rgba(var(--login-accent-rgb),.95);outline-offset:2px}
+ .login-action svg,.login-panel-close svg,.login-setting-toggle svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+ .login-settings-panel,.login-help-panel{display:flex;position:absolute;right:28px;bottom:28px;z-index:16;flex-direction:column;border:1px solid rgba(126,158,198,.28);border-radius:16px;background:rgba(5,12,24,.95);color:#edf4ff;box-shadow:0 18px 55px rgba(0,0,0,.48),inset 0 1px 0 rgba(255,255,255,.055);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);animation:loginPanelIn .2s ease-out both}
+ .login-settings-panel[hidden],.login-help-panel[hidden]{display:none!important}
+ @keyframes loginPanelIn{from{opacity:0;transform:translateY(7px) scale(.985)}to{opacity:1;transform:none}}
+ .login-settings-panel{width:min(360px,calc(100vw - 56px));height:min(404px,calc(100vh - 56px));padding:15px}
+ .login-panel-header{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:28px;margin-bottom:12px}
+ .login-panel-title{font-size:13px;font-weight:700;letter-spacing:.025em}
+ .login-panel-close{width:28px;height:28px;flex:0 0 28px;display:grid;place-items:center;border:1px solid rgba(160,185,219,.14);border-radius:8px;background:rgba(255,255,255,.055);color:#c7d5e8;cursor:pointer}
+ .login-panel-close:hover{background:rgba(255,255,255,.12);color:#fff}
+ .login-panel-close svg{width:15px;height:15px}
+ .login-settings-toggles{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+ .login-setting-toggle{height:40px;min-width:0;display:flex;align-items:center;justify-content:center;gap:7px;padding:0 8px;border:1px solid rgba(177,198,226,.1);border-radius:9px;background:rgba(255,255,255,.075);color:#d6e1f0;font:600 11px/1 'Inter',ui-sans-serif,system-ui,sans-serif;white-space:nowrap;cursor:pointer;transition:background .16s,border-color .16s,color .16s,box-shadow .16s}
+ .login-setting-toggle svg{width:16px;height:16px;flex:0 0 16px}
+ .login-setting-toggle[aria-pressed="true"]{border-color:rgba(var(--login-accent-rgb),.95);background:rgba(var(--login-accent-rgb),.88);color:#fff;box-shadow:0 3px 14px rgba(var(--login-accent-rgb),.22)}
+ .login-setting-toggle:hover{border-color:rgba(var(--login-accent-rgb),.8)}
+ .login-wallpaper-heading{margin:0 0 8px;color:rgba(210,224,244,.72);font-size:10px;font-weight:700;letter-spacing:.075em;text-transform:uppercase}
+ .wallpaper-gallery{min-height:0;flex:1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-content:start;gap:9px;overflow-y:auto;padding:1px 4px 3px 1px;scrollbar-width:thin;scrollbar-color:rgba(148,177,214,.32) transparent}
+ .wallpaper-gallery::-webkit-scrollbar{width:4px}
+ .wallpaper-gallery::-webkit-scrollbar-thumb{border-radius:4px;background:rgba(148,177,214,.32)}
+ .wallpaper-tile{display:flex;flex-direction:column;align-items:stretch;min-width:0;min-height:87px;padding:0;overflow:hidden;border:1px solid rgba(177,198,226,.16);border-radius:8px;background:rgba(255,255,255,.045);color:#dbe7f7;text-align:left;cursor:pointer;transition:border-color .16s,transform .16s,box-shadow .16s}
+ .wallpaper-tile:hover{transform:translateY(-2px);border-color:rgba(var(--login-accent-rgb),.72)}
+ .wallpaper-tile[aria-pressed="true"]{border-color:rgba(var(--login-accent-rgb),1);box-shadow:0 0 0 1px rgba(var(--login-accent-rgb),.68)}
+  .wallpaper-tile img{display:block;flex:0 0 64px;width:100%;height:64px;object-fit:cover;object-position:center;opacity:.88;background:#101827}
+ .wallpaper-tile:hover img,.wallpaper-tile[aria-pressed="true"] img{opacity:1}
+ .wallpaper-tile-name{display:block;overflow:hidden;padding:5px 6px 6px;font:500 9px/1.2 ui-monospace,SFMono-Regular,Consolas,monospace;text-overflow:ellipsis;white-space:nowrap}
+ .login-settings-status{min-height:13px;margin-top:7px;color:rgba(191,209,234,.55);font-size:9px;line-height:1.35}
+ .login-help-panel{width:min(310px,calc(100vw - 56px));padding:15px}
+ .login-help-panel p{margin:0 0 10px;color:rgba(219,231,247,.8);font-size:12px;line-height:1.6}
+ .login-help-panel p:last-child{margin-bottom:0}
+ .login-form-mobile{display:none}
+ .login-form-desktop{display:block;width:100%}
+ .login-entry-row{width:min(270px,100%);height:38px;margin:0 auto;display:flex;align-items:center;gap:4px;padding:2px;background:rgba(220,236,255,.095);border:1px solid rgba(var(--login-accent-rgb),.3);border-radius:999px;box-shadow:inset 0 1px 5px rgba(0,0,0,.2),0 7px 22px rgba(0,0,0,.16);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);transition:border-color .16s,box-shadow .16s}
+ .login-entry-row:focus-within{border-color:rgba(var(--login-accent-rgb),.72);box-shadow:0 0 0 2px rgba(var(--login-accent-rgb),.14),inset 0 1px 5px rgba(0,0,0,.2),0 7px 22px rgba(0,0,0,.16)}
+ .login-entry-row input{width:100%;min-width:0;flex:1;height:32px;padding:0 13px;border:0;outline:0;background:transparent;color:#f3f7ff;font:600 13px/1.2 'Inter',ui-sans-serif,system-ui,sans-serif;letter-spacing:.025em}
+ .login-entry-row input::placeholder{color:rgba(232,241,255,.78);font-weight:600}
+ .login-next{width:29px;height:29px;flex:0 0 29px;display:grid;place-items:center;border:0;border-radius:50%;background:rgba(var(--login-accent-rgb),.82);color:#f1f7ff;cursor:pointer}
+ .login-next:hover{background:rgba(var(--login-accent-rgb),1)}
+ .login-next:focus-visible{outline:2px solid #7bbaff;outline-offset:2px}
+ .login-next svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+ .btn{height:43px;margin-top:7px;padding:10px;background:rgba(19,70,127,.67);border:1px solid rgba(161,202,246,.38);border-radius:8px;color:#f4f8ff;font-size:13px;box-shadow:inset 0 1px 0 rgba(255,255,255,.13),0 8px 24px rgba(0,0,0,.2);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);transition:background-color .15s,border-color .15s}
+ .btn:hover{transform:none;background:rgba(30,97,166,.78);border-color:rgba(185,218,250,.58);box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 8px 26px rgba(0,0,0,.24)}
+ .btn:active{transform:translateY(1px)}
+ .login-shell,.card{transition:opacity .24s ease,filter .24s ease,transform .24s ease}
+ .login-shell.is-leaving{opacity:0;filter:blur(5px);transform:scale(1.012);pointer-events:none}
+}
+@media(max-width:760px){.login-shell,.login-center{display:contents}.login-wallpaper,.login-actions,.login-settings-panel,.login-help-panel{display:none!important}.linux-topbar,.login-logo-desktop,.login-form-desktop{display:none}.login-logo-mobile,.login-form-mobile{display:block}}
+@media(prefers-reduced-motion:reduce){.login-shell,.card,.login-wallpaper,.login-settings-panel,.login-help-panel{animation:none;transition:none}}
 </style></head><body>
-<div class="card">
-  <a class="logo" href="https://t.me/s4base" target="_blank" rel="noopener noreferrer" aria-label="Open MFM Telegram channel">
-    <img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="Marshall FM">
-  </a>
-  <?php if(isset($loginError)):?><div class="err"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><?=htmlspecialchars($loginError)?></div><?php elseif(!empty($idleExpired)):?><div class="err" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2);color:#fcd34d"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Session expired due to inactivity.</div><?php endif;?>
-  <form method="post">
-    <input type="hidden" name="login_csrf" value="<?=htmlspecialchars($_SESSION['login_csrf'])?>">
-    <div class="field"><label for="un">Username</label><div class="iw"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/></svg><input type="text" id="un" name="login_user" placeholder="Enter username" required autofocus></div></div>
-     <div class="field"><label for="pw">Password</label><div class="iw"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><input type="password" id="pw" name="login_pass" placeholder="Enter password" autocomplete="current-password" required style="letter-spacing:.1em"></div></div>
-    <button type="submit" class="btn">Sign In</button>
-  </form>
-</div></body></html>
+<div class="login-wallpaper is-visible" id="loginWallpaperA" aria-hidden="true" style="background-image:url('https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/wallpapers/default_home.jpg')"></div>
+<div class="login-wallpaper" id="loginWallpaperB" aria-hidden="true"></div>
+<div class="login-shell">
+  <header class="linux-topbar" aria-label="Local time and CPU activity">
+    <div class="linux-date" id="loginDate">---</div>
+    <div class="linux-clock" id="loginClock">--:--:-- --</div>
+    <div class="cpu-groups">
+      <div class="cpu-group" title="Top five site processes by measured CPU activity" aria-label="Site CPU activity"><span class="cpu-bars" id="siteCpuBars"><?php for($i=0;$i<5;$i++):?><i data-cpu-bar></i><?php endfor;?></span></div>
+      <div class="cpu-group manager" title="Top five File Manager PHP workers by measured CPU activity" aria-label="File Manager CPU activity"><span class="cpu-bars" id="managerCpuBars"><?php for($i=0;$i<5;$i++):?><i data-cpu-bar></i><?php endfor;?></span></div>
+    </div>
+  </header>
+  <main class="login-center">
+    <div class="card">
+      <div class="login-logo-desktop" aria-label="Marshal File Manager"><img src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/admin/admin.png" alt="Marshal File Manager"></div>
+      <a class="logo login-logo-mobile" href="https://t.me/s4base" target="_blank" rel="noopener noreferrer" aria-label="Open MFM Telegram channel">
+        <img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="Marshall FM">
+      </a>
+      <?php if(isset($loginError)):?><div class="err"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><?=htmlspecialchars($loginError)?></div><?php elseif(!empty($idleExpired)):?><div class="err" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2);color:#fcd34d"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Session expired due to inactivity.</div><?php endif;?>
+      <form method="post" id="loginFormMobile" class="login-form-mobile">
+        <input type="hidden" name="login_csrf" value="<?=htmlspecialchars($_SESSION['login_csrf'])?>">
+        <div class="field"><label for="un">Username</label><div class="iw"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/></svg><input type="text" id="un" name="login_user" placeholder="Enter username" autocomplete="username" required></div></div>
+        <div class="field"><label for="pw">Password</label><div class="iw"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><input type="password" id="pw" name="login_pass" placeholder="Enter password" autocomplete="current-password" required style="letter-spacing:.1em"></div></div>
+        <button type="submit" class="btn">Sign In</button>
+      </form>
+      <form method="post" id="loginFormDesktop" class="login-form-desktop" data-step="<?=$desktopLoginStep?>">
+        <input type="hidden" name="login_csrf" value="<?=htmlspecialchars($_SESSION['login_csrf'])?>">
+        <input type="hidden" name="login_user" id="desktopLoginUser" value="<?=htmlspecialchars($desktopLoginUsername,ENT_QUOTES,'UTF-8')?>">
+        <div class="login-entry-row">
+          <input type="<?=($desktopLoginStep==='password'?'password':'text')?>" id="desktopLoginEntry" name="<?=($desktopLoginStep==='password'?'login_pass':'')?>" autocomplete="<?=($desktopLoginStep==='password'?'current-password':'username')?>" aria-label="<?=($desktopLoginStep==='password'?'Password':'Username')?>" placeholder="<?=($desktopLoginStep==='password'?'Enter password':'Enter username')?>" required>
+          <button type="<?=($desktopLoginStep==='password'?'submit':'button')?>" class="login-next" id="desktopLoginNext" aria-label="<?=($desktopLoginStep==='password'?'Sign in':'Continue')?>" title="<?=($desktopLoginStep==='password'?'Sign in':'Continue')?>">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+          </button>
+        </div>
+      </form>
+    </div>
+  </main>
+  <img class="login-footer-mark" src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/icons/mfm.png" alt="" aria-hidden="true">
+  <div class="login-actions" aria-label="Login tools">
+    <button class="login-action" type="button" id="openLoginSettings" aria-label="Settings" title="Settings" aria-haspopup="dialog" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33h0a1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51h0a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82v0a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1v0a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+    <button class="login-action" type="button" id="openLoginHelp" aria-label="Login help" title="Login help" aria-haspopup="dialog" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.7 9a2.4 2.4 0 1 1 4.2 1.6c-1.1 1-1.9 1.3-1.9 2.9"/><path d="M12 17h.01"/></svg>
+    </button>
+  </div>
+  <section class="login-settings-panel" id="loginSettingsPanel" role="dialog" aria-labelledby="loginSettingsTitle" hidden>
+    <header class="login-panel-header">
+      <h2 class="login-panel-title" id="loginSettingsTitle">Settings</h2>
+      <button class="login-panel-close" type="button" id="closeLoginSettings" aria-label="Close settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </header>
+    <div class="login-settings-toggles">
+      <button class="login-setting-toggle" type="button" id="toggleWallpaperBlur" aria-pressed="true" title="Toggle wallpaper blur">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="8" cy="7" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="10" cy="17" r="1.5"/></svg><span>Blur</span>
+      </button>
+      <button class="login-setting-toggle" type="button" id="toggleAutoWallpaper" aria-pressed="false" title="Toggle automatic wallpaper changes">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9A7 7 0 0 1 17 6l3 6M4 12l3 6a7 7 0 0 0 11.4-3"/></svg><span>Auto background</span>
+      </button>
+    </div>
+    <h3 class="login-wallpaper-heading">Backgrounds</h3>
+    <div class="wallpaper-gallery" id="loginWallpaperGallery" aria-label="Available backgrounds"></div>
+    <div class="login-settings-status" id="loginSettingsStatus" aria-live="polite">Checking for wallpaper updates…</div>
+  </section>
+  <section class="login-help-panel" id="loginHelpPanel" role="dialog" aria-labelledby="loginHelpTitle" hidden>
+    <header class="login-panel-header">
+      <h2 class="login-panel-title" id="loginHelpTitle">Sign-in help</h2>
+      <button class="login-panel-close" type="button" id="closeLoginHelp" aria-label="Close help"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </header>
+    <p>Enter your username, select the arrow, then enter your password to sign in.</p>
+    <p>Use Settings to choose a background or change its display options.</p>
+  </section>
+</div>
+<script>
+(function(){
+  if(!window.matchMedia('(min-width: 761px)').matches){document.getElementById('un')?.focus();return;}
+  const DEFAULT_WALLPAPER_URL='https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/wallpapers/default_home.jpg';
+  const RANDOM_WALLPAPER_BASE='https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/wallpapers/random/';
+  const WALLPAPER_LIST_URL=RANDOM_WALLPAPER_BASE+'all.txt';
+  const WALLPAPER_API_URL='https://api.github.com/repos/orgezeo/marshal-file-manager/contents/images/wallpapers/random?ref=main';
+  const WALLPAPER_LIST_KEY='mfm.login.wallpaperNames.v1',WALLPAPER_KEY='mfm.login.wallpaper.v1';
+  const BLUR_KEY='mfm.login.wallpaperBlur.v1',AUTO_KEY='mfm.login.wallpaperAuto.v1';
+  const layerA=document.getElementById('loginWallpaperA'),layerB=document.getElementById('loginWallpaperB');
+  const settingsButton=document.getElementById('openLoginSettings'),helpButton=document.getElementById('openLoginHelp');
+  const settingsPanel=document.getElementById('loginSettingsPanel'),helpPanel=document.getElementById('loginHelpPanel');
+  const closeSettingsButton=document.getElementById('closeLoginSettings'),closeHelpButton=document.getElementById('closeLoginHelp');
+  const blurToggle=document.getElementById('toggleWallpaperBlur'),autoToggle=document.getElementById('toggleAutoWallpaper');
+  const gallery=document.getElementById('loginWallpaperGallery'),settingsStatus=document.getElementById('loginSettingsStatus');
+  function storageGet(key,fallback){try{const value=window.localStorage.getItem(key);return value===null?fallback:value;}catch(_){return fallback;}}
+  function storageSet(key,value){try{window.localStorage.setItem(key,String(value));}catch(_){}}
+  function cleanWallpaperName(value){
+    let name=String(value||'').trim();
+    if(!name||name.startsWith('#'))return '';
+    name=name.replace(/^["']+|["']+$/g,'');
+    if(/^https?:\/\//i.test(name)){try{name=new URL(name).pathname;}catch(_){return '';}}
+    name=name.split(/[\\/]/).pop()||'';
+    try{name=decodeURIComponent(name);}catch(_){}
+    if(!name||name==='.'||name==='..'||name.toLowerCase()==='all.txt'||/[\u0000-\u001f]/.test(name)||!/\.(?:jpe?g|png|webp|gif|avif)$/i.test(name))return '';
+    return name;
+  }
+  function sortedWallpaperNames(values){
+    const names=[],seen=new Set();
+    (Array.isArray(values)?values:[]).forEach(value=>{
+      const name=cleanWallpaperName(value),key=name.toLowerCase();
+      if(name&&key!=='default_home.jpg'&&!seen.has(key)){seen.add(key);names.push(name);}
+    });
+    return names.sort((a,b)=>a.localeCompare(b,'en',{numeric:true,sensitivity:'base'}));
+  }
+  function makeWallpaperItems(names){
+    const items=[{id:'__default__',name:'default_home.jpg',url:DEFAULT_WALLPAPER_URL}];
+    sortedWallpaperNames(names).forEach(name=>items.push({id:name,name,url:RANDOM_WALLPAPER_BASE+encodeURIComponent(name)}));
+    return items.sort((a,b)=>a.name.localeCompare(b.name,'en',{numeric:true,sensitivity:'base'}));
+  }
+  function parseWallpaperList(text){return sortedWallpaperNames(String(text||'').split(/[\r\n,]+/));}
+  async function fetchWallpaperNames(){
+    const listResponse=await fetch(WALLPAPER_LIST_URL,{cache:'no-cache',mode:'cors',headers:{'Accept':'text/plain'}});
+    if(!listResponse.ok)throw new Error('Wallpaper list request failed.');
+    let names=parseWallpaperList(await listResponse.text());
+    if(names.length)return names;
+    const directoryResponse=await fetch(WALLPAPER_API_URL,{cache:'no-cache',mode:'cors',headers:{'Accept':'application/vnd.github+json'}});
+    if(!directoryResponse.ok)throw new Error('Wallpaper directory request failed.');
+    const directory=await directoryResponse.json();
+    if(!Array.isArray(directory))throw new Error('Wallpaper directory response is invalid.');
+    names=sortedWallpaperNames(directory.filter(item=>item&&item.type==='file').map(item=>item.name));
+    return names;
+  }
+  let cachedWallpaperNames=[];
+  try{cachedWallpaperNames=sortedWallpaperNames(JSON.parse(storageGet(WALLPAPER_LIST_KEY,'[]')));}catch(_){}
+  let wallpaperItems=makeWallpaperItems(cachedWallpaperNames);
+  let selectedWallpaperId=storageGet(WALLPAPER_KEY,'__default__');
+  let currentWallpaperId='__default__',activeWallpaperLayer=0,wallpaperRequestId=0,accentRequestId=0,autoTimer=0,thumbnailObserver=null;
+  let blurEnabled=storageGet(BLUR_KEY,'1')!=='0',autoEnabled=storageGet(AUTO_KEY,'0')==='1';
+  function setSettingsStatus(message){settingsStatus.textContent=message;}
+  function updateSelectedTile(){
+    gallery.querySelectorAll('.wallpaper-tile').forEach(tile=>tile.setAttribute('aria-pressed',String(tile.dataset.wallpaperId===currentWallpaperId)));
+  }
+  function assignWallpaperThumbnail(image){
+    if(!image.dataset.src)return;
+    image.loading='eager';image.src=image.dataset.src;image.removeAttribute('data-src');
+  }
+  function loadWallpaperThumbnails(){
+    if(thumbnailObserver){thumbnailObserver.disconnect();thumbnailObserver=null;}
+    const pending=Array.from(gallery.querySelectorAll('img[data-src]'));
+    pending.slice(0,9).forEach(assignWallpaperThumbnail);
+    const remaining=pending.slice(9);
+    if(!remaining.length)return;
+    if('IntersectionObserver' in window){
+      thumbnailObserver=new IntersectionObserver(entries=>{
+        entries.forEach(entry=>{
+          if(entry.isIntersecting){assignWallpaperThumbnail(entry.target);thumbnailObserver?.unobserve(entry.target);}
+        });
+      },{root:gallery,rootMargin:'140px 0px',threshold:0});
+      remaining.forEach(image=>thumbnailObserver.observe(image));
+    }else pending.forEach(assignWallpaperThumbnail);
+  }
+  function renderWallpaperGallery(){
+    gallery.replaceChildren();
+    wallpaperItems.forEach(item=>{
+      const button=document.createElement('button');
+      button.type='button';button.className='wallpaper-tile';button.dataset.wallpaperId=item.id;
+      button.title='Use '+item.name;button.setAttribute('aria-label','Choose background '+item.name);
+      button.setAttribute('aria-pressed',String(item.id===currentWallpaperId));
+      const image=document.createElement('img');image.alt='';image.loading='lazy';image.decoding='async';image.dataset.src=item.url;
+      const label=document.createElement('span');label.className='wallpaper-tile-name';label.textContent=item.name;
+      button.append(image,label);gallery.append(button);
+    });
+    if(!settingsPanel.hidden)loadWallpaperThumbnails();
+  }
+  function hslToRgb(h,s,l){
+    const a=s*Math.min(l,1-l),f=n=>{const k=(n+h/30)%12;return Math.round(255*(l-a*Math.max(-1,Math.min(k-3,Math.min(9-k,1)))));};
+    return [f(0),f(8),f(4)];
+  }
+  function sampleWallpaperAccent(url,itemId){
+    const token=++accentRequestId,image=new Image();image.crossOrigin='anonymous';
+    image.onload=function(){
+      if(token!==accentRequestId||currentWallpaperId!==itemId)return;
+      try{
+        const canvas=document.createElement('canvas');canvas.width=24;canvas.height=24;
+        const context=canvas.getContext('2d',{willReadFrequently:true});if(!context)return;
+        context.drawImage(image,0,0,24,24);
+        const pixels=context.getImageData(0,0,24,24).data;let red=0,green=0,blue=0,count=0;
+        for(let i=0;i<pixels.length;i+=4){if(pixels[i+3]<24)continue;red+=pixels[i];green+=pixels[i+1];blue+=pixels[i+2];count++;}
+        if(!count)return;
+        red/=count*255;green/=count*255;blue/=count*255;
+        const max=Math.max(red,green,blue),min=Math.min(red,green,blue),delta=max-min;
+        let hue=210;
+        if(delta){if(max===red)hue=60*(((green-blue)/delta)%6);else if(max===green)hue=60*((blue-red)/delta+2);else hue=60*((red-green)/delta+4);if(hue<0)hue+=360;}
+        const rgb=hslToRgb(hue,.78,.52);
+        document.documentElement.style.setProperty('--login-accent-rgb',rgb.join(','));
+      }catch(_){}
+    };
+    image.src=url;
+  }
+  function setWallpaper(item,save=true){
+    if(!item)return;
+    if(item.id===currentWallpaperId){
+      selectedWallpaperId=item.id;if(save)storageSet(WALLPAPER_KEY,item.id);
+      updateSelectedTile();return;
+    }
+    const request=++wallpaperRequestId,preload=new Image();
+    preload.onload=function(){
+      if(request!==wallpaperRequestId)return;
+      const nextLayer=activeWallpaperLayer===0?layerB:layerA;
+      const previousLayer=activeWallpaperLayer===0?layerA:layerB;
+      nextLayer.style.backgroundImage='url("'+item.url.replace(/"/g,'%22')+'")';
+      nextLayer.classList.remove('is-visible');void nextLayer.offsetWidth;
+      window.requestAnimationFrame(function(){
+        if(request!==wallpaperRequestId)return;
+        nextLayer.classList.add('is-visible');previousLayer.classList.remove('is-visible');
+        activeWallpaperLayer=activeWallpaperLayer===0?1:0;currentWallpaperId=item.id;selectedWallpaperId=item.id;
+        if(save)storageSet(WALLPAPER_KEY,item.id);
+        updateSelectedTile();sampleWallpaperAccent(item.url,item.id);
+      });
+    };
+    preload.onerror=function(){if(request===wallpaperRequestId)setSettingsStatus('Could not load '+item.name+'.');};
+    preload.src=item.url;
+  }
+  function updateBlurState(){
+    document.body.classList.toggle('login-no-wallpaper-blur',!blurEnabled);
+    blurToggle.setAttribute('aria-pressed',String(blurEnabled));storageSet(BLUR_KEY,blurEnabled?'1':'0');
+  }
+  function cycleWallpaper(){
+    if(document.hidden||wallpaperItems.length<2)return;
+    const index=wallpaperItems.findIndex(item=>item.id===currentWallpaperId);
+    setWallpaper(wallpaperItems[(index+1+wallpaperItems.length)%wallpaperItems.length]);
+  }
+  function syncAutoRotation(){
+    window.clearInterval(autoTimer);autoTimer=0;
+    autoToggle.setAttribute('aria-pressed',String(autoEnabled));storageSet(AUTO_KEY,autoEnabled?'1':'0');
+    if(autoEnabled&&wallpaperItems.length>1)autoTimer=window.setInterval(cycleWallpaper,18000);
+  }
+  function openSettings(){
+    helpPanel.hidden=true;helpButton.setAttribute('aria-expanded','false');
+    settingsPanel.hidden=false;settingsButton.setAttribute('aria-expanded','true');
+    window.requestAnimationFrame(loadWallpaperThumbnails);
+  }
+  function closeSettings(){
+    settingsPanel.hidden=true;settingsButton.setAttribute('aria-expanded','false');
+    if(thumbnailObserver){thumbnailObserver.disconnect();thumbnailObserver=null;}
+  }
+  function openHelp(){
+    closeSettings();helpPanel.hidden=false;helpButton.setAttribute('aria-expanded','true');
+  }
+  function closeHelp(){helpPanel.hidden=true;helpButton.setAttribute('aria-expanded','false');}
+  renderWallpaperGallery();
+  updateBlurState();syncAutoRotation();
+  sampleWallpaperAccent(DEFAULT_WALLPAPER_URL,'__default__');
+  const cachedSelection=wallpaperItems.find(item=>item.id===selectedWallpaperId);
+  if(cachedSelection&&cachedSelection.id!=='__default__')setWallpaper(cachedSelection,false);
+  settingsButton.addEventListener('click',function(){if(settingsPanel.hidden)openSettings();else closeSettings();});
+  helpButton.addEventListener('click',function(){if(helpPanel.hidden)openHelp();else closeHelp();});
+  closeSettingsButton.addEventListener('click',closeSettings);closeHelpButton.addEventListener('click',closeHelp);
+  blurToggle.addEventListener('click',function(){blurEnabled=!blurEnabled;updateBlurState();});
+  autoToggle.addEventListener('click',function(){autoEnabled=!autoEnabled;syncAutoRotation();});
+  gallery.addEventListener('click',function(event){
+    const tile=event.target.closest('.wallpaper-tile');if(!tile)return;
+    const item=wallpaperItems.find(candidate=>candidate.id===tile.dataset.wallpaperId);
+    if(item)setWallpaper(item);
+  });
+  document.addEventListener('click',function(event){
+    if(!settingsPanel.hidden&&!settingsPanel.contains(event.target)&&!settingsButton.contains(event.target))closeSettings();
+    if(!helpPanel.hidden&&!helpPanel.contains(event.target)&&!helpButton.contains(event.target))closeHelp();
+  });
+  document.addEventListener('keydown',function(event){if(event.key==='Escape'){closeSettings();closeHelp();}});
+  async function refreshWallpaperList(){
+    setSettingsStatus('Checking for wallpaper updates…');
+    try{
+      const names=await fetchWallpaperNames();
+      if(names.length){cachedWallpaperNames=names;storageSet(WALLPAPER_LIST_KEY,JSON.stringify(names));}
+      wallpaperItems=makeWallpaperItems(cachedWallpaperNames);renderWallpaperGallery();
+      const preferred=wallpaperItems.find(item=>item.id===selectedWallpaperId);
+      if(preferred){if(preferred.id!==currentWallpaperId)setWallpaper(preferred,false);}
+      else if(selectedWallpaperId!=='__default__'){
+        selectedWallpaperId='__default__';storageSet(WALLPAPER_KEY,selectedWallpaperId);
+        setWallpaper(wallpaperItems.find(item=>item.id==='__default__'),false);
+      }
+      setSettingsStatus(names.length?wallpaperItems.length+' backgrounds · list checked':(cachedWallpaperNames.length?'Using saved wallpaper list.':'No wallpapers found; default remains available.'));
+    }catch(_){
+      wallpaperItems=makeWallpaperItems(cachedWallpaperNames);renderWallpaperGallery();
+      setSettingsStatus(cachedWallpaperNames.length?'Update check unavailable · showing saved backgrounds.':'Could not check wallpaper updates; default remains available.');
+    }
+    syncAutoRotation();
+  }
+  refreshWallpaperList();
+  const dateNode=document.getElementById('loginDate'),clockNode=document.getElementById('loginClock');
+  const dateFormat=new Intl.DateTimeFormat('en-US',{weekday:'short',year:'numeric',month:'short',day:'2-digit'});
+  const timeFormat=new Intl.DateTimeFormat('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true,timeZoneName:'short'});
+  function updateClock(){const now=new Date();dateNode.textContent=dateFormat.format(now);clockNode.textContent=timeFormat.format(now);}
+  updateClock();window.setInterval(updateClock,1000);
+  const csrf=document.querySelector('input[name="login_csrf"]')?.value||'';
+  const metricsUrl=new URL(window.location.href);metricsUrl.search='';metricsUrl.searchParams.set('x','login_metrics');
+  function paintBars(id,values,available){
+    const bars=document.querySelectorAll('#'+id+' [data-cpu-bar]');
+    bars.forEach((bar,index)=>{const value=available?Math.max(0,Math.min(100,Number(values[index]||0))):0;bar.style.height=(available?Math.max(2,Math.min(23,2+Math.sqrt(value)*3.1)):2)+'px';bar.style.opacity=available?(value>0?String(Math.min(1,.72+value/28)):'0.68'):'0.26';bar.title=available?value.toFixed(2)+'% CPU':'CPU metrics unavailable on this host';});
+  }
+  async function pollCpu(){
+    if(document.hidden)return;
+    try{
+      const form=new URLSearchParams();form.set('login_csrf',csrf);
+      const response=await fetch(metricsUrl,{method:'POST',body:form,cache:'no-store',credentials:'same-origin',headers:{'Accept':'application/json'}});
+      if(response.status===429)return;
+      const data=await response.json();
+      if(!data.available){paintBars('siteCpuBars',[],false);paintBars('managerCpuBars',[],false);return;}
+      paintBars('siteCpuBars',data.site||[],true);paintBars('managerCpuBars',data.manager||[],true);
+    }catch(_){paintBars('siteCpuBars',[],false);paintBars('managerCpuBars',[],false);}
+  }
+  pollCpu();window.setInterval(pollCpu,2000);
+  const form=document.getElementById('loginFormDesktop'),entry=document.getElementById('desktopLoginEntry');
+  const hiddenUser=document.getElementById('desktopLoginUser'),next=document.getElementById('desktopLoginNext'),shell=document.querySelector('.login-shell');
+  function showPasswordStep(){
+    if(form.dataset.step==='password')return true;
+    const username=entry.value.trim();
+    entry.setCustomValidity('');
+    if(!username){entry.setCustomValidity('Enter a username first.');entry.reportValidity();return false;}
+    hiddenUser.value=username;entry.value='';entry.type='password';entry.name='login_pass';entry.autocomplete='current-password';entry.setAttribute('aria-label','Password');entry.placeholder='Enter password';
+    form.dataset.step='password';next.type='submit';next.setAttribute('aria-label','Sign in');next.title='Sign in';
+    window.requestAnimationFrame(function(){entry.focus();});
+    return true;
+  }
+  if(form.dataset.step==='password')entry.focus();else entry.focus();
+  entry.addEventListener('input',function(){entry.setCustomValidity('');});
+  entry.addEventListener('keydown',function(event){if(event.key==='Enter'&&form.dataset.step!=='password'){event.preventDefault();showPasswordStep();}});
+  next.addEventListener('click',function(event){if(form.dataset.step!=='password'){event.preventDefault();showPasswordStep();}});
+  form?.addEventListener('submit',function(event){
+    if(form.dataset.step!=='password'){event.preventDefault();showPasswordStep();return;}
+    if(form.dataset.submitting)return;
+    event.preventDefault();form.dataset.submitting='1';shell.classList.add('is-leaving');
+    window.setTimeout(function(){HTMLFormElement.prototype.submit.call(form);},240);
+  });
+})();
+</script>
+</body></html>
 <?php exit; }
 
 /* Guardian's database/bootstrap work is needed for a full page load, not for
@@ -12446,6 +12928,48 @@ if(isset($_GET['raw'])){
 }
 
 function fmtSz($b){if($b>=1073741824)return round($b/1073741824,2).' GB';if($b>=1048576)return round($b/1048576,1).' MB';if($b>=1024)return round($b/1024,1).' KB';return $b.' B';}
+function fm_file_open_url($path,$isDir,$fallback){
+    if($isDir)return '?dir='.urlencode($path);
+    $documentRoot=realpath((string)($_SERVER['DOCUMENT_ROOT']??''));
+    $realPath=realpath($path);
+    if($documentRoot!==false&&$realPath!==false&&strpos($realPath,rtrim($documentRoot,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0){
+        $relative=substr($realPath,strlen(rtrim($documentRoot,DIRECTORY_SEPARATOR))+1);
+        $segments=explode(DIRECTORY_SEPARATOR,$relative);
+        return '/'.implode('/',array_map('rawurlencode',$segments));
+    }
+    return $fallback;
+}
+function fm_file_info_payload($path,$name,$isDir,$type,$openUrl){
+    clearstatcache(true,$path);
+    $stat=@stat($path);$mode=@fileperms($path);$uid=is_array($stat)&&isset($stat['uid'])?(int)$stat['uid']:null;$gid=is_array($stat)&&isset($stat['gid'])?(int)$stat['gid']:null;
+    $owner=$uid===null?null:(string)$uid;$group=$gid===null?null:(string)$gid;
+    if($uid!==null&&function_exists('posix_getpwuid')){$pw=@posix_getpwuid($uid);if(is_array($pw)&&!empty($pw['name']))$owner=(string)$pw['name'];}
+    if($gid!==null&&function_exists('posix_getgrgid')){$gr=@posix_getgrgid($gid);if(is_array($gr)&&!empty($gr['name']))$group=(string)$gr['name'];}
+    $modeBits=$mode===false?null:($mode&0777);$symbolic='';
+    if($modeBits!==null){foreach([[0400,'r'],[0200,'w'],[0100,'x'],[0040,'r'],[0020,'w'],[0010,'x'],[0004,'r'],[0002,'w'],[0001,'x']] as [$mask,$character])$symbolic.=($modeBits&$mask)?$character:'-';}
+    $mime=$isDir?'inode/directory':(function_exists('mime_content_type')?(@mime_content_type($path)?:'application/octet-stream'):'application/octet-stream');
+    $link=is_link($path);
+    return [
+        'name'=>(string)$name,'kind'=>$isDir?'Directory':'File','type'=>(string)$type,
+        'extension'=>$isDir?'':(string)pathinfo($name,PATHINFO_EXTENSION),
+        'bytes'=>$isDir?null:(int)(@filesize($path)?:0),'mime'=>$mime,'path'=>(string)$path,'open_url'=>(string)$openUrl,
+        'permissions'=>$mode===false?'':substr(sprintf('%o',$mode),-4),'symbolic_permissions'=>$symbolic,
+        'owner'=>$owner,'owner_id'=>$uid,'group'=>$group,'group_id'=>$gid,
+        'readable'=>@is_readable($path),'writable'=>@is_writable($path),'executable'=>@is_executable($path),
+        'modified'=>is_array($stat)&&isset($stat['mtime'])?(int)$stat['mtime']:null,
+        'accessed'=>is_array($stat)&&isset($stat['atime'])?(int)$stat['atime']:null,
+        'metadata_changed'=>is_array($stat)&&isset($stat['ctime'])?(int)$stat['ctime']:null,
+        'created'=>is_array($stat)&&isset($stat['birthtime'])?(int)$stat['birthtime']:null,
+        'inode'=>is_array($stat)&&isset($stat['ino'])?(int)$stat['ino']:null,
+        'hard_links'=>is_array($stat)&&isset($stat['nlink'])?(int)$stat['nlink']:null,
+        'device'=>is_array($stat)&&isset($stat['dev'])?(int)$stat['dev']:null,
+        'is_symlink'=>$link,'link_target'=>$link?(@readlink($path)?:''):null
+    ];
+}
+function fm_file_info_attr($path,$name,$isDir,$type,$openUrl){
+    $json=json_encode(fm_file_info_payload($path,$name,$isDir,$type,$openUrl),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_INVALID_UTF8_SUBSTITUTE);
+    return htmlspecialchars($json===false?'{}':$json,ENT_QUOTES|ENT_HTML5,'UTF-8');
+}
 function fmtUptime($s){$s=(int)$s;$d=intdiv($s,86400);$h=intdiv($s%86400,3600);$m=intdiv($s%3600,60);if($d>0)return $d.'d '.$h.'h';if($h>0)return $h.'h '.$m.'m';return $m.'m';}
 $fm->handle();
 
@@ -12501,6 +13025,7 @@ if($terminalStandalone&&isset($_GET['ssh_user'])){
 }
 if($terminalStandalone)fm_ensure_terminal_font();
 function sortUrl($col){global $curSort,$curDir_;$d=($curSort===$col&&$curDir_==='asc')?'desc':'asc';$q=$_GET;$q['sort']=$col;$q['sdir']=$d;return '?'.http_build_query($q);}
+$fmLoginTransition=!empty($_SESSION['fm_login_transition']);unset($_SESSION['fm_login_transition']);
 
 function svgFolder(){return '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="#85898C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="rgba(133,137,140,.15)"/></svg>';}
 function svgFile($t='file'){global $fm;$color=$fm->getColor($t);$p=['image'=>'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>','video'=>'<rect x="2" y="5" width="14" height="14" rx="2"/><path d="M16 10l6-4v12l-6-4z"/>','audio'=>'<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>','archive'=>'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v18M14 8h2M14 12h2M14 16h2"/>','pdf'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><text x="12" y="18" font-size="6" text-anchor="middle" fill="currentColor" stroke="none" font-weight="700">PDF</text>','word'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/>','excel'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><path d="M9.5 13l5 6M14.5 13l-5 6"/>','code'=>'<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>','data'=>'<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>','text'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>','config'=>'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82V9a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9z"/>','file'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>'];$inner=isset($p[$t])?$p[$t]:$p['file'];return '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="'.$color.'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'.$inner.'</svg>';}
@@ -12512,6 +13037,7 @@ function svgFile($t='file'){global $fm;$color=$fm->getColor($t);$p=['image'=>'<r
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Marshal FM</title>
 <link href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<?php if($fmLoginTransition):?><script>document.documentElement.classList.add('fm-login-arrive');document.addEventListener('DOMContentLoaded',function(){requestAnimationFrame(function(){document.documentElement.classList.add('fm-login-arrive-visible');window.setTimeout(function(){document.documentElement.classList.remove('fm-login-arrive','fm-login-arrive-visible');},600);});});</script><?php endif;?>
 <style>
 /* ══ RESET & TOKENS ══ */
 @font-face{font-family:'TerminalTMT';src:url('attached_assets/fonts/tmt.ttf') format('truetype'),url('https://github.com/orgezeo/marshal-file-manager/raw/refs/heads/main/fonts/terminal/tmt.ttf') format('truetype');font-weight:100 900;font-style:normal;font-display:block}
@@ -12536,6 +13062,7 @@ function svgFile($t='file'){global $fm;$color=$fm->getColor($t);$p=['image'=>'<r
 }
 html{height:100%;-webkit-tap-highlight-color:transparent}
 body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-weight:var(--fw-regular);background:var(--bg);color:var(--t1);font-size:13.5px;line-height:1.5;height:100vh;overflow:hidden;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;transition:background-color .2s var(--out),color .2s var(--out)}
+<?php if($fmLoginTransition):?>html.fm-login-arrive body{opacity:0;transition:opacity .36s ease}html.fm-login-arrive.fm-login-arrive-visible body{opacity:1}@media(prefers-reduced-motion:reduce){html.fm-login-arrive body{transition:none}}<?php endif;?>
 
 /* ══ LAYOUT ══ */
 .shell{display:grid;grid-template:"tb tb" var(--th) "sb main" 1fr "bar bar" var(--bh) / var(--sw) 1fr;height:100vh;overflow:hidden}
@@ -12759,8 +13286,17 @@ input[type=file]{display:none}
 .ov.vis{opacity:1}
 .mod-ov{display:none;position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.8);backdrop-filter:blur(10px);align-items:center;justify-content:center;padding:20px}
 .mod-ov.open{display:flex}
+.mod-ov#fileInfoOv{z-index:450}
 .mod{background:var(--surf);border:1px solid var(--border2);border-radius:var(--rlg);display:flex;flex-direction:column;overflow:hidden;animation:fadeUp .3s var(--spring) both;max-height:88vh}
 .mod-sm{width:min(400px,92vw)}.mod-md{width:min(560px,94vw)}.mod-lg{width:min(760px,95vw)}
+.file-info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.file-info-row{min-width:0;padding:9px 10px;border:1px solid var(--border);border-radius:9px;background:var(--raised)}
+.file-info-label{display:block;margin-bottom:4px;color:var(--t3);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.45px}
+.file-info-value{color:var(--t1);font-size:12px;line-height:1.45;overflow-wrap:anywhere}
+.file-info-open{display:flex;align-items:center;gap:7px;padding:12px 14px;border-top:1px solid var(--border);background:var(--raised);font-size:12px;color:var(--t2)}
+.file-info-open a{display:flex;align-items:center;gap:6px;min-width:0;color:var(--link);font-weight:700;overflow-wrap:anywhere}
+.file-info-open svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+@media(max-width:560px){.file-info-grid{grid-template-columns:1fr}.file-info-grid .file-info-row:nth-child(1),.file-info-grid .file-info-row:nth-child(7){grid-column:auto}}
 .perm-t{border-collapse:collapse;font-size:12.5px}.perm-t th{text-align:center;color:var(--t3);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;padding:4px 8px}.perm-t td{text-align:center;padding:6px 8px;color:var(--t2)}.perm-t td:first-child{text-align:left;font-weight:600;color:var(--t1)}.perm-t input[type=checkbox]{width:16px;height:16px;cursor:pointer}
 @keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
 .mod-head{display:flex;align-items:center;gap:9px;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--raised);flex-shrink:0}
@@ -14198,9 +14734,12 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
           <tbody>
           <?php $tags=$fm->getTagsFor($fm->getCwd());$audioArtMap=fm_audio_artwork_map($fm->getCwd());?>
           <?php foreach($list['folders'] as $f):
-            $perms=substr(sprintf('%o',fileperms($fm->getCwd().'/'.$f['name'])),-4);
+            $folderPath=$fm->getCwd().'/'.$f['name'];$folderMode=@fileperms($folderPath);
+            $perms=$folderMode===false?'':substr(sprintf('%o',$folderMode),-4);
+            $folderOpenUrl=fm_file_open_url($folderPath,true,'');
+            $folderInfo=fm_file_info_attr($folderPath,$f['name'],true,'folder',$folderOpenUrl);
           ?>
-          <tr data-name="<?=he($f['name'])?>" data-isdir="1" tabindex="0">
+          <tr data-name="<?=he($f['name'])?>" data-isdir="1" data-type="folder" data-info="<?=$folderInfo?>" tabindex="0">
             <td class="cc"><input type="checkbox" class="rck item-ck" value="<?=he($f['name'])?>"></td>
             <td><div class="nc" onclick="location.href='?dir=<?=urlencode($fm->getCwd().'/'.$f['name'])?>'"
               data-ctx-name="<?=he($f['name'])?>" data-ctx-isdir="1" data-ctx-perm="<?=he($perms)?>">
@@ -14221,9 +14760,12 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
           <?php foreach($list['files'] as $f):
             $type=$f['type'];$color=$fm->getColor($type);
             $ext=strtolower(pathinfo($f['name'],PATHINFO_EXTENSION));
-            $perms=substr(sprintf('%o',fileperms($fm->getCwd().'/'.$f['name'])),-4);
+            $filePath=$fm->getCwd().'/'.$f['name'];$fileMode=@fileperms($filePath);
+            $perms=$fileMode===false?'':substr(sprintf('%o',$fileMode),-4);
             $prev=$fm->canPreview($type);$isTar=$fm->isTar($f['name']);
             $rawUrl='?raw='.urlencode($f['name']).'&dir='.urlencode($fm->getCwd());
+            $fileOpenUrl=fm_file_open_url($filePath,false,$rawUrl);
+            $fileInfo=fm_file_info_attr($filePath,$f['name'],false,$type,$fileOpenUrl);
           $audioStem=strtolower(pathinfo($f['name'],PATHINFO_FILENAME));$audioFullName=strtolower($f['name']);
           $audioSidecar=$type==='audio'?($audioArtMap['tracks'][$audioFullName]??$audioArtMap['tracks'][$audioStem]??$audioArtMap['album']):'';
           $audioLyrics=$type==='audio'?($audioArtMap['lyrics'][$audioFullName]??$audioArtMap['lyrics'][$audioStem]??''):'';
@@ -14233,7 +14775,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
              $audioCustomArt=fm_audio_override_cover_path($fm->getCwd(),$audioOverride)!==''?'?audio_art=1&raw='.urlencode($f['name']).'&dir='.urlencode($fm->getCwd()):'';
              $audioArt=$audioCustomArt?:$audioDefaultArt;
           ?>
-          <tr data-name="<?=he($f['name'])?>" data-isdir="0" data-type="<?=$type?>" tabindex="0">
+          <tr data-name="<?=he($f['name'])?>" data-isdir="0" data-type="<?=$type?>" data-info="<?=$fileInfo?>" tabindex="0">
             <td class="cc"><input type="checkbox" class="rck item-ck" value="<?=he($f['name'])?>"></td>
             <td><div class="nc" <?php if($prev):?>data-preview="<?=he($rawUrl)?>" data-type="<?=$type?>" data-fname="<?=he($f['name'])?>"<?php endif;?> <?php if($type==='audio'):?>data-art="<?=he($audioArt)?>" data-art-default="<?=he($audioDefaultArt)?>" data-art-fallback="<?=he($audioSidecar)?>" data-lyrics="<?=he($audioLyrics)?>" data-audio-size="<?=max(0,(int)$f['size'])?>" data-audio-mtime="<?=max(0,(int)$f['mtime'])?>"<?php endif;?>
               data-ctx-name="<?=he($f['name'])?>" data-ctx-isdir="0" data-ctx-type="<?=$type?>" data-ctx-raw="<?=he($rawUrl)?>" data-ctx-perm="<?=he($perms)?>">
@@ -14279,6 +14821,9 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
           $isDir=is_dir($fm->getCwd().'/'.$item['name']);
            $type=$isDir?'folder':$item['type'];$color=$isDir?'#85898C':$fm->getColor($type);
           $rawUrl='?raw='.urlencode($item['name']).'&dir='.urlencode($fm->getCwd());
+          $itemPath=$fm->getCwd().'/'.$item['name'];
+          $itemOpenUrl=fm_file_open_url($itemPath,$isDir,$rawUrl);
+          $itemInfo=fm_file_info_attr($itemPath,$item['name'],$isDir,$type,$itemOpenUrl);
           $prev=!$isDir&&$fm->canPreview($type);
           $audioStem=strtolower(pathinfo($item['name'],PATHINFO_FILENAME));$audioFullName=strtolower($item['name']);
           $audioSidecar=$type==='audio'?($audioArtMap['tracks'][$audioFullName]??$audioArtMap['tracks'][$audioStem]??$audioArtMap['album']):'';
@@ -14290,7 +14835,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
           $audioCustomArt=fm_audio_override_cover_path($fm->getCwd(),$audioOverride)!==''?'?audio_art=1&raw='.urlencode($item['name']).'&dir='.urlencode($fm->getCwd()):'';
           $audioArt=$audioCustomArt?:$audioDefaultArt;
         ?>
-        <div class="gi" data-name="<?=he($item['name'])?>" data-isdir="<?=$isDir?1:0?>" data-type="<?=$type?>" <?php if($type==='audio'):?>data-art="<?=he($audioArt)?>" data-art-default="<?=he($audioDefaultArt)?>" data-art-fallback="<?=he($audioSidecar)?>" data-lyrics="<?=he($audioLyrics)?>" data-audio-size="<?=max(0,(int)$item['size'])?>" data-audio-mtime="<?=max(0,(int)$item['mtime'])?>"<?php endif;?>
+        <div class="gi" data-name="<?=he($item['name'])?>" data-isdir="<?=$isDir?1:0?>" data-type="<?=$type?>" data-info="<?=$itemInfo?>" <?php if($type==='audio'):?>data-art="<?=he($audioArt)?>" data-art-default="<?=he($audioDefaultArt)?>" data-art-fallback="<?=he($audioSidecar)?>" data-lyrics="<?=he($audioLyrics)?>" data-audio-size="<?=max(0,(int)$item['size'])?>" data-audio-mtime="<?=max(0,(int)$item['mtime'])?>"<?php endif;?>
           <?php if(!$isDir&&$prev):?>data-preview="<?=he($rawUrl)?>" data-type="<?=$type?>" data-fname="<?=he($item['name'])?>"
           <?php elseif($isDir):?>onclick="location.href='?dir=<?=urlencode($fm->getCwd().'/'.$item['name'])?>'"<?php endif;?>
           data-ctx-name="<?=he($item['name'])?>" data-ctx-isdir="<?=$isDir?1:0?>" data-ctx-raw="<?=$isDir?'':he($rawUrl)?>">
@@ -14351,6 +14896,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="ctx-header"><svg viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="1.8" stroke-linecap="round" style="width:14px;height:14px;flex-shrink:0"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg><span id="ctx-name"></span></div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" id="ctx-open"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Open</div>
+  <div class="ctx-item" id="ctx-info"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>Info</div>
   <div class="ctx-item" id="ctx-edit"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit</div>
   <div class="ctx-item" id="ctx-audio-info" style="display:none"><svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/><path d="M4 21h16"/></svg>Edit song details</div>
   <div class="ctx-item" id="ctx-dl"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Download</div>
@@ -14379,6 +14925,19 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   </div>
   <div class="sheet-grid" id="sh-grid"></div>
   <div style="height:8px"></div>
+</div>
+
+<!-- FILE INFORMATION MODAL -->
+<div class="mod-ov" id="fileInfoOv">
+  <div class="mod mod-md">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg></div>
+      <span class="mod-title" id="fileInfoTitle">File information</span>
+      <button type="button" class="btn btn-icon btn-g" id="fileInfoClose" aria-label="Close file information"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body"><div class="file-info-grid" id="fileInfoGrid"></div></div>
+    <div class="file-info-open"><span>Open:</span><a id="fileInfoOpenLink" href="#" target="_blank" rel="noopener"><span id="fileInfoOpenName"></span><svg viewBox="0 0 24 24"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a></div>
+  </div>
 </div>
 
 <!-- PREVIEW MODAL -->
@@ -14483,7 +15042,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .fm-music-panel.fm-music-selected-video-open .fm-music-cover{background:transparent;box-shadow:none}
 .fm-music-panel.fm-music-selected-video-open .fm-music-cover-note,.fm-music-panel.fm-music-selected-video-open .fm-music-cover img{visibility:hidden;opacity:0}
 @media(max-width:768px){
-  .fm-music-selected-video{-webkit-mask-image:linear-gradient(to bottom,#000 0%,#000 95%,rgba(0,0,0,.995) 95.5%,rgba(0,0,0,.97) 96%,rgba(0,0,0,.92) 96.5%,rgba(0,0,0,.82) 97%,rgba(0,0,0,.68) 97.5%,rgba(0,0,0,.50) 98%,rgba(0,0,0,.32) 98.5%,rgba(0,0,0,.17) 99%,rgba(0,0,0,.06) 99.5%,transparent 100%);mask-image:linear-gradient(to bottom,#000 0%,#000 95%,rgba(0,0,0,.995) 95.5%,rgba(0,0,0,.97) 96%,rgba(0,0,0,.92) 96.5%,rgba(0,0,0,.82) 97%,rgba(0,0,0,.68) 97.5%,rgba(0,0,0,.50) 98%,rgba(0,0,0,.32) 98.5%,rgba(0,0,0,.17) 99%,rgba(0,0,0,.06) 99.5%,transparent 100%)}
+  .fm-music-selected-video{-webkit-mask-image:linear-gradient(to bottom,#000 0%,#000 70%,rgba(0,0,0,.995) 72%,rgba(0,0,0,.97) 75%,rgba(0,0,0,.91) 79%,rgba(0,0,0,.82) 83%,rgba(0,0,0,.68) 87%,rgba(0,0,0,.52) 90%,rgba(0,0,0,.35) 93%,rgba(0,0,0,.19) 96%,rgba(0,0,0,.075) 98%,rgba(0,0,0,.015) 99.5%,transparent 100%);mask-image:linear-gradient(to bottom,#000 0%,#000 70%,rgba(0,0,0,.995) 72%,rgba(0,0,0,.97) 75%,rgba(0,0,0,.91) 79%,rgba(0,0,0,.82) 83%,rgba(0,0,0,.68) 87%,rgba(0,0,0,.52) 90%,rgba(0,0,0,.35) 93%,rgba(0,0,0,.19) 96%,rgba(0,0,0,.075) 98%,rgba(0,0,0,.015) 99.5%,transparent 100%)}
   .fm-music-video-loader{top:29dvh}
   .fm-music-scroll{padding-top:calc(58px + env(safe-area-inset-top))}
 }
@@ -16581,12 +17140,13 @@ function openMod(id){document.getElementById(id)?.classList.add('open');}
 function closeMod(id){document.getElementById(id)?.classList.remove('open');if(id==='configInspectorOv'&&typeof resetConfigInspectorView==='function')resetConfigInspectorView();if(id==='rootingScanOv'&&typeof resetRootingScanView==='function')resetRootingScanView();}
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
-  ['prevOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv'].forEach(closeMod);
+  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv'].forEach(closeMod);
   closeSheet();closeCtx();
 });
-['prevOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv'].forEach(id=>{
+['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv'].forEach(id=>{
   document.getElementById(id)?.addEventListener('click',e=>{if(e.target===document.getElementById(id))closeMod(id);});
 });
+document.getElementById('fileInfoClose')?.addEventListener('click',()=>closeMod('fileInfoOv'));
 
 /* ═══════════════════════════════════════
    RESPONSE CHANGER
@@ -17003,6 +17563,7 @@ function showCtx(x,y,data){
   const isDir=data.isDir;const isRO=RO;
   // Show/hide items
   qs('ctx-open').style.display='flex';
+  qs('ctx-info').style.display='flex';
   qs('ctx-edit').style.display=(isDir||data.type==='audio')?'none':'flex';
   qs('ctx-audio-info').style.display=(!isDir&&data.type==='audio'&&!isRO)?'flex':'none';
   qs('ctx-dl').style.display=isDir?'none':'flex';
@@ -17026,6 +17587,40 @@ function showCtx(x,y,data){
 }
 function closeCtx(){ctx.classList.remove('open');}
 function qs(id){return document.getElementById(id);}
+function readFileInfo(el){
+  if(!el)return null;
+  try{return JSON.parse(el.dataset.info||'{}');}catch(_){return null;}
+}
+function fileInfoDate(value){
+  const timestamp=Number(value);
+  if(!Number.isFinite(timestamp)||timestamp<=0)return'—';
+  const date=new Date(timestamp*1000);
+  return Number.isNaN(date.getTime())?'—':date.toLocaleString();
+}
+function openFileInfo(info){
+  if(typeof info==='string'){try{info=JSON.parse(info);}catch(_){info=null;}}
+  if(!info||!info.name){toast('File information is unavailable.');return;}
+  const size=info.bytes===null||info.bytes===undefined?'Not calculated for folders':`${formatBytes(Number(info.bytes)||0)} (${Number(info.bytes||0).toLocaleString()} bytes)`;
+  const rows=[
+    ['Name',info.name],['Kind',info.kind],['File type',info.type||'—'],
+    ['Extension',info.extension||'No extension'],['Size',size],['MIME type',info.mime||'—'],
+    ['Full path',info.path||'—'],['Permissions',info.permissions?`${info.permissions} · ${info.symbolic_permissions||''}`:'Unavailable'],
+    ['Owner',info.owner||'—'],['Owner ID',info.owner_id??'—'],['Group',info.group||'—'],['Group ID',info.group_id??'—'],
+    ['Readable',info.readable?'Yes':'No'],['Writable',info.writable?'Yes':'No'],['Executable',info.executable?'Yes':'No'],
+    ['Modified',fileInfoDate(info.modified)],['Last accessed',fileInfoDate(info.accessed)],['Metadata changed',fileInfoDate(info.metadata_changed)],
+    ['Inode',info.inode??'—'],['Hard links',info.hard_links??'—'],['Device ID',info.device??'—'],
+    ['Symbolic link',info.is_symlink?'Yes':'No']
+  ];
+  if(info.created)rows.splice(18,0,['Created',fileInfoDate(info.created)]);
+  if(info.is_symlink&&info.link_target)rows.push(['Link target',info.link_target]);
+  document.getElementById('fileInfoTitle').textContent=info.name;
+  document.getElementById('fileInfoGrid').innerHTML=rows.map(([label,value])=>`<div class="file-info-row"><span class="file-info-label">${esc(label)}</span><div class="file-info-value">${esc(String(value))}</div></div>`).join('');
+  const openLink=document.getElementById('fileInfoOpenLink');
+  openLink.href=info.open_url?new URL(info.open_url,location.href).href:'#';
+  openLink.setAttribute('aria-label',`Open ${info.name}`);
+  document.getElementById('fileInfoOpenName').textContent=info.name;
+  openMod('fileInfoOv');
+}
 
 document.addEventListener('contextmenu',e=>{
   const nc=e.target.closest('[data-ctx-name]');
@@ -17037,13 +17632,14 @@ document.addEventListener('contextmenu',e=>{
   const raw=nc?nc.dataset.ctxRaw:row.dataset.ctxRaw||'';
   const type=nc?nc.dataset.ctxType:row.dataset.type||'';
   const perm=(nc?nc.dataset.ctxPerm:row.dataset.ctxPerm)||'';
-  showCtx(e.clientX,e.clientY,{name,isDir,raw,type,perm});
+  showCtx(e.clientX,e.clientY,{name,isDir,raw,type,perm,info:readFileInfo(row||nc)});
 });
 document.addEventListener('click',e=>{if(!e.target.closest('.ctx'))closeCtx();});
 document.addEventListener('scroll',closeCtx,true);
 
 // Context menu actions
 qs('ctx-open')?.addEventListener('click',()=>{closeCtx();doAction('open',ctxData.name,ctxData);});
+qs('ctx-info')?.addEventListener('click',()=>{closeCtx();openFileInfo(ctxData.info);});
 qs('ctx-edit')?.addEventListener('click',()=>{closeCtx();doAction('edit',ctxData.name);});
 qs('ctx-audio-info')?.addEventListener('click',()=>{closeCtx();fmMusicOpenEditor(ctxData.name);});
 qs('ctx-dl')?.addEventListener('click',()=>{closeCtx();doAction('dl',ctxData.name,ctxData);});
@@ -17063,12 +17659,13 @@ qs('ctx-del')?.addEventListener('click',()=>{closeCtx();doAction('del',ctxData.n
 const shOv=document.getElementById('shOv');
 const sheet=document.getElementById('sheet');
 let lpTimer,lpActive=false,lpStartY=0;
-function openSheet(name,isDir,raw,type,size){
+function openSheet(name,isDir,raw,type,size,info){
   document.getElementById('sh-name').textContent=name;
   document.getElementById('sh-meta').textContent=isDir?'Directory':(size?formatBytes(size)+' · '+(type||'file'):type||'file');
   const g=document.getElementById('sh-grid');
   const btns=[
     {icon:'<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',label:'Open',cls:'',act:()=>doAction('open',name,{isDir,raw,type})},
+    {icon:'<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>',label:'Info',cls:'',act:()=>openFileInfo(info)},
     !isDir&&!RO?{icon:type==='audio'?'<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>':'<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',label:type==='audio'?'Song details':'Edit',cls:'sh-blue',act:()=>type==='audio'?fmMusicOpenEditor(name):doAction('edit',name)}:null,
     !isDir?{icon:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',label:'Download',cls:'sh-blue',act:()=>{if(raw)location.href=raw+'&dl=1';}}:null,
     {icon:'<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',label:'Copy Path',cls:'',act:()=>{navigator.clipboard.writeText(CWD+'/'+name).then(()=>toast('Path copied!'));}},
@@ -17105,9 +17702,10 @@ function attachLongPress(el){
       const isDir=(row.dataset.isdir||'0')==='1';
       const raw=row.querySelector('[data-ctx-raw]')?.dataset.ctxRaw||'';
       const type=row.dataset.type||row.querySelector('[data-ctx-type]')?.dataset.ctxType||'';
-      const size=parseInt(row.querySelector('.sz')?.textContent)||0;
+      const info=readFileInfo(row);
+      const size=Number(info?.bytes)||0;
       if(navigator.vibrate)navigator.vibrate(40);
-      openSheet(name,isDir,raw,type,0);
+      openSheet(name,isDir,raw,type,size,info);
     },550);
   },{passive:true});
   el.addEventListener('touchmove',e=>{
@@ -17204,11 +17802,12 @@ function fmMusicFadeOutput(target,duration,onComplete){
 function fmMusicStartWithFade(request,onError){
   fmMusicPausePending=false;
   const action=++fmMusicPlaybackAction;
-  fmMusicSetOutputGain(0);
+  fmMusicFadeOutput(0,0);
   let attempt;
   try{attempt=fmMusicAudio.play();}catch(error){attempt=Promise.reject(error);}
   Promise.resolve(attempt).then(()=>{
-    if(request!==fmMusicPlaybackRequest||action!==fmMusicPlaybackAction||fmMusicPausePending||fmMusicAudio.paused)return;
+    if(request!==fmMusicPlaybackRequest||action!==fmMusicPlaybackAction||fmMusicPausePending)return;
+    if(fmMusicAudio.paused){fmMusicSetOutputGain(1);return;}
     fmMusicFadeOutput(1,300);
     fmMusicUpdateButtons();
   }).catch(error=>{
@@ -17219,7 +17818,8 @@ function fmMusicStartWithFade(request,onError){
 }
 function fmMusicPauseWithFade(onComplete){
   if(fmMusicAudio.paused){
-    fmMusicSetOutputGain(1);onComplete?.();return;
+    fmMusicPausePending=false;++fmMusicPlaybackAction;
+    fmMusicFadeOutput(1,0,onComplete);return;
   }
   fmMusicPausePending=true;
   const action=++fmMusicPlaybackAction;
@@ -17519,16 +18119,14 @@ function fmMusicSyncVideoFade(){
     video.style.removeProperty('mask-image');
     return;
   }
-  const title=document.getElementById('fmMusicTitle');
   const progress=document.querySelector('.fm-music-progress-wrap');
-  if(!title||!progress)return;
+  if(!progress)return;
   const videoTop=video.getBoundingClientRect().top;
-  const startY=title.getBoundingClientRect().top-videoTop;
   const endY=progress.getBoundingClientRect().bottom-videoTop+18;
   const height=Math.max(1,Math.ceil(endY));
-  const start=Math.max(0,Math.min(height-1,Math.round(startY)));
+  const start=Math.max(0,Math.min(height-1,Math.round(height*.70)));
   const span=Math.max(1,height-start);
-  const ramp=[[.02,.995],[.08,.97],[.18,.91],[.30,.82],[.44,.68],[.58,.52],[.72,.35],[.85,.19],[.94,.075],[.985,.015],[1,0]];
+  const ramp=[[0,1],[.10,.985],[.22,.94],[.36,.86],[.50,.72],[.64,.54],[.77,.35],[.88,.18],[.95,.07],[.99,.015],[1,0]];
   const stops=ramp.map(([position,opacity])=>{
     const y=(start+span*position).toFixed(1);
     return `${opacity===0?'transparent':`rgba(0,0,0,${opacity})`} ${y}px`;
@@ -17810,7 +18408,7 @@ function fmMusicPlayTrack(index,openPanel=true){
     });
   };
   if(!fmMusicAudio.paused&&fmMusicOutputGain>0)fmMusicFadeOutput(0,220,beginSourceLoad);
-  else{fmMusicSetOutputGain(0);beginSourceLoad();}
+  else fmMusicFadeOutput(0,0,beginSourceLoad);
 }
 function fmMusicSeekBy(seconds){
   if(!Number.isFinite(fmMusicAudio.duration)||fmMusicAudio.duration<=0)return;
@@ -17839,6 +18437,11 @@ document.addEventListener('pointerdown',e=>{if(fmMusicOptions?.open&&!fmMusicOpt
 function fmMusicTogglePlayback(){
   if(window.mfmSelectedSongsLoading||fmMusicWaitingForSource)return;
   if(fmMusicIndex<0){fmMusicCollect();if(fmMusicTracks.length)fmMusicPlayTrack(0);return;}
+  if(fmMusicPausePending&&fmMusicAudio.paused){
+    fmMusicPausePending=false;
+    fmMusicStartWithFade(fmMusicPlaybackRequest,()=>toast('The audio could not be played.'));
+    return;
+  }
   if(fmMusicPausePending){
     fmMusicPausePending=false;++fmMusicPlaybackAction;
     fmMusicFadeOutput(1,260);return;
@@ -21696,7 +22299,7 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
   const rawRoot='https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/mfmss';
   const dataUrl=rawRoot+'/alldata/all.json';
   const songsIndexUrl='https://api.github.com/repos/orgezeo/marshal-file-manager/contents/mfmss/songs?ref=main';
-  const state={active:false,loading:false,firstLoadPending:false,activationRequest:0,items:new Map(),signature:'',timer:0,currentVideoTrack:'',lastAudioTime:null,fired:new Set(),videoActive:false,artRequests:new Map(),artObjects:new Map(),artQueue:[],artQueueRunning:false,artObserver:null,artHydration:null,tagLoaded:new Set(),artKnownMissing:new Set(),videoRequests:new Map(),videoObjectUrl:'',videoObjectKey:'',videoLoadRequest:0,nextPlan:null};
+  const state={active:false,loading:false,firstLoadPending:false,activationRequest:0,items:new Map(),signature:'',timer:0,currentVideoTrack:'',lastAudioTime:null,fired:new Set(),videoActive:false,artRequests:new Map(),artObjects:new Map(),artQueue:[],artQueueRunning:false,artObserver:null,artHydration:null,tagLoaded:new Set(),videoBlobs:new Map(),videoRequests:new Map(),videoObjectUrl:'',videoObjectKey:'',videoLoadRequest:0,nextPlan:null};
   const playlistCacheKey=FM_AUDIO_CACHE_SCOPE+'|selected-playlist';
   const playlistCacheVersion='selected-playlist-v1';
   const selectedClientStorageKey='mfm-selected-songs-client-'+FM_AUDIO_CACHE_SCOPE;
@@ -22145,26 +22748,34 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
     state.artRequests.set(artworkKey,request);
     return request;
   }
-  function selectedVideoKey(track){return track.videoUrl+'|'+(track.videoSha||'');}
+  function selectedVideoKey(track){return track.videoUrl+'|'+(track.videoSha||track.sha||'');}
+  function rememberVideoBlob(key,blob){
+    if(!(blob instanceof Blob)||!blob.size)return;
+    state.videoBlobs.delete(key);state.videoBlobs.set(key,blob);
+    while(state.videoBlobs.size>2)state.videoBlobs.delete(state.videoBlobs.keys().next().value);
+  }
   function loadTrackVideo(track){
     if(!track?.mfmSelectedSong||!track.videoUrl)return Promise.resolve(null);
     const version=track.videoSha||track.sha||fmMusicCacheVersion(track),key=selectedVideoKey(track);
+    const inMemory=state.videoBlobs.get(key);
+    if(inMemory){state.videoBlobs.delete(key);state.videoBlobs.set(key,inMemory);return Promise.resolve(inMemory);}
     if(state.videoRequests.has(key))return state.videoRequests.get(key);
     const request=(async()=>{
       const cached=await readSelectedAsset('video',track.videoUrl,version);
-      if(cached.hit)return cached.blob;
+      if(cached.hit){rememberVideoBlob(key,cached.blob);return cached.blob;}
       const response=await fetch(track.videoFetchUrl||track.videoUrl,{cache:'no-store',headers:{Accept:'video/mp4,video/*;q=0.9,*/*;q=0.5'}});
       if(!response.ok)throw new Error('Selected song video download failed.');
       const blob=await response.blob();
       if(!blob.size||(track.videoSize>0&&blob.size!==track.videoSize))throw new Error('Selected song video changed while being saved.');
-      await writeSelectedAsset('video',track.videoUrl,version,blob);
+      rememberVideoBlob(key,blob);
+      void writeSelectedAsset('video',track.videoUrl,version,blob);
       return blob;
     })().catch(()=>null).finally(()=>state.videoRequests.delete(key));
     state.videoRequests.set(key,request);
     return request;
   }
   function preloadPlaylistAssets(tracks){
-    // Art is queued by the visible queue rows; videos are fetched only when played.
+    // Only the current and upcoming track videos are prefetched; never download the whole playlist.
     void tracks;
   }
   function releaseOldVideoSource(track){
@@ -22191,6 +22802,7 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
     if(request!==state.videoLoadRequest||!state.active||!layer.classList.contains('open')||fmMusicTracks[fmMusicIndex]?.url!==track.url)return;
     if(!blob){hideVideo();return;}
     releaseOldVideoSource(track);
+    state.videoBlobs.delete(key);
     state.videoObjectUrl=URL.createObjectURL(blob);state.videoObjectKey=key;
     video.src=state.videoObjectUrl;video.dataset.source=key;video.load();
     state.videoActive=true;
@@ -22260,8 +22872,13 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
     if(next<fmMusicTracks.length)return next;
     return fmMusicRepeat===1?0:-1;
   }
+  function preloadTrackVideo(track){
+    if(!track?.mfmSelectedSong||!track.videoUrl||!track.videoEvents?.length)return;
+    if(state.videoObjectKey===selectedVideoKey(track)&&state.videoObjectUrl)return;
+    void loadTrackVideo(track);
+  }
   function preloadUpcomingTrack(){
-    if(!state.active||fmMusicIndex<0||!Number.isFinite(audio.duration)||audio.duration<=0)return;
+    if(!state.active||fmMusicWaitingForSource||fmMusicIndex<0||!Number.isFinite(audio.duration)||audio.duration<=0)return;
     const remaining=audio.duration-audio.currentTime;
     if(remaining>30||remaining<0||fmMusicAudio.loop)return;
     const current=fmMusicTracks[fmMusicIndex];
@@ -22275,7 +22892,11 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
     state.nextPlan=plan;
     plan.audioPromise=fmMusicCacheTrack(track);
     loadTrackArtwork(track);
-    if(track.videoUrl)loadTrackVideo(track);
+    preloadTrackVideo(track);
+  }
+  function preloadCurrentTrackVideo(){
+    if(!state.active||fmMusicWaitingForSource||fmMusicIndex<0)return;
+    preloadTrackVideo(fmMusicTracks[fmMusicIndex]);
   }
   document.getElementById('fmMusicShuffle')?.addEventListener('click',()=>{state.nextPlan=null;});
   document.getElementById('fmMusicRepeat')?.addEventListener('click',()=>{state.nextPlan=null;});
@@ -22543,6 +23164,7 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
     state.fired.clear();
     hideVideo();
     releaseVideoObject();
+    state.videoBlobs.clear();
     setPlaylistLabels(false);
     localCollect();
   }
@@ -22556,6 +23178,7 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
 
   function syncVideo(){
     if(!state.active){hideVideo();state.lastAudioTime=null;return;}
+    if(fmMusicWaitingForSource){hideVideo();state.lastAudioTime=null;return;}
     const track=fmMusicTracks[fmMusicIndex];
     if(!track||!track.mfmSelectedSong||!track.videoUrl||!track.videoEvents?.length){
       hideVideo();releaseOldVideoSource(null);state.currentVideoTrack=track?.url||'';state.lastAudioTime=audio.currentTime||0;return;
@@ -22596,6 +23219,7 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
   audio.addEventListener('timeupdate',preloadUpcomingTrack);
   audio.addEventListener('durationchange',preloadUpcomingTrack);
   audio.addEventListener('play',syncVideo);
+  audio.addEventListener('play',preloadCurrentTrackVideo);
   audio.addEventListener('pause',syncVideo);
   audio.addEventListener('seeked',()=>{
     state.lastAudioTime=Math.max(0,(Number(audio.currentTime)||0)-0.3);
