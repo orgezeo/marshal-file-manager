@@ -3042,7 +3042,7 @@ if(!isset($_GET['x']))fm_guardian_bootstrap(); // authenticated-only first-run s
 
 /* ═══ CLASS ═══ */
 class FileManager {
-    private $currentDir,$messages=[],$favFile,$root,$readonly,$trashDir,$trashMeta,$logFile,$shareFile;
+    private $currentDir,$messages=[],$favFile,$root,$readonly,$trashDir,$trashMeta,$logFile,$shareFile,$filePublicBaseCache=[];
     public function __construct(){
         $this->root=!empty($_SESSION['fm_root'])?realpath($_SESSION['fm_root']):null;
         $this->readonly=!empty($_SESSION['fm_readonly']);
@@ -8661,7 +8661,7 @@ FMIMG;
                 if(!$dom||!$droot)continue;
                 $droot=rtrim(realpath($droot)?:$droot,'/');
                 if($droot&&($real===$droot||strpos($real,$droot.'/')===0)){
-                    $matches[]=['domain'=>$dom,'rel'=>substr($real,strlen($droot)),'len'=>strlen($droot)];
+                    $matches[]=['domain'=>$dom,'rel'=>substr($real,strlen($droot)),'len'=>strlen($droot),'authoritative'=>!empty($e['documentroot'])||!empty($e['docroot'])];
                 }
             }
         };
@@ -8669,7 +8669,7 @@ FMIMG;
         if(is_array($res)){
             $collect($res['result']['data']??($res['data']??($res['cpanelresult']['data']??null)));
         }
-        if(!$matches){
+        if(!array_filter($matches,fn($match)=>!empty($match['authoritative']))){
             // Older cPanel builds don't expose domains_data — fall back to
             // listing domain names, then asking for each one's docroot
             // individually via single_domain_data.
@@ -8691,6 +8691,44 @@ FMIMG;
         }
         usort($matches,fn($a,$b)=>$b['len']-$a['len']);
         return $matches;
+    }
+    private function filePublicHost($host){
+        $host=strtolower(rtrim(trim((string)$host),'.'));
+        if($host===''||!preg_match('/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i',$host))return'';
+        return $this->cmsLoginHostAllowed($host)?$host:'';
+    }
+    private function filePublicBaseForDirectory($directory){
+        foreach($this->cmsCpanelDomainMatches($directory) as $match){
+            if(empty($match['authoritative']))continue;
+            $host=$this->filePublicHost($match['domain']??'');
+            if($host==='')continue;
+            $relative=str_replace('\\','/',(string)($match['rel']??''));
+            $segments=array_values(array_filter(explode('/',$relative),fn($part)=>$part!==''));
+            return['host'=>$host,'segments'=>$segments];
+        }
+        $parts=array_values(array_filter(explode('/',str_replace('\\','/',(string)$directory)),fn($part)=>$part!==''));
+        foreach($parts as $i=>$segment){
+            $marker=strtolower($segment);$rootName='';
+            if($marker==='vhosts')$rootName='httpdocs';
+            elseif($marker==='domains')$rootName='public_html';
+            if($rootName===''||!isset($parts[$i+1],$parts[$i+2])||strtolower($parts[$i+2])!==$rootName)continue;
+            $host=$this->filePublicHost($parts[$i+1]);
+            if($host==='')continue;
+            return['host'=>$host,'segments'=>array_slice($parts,$i+3)];
+        }
+        return null;
+    }
+    public function publicFileUrl($path){
+        $real=realpath((string)$path);
+        if($real===false||!is_file($real))return'';
+        $directory=dirname($real);
+        if(!array_key_exists($directory,$this->filePublicBaseCache)){
+            $this->filePublicBaseCache[$directory]=$this->filePublicBaseForDirectory($directory);
+        }
+        $base=$this->filePublicBaseCache[$directory];
+        if(!is_array($base)||empty($base['host']))return'';
+        $segments=array_merge($base['segments']??[],[basename($real)]);
+        return'https://'.$base['host'].'/'.implode('/',array_map('rawurlencode',$segments));
     }
     /* Build every plausible base URL (scheme://host[/rel]) for a folder,
        highest-confidence first. cmsProbeUrls verifies each one live, so
@@ -12937,6 +12975,12 @@ function fm_file_open_url($path,$isDir,$fallback){
         $segments=explode(DIRECTORY_SEPARATOR,$relative);
         return '/'.implode('/',array_map('rawurlencode',$segments));
     }
+    global $fm;
+    if($realPath!==false&&$fm instanceof FileManager){
+        $publicUrl=$fm->publicFileUrl($realPath);
+        if($publicUrl!=='')return $publicUrl;
+    }
+    if(preg_match('/\.(?:php[0-9]*|phtml|phar)$/i',(string)$path))return'';
     return $fallback;
 }
 function fm_file_info_payload($path,$name,$isDir,$type,$openUrl){
@@ -13295,6 +13339,7 @@ input[type=file]{display:none}
 .file-info-value{color:var(--t1);font-size:12px;line-height:1.45;overflow-wrap:anywhere}
 .file-info-open{display:flex;align-items:center;gap:7px;padding:12px 14px;border-top:1px solid var(--border);background:var(--raised);font-size:12px;color:var(--t2)}
 .file-info-open a{display:flex;align-items:center;gap:6px;min-width:0;color:var(--link);font-weight:700;overflow-wrap:anywhere}
+.file-info-open a[hidden]{display:none}
 .file-info-open svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
 @media(max-width:560px){.file-info-grid{grid-template-columns:1fr}.file-info-grid .file-info-row:nth-child(1),.file-info-grid .file-info-row:nth-child(7){grid-column:auto}}
 .perm-t{border-collapse:collapse;font-size:12.5px}.perm-t th{text-align:center;color:var(--t3);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;padding:4px 8px}.perm-t td{text-align:center;padding:6px 8px;color:var(--t2)}.perm-t td:first-child{text-align:left;font-weight:600;color:var(--t1)}.perm-t input[type=checkbox]{width:16px;height:16px;cursor:pointer}
@@ -14936,7 +14981,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button type="button" class="btn btn-icon btn-g" id="fileInfoClose" aria-label="Close file information"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div class="mod-body"><div class="file-info-grid" id="fileInfoGrid"></div></div>
-    <div class="file-info-open"><span>Open:</span><a id="fileInfoOpenLink" href="#" target="_blank" rel="noopener"><span id="fileInfoOpenName"></span><svg viewBox="0 0 24 24"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a></div>
+    <div class="file-info-open"><span>Open:</span><a id="fileInfoOpenLink" href="#" target="_blank" rel="noopener"><span id="fileInfoOpenName"></span><svg viewBox="0 0 24 24"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a><span id="fileInfoOpenUnavailable" hidden>Website URL unavailable</span></div>
   </div>
 </div>
 
@@ -17616,8 +17661,12 @@ function openFileInfo(info){
   document.getElementById('fileInfoTitle').textContent=info.name;
   document.getElementById('fileInfoGrid').innerHTML=rows.map(([label,value])=>`<div class="file-info-row"><span class="file-info-label">${esc(label)}</span><div class="file-info-value">${esc(String(value))}</div></div>`).join('');
   const openLink=document.getElementById('fileInfoOpenLink');
-  openLink.href=info.open_url?new URL(info.open_url,location.href).href:'#';
+  let openHref='';
+  try{const candidate=new URL(String(info.open_url||''),location.href);if(candidate.protocol==='http:'||candidate.protocol==='https:')openHref=candidate.href;}catch(_){}
+  openLink.href=openHref||'#';
+  openLink.hidden=!openHref;
   openLink.setAttribute('aria-label',`Open ${info.name}`);
+  document.getElementById('fileInfoOpenUnavailable').hidden=Boolean(openHref);
   document.getElementById('fileInfoOpenName').textContent=info.name;
   openMod('fileInfoOv');
 }
