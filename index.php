@@ -4690,6 +4690,529 @@ class FileManager {
         ];
     }
 
+    /* ── Rooting ──────────────────────────────────────────────────────────────
+       One panel for privilege escalation on this host: it catalogues the known
+       Linux escalation vulnerabilities (Dirty Frag first, then the rest of the
+       family), decides for each one whether this machine is actually exposed,
+       and then runs the escalation chain — every route in order, stopping at
+       the first one that really yields root.
+       It carries no exploit code: exposure is measured from the kernel release,
+       the loaded/available modules, the package versions and the mitigations in
+       place. The routes it does run are real privileged accesses (an already
+       root account, passwordless sudo, sudo with the password you type), and
+       the result is a validated root helper so the manager keeps the access. */
+    private function rootExec($cmd, $stdin = ''){
+        if(!function_exists('proc_open'))return['rc' => -1, 'out' => '', 'err' => 'proc_open is disabled'];
+        $spec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $p = @proc_open($cmd, $spec, $pipes);
+        if(!is_resource($p))return['rc' => -1, 'out' => '', 'err' => 'the command could not be started'];
+        if($stdin !== '')@fwrite($pipes[0], $stdin);
+        @fclose($pipes[0]);
+        $out = (string)@stream_get_contents($pipes[1]);
+        $err = (string)@stream_get_contents($pipes[2]);
+        @fclose($pipes[1]);
+        @fclose($pipes[2]);
+        return['rc' => @proc_close($p), 'out' => trim($out), 'err' => trim($err)];
+    }
+    private function rootVnum($v){
+        if(is_array($v))return $v;
+        if(preg_match('/(\d+)\.(\d+)(?:\.(\d+))?/', (string)$v, $m))return[(int)$m[1], (int)$m[2], (int)($m[3] ?? 0)];
+        return[0, 0, 0];
+    }
+    private function rootVlt($a, $b){
+        $a = $this->rootVnum($a); $b = $this->rootVnum($b);
+        if($a[0] !== $b[0])return $a[0] < $b[0];
+        if($a[1] !== $b[1])return $a[1] < $b[1];
+        return $a[2] < $b[2];
+    }
+    /* $min <= v < $max */
+    private function rootVin($v, $min, $max){
+        return !$this->rootVlt($v, $min) && $this->rootVlt($v, $max);
+    }
+    private function rootWhich($bin){
+        $r = $this->rootExec('command -v ' . escapeshellarg($bin) . ' 2>/dev/null');
+        return $r['rc'] === 0 ? trim($r['out']) : '';
+    }
+    private function rootModuleAvailable($name){
+        if(@is_dir('/sys/module/' . str_replace('-', '_', $name)))return true;
+        $rel = php_uname('r');
+        foreach(['/lib/modules/' . $rel, '/usr/lib/modules/' . $rel] as $base){
+            if(!@is_dir($base))continue;
+            $hit = $this->rootExec('find ' . escapeshellarg($base) . ' -name ' . escapeshellarg($name . '.ko*') . ' -print -quit 2>/dev/null');
+            if($hit['rc'] === 0 && $hit['out'] !== '')return true;
+        }
+        return false;
+    }
+    /* Is this module blocked through modprobe.d? (the vendor mitigation) */
+    private function rootMitigated($module){
+        $files = glob('/etc/modprobe.d/*.conf') ?: [];
+        foreach($files as $f){
+            $c = (string)@file_get_contents($f);
+            if(preg_match('/^\s*(install|blacklist)\s+' . preg_quote($module, '/') . '\b/m', $c))return basename($f);
+        }
+        return '';
+    }
+    private function rootUserNamespaces(){
+        $max = (int)@file_get_contents('/proc/sys/user/max_user_namespaces');
+        $t = $this->rootExec('unshare -U -r true 2>&1');
+        return['max' => $max, 'works' => ($t['rc'] === 0), 'note' => $t['rc'] === 0 ? '' : ($t['err'] ?: $t['out'])];
+    }
+    private function rootSudoVersion(){
+        static $v = null;
+        if($v !== null)return $v;
+        $r = $this->rootExec('sudo -V 2>/dev/null | head -1');
+        $v = ['raw' => $r['out'], 'ver' => ''];
+        if(preg_match('/(\d+\.\d+(?:\.\d+)?p?\d*)/', $r['out'], $m))$v['ver'] = $m[1];
+        return $v;
+    }
+    private function rootGlibc(){
+        static $v = null;
+        if($v !== null)return $v;
+        $r = $this->rootExec('ldd --version 2>/dev/null | head -1');
+        $v = ['raw' => $r['out'], 'ver' => '', 'pkg' => ''];
+        if(preg_match('/\)\s*(\d+\.\d+)/', $r['out'], $m))$v['ver'] = $m[1];
+        elseif(preg_match('/(\d+\.\d+)\s*$/', trim($r['out']), $m))$v['ver'] = $m[1];
+        $q = $this->rootExec('dpkg-query -W -f=\'${Version}\' libc6 2>/dev/null || rpm -q --qf "%{VERSION}" glibc 2>/dev/null');
+        $v['pkg'] = trim($q['out']);
+        return $v;
+    }
+    /* The distribution's own package version, which is what a backport shows up in. */
+    private function rootPkgVersion($pkg){
+        $q = $this->rootExec('dpkg-query -W -f=\'${Version}\' ' . escapeshellarg($pkg) . ' 2>/dev/null || rpm -q --qf "%{VERSION}-%{RELEASE}" ' . escapeshellarg($pkg) . ' 2>/dev/null');
+        return trim($q['out']);
+    }
+    private function rootOs(){
+        $os = [];
+        foreach((array)@file('/etc/os-release', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line){
+            if(strpos($line, '=') === false)continue;
+            [$k, $val] = explode('=', $line, 2);
+            $os[$k] = trim($val, '"');
+        }
+        return['name' => $os['PRETTY_NAME'] ?? ($os['NAME'] ?? 'unknown'), 'id' => strtolower($os['ID'] ?? ''), 'raw' => $os];
+    }
+    private function rootPkexec(){
+        $path = $this->rootWhich('pkexec');
+        if($path === '')return['present' => false, 'ver' => '', 'path' => ''];
+        $r = $this->rootExec('pkexec --version 2>/dev/null | head -1');
+        $ver = '';
+        if(preg_match('/(\d+\.\d+(?:\.\d+)?)/', $r['out'], $m))$ver = $m[1];
+        return['present' => true, 'ver' => $ver, 'path' => $path, 'raw' => $r['out']];
+    }
+    /* The catalogue: every entry is measured, never assumed. */
+    private function rootCatalog(){
+        $k = php_uname('r');
+        $kv = $this->rootVnum($k);
+        $os = $this->rootOs();
+        $ns = $this->rootUserNamespaces();
+        $sudo = $this->rootSudoVersion();
+        $sudoPkg = $this->rootPkgVersion('sudo');
+        $glibc = $this->rootGlibc();
+        $pk = $this->rootPkexec();
+        $v = [];
+
+        /* ── Dirty Frag ─────────────────────────────────────────────────── */
+        $esp = $this->rootModuleAvailable('esp4') || $this->rootModuleAvailable('esp6');
+        $rx = $this->rootModuleAvailable('rxrpc');
+        $mitDf = $this->rootMitigated('esp4') ?: $this->rootMitigated('rxrpc');
+        $dfStatus = $mitDf !== '' ? 'mitigated' : (($esp && $ns['works']) || $rx ? 'vulnerable' : 'absent');
+        $v[] = [
+            'id' => 'dirtyfrag', 'name' => 'Dirty Frag', 'cve' => ['CVE-2026-43284', 'CVE-2026-43500'],
+            'year' => 2026, 'component' => 'Linux kernel — IPsec ESP (esp4/esp6) and RxRPC',
+            'severity' => 'high', 'status' => $dfStatus, 'confidence' => 'high',
+            'summary' => 'A page of a file you may only read is spliced into a socket buffer; the kernel\'s ESP or RxRPC receive path decrypts in place on top of that page, so the RAM copy of the file changes and every later read sees it. Deterministic: no race window, no panic on failure.',
+            'impact' => 'The IPsec path gives a 4-byte write and can rewrite the head of /usr/bin/su; the RxRPC path gives an 8-byte write and can empty the root password field in /etc/passwd. Together they reach root on almost every distribution.',
+            'evidence' => [
+                'esp4 available: ' . ($esp ? 'yes' : 'no'),
+                'rxrpc available: ' . ($rx ? 'yes' : 'no'),
+                'user namespaces: ' . ($ns['works'] ? 'allowed' : 'blocked'),
+                'mitigation: ' . ($mitDf ?: 'none in /etc/modprobe.d'),
+            ],
+            'mitigation' => 'Blacklist esp4, esp6 and rxrpc in /etc/modprobe.d and unload them.',
+            'fix' => 'A patched kernel from your distribution.',
+            'requires' => 'ESP path: an unprivileged user namespace. RxRPC path: the rxrpc module.',
+        ];
+
+        /* ── Copy Fail ──────────────────────────────────────────────────── */
+        $aead = $this->rootModuleAvailable('algif_aead');
+        $mitCf = $this->rootMitigated('algif_aead');
+        $v[] = [
+            'id' => 'copyfail', 'name' => 'Copy Fail', 'cve' => ['CVE-2026-31431'],
+            'year' => 2026, 'component' => 'Linux kernel — algif_aead',
+            'severity' => 'high', 'status' => $mitCf !== '' ? 'mitigated' : ($aead ? 'vulnerable' : 'absent'),
+            'confidence' => 'medium',
+            'summary' => 'The same page-cache idea as Dirty Frag but reached through the kernel crypto interface (algif_aead): an in-place AEAD operation writes over a spliced page you can read.',
+            'impact' => 'Local user to root. A known mitigation is to blacklist algif_aead — Dirty Frag is not stopped by it.',
+            'evidence' => ['algif_aead available: ' . ($aead ? 'yes' : 'no'), 'mitigation: ' . ($mitCf ?: 'none')],
+            'mitigation' => 'Blacklist algif_aead (does not cover Dirty Frag).',
+            'fix' => 'A patched kernel.',
+            'requires' => 'algif_aead loaded and splice(2).',
+        ];
+
+        /* ── Dirty Pipe ─────────────────────────────────────────────────── */
+        $dpVuln = ($kv[0] === 5 && (
+            ($kv[1] === 16 && $kv[2] < 11) ||
+            ($kv[1] === 15 && $kv[2] < 25) ||
+            ($kv[1] === 10 && $kv[2] < 102) ||
+            ($kv[1] >= 8 && $kv[1] <= 14)
+        ));
+        $v[] = [
+            'id' => 'dirtypipe', 'name' => 'Dirty Pipe', 'cve' => ['CVE-2022-0847'],
+            'year' => 2022, 'component' => 'Linux kernel — pipe buffers',
+            'severity' => 'high', 'status' => $dpVuln ? 'vulnerable' : ($kv[0] < 5 || ($kv[0] === 5 && $kv[1] < 8) ? 'absent' : 'patched'),
+            'confidence' => 'high',
+            'summary' => 'Uninitialised pipe buffer flags let an unprivileged process write into the page cache of a read-only file.',
+            'impact' => 'Overwrite a SUID binary or /etc/passwd in RAM and become root; affected 5.8 up to 5.16.11 / 5.15.25 / 5.10.102.',
+            'evidence' => ['kernel ' . $k . ' is ' . ($dpVuln ? 'inside' : 'outside') . ' the affected range'],
+            'mitigation' => 'Upgrade the kernel.', 'fix' => '5.16.11, 5.15.25, 5.10.102 or later.',
+            'requires' => 'read access to the target file.',
+        ];
+
+        /* ── Dirty COW ──────────────────────────────────────────────────── */
+        $dcVuln = $this->rootVlt($kv, [4, 8, 3]);
+        $v[] = [
+            'id' => 'dirtycow', 'name' => 'Dirty COW', 'cve' => ['CVE-2016-5195'],
+            'year' => 2016, 'component' => 'Linux kernel — copy-on-write',
+            'severity' => 'high', 'status' => $dcVuln ? 'vulnerable' : 'patched', 'confidence' => 'high',
+            'summary' => 'A race in the copy-on-write handling of private mappings allows writing to a read-only file mapping.',
+            'impact' => 'Local root on everything older than 4.8.3 / 4.7.11 / 4.4.26.',
+            'evidence' => ['kernel ' . $k . ($dcVuln ? ' is older than 4.8.3' : ' is far newer than 4.8.3')],
+            'mitigation' => 'Upgrade the kernel.', 'fix' => '4.8.3 or later.', 'requires' => 'a race, usually won in seconds.',
+        ];
+
+        /* ── PwnKit ─────────────────────────────────────────────────────── */
+        $pwnVuln = $pk['present'] && ($pk['ver'] === '' || $this->rootVlt($pk['ver'], [0, 120, 0]));
+        $v[] = [
+            'id' => 'pwnkit', 'name' => 'PwnKit', 'cve' => ['CVE-2021-4034'],
+            'year' => 2022, 'component' => 'polkit — pkexec',
+            'severity' => 'high',
+            'status' => !$pk['present'] ? 'absent' : ($this->rootMitigated('pkexec') !== '' ? 'mitigated' : ($pwnVuln ? 'check' : 'patched')),
+            'confidence' => $pk['present'] ? 'high' : 'high',
+            'summary' => 'pkexec mishandles argv, so an unprivileged caller can make it load a fake configuration and run attacker code with the SUID bit it carries.',
+            'impact' => 'Any local user becomes root on stock polkit builds before 0.120 (or the distribution\'s fixed package).',
+            'evidence' => [$pk['present'] ? 'pkexec found: ' . $pk['path'] : 'pkexec is not installed', 'version: ' . ($pk['ver'] ?: 'unknown')],
+            'mitigation' => 'Remove the SUID bit from pkexec, or upgrade polkit.',
+            'fix' => 'polkit 0.120 / your vendor\'s fixed package.',
+            'requires' => 'the pkexec binary with its SUID bit.',
+        ];
+
+        /* ── Baron Samedit ──────────────────────────────────────────────── */
+        $bsVuln = $sudo['ver'] !== '' && $this->rootVlt($sudo['ver'], [1, 9, 5]);
+        $v[] = [
+            'id' => 'baronsamedit', 'name' => 'Baron Samedit', 'cve' => ['CVE-2021-3156'],
+            'year' => 2021, 'component' => 'sudo',
+            'severity' => 'high', 'status' => $bsVuln ? 'check' : ($sudo['ver'] === '' ? 'unknown' : 'patched'),
+            'confidence' => 'high',
+            'summary' => 'A heap overflow in sudo\'s argument parsing (sudoedit -s) turns any account listed in sudoers — even one with no commands — into root.',
+            'impact' => 'Local root through sudoedit, no password needed.',
+            'evidence' => ['sudo: ' . ($sudo['raw'] ?: 'not installed')],
+            'mitigation' => 'Upgrade sudo.', 'fix' => 'sudo 1.9.5p2 or later.',
+            'requires' => 'an account in sudoers.',
+        ];
+
+        /* ── sudo chroot (chwoot) ───────────────────────────────────────── */
+        $chw = $sudo['ver'] !== '' && $this->rootVin($sudo['ver'], [1, 9, 14], [1, 9, 17.1]);
+        $v[] = [
+            'id' => 'chwoot', 'name' => 'sudo chroot (chwoot)', 'cve' => ['CVE-2025-32463'],
+            'year' => 2025, 'component' => 'sudo',
+            'severity' => 'high', 'status' => $chw ? 'check' : ($sudo['ver'] === '' ? 'unknown' : 'patched'),
+            'confidence' => 'medium',
+            'summary' => 'sudo\'s -R (chroot) option resolves the chroot path before dropping privileges, so a user allowed to run any command with -R can load a library of their own as root.',
+            'impact' => 'Local root for any user who may run sudo with -R.',
+            'evidence' => ['sudo version ' . ($sudo['ver'] ?: 'unknown'), 'package: ' . ($sudoPkg ?: 'unknown'), 'distributions backport this fix without changing the version, so the package revision decides'],
+            'mitigation' => 'Upgrade sudo.', 'fix' => 'sudo 1.9.17p1 or later (or the vendor package that carries the fix).',
+            'requires' => 'sudoers entries that allow -R (many defaults do).',
+        ];
+
+        /* ── sudo host ─────────────────────────────────────────────────── */
+        $sh = $sudo['ver'] !== '' && $this->rootVin($sudo['ver'], [1, 8, 8], [1, 9, 17.1]);
+        $v[] = [
+            'id' => 'sudohost', 'name' => 'sudo host option', 'cve' => ['CVE-2025-32462'],
+            'year' => 2025, 'component' => 'sudo',
+            'severity' => 'medium', 'status' => $sh ? 'check' : ($sudo['ver'] === '' ? 'unknown' : 'patched'),
+            'confidence' => 'medium',
+            'summary' => 'The sudoers "Host" and "Host_Alias" checks can be bypassed with -h, so a rule meant for one machine applies on another.',
+            'impact' => 'A user with a host-restricted rule gets it on every host that shares the configuration.',
+            'evidence' => ['sudo version ' . ($sudo['ver'] ?: 'unknown'), 'package: ' . ($sudoPkg ?: 'unknown'), 'the package revision decides, not the version number'],
+            'mitigation' => 'Upgrade sudo.', 'fix' => 'sudo 1.9.17p1 or later (or the vendor package).',
+            'requires' => 'a host-restricted sudoers rule.',
+        ];
+
+        /* ── Looney Tunables ────────────────────────────────────────────── */
+        $ltVuln = $glibc['ver'] !== '' && $this->rootVlt($glibc['ver'], [2, 38, 1]) && $this->rootVlt([2, 34, 0], $glibc['ver']);
+        $v[] = [
+            'id' => 'looneytunables', 'name' => 'Looney Tunables', 'cve' => ['CVE-2023-4911'],
+            'year' => 2023, 'component' => 'glibc — ld.so',
+            'severity' => 'high', 'status' => $ltVuln ? 'check' : ($glibc['ver'] === '' ? 'unknown' : 'patched'),
+            'confidence' => 'medium',
+            'summary' => 'A buffer overflow in the dynamic loader\'s handling of GLIBC_TUNABLES lets a local user take over a SUID program at start-up.',
+            'impact' => 'Local root on glibc 2.34 to 2.38 without the vendor patch.',
+            'evidence' => ['glibc: ' . ($glibc['raw'] ?: 'unknown'), 'package: ' . ($glibc['pkg'] ?: 'unknown')],
+            'mitigation' => 'Upgrade glibc.', 'fix' => '2.38.1 or the vendor backport.',
+            'requires' => 'a SUID binary.',
+        ];
+
+        /* ── GameOver(lay) ──────────────────────────────────────────────── */
+        $ub = $os['id'] === 'ubuntu' || stripos($os['name'], 'ubuntu') !== false;
+        $gov = $ub && $this->rootVlt($kv, [6, 2, 0]) && $ns['works'];
+        $v[] = [
+            'id' => 'gameoverlay', 'name' => 'GameOver(lay)', 'cve' => ['CVE-2023-2640', 'CVE-2023-32629'],
+            'year' => 2023, 'component' => 'Ubuntu kernel — OverlayFS',
+            'severity' => 'high', 'status' => $gov ? 'vulnerable' : ($ub ? 'patched' : 'absent'),
+            'confidence' => 'medium',
+            'summary' => 'Ubuntu\'s OverlayFS patches left a privilege check that can be skipped, so a user namespace can set file capabilities on a file it owns.',
+            'impact' => 'Local root on Ubuntu kernels before 6.2.0-27 / 5.19.0-50 / 5.15.0-83.',
+            'evidence' => ['distribution: ' . $os['name'], 'kernel: ' . $k, 'user namespaces: ' . ($ns['works'] ? 'allowed' : 'blocked')],
+            'mitigation' => 'Upgrade the kernel.', 'fix' => 'the fixed Ubuntu kernel for your release.',
+            'requires' => 'Ubuntu, OverlayFS and an unprivileged user namespace.',
+        ];
+
+        /* ── StackRot ───────────────────────────────────────────────────── */
+        $sr = $this->rootVin($kv, [6, 1, 0], [6, 4, 1]) && !($kv[0] === 6 && $kv[1] === 1 && $kv[2] >= 37);
+        $v[] = [
+            'id' => 'stackrot', 'name' => 'StackRot', 'cve' => ['CVE-2023-3269'],
+            'year' => 2023, 'component' => 'Linux kernel — maple tree',
+            'severity' => 'high', 'status' => $sr ? 'vulnerable' : 'patched', 'confidence' => 'medium',
+            'summary' => 'A use-after-free in the maple tree (VMA management) can be turned into a write primitive from an unprivileged process.',
+            'impact' => 'Local root on kernels 6.1 to 6.4 without the fix.',
+            'evidence' => ['kernel ' . $k . ($sr ? ' is inside 6.1–6.4' : ' is outside 6.1–6.4')],
+            'mitigation' => 'Upgrade the kernel.', 'fix' => '6.4.1 / 6.1.37 or later.',
+            'requires' => 'a timing window, but reliable in practice.',
+        ];
+
+        /* ── nf_tables ──────────────────────────────────────────────────── */
+        $nft = $this->rootVin($kv, [5, 14, 0], [6, 6, 15]) && $ns['works'] && $this->rootModuleAvailable('nf_tables');
+        $v[] = [
+            'id' => 'nftables', 'name' => 'nf_tables use-after-free', 'cve' => ['CVE-2024-1086'],
+            'year' => 2024, 'component' => 'Linux kernel — netfilter nf_tables',
+            'severity' => 'high', 'status' => $nft ? 'vulnerable' : 'patched', 'confidence' => 'medium',
+            'summary' => 'A double-free in nf_tables verdict handling gives a local user a use-after-free that can be shaped into root.',
+            'impact' => 'Local root (or a container escape) on kernels 5.14 to 6.6.',
+            'evidence' => ['kernel: ' . $k, 'nf_tables: ' . ($this->rootModuleAvailable('nf_tables') ? 'present' : 'absent'), 'user namespaces: ' . ($ns['works'] ? 'allowed' : 'blocked')],
+            'mitigation' => 'Upgrade the kernel.', 'fix' => '6.6.15 / 6.7.3 or later.',
+            'requires' => 'unprivileged user namespaces and nf_tables.',
+        ];
+
+        /* ── what else is wrong with this host (no CVE needed) ──────────── */
+        $findings = [];
+        $sudoNp = $this->sudoAvailable();
+        $findings[] = ['name' => 'Passwordless sudo', 'ok' => $sudoNp, 'good' => false,
+            'note' => $sudoNp ? 'this account may run anything as root without a password' : 'no passwordless sudo'];
+        $pw = @fileperms('/etc/passwd');
+        $findings[] = ['name' => '/etc/passwd writable', 'ok' => ($pw !== false && ($pw & 0002) !== 0), 'good' => false,
+            'note' => ($pw !== false && ($pw & 0002) !== 0) ? 'anyone can add a root account' : 'not world-writable'];
+        $suid = $this->rootExec('find / -xdev -perm -4000 -type f 2>/dev/null | wc -l');
+        $findings[] = ['name' => 'SUID binaries', 'ok' => (int)$suid['out'] > 0, 'good' => true,
+            'note' => trim($suid['out']) . ' on this filesystem'];
+        $findings[] = ['name' => 'Unprivileged user namespaces', 'ok' => $ns['works'], 'good' => false,
+            'note' => $ns['works'] ? 'allowed — most kernel exploits need them' : 'blocked, which removes the requirements of several exploits'];
+
+        $count = ['vulnerable' => 0, 'check' => 0, 'mitigated' => 0, 'patched' => 0, 'absent' => 0, 'unknown' => 0];
+        foreach($v as $e){$count[$e['status']] = ($count[$e['status']] ?? 0) + 1;}
+        return['vulns' => $v, 'counts' => $count, 'findings' => $findings];
+    }
+    private function rootSystem(){
+        $os = $this->rootOs();
+        $ns = $this->rootUserNamespaces();
+        return[
+            'kernel' => php_uname('r'), 'build' => php_uname('v'), 'machine' => php_uname('m'),
+            'name' => $os['name'], 'manager' => $this->managerAccount(),
+            'euid' => function_exists('posix_geteuid') ? posix_geteuid() : null,
+            'sudo' => $this->sudoAvailable(), 'namespaces' => $ns['works'],
+            'helper' => $this->rootHelperInstalled(), 'helper_path' => $this->rootSudoersFile(),
+        ];
+    }
+    private function rootSudoersFile(){return '/etc/sudoers.d/90-marshal-fm';}
+    private function rootMitigationFile(){return '/etc/modprobe.d/dirtyfrag.conf';}
+    private function rootMarker(){return 'Marshal File Manager - full privileges';}
+    private function rootHelperInstalled(){
+        $f = $this->rootSudoersFile();
+        if(@is_file($f) && @is_readable($f))return strpos((string)@file_get_contents($f), $this->rootMarker()) !== false;
+        if($this->sudoAvailable()){
+            $r = $this->rootExec('sudo -n grep -c ' . escapeshellarg($this->rootMarker()) . ' ' . escapeshellarg($f) . ' 2>/dev/null');
+            if($r['rc'] === 0 && (int)$r['out'] > 0)return true;
+        }
+        return false;
+    }
+    private function rootHelperContent(){
+        $u = $this->managerAccount();
+        return "# " . $this->rootMarker() . " (installed by the Rooting tool)\n"
+             . "# Every file operation, ownership change and site write then runs as root.\n"
+             . "# Delete this file to take the privileges away again.\n"
+             . "Defaults:" . $u . " !requiretty\n"
+             . $u . " ALL=(root) NOPASSWD: ALL\n";
+    }
+    private function rootAs($cmd, $password = ''){
+        if($this->sudoAvailable()){
+            $r = $this->rootExec('sudo -n ' . $cmd . ' 2>&1');
+            return $r + ['route' => 'sudo -n'];
+        }
+        if($password !== ''){
+            $r = $this->rootExec('sudo -S -k -p "" ' . $cmd . ' 2>&1', $password . "\n");
+            $r['out'] = trim(preg_replace('/^\[sudo\].*$/m', '', $r['out']));
+            return $r + ['route' => 'sudo with the typed password'];
+        }
+        return['rc' => 1, 'out' => 'sudo needs a password and none was given', 'err' => '', 'route' => 'none'];
+    }
+    private function rootInstallHelper($password = ''){
+        $tmp = @tempnam(sys_get_temp_dir(), 'fm-sudoers-');
+        if($tmp === false)return['ok' => false, 'error' => 'A temporary file could not be created.'];
+        @chmod($tmp, 0600);
+        @file_put_contents($tmp, $this->rootHelperContent());
+        $check = $this->rootAs('visudo -cf ' . escapeshellarg($tmp), $password);
+        if($check['rc'] !== 0){
+            @unlink($tmp);
+            return['ok' => false, 'error' => 'The rule was rejected by visudo, so nothing was changed: ' . ($check['out'] ?: $check['err'])];
+        }
+        $dest = $this->rootSudoersFile();
+        $ins = $this->rootAs('install -m 0440 -o root -g root ' . escapeshellarg($tmp) . ' ' . escapeshellarg($dest), $password);
+        @unlink($tmp);
+        if($ins['rc'] !== 0)return['ok' => false, 'error' => 'The rule could not be installed: ' . ($ins['out'] ?: $ins['err'])];
+        $full = $this->rootAs('visudo -c', $password);
+        if($full['rc'] !== 0){
+            $this->rootAs('rm -f ' . escapeshellarg($dest), $password);
+            return['ok' => false, 'error' => 'The sudo configuration did not validate, so the rule was removed again: ' . ($full['out'] ?: $full['err'])];
+        }
+        $this->log('rooting_helper', $dest);
+        return['ok' => true, 'path' => $dest, 'message' => 'Full privileges: ' . $this->managerAccount() . ' may now run anything as root without a password.'];
+    }
+    private function rootRemoveHelper($password = ''){
+        $dest = $this->rootSudoersFile();
+        if(!@is_file($dest))return['ok' => true, 'removed' => false, 'message' => 'There was no helper to remove.'];
+        $r = $this->rootAs('rm -f ' . escapeshellarg($dest), $password);
+        if($r['rc'] !== 0)return['ok' => false, 'error' => 'The rule could not be removed: ' . ($r['out'] ?: $r['err'])];
+        $this->log('rooting_helper_removed', $dest);
+        return['ok' => true, 'removed' => true, 'message' => 'The rule was removed; the manager is back to its own account.'];
+    }
+    private function rootHarden($on, $password = ''){
+        $f = $this->rootMitigationFile();
+        if(!$on){
+            if(!@is_file($f))return['ok' => true, 'mitigated' => false, 'message' => 'The mitigation was not installed.'];
+            $r = $this->rootAs('rm -f ' . escapeshellarg($f), $password);
+            if($r['rc'] !== 0)return['ok' => false, 'error' => 'The mitigation could not be removed: ' . ($r['out'] ?: $r['err'])];
+            return['ok' => true, 'mitigated' => false, 'message' => 'The mitigation was removed; the modules may load again.'];
+        }
+        $body = "install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\ninstall algif_aead /bin/false\n";
+        $tmp = @tempnam(sys_get_temp_dir(), 'fm-root-');
+        @file_put_contents($tmp, $body);
+        $this->rootAs('mkdir -p /etc/modprobe.d', $password);
+        $r = $this->rootAs('install -m 0644 -o root -g root ' . escapeshellarg($tmp) . ' ' . escapeshellarg($f), $password);
+        @unlink($tmp);
+        if($r['rc'] !== 0)return['ok' => false, 'error' => 'The mitigation could not be written: ' . ($r['out'] ?: $r['err'])];
+        $this->rootAs('sh -c "modprobe -r esp4 esp6 rxrpc algif_aead 2>/dev/null; true"', $password);
+        $this->log('rooting_mitigation', $f);
+        return['ok' => true, 'mitigated' => true, 'path' => $f, 'message' => 'esp4, esp6, rxrpc and algif_aead are blacklisted and unloaded, so neither Dirty Frag nor Copy Fail can be reached.'];
+    }
+    /* The escalation chain. Every route is really executed; the first one that
+       yields root stops the run. */
+    public function rootingEscalate($password = ''){
+        $steps = [];
+        $step = function($route, $ok, $note) use (&$steps){$steps[] = ['route' => $route, 'ok' => (bool)$ok, 'note' => (string)$note];};
+        $finish = function($route, $note) use (&$steps, $step){
+            $step($route, true, $note);
+            $helper = $this->rootHelperInstalled() ? ['installed' => true, 'note' => 'already installed'] : $this->rootInstallHelper('');
+            return[
+                'ok' => true, 'stopped_at' => $route, 'steps' => $steps,
+                'root' => $this->rootIdentity(),
+                'helper' => $helper,
+                'message' => 'Rooted with: ' . $route . '. ' . ($helper['ok'] ?? false ? 'The privileges were kept in ' . $this->rootSudoersFile() . ', so every operation runs as root from now on.' : ('The helper could not be kept: ' . ($helper['error'] ?? ''))),
+            ];
+        };
+        $id = $this->rootIdentity();
+        if($id['euid'] === 0)return $finish('the manager already runs as root', 'php is running as uid 0');
+        $step('the manager already runs as root', false, 'uid ' . ($id['euid'] ?? '?'));
+        if($id['sudo_nopass'])return $finish('sudo without a password', 'sudo -n id -un = root');
+        $step('sudo without a password', false, 'this account may not use sudo without a password');
+        if($password !== ''){
+            $r = $this->rootExec('sudo -S -k -p "" id -un 2>&1', $password . "\n");
+            $out = trim(preg_replace('/^\[sudo\].*$/m', '', $r['out']));
+            if($r['rc'] === 0 && $out === 'root')return $finish('sudo with the password you typed', 'sudo accepted the password for ' . $this->managerAccount());
+            $step('sudo with the password you typed', false, $out !== '' ? $out : 'sudo refused the password');
+        }else{
+            $step('sudo with a password', false, 'no password was given (type one in the field and run again)');
+        }
+        $cat = $this->rootCatalog();
+        $reach = [];
+        foreach($cat['vulns'] as $v)if($v['status'] === 'vulnerable' || $v['status'] === 'check')$reach[] = $v['name'];
+        $step('kernel and library exploits', false, $reach
+            ? count($reach) . ' known vulnerability(ies) are reachable here (' . implode(', ', $reach) . '), but this tool measures exposure instead of firing a exploit'
+            : 'nothing in the catalogue is reachable on this kernel, so there is no exploit to try');
+        return[
+            'ok' => false, 'stopped_at' => null, 'steps' => $steps, 'root' => $id,
+            'reachable' => $reach,
+            'message' => $reach
+                ? 'No route from this account gave root. The host does look exposed to ' . implode(', ', $reach) . ' — fix that first, or give this account sudo once.'
+                : 'No route from this account gave root, and no catalogued vulnerability is reachable here.',
+        ];
+    }
+    private function rootIdentity(){
+        $uid = function_exists('posix_geteuid') ? posix_geteuid() : null;
+        $nopass = $this->sudoAvailable();
+        $as = '';
+        if($nopass){
+            $r = $this->rootExec('sudo -n id -un 2>/dev/null');
+            if($r['rc'] === 0)$as = trim($r['out']);
+        }
+        return['manager' => $this->managerAccount(), 'euid' => $uid, 'sudo_nopass' => $nopass, 'sudo_as' => $as, 'helper' => $this->rootHelperInstalled()];
+    }
+    /* The point of the whole thing: every feature this manager has, proven. */
+    private function rootVerify(){
+        $items = [];
+        $add = function($name, $ok, $note) use (&$items){$items[] = ['name' => $name, 'ok' => (bool)$ok, 'note' => (string)$note];};
+        $id = $this->rootIdentity();
+        $add('The manager may become root', $id['sudo_nopass'], $id['sudo_nopass'] ? 'sudo answered as ' . ($id['sudo_as'] ?: 'root') : 'no passwordless sudo');
+        $add('Root helper installed', $id['helper'], $id['helper'] ? $this->rootSudoersFile() : 'not installed — press Keep full privileges');
+        $probe = __DIR__ . '/.fm-probe-' . bin2hex(random_bytes(4)) . '.txt';
+        $local = @file_put_contents($probe, 'x') !== false;
+        if($local)@unlink($probe);
+        $add('Normal file write', $local, $local ? 'the manager writes in its own directory' : 'the manager directory is read-only');
+        foreach(['wordpress' => $this->privSiteConfigFor('wordpress'), 'joomla' => $this->privSiteConfigFor('joomla')] as $type => $cfg){
+            if(!$cfg){$add('Write inside ' . $type, false, 'no installation was found');continue;}
+            $root = $type === 'wordpress' ? rtrim($this->wpSiteRoot($cfg), '/') : rtrim(dirname($cfg), '/');
+            $p = $root . '/.fm-root-probe-' . bin2hex(random_bytes(4)) . '.txt';
+            $ok = false; $how = '';
+            $viaRoot = $this->rootAs('sh -c ' . escapeshellarg('printf x > ' . escapeshellarg($p)));
+            if($viaRoot['rc'] === 0 && @file_exists($p)){$ok = true; $how = 'as root'; $this->rootAs('rm -f ' . escapeshellarg($p));}
+            elseif(@file_put_contents($p, 'x') !== false){$ok = true; $how = 'by the manager account itself'; @unlink($p);}
+            else{
+                $br = $this->privOp('write', ['path' => $p, 'data' => base64_encode('x'), 'b64' => 1], $p);
+                if(!empty($br['ok'])){$ok = true; $how = 'through the site bridge';}
+            }
+            $add('Write inside the ' . $type . ' root', $ok, $ok ? $how : 'refused by every route');
+        }
+        $t = __DIR__ . '/.fm-chown-probe-' . bin2hex(random_bytes(4)) . '.txt';
+        @file_put_contents($t, 'x');
+        $res = @file_exists($t) ? $this->chownPath($t, 'www-data') : ['error' => 'the probe file could not be created'];
+        $add('Change owner of a file', !empty($res['ok']), !empty($res['ok']) ? 'done by ' . implode(', ', array_keys((array)$res['via'])) : (string)($res['error'] ?? 'failed'));
+        if(!empty($res['ok']))$this->rootAs('rm -f ' . escapeshellarg($t)); elseif(@file_exists($t))@unlink($t);
+        $shadow = @is_readable('/etc/shadow');
+        $asRoot = false;
+        if(!$shadow)$asRoot = ($this->rootAs('head -c 32 /etc/shadow')['rc'] === 0);
+        $add('Read a root-only file', $shadow || $asRoot, $shadow ? '/etc/shadow readable directly' : ($asRoot ? '/etc/shadow readable as root' : 'not readable'));
+        $add('Privilege Mode', $this->privMode() !== '', 'mode: ' . $this->privMode() . ' (' . $this->privModeLabel() . ')');
+        $g = $this->guardLoad();
+        $add('Guarded site files', true, count((array)$g['files']) . ' file(s) watched');
+        $okCount = 0; foreach($items as $i)if($i['ok'])$okCount++;
+        return['ok' => $okCount === count($items), 'passed' => $okCount, 'total' => count($items), 'items' => $items];
+    }
+    /* ?x=rooting */
+    public function rootingEndpoint($post){
+        $act = (string)($post['action'] ?? 'catalog');
+        $password = (string)($post['password'] ?? '');
+        if($act === 'escalate')return$this->rootingEscalate($password);
+        if($act === 'keep')return$this->rootInstallHelper($password);
+        if($act === 'revoke')return$this->rootRemoveHelper($password);
+        if($act === 'harden')return$this->rootHarden(true, $password);
+        if($act === 'unharden')return$this->rootHarden(false, $password);
+        if($act === 'verify')return$this->rootVerify();
+        $cat = $this->rootCatalog();
+        return[
+            'ok' => true, 'system' => $this->rootSystem(),
+            'vulns' => $cat['vulns'], 'counts' => $cat['counts'], 'findings' => $cat['findings'],
+            'mitigation' => ['active' => @is_file($this->rootMitigationFile()), 'file' => $this->rootMitigationFile()],
+            'mode' => $this->privMode(), 'mode_label' => $this->privModeLabel(),
+        ];
+    }
+
     /* ── Site files guard ─────────────────────────────────────────────────────
        Every file this tool installs inside a site (mu-plugins today) is recorded
        with its sha256 and its content. WordPress cron gets one event per file,
@@ -14463,6 +14986,11 @@ if(isset($_GET['x'])){
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
         echo json_encode($fm->ownersEndpoint($_POST));exit;
     }
+    if($xop==='rooting'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->rootingEndpoint($_POST));exit;
+    }
     if($xop==='guard'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
@@ -15412,6 +15940,62 @@ a.nt:hover{color:var(--link)}
 .own-result.bad{color:#fca5a5}
 .own-result.good{color:#7ee2a8}
 .own-chk{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--t2);text-transform:none;letter-spacing:0}
+
+/* ROOTING */
+.root-mod{max-width:680px}
+.root-body{display:flex;flex-direction:column;gap:12px;max-height:calc(90dvh - 70px);overflow:auto}
+.root-sec{border:1px solid var(--border);border-radius:10px;background:var(--surf);padding:10px 12px}
+.root-sec h4{margin:0 0 7px;font-size:10.5px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;color:var(--t3);display:flex;align-items:center;gap:6px}
+.root-sec h4 .n{font-weight:600;letter-spacing:0;text-transform:none;color:var(--t3);font-size:10px}
+.root-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.root-kv{display:flex;flex-direction:column;gap:1px;padding:5px 8px;border-radius:7px;background:var(--raised)}
+.root-kv span:first-child{font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--t3)}
+.root-kv span:last-child{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--t1);word-break:break-all}
+.root-chips{display:flex;flex-wrap:wrap;gap:6px}
+.root-chip{font-size:10.5px;padding:2px 8px;border-radius:20px;border:1px solid;line-height:1.7}
+.root-chip.v{color:#fca5a5;border-color:rgba(252,165,165,.55);background:rgba(252,165,165,.1)}
+.root-chip.c{color:#fcd34d;border-color:rgba(252,211,77,.5);background:rgba(252,211,77,.08)}
+.root-chip.m{color:#7cc7ff;border-color:rgba(124,199,255,.45)}
+.root-chip.p{color:#7ee2a8;border-color:rgba(126,226,168,.4)}
+.root-chip.a{color:#a1a1aa;border-color:rgba(161,161,170,.32)}
+.root-row{border:1px solid var(--border);border-radius:9px;margin-bottom:6px;overflow:hidden;background:var(--raised)}
+.root-row:last-child{margin-bottom:0}
+.root-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer}
+.root-head:hover{background:var(--hov)}
+.root-head .nm{font-size:12.5px;font-weight:600;color:var(--t1)}
+.root-head .cve{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--t3)}
+.root-head .st{margin-left:auto;font-size:9.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;padding:2px 7px;border-radius:20px;border:1px solid}
+.root-head .st.v{color:#fca5a5;border-color:rgba(252,165,165,.55)}
+.root-head .st.c{color:#fcd34d;border-color:rgba(252,211,77,.5)}
+.root-head .st.m{color:#7cc7ff;border-color:rgba(124,199,255,.45)}
+.root-head .st.p{color:#7ee2a8;border-color:rgba(126,226,168,.4)}
+.root-head .st.a{color:#a1a1aa;border-color:rgba(161,161,170,.32)}
+.root-detail{display:none;padding:0 10px 10px;font-size:11.5px;line-height:1.65;color:var(--t2)}
+.root-row.open .root-detail{display:block}
+.root-detail b{color:var(--t1)}
+.root-detail .lab{font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--t3);margin:8px 0 2px}
+.root-detail ul{margin:3px 0 0 16px;padding:0}
+.root-detail li{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--t2)}
+.root-acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px}
+.root-out{font-size:11.5px;line-height:1.6;color:var(--t2);white-space:pre-wrap;word-break:break-word;min-height:16px}
+.root-out.good{color:#7ee2a8}
+.root-out.bad{color:#fca5a5}
+.root-steps{display:flex;flex-direction:column;gap:3px;margin-top:8px}
+.root-step{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;padding:3px 0;border-bottom:1px solid var(--border)}
+.root-step:last-child{border-bottom:0}
+.root-step .t{flex-shrink:0;width:12px;text-align:center;font-weight:700}
+.root-step.ok .t{color:#7ee2a8}.root-step.bad .t{color:#fca5a5}
+.root-step .r{color:var(--t1)}
+.root-step .w{color:var(--t3);font-size:10.5px}
+.root-banner{border-radius:9px;padding:9px 11px;font-size:12px;line-height:1.6;display:none}
+.root-banner.good{display:block;background:rgba(126,226,168,.1);border:1px solid rgba(126,226,168,.45);color:#a7ecc5}
+.root-banner.bad{display:block;background:rgba(252,165,165,.09);border:1px solid rgba(252,165,165,.45);color:#fca5a5}
+.root-danger{font-size:10.5px;color:#fcd34d;line-height:1.6;margin-top:7px}
+.root-item{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;color:var(--t2);padding:3px 0;border-bottom:1px solid var(--border)}
+.root-item:last-child{border-bottom:0}
+.root-item .t{width:12px;flex-shrink:0;text-align:center;font-weight:700}
+.root-item.ok .t{color:#7ee2a8}.root-item.bad .t{color:#fca5a5}
+.root-item .w{color:var(--t3);font-size:10.5px}
 .acts{display:flex;gap:3px;justify-content:flex-end}
 
 /* ══ GRID VIEW ══ */
@@ -16595,6 +17179,9 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="sb-div"></div>
   <div class="sb-sec" style="flex-shrink:1;min-height:0;display:flex;flex-direction:column"><div class="sb-label">Tools</div>
     <div class="sb-nav" style="overflow-y:auto;overflow-x:hidden;min-height:0;flex:1">
+       <?php if(!empty($_SESSION['fm_admin'])):?>
+       <button class="sb-item" id="rootBtn" style="border:1px solid rgba(252,165,165,.35);background:rgba(252,165,165,.07)" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and one press to take root"><svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 7.65-7.65"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg>Rooting<span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span></button>
+       <?php endif;?>
        <?php if(!empty($_SESSION['auth'])):?>
        <button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account">
          <svg viewBox="0 0 24 24" style="stroke:#2563eb"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/><path d="m15 5 3 3"/></svg>CMS MFM ACC Login
@@ -18303,6 +18890,65 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 <?php endif;?>
 
+<!-- ROOTING MODAL -->
+<?php if(!empty($_SESSION['fm_admin'])):?>
+<div class="mod-ov" id="rootOv">
+  <div class="mod root-mod">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 7.65-7.65"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg></div>
+      <span class="mod-title">Rooting</span>
+      <button type="button" class="btn btn-icon btn-g" id="rootClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body root-body">
+
+      <div class="root-sec">
+        <h4>This host</h4>
+        <div class="root-grid" id="rootSystem"></div>
+      </div>
+
+      <div class="root-sec">
+        <h4>Root now <span class="n" id="rootVerdict"></span></h4>
+        <div class="root-chips" id="rootChips"></div>
+        <input type="password" id="rootPass" class="inp" placeholder="Password for sudo (only if it is asked for)" autocomplete="off" style="display:none;margin-top:8px">
+        <div class="root-acts">
+          <button type="button" class="btn btn-p" id="rootGo">Start rooting</button>
+          <button type="button" class="btn btn-g" id="rootVerify">Verify every feature</button>
+          <button type="button" class="btn btn-g" id="rootRevoke">Revoke privileges</button>
+        </div>
+        <div class="root-banner" id="rootBanner"></div>
+        <div class="root-steps" id="rootSteps"></div>
+        <div class="root-out" id="rootOut"></div>
+        <div class="root-danger">
+          Full privileges are kept as a rule in <code>/etc/sudoers.d/</code>: this account may then run
+          anything as root without a password. Anyone who reaches this manager reaches root, so keep it
+          behind authentication and TLS — <b>Revoke privileges</b> takes it away again.
+        </div>
+      </div>
+
+      <div class="root-sec">
+        <h4>Known privilege-escalation vulnerabilities <span class="n" id="rootCount"></span></h4>
+        <div class="root-out" style="margin-bottom:8px">Dirty Frag (<b>CVE-2026-43284</b> IPsec&nbsp;ESP · <b>CVE-2026-43500</b> RxRPC)
+          and the rest of the Linux escalation family — each one measured against this host, never assumed.
+          Click a row for what it is, what was found here, and how to fix it.</div>
+        <div class="root-chips" id="rootSum"></div>
+        <div id="rootVulns" style="margin-top:9px"></div>
+      </div>
+
+      <div class="root-sec">
+        <h4>Other findings</h4>
+        <div id="rootFindings"></div>
+        <div class="root-acts">
+          <button type="button" class="btn btn-amb" id="rootHarden">Blacklist the vulnerable modules</button>
+          <button type="button" class="btn btn-g" id="rootUnharden">Undo</button>
+        </div>
+        <div class="root-out" id="rootMitOut"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+<?php endif;?>
+
 <!-- CHANGE OWNER MODAL -->
 <?php if(!empty($_SESSION['fm_admin'])):?>
 <div class="mod-ov" id="ownOv">
@@ -19482,10 +20128,10 @@ function openMod(id){document.getElementById(id)?.classList.add('open');}
 function closeMod(id){document.getElementById(id)?.classList.remove('open');if(id==='configInspectorOv'&&typeof resetConfigInspectorView==='function')resetConfigInspectorView();if(id==='rootingScanOv'&&typeof resetRootingScanView==='function')resetRootingScanView();}
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
-  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','privOv','sessOv','guardOv','sfgOv','ownOv'].forEach(closeMod);
+  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','privOv','sessOv','guardOv','sfgOv','ownOv','rootOv'].forEach(closeMod);
   closeSheet();closeCtx();
 });
-['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','ownOv'].forEach(id=>{
+['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','ownOv','rootOv'].forEach(id=>{
   document.getElementById(id)?.addEventListener('click',e=>{if(e.target===document.getElementById(id))closeMod(id);});
 });
 document.getElementById('fileInfoClose')?.addEventListener('click',()=>closeMod('fileInfoOv'));
@@ -23448,6 +24094,161 @@ async function ownApplyNow(){
   }
 }
 document.getElementById('ownClose')?.addEventListener('click',()=>closeMod('ownOv'));
+/* ═══════════════════════════════════════
+   ROOTING
+   One panel: the catalogue of known escalation
+   vulnerabilities, whether this host is exposed to
+   each of them, and one press that runs the whole
+   chain and stops at the first route that gives root.
+═══════════════════════════════════════ */
+let ROOT=null;
+function rootEsc(v){return typeof sessEsc==='function'?sessEsc(v):String(v==null?'':v);}
+function rootSet(id,msg,kind){const o=document.getElementById(id);if(!o)return;o.textContent=msg||'';o.className='root-out'+(kind?' '+kind:'');}
+async function rootCall(action,extra){
+  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action',action);
+  for(const k in (extra||{})){if(extra[k]!==undefined&&extra[k]!==null)fd.append(k,String(extra[k]));}
+  try{
+    const r=await fetch('?x=rooting',{method:'POST',body:fd,cache:'no-store'});
+    if(r.status===403){toast('Security token rejected. Reload the page.');return null;}
+    return await r.json();
+  }catch(e){toast('The request failed.');return null;}
+}
+const ROOT_LABEL={vulnerable:'vulnerable',check:'check',mitigated:'mitigated',patched:'patched',absent:'not present',unknown:'unknown'};
+const ROOT_CLASS={vulnerable:'v',check:'c',mitigated:'m',patched:'p',absent:'a',unknown:'a'};
+function rootRender(){
+  const d=ROOT;if(!d)return;
+  const sy=d.system||{},c=d.counts||{};
+  const kv=(k,v)=>'<div class="root-kv"><span>'+rootEsc(k)+'</span><span>'+rootEsc(v)+'</span></div>';
+  const sbox=document.getElementById('rootSystem');
+  if(sbox)sbox.innerHTML=kv('Kernel',sy.kernel||'?')+kv('Distribution',sy.name||'?')
+    +kv('Machine',sy.machine||'?')+kv('Privilege Mode',d.mode_label||d.mode||'?')
+    +kv('Manager account',(sy.manager||'?')+' (uid '+(sy.euid===null?'?':sy.euid)+')')
+    +kv('Root',sy.sudo?'available':'not available')+kv('User namespaces',sy.namespaces?'allowed':'blocked')
+    +kv('Root helper',sy.helper?'installed':'not installed')+kv('Module mitigation',(d.mitigation&&d.mitigation.active)?'in place':'not installed');
+  const chips=document.getElementById('rootChips');
+  if(chips)chips.innerHTML=
+    '<span class="root-chip v">'+(c.vulnerable||0)+' vulnerable</span>'
+    +'<span class="root-chip c">'+(c.check||0)+' need a version check</span>'
+    +'<span class="root-chip m">'+(c.mitigated||0)+' mitigated</span>'
+    +'<span class="root-chip p">'+(c.patched||0)+' patched</span>'
+    +'<span class="root-chip a">'+(c.absent||0)+' not present</span>';
+  const v=document.getElementById('rootVerdict');
+  if(v)v.textContent='— '+((c.vulnerable||0)>0?('this host is open to '+c.vulnerable+' of them'):((c.check||0)>0?('nothing certain, '+c.check+' to confirm with your vendor'):'nothing here is reachable'));
+  const cnt=document.getElementById('rootCount');
+  if(cnt)cnt.textContent='— '+(d.vulns||[]).length+' entries';
+  const sum=document.getElementById('rootSum');
+  if(sum){
+    const reach=(d.vulns||[]).filter(x=>x.status==='vulnerable'||x.status==='check').map(x=>x.name);
+    sum.innerHTML=reach.length?reach.map(n=>'<span class="root-chip c">'+rootEsc(n)+'</span>').join(''):'<span class="root-chip p">no catalogued vulnerability is reachable on this kernel</span>';
+  }
+  const box=document.getElementById('rootVulns');
+  if(box){
+    box.innerHTML=(d.vulns||[]).map(x=>{
+      const cls=ROOT_CLASS[x.status]||'a';
+      return '<div class="root-row" data-v="'+rootEsc(x.id)+'">'
+        +'<div class="root-head"><span class="nm">'+rootEsc(x.name)+'</span>'
+        +'<span class="cve">'+rootEsc((x.cve||[]).join(' · '))+'</span>'
+        +'<span class="st '+cls+'">'+rootEsc(ROOT_LABEL[x.status]||x.status)+'</span></div>'
+        +'<div class="root-detail">'
+        +'<div>'+rootEsc(x.summary)+'</div>'
+        +'<div class="lab">What it gives an attacker</div><div>'+rootEsc(x.impact)+'</div>'
+        +'<div class="lab">What was measured here</div><ul>'+(x.evidence||[]).map(e=>'<li>'+rootEsc(e)+'</li>').join('')+'</ul>'
+        +'<div class="lab">Needs</div><div>'+rootEsc(x.requires)+'</div>'
+        +'<div class="lab">Mitigation / fix</div><div>'+rootEsc(x.mitigation)+' <b>'+rootEsc(x.fix)+'</b></div>'
+        +'<div class="lab">Component / year</div><div>'+rootEsc(x.component)+' · '+rootEsc(x.year)+' · severity '+rootEsc(x.severity)+'</div>'
+        +'</div></div>';
+    }).join('');
+  }
+  const fbox=document.getElementById('rootFindings');
+  if(fbox)fbox.innerHTML=(d.findings||[]).map(f=>{
+    const good=f.good?f.ok:!f.ok;
+    return '<div class="root-item '+(good?'ok':'bad')+'"><span class="t">'+(good?'✓':'!')+'</span>'
+      +'<span><span>'+rootEsc(f.name)+'</span> <span class="w">'+rootEsc(f.note)+'</span></span></div>';
+  }).join('');
+  const b=document.getElementById('rootBadge');
+  if(b)b.textContent=(sy.sudo?'· root':((c.vulnerable||0)>0?'· '+(c.vulnerable||0)+' open':''));
+  const pass=document.getElementById('rootPass');
+  if(pass)pass.style.display=sy.sudo?'none':'block';
+}
+function rootSteps(steps){
+  const box=document.getElementById('rootSteps');if(!box)return;
+  box.innerHTML=(steps||[]).map(s=>'<div class="root-step '+(s.ok?'ok':'bad')+'"><span class="t">'+(s.ok?'✓':'✕')+'</span>'
+    +'<span><span class="r">'+rootEsc(s.route)+'</span> <span class="w">'+rootEsc(s.note)+'</span></span></div>').join('');
+}
+function rootBanner(msg,kind){
+  const b=document.getElementById('rootBanner');if(!b)return;
+  b.textContent=msg||'';b.className='root-banner'+(kind?' '+kind:'');
+}
+function rootVerifyList(d){
+  const box=document.getElementById('rootSteps');if(!box)return;
+  if(!d||!d.items){box.innerHTML='';return;}
+  box.innerHTML=d.items.map(i=>'<div class="root-step '+(i.ok?'ok':'bad')+'"><span class="t">'+(i.ok?'✓':'✕')+'</span>'
+    +'<span><span class="r">'+rootEsc(i.name)+'</span> <span class="w">'+rootEsc(i.note)+'</span></span></div>').join('');
+}
+async function rootLoad(){
+  const d=await rootCall('catalog');
+  if(!d||!d.ok){rootSet('rootOut','The host could not be inspected.','bad');return;}
+  ROOT=d;rootRender();
+}
+document.getElementById('rootBtn')?.addEventListener('click',()=>{
+  rootBanner('');rootSet('rootOut','');rootSet('rootMitOut','');
+  const st=document.getElementById('rootSteps');if(st)st.innerHTML='';
+  openMod('rootOv');rootLoad();
+});
+document.getElementById('rootClose')?.addEventListener('click',()=>closeMod('rootOv'));
+document.getElementById('rootVulns')?.addEventListener('click',e=>{
+  const head=e.target.closest('.root-head');if(!head)return;
+  head.parentElement.classList.toggle('open');
+});
+document.getElementById('rootGo')?.addEventListener('click',async()=>{
+  const btn=document.getElementById('rootGo');if(btn)btn.disabled=true;
+  const pass=document.getElementById('rootPass');
+  rootBanner('Running every route — it stops at the first one that works…','');
+  rootSteps([]);rootSet('rootOut','');
+  const r=await rootCall('escalate',{password:pass?pass.value:''});
+  if(btn)btn.disabled=false;
+  if(pass)pass.value='';
+  if(!r){rootBanner('The request failed.','bad');return;}
+  rootSteps(r.steps||[]);
+  if(r.ok){
+    rootBanner('Rooted — stopped at: '+r.stopped_at+'. '+(r.message||''),'good');
+    toast('Rooted: '+r.stopped_at);
+    rootLoad();
+  }else{
+    rootBanner('No route gave root. '+(r.message||''),'bad');
+    rootSet('rootOut',(r.reachable&&r.reachable.length)?('Reachable here: '+r.reachable.join(', ')):'Nothing in the catalogue is reachable here.','bad');
+  }
+});
+document.getElementById('rootVerify')?.addEventListener('click',async()=>{
+  rootSet('rootOut','Running every check…');
+  const r=await rootCall('verify');
+  if(!r){rootSet('rootOut','The check could not run.','bad');return;}
+  rootVerifyList(r);
+  rootSet('rootOut',r.ok?('Everything works: '+r.passed+' of '+r.total+' checks pass.'):('Still broken: '+r.passed+' of '+r.total+' checks pass.'),r.ok?'good':'bad');
+});
+document.getElementById('rootRevoke')?.addEventListener('click',async()=>{
+  if(!confirm('Remove the root helper? Privileged operations fall back to the site bridge.'))return;
+  const pass=document.getElementById('rootPass');
+  const r=await rootCall('revoke',{password:pass?pass.value:''});
+  if(!r){rootSet('rootOut','The request failed.','bad');return;}
+  rootSet('rootOut',r.message||r.error||'',r.ok?'good':'bad');
+  if(r.ok)rootLoad();
+});
+document.getElementById('rootHarden')?.addEventListener('click',async()=>{
+  const pass=document.getElementById('rootPass');
+  const r=await rootCall('harden',{password:pass?pass.value:''});
+  if(!r){rootSet('rootMitOut','The request failed.','bad');return;}
+  rootSet('rootMitOut',r.message||r.error||'',r.ok?'good':'bad');
+  if(r.ok)rootLoad();
+});
+document.getElementById('rootUnharden')?.addEventListener('click',async()=>{
+  const pass=document.getElementById('rootPass');
+  const r=await rootCall('unharden',{password:pass?pass.value:''});
+  if(!r){rootSet('rootMitOut','The request failed.','bad');return;}
+  rootSet('rootMitOut',r.message||r.error||'',r.ok?'good':'bad');
+  if(r.ok)rootLoad();
+});
+
 document.getElementById('ownCancel')?.addEventListener('click',()=>closeMod('ownOv'));
 document.getElementById('ownApply')?.addEventListener('click',ownApplyNow);
 document.getElementById('ownSearch')?.addEventListener('input',ownRender);
