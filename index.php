@@ -1122,7 +1122,7 @@ function fm_ensure_terminal_font(){
    (see FM_UPDATE_PAUSED below), which is ON by default and resumes the
    moment the pause is lifted. */
 if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/index.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
-if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', true); // automatic update checks are enabled by default; the Guardian panel can pause them temporarily
+if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // automatic update checks are enabled by default; the Guardian panel can pause them temporarily
 
 /* Prefer the database the project already uses. Replit and most modern PHP
    deployments expose it as DATABASE_URL; the old fmguardian@127.0.0.1:3307
@@ -1937,28 +1937,80 @@ function fm_guardian_rewrite_constant($name,$newValue,$isBool=false){
     return $ok;
 }
 
-/* ── a PHP syntax check without a shell ──────────────────────────────────────
-   `php -l` is the one thing this file needs another process for, and the only
-   interpreter it ever starts is PHP itself: the same binary, the same language,
-   started from an argument vector instead of a /bin/sh command line. */
+/* ── A PHP syntax check that never needs another program ─────────────────────
+   The tokenizer parses the file inside this very process: token_get_all() with
+   TOKEN_PARSE runs a real parse and throws ParseError on anything the compiler
+   would reject. That matters most where the old check failed: on php-fpm, CGI,
+   Apache-module and LiteSpeed hosts PHP_BINARY is not a command-line binary, so
+   `php -l` answered with an error and a perfectly good update looked broken.
+   The command-line check is only a fallback now, and the binary is probed on a
+   file that must parse before it is trusted. */
 function fm_php_lint($file){
-    $bin = defined('PHP_BINARY') ? PHP_BINARY : '';
-    if($bin === '' || !@is_executable($bin)){
-        $guess = (defined('PHP_BINDIR') ? PHP_BINDIR : '/usr/bin') . '/php';
-        $bin = @is_executable($guess) ? $guess : '';
+    $code = @file_get_contents($file);
+    if($code === false)return['ran' => false, 'ok' => true, 'out' => '', 'why' => 'the file could not be read'];
+    if(strncmp($code, "\xEF\xBB\xBF", 3) === 0)$code = substr($code, 3);
+    if(!preg_match('/^\s*<\?php/', $code)){
+        return['ran' => true, 'ok' => false, 'why' => 'not php',
+               'out' => 'the file does not start with <?php, so it is not a PHP file at all — an HTML page from a hosting/ repository page looks exactly like this'];
     }
-    if($bin === '' || !function_exists('proc_open'))return['ran' => false, 'ok' => true, 'out' => ''];
-    $spec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-    $p = @proc_open([$bin, '-l', $file], $spec, $pipes);
-    if(!is_resource($p))return['ran' => false, 'ok' => true, 'out' => ''];
-    @fclose($pipes[0]);
-    $out = (string)@stream_get_contents($pipes[1]) . (string)@stream_get_contents($pipes[2]);
-    @fclose($pipes[1]);
-    @fclose($pipes[2]);
-    $rc = (int)@proc_close($p);
-    return['ran' => true, 'ok' => $rc === 0 && !preg_match('/\b(?:parse|fatal)\s+error\b/i', $out), 'out' => trim($out)];
+    if(function_exists('token_get_all')){
+        $limit = @ini_get('memory_limit');
+        $bytes = strlen($code);
+        if($limit && $limit !== '-1'){
+            $max = (int)$limit * 1024 * 1024;
+            if($max > 0 && $bytes > $max * 0.35){
+                return['ran' => false, 'ok' => true, 'why' => 'too big for the tokenizer here',
+                       'out' => 'the file is ' . $bytes . ' bytes and the memory limit is ' . $limit];
+            }
+        }
+        try{
+            token_get_all($code, TOKEN_PARSE);
+            return['ran' => true, 'ok' => true, 'why' => 'tokenizer', 'out' => 'parsed by PHP itself'];
+        }catch(\Throwable $e){
+            return['ran' => true, 'ok' => false, 'why' => 'tokenizer',
+                   'out' => get_class($e) . ': ' . $e->getMessage() . ' (line ' . $e->getLine() . ')'];
+        }
+    }
+    /* fallback: a genuine command-line PHP, and only after it proves itself */
+    $cands = [];
+    if(defined('PHP_BINARY') && PHP_BINARY !== '')$cands[] = PHP_BINARY;
+    if(defined('PHP_BINDIR'))$cands[] = rtrim(PHP_BINDIR, '/') . '/php';
+    $path = (string)@getenv('PATH') . PATH_SEPARATOR . '/usr/local/bin:/usr/bin:/bin';
+    foreach(explode(PATH_SEPARATOR, $path) as $dir){
+        $dir = rtrim($dir, '/');
+        if($dir === '')continue;
+        foreach(['php', 'php8.4', 'php8.3', 'php8.2', 'php8.1', 'php8.0', 'php7.4'] as $n)$cands[] = $dir . '/' . $n;
+    }
+    if(!function_exists('proc_open'))return['ran' => false, 'ok' => true, 'out' => '', 'why' => 'no tokenizer and no proc_open'];
+    $probe = @tempnam(sys_get_temp_dir(), 'fm-lint-');
+    @file_put_contents($probe, "<?php echo 1;\n");
+    foreach(array_unique($cands) as $bin){
+        if(!@is_file($bin) || !@is_executable($bin))continue;
+        if(preg_match('/(fpm|cgi|apache|httpd|lshttpd)/i', basename($bin)))continue;
+        $spec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $h = @proc_open([$bin, '-l', $probe], $spec, $pipes);
+        if(!is_resource($h))continue;
+        @fclose($pipes[0]);
+        $probeOut = (string)@stream_get_contents($pipes[1]) . (string)@stream_get_contents($pipes[2]);
+        @fclose($pipes[1]);
+        @fclose($pipes[2]);
+        $probeRc = (int)@proc_close($h);
+        if($probeRc !== 0 || stripos($probeOut, 'No syntax errors') === false)continue;
+        $spec2 = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $h2 = @proc_open([$bin, '-l', $file], $spec2, $p2);
+        if(!is_resource($h2))continue;
+        @fclose($p2[0]);
+        $out = (string)@stream_get_contents($p2[1]) . (string)@stream_get_contents($p2[2]);
+        @fclose($p2[1]);
+        @fclose($p2[2]);
+        $rc = (int)@proc_close($h2);
+        @unlink($probe);
+        return['ran' => true, 'ok' => $rc === 0 && !preg_match('/\b(?:parse|fatal)\s+error\b/i', $out),
+               'why' => 'command line', 'out' => trim($out)];
+    }
+    @unlink($probe);
+    return['ran' => false, 'ok' => true, 'out' => '', 'why' => 'no usable checker on this host'];
 }
-
 function fm_guardian_release_timestamp($url,$headers=[]){
     foreach((array)$headers as $header){
         if(stripos($header,'Last-Modified:')===0){
@@ -2043,7 +2095,10 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
     if(@file_put_contents($tmp,$data)===false)return ['ok'=>false,'error'=>'Could not write temp file (check permissions).'];
     $lintDownload=fm_php_lint($tmp);
     if($lintDownload['ran']&&!$lintDownload['ok']){
-        @unlink($tmp);return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check — not applied.'];
+        @unlink($tmp);
+        return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check — not applied. '
+            . ($lintDownload['out']!=='' ? '(' . $lintDownload['out'] . ')' : '')
+            . ($lintDownload['why']!=='' ? ' [checked by: ' . $lintDownload['why'] . ']' : '')];
     }
     if(!@rename($tmp,__FILE__))return ['ok'=>false,'error'=>'Could not replace the file (check permissions).'];
     fm_guardian_sync($data);
