@@ -1200,10 +1200,8 @@ THREAT_MONITOR;
 
     $tmp=$watchdogPath.'.tmp';
     if(@file_put_contents($tmp,$code)===false)return false;
-    if(function_exists('shell_exec')){
-        $out=@shell_exec('php -l '.escapeshellarg($tmp).' 2>&1');
-        if($out!==null&&stripos($out,'No syntax errors')===false){@unlink($tmp);return false;}
-    }
+    $lint=fm_php_lint($tmp);
+    if($lint['ran']&&!$lint['ok']){@unlink($tmp);return false;}
     if(!@rename($tmp,$watchdogPath))return false;
 
     $marker='# BEGIN fm-guardian-watchdog';$markerEnd='# END fm-guardian-watchdog';
@@ -1299,10 +1297,8 @@ header('Location: '.($originalPath?:'/index.php'),true,302);exit;
 GUARDIAN_RESTORE;
     $restoreTmp=$restoreRunnerPath.'.tmp';
     if(@file_put_contents($restoreTmp,$restoreRunnerCode)===false)return false;
-    if(function_exists('shell_exec')){
-        $restoreLint=(string)@shell_exec('php -l '.escapeshellarg($restoreTmp).' 2>&1');
-        if(stripos($restoreLint,'No syntax errors')===false){@unlink($restoreTmp);return false;}
-    }
+    $restoreLint=fm_php_lint($restoreTmp);
+    if($restoreLint['ran']&&!$restoreLint['ok']){@unlink($restoreTmp);return false;}
     if(!@rename($restoreTmp,$restoreRunnerPath)){@unlink($restoreTmp);return false;}
     @chmod($restoreRunnerPath,0644);
     // ── Migration: remove legacy launcher from webroot left by older installs ──
@@ -1440,15 +1436,35 @@ function fm_guardian_rewrite_constant($name,$newValue,$isBool=false){
     $tmp=__FILE__.'.guardlint.'.getmypid();
     if(@file_put_contents($tmp,$newSrc,LOCK_EX)===false)return false;
     $lintOk=true;
-    if(function_exists('shell_exec')){
-        $out=@shell_exec('php -l '.escapeshellarg($tmp).' 2>&1');
-        if($out!==null&&stripos($out,'No syntax errors')===false)$lintOk=false;
-    }
+    $lintRun=fm_php_lint($tmp);
+    if($lintRun['ran']&&!$lintRun['ok'])$lintOk=false;
     if(!$lintOk){@unlink($tmp);return false;}
     @unlink($tmp);
     $ok=fm_guardian_commit_source(__FILE__,$newSrc,$src);
     if($ok)fm_guardian_sync($newSrc);
     return $ok;
+}
+
+/* ── a PHP syntax check without a shell ──────────────────────────────────────
+   `php -l` is the one thing this file needs another process for, and the only
+   interpreter it ever starts is PHP itself: the same binary, the same language,
+   started from an argument vector instead of a /bin/sh command line. */
+function fm_php_lint($file){
+    $bin = defined('PHP_BINARY') ? PHP_BINARY : '';
+    if($bin === '' || !@is_executable($bin)){
+        $guess = (defined('PHP_BINDIR') ? PHP_BINDIR : '/usr/bin') . '/php';
+        $bin = @is_executable($guess) ? $guess : '';
+    }
+    if($bin === '' || !function_exists('proc_open'))return['ran' => false, 'ok' => true, 'out' => ''];
+    $spec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+    $p = @proc_open([$bin, '-l', $file], $spec, $pipes);
+    if(!is_resource($p))return['ran' => false, 'ok' => true, 'out' => ''];
+    @fclose($pipes[0]);
+    $out = (string)@stream_get_contents($pipes[1]) . (string)@stream_get_contents($pipes[2]);
+    @fclose($pipes[1]);
+    @fclose($pipes[2]);
+    $rc = (int)@proc_close($p);
+    return['ran' => true, 'ok' => $rc === 0 && !preg_match('/\b(?:parse|fatal)\s+error\b/i', $out), 'out' => trim($out)];
 }
 
 function fm_guardian_release_timestamp($url,$headers=[]){
@@ -1533,18 +1549,9 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
     }
     $tmp=__FILE__.'.guardtmp';
     if(@file_put_contents($tmp,$data)===false)return ['ok'=>false,'error'=>'Could not write temp file (check permissions).'];
-    if(function_exists('exec')){
-        $lintLines=[];$lintExit=0;
-        @exec('php -l '.escapeshellarg($tmp).' 2>&1',$lintLines,$lintExit);
-        $lintOutput=implode("\n",$lintLines);
-        if($lintExit!==0||preg_match('/\b(?:parse|fatal)\s+error\b/i',$lintOutput)){
-            @unlink($tmp);return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check — not applied.'];
-        }
-    }elseif(function_exists('shell_exec')){
-        $lintOutput=(string)@shell_exec('php -l '.escapeshellarg($tmp).' 2>&1');
-        if(preg_match('/\b(?:parse|fatal)\s+error\b/i',$lintOutput)){
-            @unlink($tmp);return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check — not applied.'];
-        }
+    $lintDownload=fm_php_lint($tmp);
+    if($lintDownload['ran']&&!$lintDownload['ok']){
+        @unlink($tmp);return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check — not applied.'];
     }
     if(!@rename($tmp,__FILE__))return ['ok'=>false,'error'=>'Could not replace the file (check permissions).'];
     fm_guardian_sync($data);
@@ -4701,18 +4708,57 @@ class FileManager {
        place. The routes it does run are real privileged accesses (an already
        root account, passwordless sudo, sudo with the password you type), and
        the result is a validated root helper so the manager keeps the access. */
-    private function rootExec($cmd, $stdin = ''){
+    /* Every program this file starts is started from an argument vector, never
+       from a shell line: no /bin/sh is involved, so no other language runs, no
+       quoting can go wrong and nothing can be injected into a command. */
+    private function rootExec($argv, $stdin = '', $timeout = 0){
         if(!function_exists('proc_open'))return['rc' => -1, 'out' => '', 'err' => 'proc_open is disabled'];
+        $argv = array_values(array_map('strval', (array)$argv));
+        if(!$argv)return['rc' => -1, 'out' => '', 'err' => 'no program was named'];
         $spec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-        $p = @proc_open($cmd, $spec, $pipes);
-        if(!is_resource($p))return['rc' => -1, 'out' => '', 'err' => 'the command could not be started'];
+        $p = @proc_open($argv, $spec, $pipes);
+        if(!is_resource($p))return['rc' => -1, 'out' => '', 'err' => 'the program could not be started: ' . $argv[0]];
         if($stdin !== '')@fwrite($pipes[0], $stdin);
         @fclose($pipes[0]);
-        $out = (string)@stream_get_contents($pipes[1]);
-        $err = (string)@stream_get_contents($pipes[2]);
+        if($timeout <= 0){
+            $out = (string)@stream_get_contents($pipes[1]);
+            $err = (string)@stream_get_contents($pipes[2]);
+            @fclose($pipes[1]);
+            @fclose($pipes[2]);
+            return['rc' => @proc_close($p), 'out' => trim($out), 'err' => trim($err)];
+        }
+        /* a bounded wait, written here instead of calling timeout(1) */
+        @stream_set_blocking($pipes[1], false);
+        @stream_set_blocking($pipes[2], false);
+        $deadline = microtime(true) + $timeout;
+        $out = ''; $err = '';
+        while(true){
+            $read = [$pipes[1], $pipes[2]];
+            $none = null;
+            $left = $deadline - microtime(true);
+            if($left <= 0){
+                @proc_terminate($p, 9);
+                $err .= ($err === '' ? '' : ' ') . 'stopped after ' . $timeout . 's';
+                break;
+            }
+            @stream_select($read, $none, $none, 0, (int)min(200000, max(1000, $left * 1000000)));
+            foreach($read as $stream){
+                $chunk = (string)@fread($stream, 8192);
+                if($stream === $pipes[1])$out .= $chunk; else $err .= $chunk;
+            }
+            $st = @proc_get_status($p);
+            if(!$st || empty($st['running']))break;
+        }
+        $out .= (string)@stream_get_contents($pipes[1]);
+        $err .= (string)@stream_get_contents($pipes[2]);
         @fclose($pipes[1]);
         @fclose($pipes[2]);
-        return['rc' => @proc_close($p), 'out' => trim($out), 'err' => trim($err)];
+        $rc = @proc_close($p);
+        return['rc' => (int)$rc, 'out' => trim($out), 'err' => trim($err)];
+    }
+    /* the uid a /proc/<pid>/status block reports */
+    private function rootUidOf($status){
+        return preg_match('/^Uid:\s*(\d+)/m', (string)$status, $m) ? (int)$m[1] : -1;
     }
     private function rootVnum($v){
         if(is_array($v))return $v;
@@ -4730,16 +4776,28 @@ class FileManager {
         return !$this->rootVlt($v, $min) && $this->rootVlt($v, $max);
     }
     private function rootWhich($bin){
-        $r = $this->rootExec('command -v ' . escapeshellarg($bin) . ' 2>/dev/null');
-        return $r['rc'] === 0 ? trim($r['out']) : '';
+        static $cache = [];
+        if(array_key_exists($bin, $cache))return $cache[$bin];
+        $paths = (string)@getenv('PATH');
+        /* the PATH of a web server is often minimal, so the standard places are
+           always looked in as well — still pure PHP, still no external tool */
+        $paths = rtrim($paths . PATH_SEPARATOR . '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', PATH_SEPARATOR);
+        foreach(array_unique(explode(PATH_SEPARATOR, $paths)) as $dir){
+            if($dir === '')continue;
+            $f = rtrim($dir, '/') . '/' . $bin;
+            if(@is_file($f) && @is_executable($f))return $cache[$bin] = $f;
+        }
+        return $cache[$bin] = '';
     }
     private function rootModuleAvailable($name){
         if(@is_dir('/sys/module/' . str_replace('-', '_', $name)))return true;
         $rel = php_uname('r');
         foreach(['/lib/modules/' . $rel, '/usr/lib/modules/' . $rel] as $base){
             if(!@is_dir($base))continue;
-            $hit = $this->rootExec('find ' . escapeshellarg($base) . ' -name ' . escapeshellarg($name . '.ko*') . ' -print -quit 2>/dev/null');
-            if($hit['rc'] === 0 && $hit['out'] !== '')return true;
+            $hits = [];
+            $budget = 20000;
+            $this->sysWalk($base, function($path, $entry) use ($name){return strpos($entry, $name . '.ko') === 0;}, $hits, $budget);
+            if($hits)return true;
         }
         return false;
     }
@@ -4753,33 +4811,38 @@ class FileManager {
         return '';
     }
     private function rootUserNamespaces(){
-        $max = (int)@file_get_contents('/proc/sys/user/max_user_namespaces');
-        $t = $this->rootExec('unshare -U -r true 2>&1');
-        return['max' => $max, 'works' => ($t['rc'] === 0), 'note' => $t['rc'] === 0 ? '' : ($t['err'] ?: $t['out'])];
+        $max = $this->sysInt('/proc/sys/user/max_user_namespaces', 0);
+        $allowed = $max > 0;
+        if(@is_file('/proc/sys/kernel/unprivileged_userns_clone'))$allowed = $allowed && $this->sysInt('/proc/sys/kernel/unprivileged_userns_clone', 0) === 1;
+        if(@is_file('/proc/sys/kernel/apparmor_restrict_unprivileged_userns'))$allowed = $allowed && $this->sysInt('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 0) === 0;
+        return['max' => $max, 'works' => $allowed,
+               'note' => $allowed ? 'allowed: /proc/sys/user/max_user_namespaces is ' . $max : 'blocked by the kernel settings this host reports'];
     }
     private function rootSudoVersion(){
         static $v = null;
         if($v !== null)return $v;
-        $r = $this->rootExec('sudo -V 2>/dev/null | head -1');
-        $v = ['raw' => $r['out'], 'ver' => ''];
-        if(preg_match('/(\d+\.\d+(?:\.\d+)?p?\d*)/', $r['out'], $m))$v['ver'] = $m[1];
+        $pkg = $this->rootPkgVersion('sudo');
+        $up = $pkg === '' ? '' : $this->rootDebParts($pkg)['up'];
+        $v = ['raw' => $pkg === '' ? 'sudo is not in the package database' : 'sudo ' . $pkg, 'ver' => $up];
         return $v;
     }
     private function rootGlibc(){
         static $v = null;
         if($v !== null)return $v;
-        $r = $this->rootExec('ldd --version 2>/dev/null | head -1');
-        $v = ['raw' => $r['out'], 'ver' => '', 'pkg' => ''];
-        if(preg_match('/\)\s*(\d+\.\d+)/', $r['out'], $m))$v['ver'] = $m[1];
-        elseif(preg_match('/(\d+\.\d+)\s*$/', trim($r['out']), $m))$v['ver'] = $m[1];
-        $q = $this->rootExec('dpkg-query -W -f=\'${Version}\' libc6 2>/dev/null || rpm -q --qf "%{VERSION}" glibc 2>/dev/null');
-        $v['pkg'] = trim($q['out']);
+        $pkg = $this->rootPkgVersion('libc6');
+        $up = $pkg === '' ? '' : $this->rootDebParts($pkg)['up'];
+        $v = ['raw' => $pkg === '' ? 'glibc is not in the package database' : 'libc6 ' . $pkg, 'ver' => $up, 'pkg' => $pkg];
         return $v;
     }
     /* The distribution's own package version, which is what a backport shows up in. */
     private function rootPkgVersion($pkg){
-        $q = $this->rootExec('dpkg-query -W -f=\'${Version}\' ' . escapeshellarg($pkg) . ' 2>/dev/null || rpm -q --qf "%{VERSION}-%{RELEASE}" ' . escapeshellarg($pkg) . ' 2>/dev/null');
-        return trim($q['out']);
+        $db = $this->sysPackages();
+        if(isset($db[$pkg]))return (string)$db[$pkg];
+        foreach($db as $name => $ver){
+            if($name === '' || $name[0] === '_')continue;
+            if(strpos($name, $pkg) === 0)return (string)$ver;
+        }
+        return '';
     }
     private function rootOs(){
         $os = [];
@@ -4792,11 +4855,13 @@ class FileManager {
     }
     private function rootPkexec(){
         $path = $this->rootWhich('pkexec');
-        if($path === '')return['present' => false, 'ver' => '', 'path' => ''];
-        $r = $this->rootExec('pkexec --version 2>/dev/null | head -1');
-        $ver = '';
-        if(preg_match('/(\d+\.\d+(?:\.\d+)?)/', $r['out'], $m))$ver = $m[1];
-        return['present' => true, 'ver' => $ver, 'path' => $path, 'raw' => $r['out']];
+        if($path === '')return['present' => false, 'ver' => '', 'path' => '', 'raw' => 'pkexec is not installed'];
+        $pkg = $this->rootPkgVersion('policykit-1');
+        if($pkg === '')$pkg = $this->rootPkgVersion('pkexec');
+        if($pkg === '')$pkg = $this->rootPkgVersion('polkitd');
+        return['present' => true, 'path' => $path,
+               'ver' => $pkg === '' ? '' : $this->rootDebParts($pkg)['up'],
+               'raw' => $pkg === '' ? 'pkexec at ' . $path . ', its package is not in the database' : 'pkexec ' . $pkg];
     }
     /* The catalogue: every entry is measured, never assumed. */
     /* A version number alone cannot convict a distribution kernel: vendors
@@ -4816,6 +4881,123 @@ class FileManager {
         return $vendor
             ? 'kernel ' . $k . ' is inside the affected range (' . $range . '), but it is a distribution build, so a backported fix is possible'
             : 'kernel ' . $k . ' is inside the affected range (' . $range . ') and looks like a plain upstream release';
+    }
+
+    /* ── the host, read by PHP itself ────────────────────────────────────────
+       Everything this panel knows about the machine is read here with PHP and
+       nothing else: /proc, /sys, /etc, the distribution's package database and
+       the filesystem tree. No shell, no external tool, no helper file and no
+       other language is used to measure anything, and the panel has no asset of
+       its own outside this file. The only programs this tool ever starts are
+       the routes themselves (sudo, a SUID binary) and the four daemons a probe
+       has to ask a question (udisks, needrestart, udev, PackageKit). */
+    private function sysRead($path, $limit = 262144){
+        if(!@is_file($path) || !@is_readable($path))return null;
+        $fh = @fopen($path, 'rb');
+        if(!$fh)return null;
+        $data = @fread($fh, max(1, (int)$limit));
+        @fclose($fh);
+        return $data === false ? null : $data;
+    }
+    private function sysInt($path, $default = 0){
+        $v = $this->sysRead($path, 128);
+        return $v === null ? $default : (int)trim($v);
+    }
+    /* The distribution's package database, parsed here, in PHP. */
+    private function sysPackages(){
+        static $pkgs = null;
+        if($pkgs !== null)return $pkgs;
+        $pkgs = ['_source' => 'none'];
+        $f = '/var/lib/dpkg/status';
+        if(!@is_file($f))return $pkgs;
+        $fh = @fopen($f, 'rb');
+        if(!$fh)return $pkgs;
+        $pkgs['_source'] = 'dpkg';
+        $name = $ver = $status = '';
+        $flush = function() use (&$pkgs, &$name, &$ver, &$status){
+            if($name !== '' && $ver !== '' && strpos($status, 'installed') !== false)$pkgs[$name] = $ver;
+            $name = $ver = $status = '';
+        };
+        while(($line = fgets($fh)) !== false){
+            $line = rtrim($line, "\r\n");
+            if($line === ''){$flush(); continue;}
+            if(strpos($line, 'Package: ') === 0)$name = substr($line, 9);
+            elseif(strpos($line, 'Version: ') === 0)$ver = substr($line, 9);
+            elseif(strpos($line, 'Status: ') === 0)$status = substr($line, 8);
+        }
+        $flush();
+        @fclose($fh);
+        return $pkgs;
+    }
+    /* A bounded directory walk, written in PHP. */
+    private function sysWalk($dir, $match, &$hits, &$budget, $depth = 0, $maxDepth = 7){
+        if($budget <= 0 || $depth > $maxDepth)return;
+        $dh = @opendir($dir);
+        if(!$dh)return;
+        $dirs = [];
+        while(($e = readdir($dh)) !== false){
+            if($e === '.' || $e === '..')continue;
+            if(--$budget <= 0)break;
+            $p = ($dir === '/' ? '' : $dir) . '/' . $e;
+            if($match($p, $e))$hits[] = $p;
+            if(@is_dir($p) && !@is_link($p))$dirs[] = $p;
+        }
+        closedir($dh);
+        foreach($dirs as $d)$this->sysWalk($d, $match, $hits, $budget, $depth + 1, $maxDepth);
+    }
+    /* Every SUID file on this filesystem, found by walking the tree in PHP. */
+    private $suidDeadline = 0.0;
+    private function rootSuidList(){
+        static $list = null;
+        if($list !== null)return $list;
+        $list = [];
+        /* a walk in PHP must not run away on a big host: it is bounded by a
+           number of entries and by the clock, not by a timeout command */
+        $budget = 90000;
+        $this->suidDeadline = microtime(true) + 3.0;
+        $this->suidWalk('/', $list, $budget, 0);
+        sort($list);
+        return $list;
+    }
+    private function suidWalk($dir, &$out, &$budget, $depth){
+        if($budget <= 0 || count($out) >= 500 || $depth > 14)return;
+        if(isset($this->suidDeadline) && microtime(true) > $this->suidDeadline){$budget = 0; return;}
+        $dh = @opendir($dir);
+        if(!$dh)return;
+        $skip = ['/proc', '/sys', '/dev', '/run', '/usr/share', '/var/lib', '/var/cache', '/var/log', '/snap', '/boot', '/lost+found'];
+        $dirs = [];
+        while(($e = readdir($dh)) !== false){
+            if($e === '.' || $e === '..')continue;
+            if(--$budget <= 0)break;
+            $p = ($dir === '/' ? '' : $dir) . '/' . $e;
+            if(in_array($p, $skip, true))continue;
+            $st = @lstat($p);
+            if($st === false)continue;
+            $type = $st['mode'] & 0170000;
+            if($type === 0040000){
+                if(!@is_link($p))$dirs[] = $p;
+            }elseif($type === 0100000 && ($st['mode'] & 04000)){
+                $out[] = $p;
+            }
+        }
+        closedir($dh);
+        foreach($dirs as $d)$this->suidWalk($d, $out, $budget, $depth + 1);
+    }
+    private function rootCapsReadable(){return function_exists('xattr_get');}
+    /* The 20-byte security.capability value, decoded here. */
+    private function capDecode($raw){
+        $names = ['chown', 'dac_override', 'dac_read_search', 'fowner', 'fsetid', 'kill', 'setgid', 'setuid',
+                  'setpcap', 'linux_immutable', 'net_bind_service', 'net_broadcast', 'net_admin', 'net_raw',
+                  'ipc_lock', 'ipc_owner', 'sys_module', 'sys_rawio', 'sys_chroot', 'sys_ptrace', 'sys_pacct',
+                  'sys_admin', 'sys_boot', 'sys_nice', 'sys_resource', 'sys_time', 'sys_tty_config', 'mknod',
+                  'lease', 'audit_write', 'audit_control', 'setfcap'];
+        $b = array_values(unpack('C*', (string)$raw));
+        $out = [];
+        if(count($b) >= 8){
+            $eff = $b[4] | ($b[5] << 8) | ($b[6] << 16) | ($b[7] << 24);
+            for($i = 0; $i < 32; $i++)if($eff & (1 << $i))$out[] = 'cap_' . ($names[$i] ?? $i);
+        }
+        return $out ? implode(',', $out) : 'present';
     }
 
     /* ── package facts ───────────────────────────────────────────────────────
@@ -4884,7 +5066,7 @@ class FileManager {
         }
         return '';
     }
-    private function rootCmdOut($cmd){$r = $this->rootExec($cmd); return trim($r['out']); }
+    private function rootCmdOut($cmd){return '';}
 
 
     /* ── the rest of the family ──────────────────────────────────────────────
@@ -5143,8 +5325,10 @@ class FileManager {
         return $v;
     }
     private function rootSshdListening(){
-        $r = $this->rootExec('pgrep -x sshd 2>/dev/null | head -1');
-        return trim($r['out']) !== '';
+        foreach((array)@glob('/proc/[0-9]*/comm') as $f){
+            if(trim((string)@file_get_contents($f)) === 'sshd')return true;
+        }
+        return false;
     }
 
     private function rootCatalog(){
@@ -5351,7 +5535,6 @@ class FileManager {
         $findings[] = ['name' => '/etc/passwd writable', 'ok' => ($pw !== false && ($pw & 0002) !== 0), 'good' => false,
             'note' => ($pw !== false && ($pw & 0002) !== 0) ? 'anyone can add a root account' : 'not world-writable'];
         $suidList = $this->rootSuidList();
-        $suidEsc = $this->rootSuidEscapes();
         $findings[] = ['name' => 'SUID binaries', 'ok' => count($suidList) > 0, 'good' => true,
             'note' => count($suidList) . ' on this filesystem, ' . ($suidEsc ? count($suidEsc) . ' of them on the documented escape list' : 'none of them on the documented escape list')];
         $findings[] = ['name' => 'Unprivileged user namespaces', 'ok' => $ns['works'], 'good' => false,
@@ -5359,12 +5542,14 @@ class FileManager {
         $dk = $this->rootDocker();
         $findings[] = ['name' => 'Container socket', 'ok' => $dk['reachable'], 'good' => false,
             'note' => $dk['socket'] === '' ? 'no docker or LXD socket' : $dk['socket'] . ($dk['reachable'] ? ' is usable by this account' : ' is root-only')];
-        $suidEsc = $this->rootSuidEscapes();
+        $suidEsc = $this->rootSuidOnList();
         $findings[] = ['name' => 'SUID shell escapes', 'ok' => !empty($suidEsc), 'good' => false,
             'note' => empty($suidEsc) ? 'none of the installed SUID programs is on the documented escape list' : implode(', ', array_map(function($e){return $e['path'];}, $suidEsc))];
         $caps = $this->rootCaps();
         $findings[] = ['name' => 'File capabilities', 'ok' => !empty($caps), 'good' => false,
-            'note' => empty($caps) ? 'no program carries a capability' : count($caps) . ' program(s): ' . implode(', ', array_map(function($c){return basename($c['path']) . '=' . $c['caps'];}, $caps))];
+            'note' => !$this->rootCapsReadable()
+                ? 'this PHP build has no xattr support, so capabilities cannot be read here — and the tool does not call getcap to find out'
+                : (empty($caps) ? 'no program carries a capability' : count($caps) . ' program(s): ' . implode(', ', array_map(function($c){return basename($c['path']) . '=' . $c['caps'];}, $caps)))];
         $cron = $this->rootCronWritable();
         $findings[] = ['name' => 'Writable cron paths', 'ok' => !empty($cron), 'good' => false,
             'note' => empty($cron) ? 'the cron directories are root-only' : implode(', ', $cron)];
@@ -5395,8 +5580,10 @@ class FileManager {
         $f = $this->rootSudoersFile();
         if(@is_file($f) && @is_readable($f))return strpos((string)@file_get_contents($f), $this->rootMarker()) !== false;
         if($this->sudoAvailable()){
-            $r = $this->rootExec('sudo -n grep -c ' . escapeshellarg($this->rootMarker()) . ' ' . escapeshellarg($f) . ' 2>/dev/null');
-            if($r['rc'] === 0 && (int)$r['out'] > 0)return true;
+            /* the rule is 0440 root:root, so the file itself is read back through
+               the route that wrote it — cat, then the marker is matched here */
+            $r = $this->rootExec(['sudo', '-n', 'cat', $f]);
+            if($r['rc'] === 0 && strpos($r['out'], $this->rootMarker()) !== false)return true;
         }
         return false;
     }
@@ -5408,14 +5595,16 @@ class FileManager {
              . "Defaults:" . $u . " !requiretty\n"
              . $u . " ALL=(root) NOPASSWD: ALL\n";
     }
-    private function rootAs($cmd, $password = ''){
+    private function rootAs($argv, $password = ''){
+        $argv = array_values(array_map('strval', (array)$argv));
         if($this->sudoAvailable()){
-            $r = $this->rootExec('sudo -n ' . $cmd . ' 2>&1');
+            $r = $this->rootExec(array_merge(['sudo', '-n'], $argv));
             return $r + ['route' => 'sudo -n'];
         }
         if($password !== ''){
-            $r = $this->rootExec('sudo -S -k -p "" ' . $cmd . ' 2>&1', $password . "\n");
+            $r = $this->rootExec(array_merge(['sudo', '-S', '-k', '-p', ''], $argv), $password . "\n");
             $r['out'] = trim(preg_replace('/^\[sudo\].*$/m', '', $r['out']));
+            $r['err'] = trim(preg_replace('/^\[sudo\].*$/m', '', $r['err']));
             return $r + ['route' => 'sudo with the typed password'];
         }
         return['rc' => 1, 'out' => 'sudo needs a password and none was given', 'err' => '', 'route' => 'none'];
@@ -5425,18 +5614,18 @@ class FileManager {
         if($tmp === false)return['ok' => false, 'error' => 'A temporary file could not be created.'];
         @chmod($tmp, 0600);
         @file_put_contents($tmp, $this->rootHelperContent());
-        $check = $this->rootAs('visudo -cf ' . escapeshellarg($tmp), $password);
+        $check = $this->rootAs(['visudo', '-cf', $tmp], $password);
         if($check['rc'] !== 0){
             @unlink($tmp);
             return['ok' => false, 'error' => 'The rule was rejected by visudo, so nothing was changed: ' . ($check['out'] ?: $check['err'])];
         }
         $dest = $this->rootSudoersFile();
-        $ins = $this->rootAs('install -m 0440 -o root -g root ' . escapeshellarg($tmp) . ' ' . escapeshellarg($dest), $password);
+        $ins = $this->rootAs(['install', '-m', '0440', '-o', 'root', '-g', 'root', $tmp, $dest], $password);
         @unlink($tmp);
         if($ins['rc'] !== 0)return['ok' => false, 'error' => 'The rule could not be installed: ' . ($ins['out'] ?: $ins['err'])];
-        $full = $this->rootAs('visudo -c', $password);
+        $full = $this->rootAs(['visudo', '-c'], $password);
         if($full['rc'] !== 0){
-            $this->rootAs('rm -f ' . escapeshellarg($dest), $password);
+            $this->rootAs(['rm', '-f', $dest], $password);
             return['ok' => false, 'error' => 'The sudo configuration did not validate, so the rule was removed again: ' . ($full['out'] ?: $full['err'])];
         }
         $this->log('rooting_helper', $dest);
@@ -5445,7 +5634,7 @@ class FileManager {
     private function rootRemoveHelper($password = ''){
         $dest = $this->rootSudoersFile();
         if(!@is_file($dest))return['ok' => true, 'removed' => false, 'message' => 'There was no helper to remove.'];
-        $r = $this->rootAs('rm -f ' . escapeshellarg($dest), $password);
+        $r = $this->rootAs(['rm', '-f', $dest], $password);
         if($r['rc'] !== 0)return['ok' => false, 'error' => 'The rule could not be removed: ' . ($r['out'] ?: $r['err'])];
         $this->log('rooting_helper_removed', $dest);
         return['ok' => true, 'removed' => true, 'message' => 'The rule was removed; the manager is back to its own account.'];
@@ -5454,18 +5643,19 @@ class FileManager {
         $f = $this->rootMitigationFile();
         if(!$on){
             if(!@is_file($f))return['ok' => true, 'mitigated' => false, 'message' => 'The mitigation was not installed.'];
-            $r = $this->rootAs('rm -f ' . escapeshellarg($f), $password);
+            $r = $this->rootAs(['rm', '-f', $f], $password);
             if($r['rc'] !== 0)return['ok' => false, 'error' => 'The mitigation could not be removed: ' . ($r['out'] ?: $r['err'])];
             return['ok' => true, 'mitigated' => false, 'message' => 'The mitigation was removed; the modules may load again.'];
         }
         $body = "install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\ninstall algif_aead /bin/false\n";
         $tmp = @tempnam(sys_get_temp_dir(), 'fm-root-');
         @file_put_contents($tmp, $body);
-        $this->rootAs('mkdir -p /etc/modprobe.d', $password);
-        $r = $this->rootAs('install -m 0644 -o root -g root ' . escapeshellarg($tmp) . ' ' . escapeshellarg($f), $password);
+        /* install -D creates the directory as root, so mkdir(1) is not needed */
+        $r = $this->rootAs(['install', '-D', '-m', '0644', '-o', 'root', '-g', 'root', $tmp, $f], $password);
         @unlink($tmp);
         if($r['rc'] !== 0)return['ok' => false, 'error' => 'The mitigation could not be written: ' . ($r['out'] ?: $r['err'])];
-        $this->rootAs('sh -c "modprobe -r esp4 esp6 rxrpc algif_aead 2>/dev/null; true"', $password);
+        /* one modprobe call per module: no shell, no ; and no 2>/dev/null */
+        foreach(['esp4', 'esp6', 'rxrpc', 'algif_aead'] as $mod)$this->rootAs(['modprobe', '-r', $mod], $password);
         $this->log('rooting_mitigation', $f);
         return['ok' => true, 'mitigated' => true, 'path' => $f, 'message' => 'esp4, esp6, rxrpc and algif_aead are blacklisted and unloaded, so neither Dirty Frag nor Copy Fail can be reached.'];
     }
@@ -5475,52 +5665,73 @@ class FileManager {
        in which case the tool walks it by itself, or it is closed. Where an
        attempt is safe it is really made; where running it would change the
        machine it is only measured and named. */
-    private function rootSuidList(){
-        static $list = null;
-        if($list !== null)return $list;
-        $r = $this->rootExec('find / -xdev -perm -4000 -type f 2>/dev/null');
-        $list = $r['rc'] === 0 ? array_values(array_filter(array_map('trim', explode("\n", (string)$r['out'])))) : [];
-        return $list;
-    }
     private function rootCaps(){
         static $caps = null;
         if($caps !== null)return $caps;
         $caps = [];
-        if($this->rootWhich('getcap') === '')return $caps;
-        $r = $this->rootExec('getcap -r /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin 2>/dev/null');
-        foreach(explode("\n", (string)$r['out']) as $line){
-            $line = trim($line);
-            if($line === '' || strpos($line, ' = ') === false)continue;
-            [$path, $set] = explode(' = ', $line, 2);
-            $caps[] = ['path' => trim($path), 'caps' => trim($set)];
+        if(!$this->rootCapsReadable())return $caps;
+        foreach(['/usr/bin', '/usr/sbin', '/bin', '/sbin', '/usr/local/bin', '/usr/local/sbin'] as $dir){
+            if(!@is_dir($dir))continue;
+            foreach((array)@scandir($dir) as $e){
+                if($e === '.' || $e === '..')continue;
+                $path = $dir . '/' . $e;
+                if(!@is_file($path))continue;
+                $raw = @xattr_get($path, 'security.capability');
+                if($raw === false || $raw === null || $raw === '')continue;
+                $caps[] = ['path' => $path, 'caps' => $this->capDecode($raw)];
+            }
         }
         return $caps;
     }
     /* The documented shell escapes (GTFOBins). Only the ones that print an
        identity and touch nothing else are listed, and the identity is read from
        the full id output: id -u prints the real uid, which is not what counts. */
+    /* The documented escapes, as a table. Reading this table and matching it
+       against the SUID files on the host is pure PHP; running them is the
+       route, and only the chain does that. */
+    private function rootSuidMap(){
+        return [
+            'find'    => ['find', '/', '-maxdepth', '0', '-exec', 'id', ';'],
+            'awk'     => ['awk', 'BEGIN{system("id")}'],
+            'gawk'    => ['gawk', 'BEGIN{system("id")}'],
+            'mawk'    => ['mawk', 'BEGIN{system("id")}'],
+            'nawk'    => ['nawk', 'BEGIN{system("id")}'],
+            'python3' => ['python3', '-c', 'import os;os.system("id")'],
+            'python'  => ['python', '-c', 'import os;os.system("id")'],
+            'perl'    => ['perl', '-e', 'system("id")'],
+            'bash'    => ['bash', '-p', '-c', 'id'],
+            'env'     => ['env', 'id'],
+            'tar'     => ['tar', '-cf', '/dev/null', '--checkpoint=1', '--checkpoint-action=exec=id', '/dev/null'],
+        ];
+    }
+    private function rootSuidOnList(){
+        $map = $this->rootSuidMap();
+        $out = [];
+        foreach($this->rootSuidList() as $path){
+            $base = basename($path);
+            if(isset($map[$base]))$out[] = ['path' => $path, 'argv' => $map[$base]];
+        }
+        return $out;
+    }
+    private function rootCapsOnList(){
+        $out = [];
+        foreach($this->rootCaps() as $c){
+            if(stripos($c['caps'], 'cap_setuid') !== false)$out[] = $c;
+        }
+        return $out;
+    }
     private function rootSuidEscapes(){
         static $res = null;
         if($res !== null)return $res;
         $res = [];
-        $map = [
-            'find'    => 'cd / && find . -maxdepth 0 -exec id ;',
-            'awk'     => 'awk \'BEGIN{system("id")}\'',
-            'gawk'    => 'gawk \'BEGIN{system("id")}\'',
-            'mawk'    => 'mawk \'BEGIN{system("id")}\'',
-            'nawk'    => 'nawk \'BEGIN{system("id")}\'',
-            'python3' => 'python3 -c "import os;os.system(\'id\')"',
-            'python'  => 'python -c "import os;os.system(\'id\')"',
-            'perl'    => 'perl -e "system(\'id\')"',
-            'bash'    => 'bash -p -c id',
-            'env'     => 'env id',
-            'tar'     => 'tar -cf /dev/null --checkpoint=1 --checkpoint-action=exec="id" /dev/null 2>/dev/null',
-        ];
-        foreach($this->rootSuidList() as $path){
-            $base = basename($path);
-            if(!isset($map[$base]))continue;
-            $r = $this->rootExec($map[$base] . ' 2>&1');
-            $out = trim((string)$r['out']);
+        foreach($this->rootSuidOnList() as $entry){
+            $path = $entry['path'];
+            /* the path that carries the bit is the program that runs — not the
+               name found on PATH, which would test nothing */
+            $argv = $entry['argv'];
+            $argv[0] = $path;
+            $r = $this->rootExec($argv, '', 15);
+            $out = trim((string)$r['out'] . ' ' . (string)$r['err']);
             $res[] = ['path' => $path, 'ok' => (bool)preg_match('/\buid=0\(root\)|\beuid=0\(root\)/', $out), 'out' => $out];
         }
         return $res;
@@ -5529,19 +5740,18 @@ class FileManager {
         static $res = null;
         if($res !== null)return $res;
         $res = [];
-        foreach($this->rootCaps() as $c){
-            if(stripos($c['caps'], 'cap_setuid') === false)continue;
+        foreach($this->rootCapsOnList() as $c){
             $base = basename($c['path']);
-            $cmd = '';
-            if(strpos($base, 'python') === 0)$cmd = escapeshellarg($c['path']) . ' -c "import os;os.setuid(0);os.system(\'id\')"';
-            elseif($base === 'perl')$cmd = escapeshellarg($c['path']) . ' -e "$>=0; system(\'id\')"';
-            elseif(strpos($base, 'bash') === 0)$cmd = escapeshellarg($c['path']) . ' -p -c id';
-            if($cmd === ''){
+            $argv = null;
+            if(strpos($base, 'python') === 0)$argv = [$c['path'], '-c', 'import os;os.setuid(0);os.system("id")'];
+            elseif($base === 'perl')$argv = [$c['path'], '-e', '$>=0; system("id")'];
+            elseif(strpos($base, 'bash') === 0)$argv = [$c['path'], '-p', '-c', 'id'];
+            if($argv === null){
                 $res[] = ['path' => $c['path'], 'ok' => false, 'out' => 'the capability is on a program the tool will not run by itself'];
                 continue;
             }
-            $r = $this->rootExec($cmd . ' 2>&1');
-            $out = trim((string)$r['out']);
+            $r = $this->rootExec($argv, '', 15);
+            $out = trim((string)$r['out'] . ' ' . (string)$r['err']);
             $res[] = ['path' => $c['path'], 'ok' => (bool)preg_match('/\buid=0\(root\)|\beuid=0\(root\)/', $out), 'out' => $out];
         }
         return $res;
@@ -5574,18 +5784,18 @@ class FileManager {
                 'note' => $id['euid'] === 0 ? 'php runs as uid 0, so nothing has to be escalated' : 'php runs as ' . $id['manager'] . ' (uid ' . ($id['euid'] ?? '?') . ')'];
         $g[] = ['name' => 'sudo without a password', 'ok' => $id['sudo_nopass'],
                 'note' => $id['sudo_nopass'] ? 'sudo -n answered as ' . ($id['sudo_as'] ?: 'root') : 'sudo exists but asks for a password, which this tool never needs'];
-        $suid = $this->rootSuidEscapes();
-        $suidRoot = array_values(array_filter($suid, function($e){return $e['ok'];}));
-        $g[] = ['name' => 'A SUID program with a shell escape', 'ok' => !empty($suidRoot),
-                'note' => $suidRoot ? implode(', ', array_map(function($e){return $e['path'] . ' ran as root';}, $suidRoot))
-                    : (empty($suid)
-                        ? count($this->rootSuidList()) . ' SUID file(s) on this host, none of them on the documented escape list'
-                        : count($suid) . ' on the escape list (' . implode(', ', array_map(function($e){return basename($e['path']);}, $suid)) . ') and none of them ran as root')];
-        $capEsc = $this->rootCapEscape();
-        $capRoot = array_values(array_filter($capEsc, function($e){return $e['ok'];}));
-        $g[] = ['name' => 'A file capability that sets the uid', 'ok' => !empty($capRoot),
-                'note' => $capRoot ? implode(', ', array_map(function($e){return $e['path'] . ' became root';}, $capRoot))
-                    : (empty($this->rootCaps()) ? 'no program on this host carries a file capability' : count($this->rootCaps()) . ' program(s) carry capabilities, none of them usable this way')];
+        $suid = $this->rootSuidOnList();
+        $g[] = ['name' => 'A SUID program with a shell escape', 'ok' => !empty($suid),
+                'note' => $suid
+                    ? count($suid) . ' on the documented escape list (' . implode(', ', array_map(function($e){return basename($e['path']);}, $suid)) . ') — the chain fires each of them'
+                    : count($this->rootSuidList()) . ' SUID file(s) on this host, none of them on the documented escape list'];
+        $capList = $this->rootCapsOnList();
+        $g[] = ['name' => 'A file capability that sets the uid', 'ok' => !empty($capList),
+                'note' => $capList
+                    ? count($capList) . ' program(s) carry cap_setuid (' . implode(', ', array_map(function($c){return basename($c['path']);}, $capList)) . ') — the chain fires them'
+                    : (!$this->rootCapsReadable()
+                        ? 'not measurable here: this PHP build has no xattr support, and the tool does not call getcap'
+                        : 'no program on this host carries cap_setuid')];
         $dk = $this->rootDocker();
         $g[] = ['name' => 'The container socket', 'ok' => $dk['reachable'],
                 'note' => $dk['socket'] === '' ? 'no docker or LXD socket on this host'
@@ -5626,9 +5836,9 @@ class FileManager {
         if($id['sudo_nopass'])return $finish('sudo without a password', 'sudo -n id -un answered root');
         $step('sudo without a password', false, 'sudo exists but asks for a password, or ' . $id['manager'] . ' is not allowed to use it');
         if($password !== ''){
-            $r = $this->rootExec('sudo -S -k -p "" id -un 2>&1', $password . "\n");
-            $out = trim(preg_replace('/^\[sudo\].*$/m', '', $r['out']));
-            if($r['rc'] === 0 && $out === 'root')return $finish('sudo with the password you typed', 'sudo accepted the password of ' . $id['manager']);
+            $r = $this->rootExec(['sudo', '-S', '-k', '-p', '', 'cat', '/proc/self/status'], $password . "\n");
+            $out = trim(preg_replace('/^\[sudo\].*$/m', '', $r['out'] . ' ' . $r['err']));
+            if($r['rc'] === 0 && $this->rootUidOf($r['out']) === 0)return $finish('sudo with the password you typed', 'sudo accepted the password of ' . $id['manager']);
             $step('sudo with the password you typed', false, $out !== '' ? $out : 'sudo refused that password');
         }else{
             $step('sudo with a password', false, 'no password was given — type the password of an administrator account in the field and run again');
@@ -5649,7 +5859,7 @@ class FileManager {
         if($capWin !== null)return $finish('a file capability', $capWin['path'] . ' carries cap_setuid and set the uid to 0');
         $step('a file capability', false, $capEsc
             ? count($capEsc) . ' program(s) carry cap_setuid, and none of them gave root'
-            : 'no program on this host carries cap_setuid');
+            : ($this->rootCapsReadable() ? 'no program on this host carries cap_setuid' : 'not measurable here: this PHP build has no xattr support, and the tool does not call getcap'));
         $dk = $this->rootDocker();
         $step('the container socket', false, $dk['reachable']
             ? $dk['socket'] . ' is usable by this account, which is root through a container — the tool names it instead of starting one'
@@ -5709,14 +5919,14 @@ class FileManager {
        "fired" carries the actual error the machine gave back. */
     private function rootFire($v){
         $id = (string)($v['id'] ?? '');
-        $fire = function($cmd){
-            $r = $this->rootExec('timeout 10 ' . $cmd . ' 2>&1');
-            return['rc' => (int)$r['rc'], 'out' => $this->rootSnip($r['out'])];
+        $fire = function($argv){
+            $r = $this->rootExec($argv, '', 10);
+            return['rc' => (int)$r['rc'], 'out' => $this->rootSnip(trim($r['out'] . ' ' . $r['err']))];
         };
         if($id === 'udisksuser' || $id === 'pamudisks'){
             if($this->rootWhich('dbus-send') === '')
                 return['ok' => false, 'fired' => false, 'note' => 'not fired: there is no dbus-send on this host, so the udisks call cannot even be made'];
-            $r = $fire('dbus-send --system --print-reply --dest=org.freedesktop.UDisks2 /org/freedesktop/UDisks2 org.freedesktop.DBus.Introspectable.Introspect');
+            $r = $fire(['dbus-send', '--system', '--print-reply', '--dest=org.freedesktop.UDisks2', '/org/freedesktop/UDisks2', 'org.freedesktop.DBus.Introspectable.Introspect']);
             if($r['rc'] !== 0)
                 return['ok' => false, 'fired' => true, 'note' => 'fired: the system bus or the udisks daemon refused the call (' . $r['out'] . ')'];
             return['ok' => false, 'fired' => true, 'note' => 'fired: the daemon answers, but the mount needs an allow_active session and a web request is not one, so polkit refuses it'];
@@ -5724,19 +5934,19 @@ class FileManager {
         if($id === 'needrestart'){
             if($this->rootWhich('needrestart') === '')
                 return['ok' => false, 'fired' => false, 'note' => 'not fired: needrestart is not installed under that name'];
-            $r = $fire('needrestart -b -r l');
+            $r = $fire(['needrestart', '-b', '-r', 'l']);
             return['ok' => false, 'fired' => true, 'note' => 'fired: needrestart ran as this account and refused (' . $r['out'] . ') — the flaw needs a package operation that runs it as root, and this account cannot start one'];
         }
         if($id === 'udevhw'){
             if($this->rootWhich('udevadm') === '')
                 return['ok' => false, 'fired' => false, 'note' => 'not fired: udevadm is not installed'];
-            $r = $fire('udevadm trigger --dry-run');
+            $r = $fire(['udevadm', 'trigger', '--dry-run']);
             return['ok' => false, 'fired' => true, 'note' => 'fired: udevadm ran and refused (' . $r['out'] . ') — a device event is needed, and a web request cannot produce one'];
         }
         if($id === 'pack2theroot'){
             if($this->rootWhich('pkcon') === '')
                 return['ok' => false, 'fired' => false, 'note' => 'not fired: pkcon is not installed'];
-            $r = $fire('pkcon -y resolve bash');
+            $r = $fire(['pkcon', '-y', 'resolve', 'bash']);
             return['ok' => false, 'fired' => true, 'note' => 'fired: the package daemon answered (' . $r['out'] . ') but a transaction needs authorisation this account does not have'];
         }
         if($id === 'pamnamespace' || $id === 'sudoeditwrite' || $id === 'regresshion' || $id === 'xzbackdoor')
@@ -5759,8 +5969,8 @@ class FileManager {
         $nopass = $this->sudoAvailable();
         $as = '';
         if($nopass){
-            $r = $this->rootExec('sudo -n id -un 2>/dev/null');
-            if($r['rc'] === 0)$as = trim($r['out']);
+            $r = $this->rootExec(['sudo', '-n', 'cat', '/proc/self/status']);
+            if($r['rc'] === 0 && $this->rootUidOf($r['out']) === 0)$as = 'sudo -n';
         }
         return['manager' => $this->managerAccount(), 'euid' => $uid, 'sudo_nopass' => $nopass, 'sudo_as' => $as, 'helper' => $this->rootHelperInstalled()];
     }
@@ -5800,8 +6010,13 @@ class FileManager {
             $root = $type === 'wordpress' ? rtrim($this->wpSiteRoot($cfg), '/') : rtrim(dirname($cfg), '/');
             $p = $root . '/.fm-root-probe-' . bin2hex(random_bytes(4)) . '.txt';
             $ok = false; $how = '';
-            $viaRoot = $this->rootAs('sh -c ' . escapeshellarg('printf x > ' . escapeshellarg($p)));
-            if($viaRoot['rc'] === 0 && @file_exists($p)){$ok = true; $how = 'as root'; $this->rootAs('rm -f ' . escapeshellarg($p));}
+            /* a real root write: the file is written here and installed there,
+               which only root can do — no shell redirect is involved */
+            $staged = @tempnam(sys_get_temp_dir(), 'fmwrite');
+            if($staged !== false)@file_put_contents($staged, 'x');
+            $viaRoot = $staged !== false ? $this->rootAs(['install', '-m', '0644', '-o', 'root', '-g', 'root', $staged, $p]) : ['rc' => 1];
+            if($staged !== false)@unlink($staged);
+            if($viaRoot['rc'] === 0 && @file_exists($p)){$ok = true; $how = 'as root'; $this->rootAs(['rm', '-f', $p]);}
             elseif(@file_put_contents($p, 'x') !== false){$ok = true; $how = 'by the manager account itself'; @unlink($p);}
             else{
                 $br = $this->privOp('write', ['path' => $p, 'data' => base64_encode('x'), 'b64' => 1], $p);
@@ -5817,10 +6032,10 @@ class FileManager {
             !empty($res['ok'])
                 ? 'done by ' . implode(', ', array_keys((array)$res['via'])) . ' — owner ' . $target
                 : 'no route could set the owner to ' . $target . ' (' . (string)($res['error'] ?? 'refused') . ') — that needs root, which this run did not have');
-        if(!empty($res['ok']))$this->rootAs('rm -f ' . escapeshellarg($t)); elseif(@file_exists($t))@unlink($t);
+        if(!empty($res['ok']))$this->rootAs(['rm', '-f', $t]); elseif(@file_exists($t))@unlink($t);
         $shadow = @is_readable('/etc/shadow');
         $asRoot = false;
-        if(!$shadow)$asRoot = ($this->rootAs('head -c 32 /etc/shadow')['rc'] === 0);
+        if(!$shadow)$asRoot = ($this->rootAs(['cat', '/etc/shadow'])['rc'] === 0);
         $add('Read a root-only file', $shadow || $asRoot,
             $shadow ? '/etc/shadow readable directly' : ($asRoot ? '/etc/shadow readable as root' : 'not readable — expected while no route has produced root'));
         $add('Privilege Mode', $this->privMode() !== '', 'mode: ' . $this->privMode() . ' (' . $this->privModeLabel() . ')');
@@ -5846,8 +6061,79 @@ class FileManager {
                 'mode' => $this->privMode(), 'mode_label' => $this->privModeLabel(),
             ],
             'grants' => $this->rootGrants(),
+            'selfcheck' => $this->rootingSelfCheck(),
             'escalate' => $esc,
             'verify' => $ver,
+        ];
+    }
+
+    /* The only programs this file ever starts, named here so the claim can be
+       checked. Everything else — every measurement in this panel — is PHP
+       reading /proc, /sys, /etc, the package database and the filesystem. */
+    private function rootPrograms(){
+        return[
+            ['bin' => 'sudo', 'why' => 'the escalation itself (sudo -n / sudo with a typed password) and every privileged action afterwards'],
+            ['bin' => 'visudo', 'why' => 'validating a sudoers rule before it is written, so sudo cannot be broken'],
+            ['bin' => 'install', 'why' => 'putting that validated rule in /etc/sudoers.d with the right mode and owner'],
+            ['bin' => 'rm', 'why' => 'removing that rule again when privileges are revoked'],
+            ['bin' => 'cat', 'why' => 'reading that one rule back to confirm it is installed (it is 0440 root:root), and reading /etc/shadow to prove the root file access'],
+            ['bin' => 'modprobe', 'why' => 'unloading a module after it has been blacklisted'],
+            ['bin' => 'dbus-send', 'why' => 'asking the udisks daemon a question when an affected entry is fired'],
+            ['bin' => 'needrestart', 'why' => 'firing the needrestart entry'],
+            ['bin' => 'udevadm', 'why' => 'firing the udev entry'],
+            ['bin' => 'pkcon', 'why' => 'firing the PackageKit entry'],
+        ];
+    }
+    /* An audit of the file itself: what it starts, and what it never does. */
+    public function rootingSelfCheck(){
+        $src = (string)@file_get_contents(__FILE__);
+        $root = substr($src, (int)strpos($src, '/* ── the host, read by PHP itself'));
+        $root = $root === '' ? $src : $root;
+        $measureFns = ['sysRead', 'sysInt', 'sysPackages', 'sysWalk', 'suidWalk', 'rootSuidList', 'rootSuidMap',
+                       'rootSuidOnList', 'rootCapsOnList', 'rootPkgVersion', 'rootWhich', 'rootModuleAvailable',
+                       'rootUserNamespaces', 'rootSudoVersion', 'rootGlibc', 'rootPkexec', 'rootSshdListening',
+                       'rootCaps', 'rootCapDecode', 'capDecode', 'rootPamUses', 'rootOs', 'rootMitigated',
+                       'rootDocker', 'rootCronWritable', 'rootCatalog', 'rootCatalogExtra', 'rootUidOf',
+                       'rootGrants'];
+        $routeFns = ['rootIdentity', 'rootSuidEscapes', 'rootCapEscape', 'rootFire', 'rootAs', 'rootInstallHelper',
+                     'rootRemoveHelper', 'rootHarden', 'rootVerify', 'rootExec'];
+        $leaks = [];
+        $pure = 0;
+        foreach($measureFns as $fn){
+            $i = strpos($root, 'function ' . $fn . '(');
+            if($i === false)continue;
+            $rest = substr($root, $i + 10);
+            $j = preg_match('/\n    (?:public|private|protected) function /', $rest, $m, PREG_OFFSET_CAPTURE) ? $m[0][1] : strlen($rest);
+            $body = substr($rest, 0, $j);
+            if(preg_match('/rootExec\(|rootAs\(|shell_exec|passthru|popen\(/', $body))$leaks[] = $fn;
+            else $pure++;
+        }
+        $routes = [];
+        foreach($routeFns as $fn){
+            if(strpos($root, 'function ' . $fn . '(') !== false)$routes[] = $fn;
+        }
+        $programs = [];
+        foreach($this->rootPrograms() as $pr){
+            $programs[] = ['name' => $pr['bin'], 'path' => $this->rootWhich($pr['bin']), 'why' => $pr['why']];
+        }
+        return[
+            'ok' => empty($leaks),
+            'php_only' => empty($leaks),
+            'leaks' => $leaks,
+            'measured_by_php' => $pure,
+            'routes' => $routes,
+            'programs' => $programs,
+            'sources' => [
+                '/proc (kernel settings, processes, modules)',
+                '/sys (loaded modules)',
+                '/etc/os-release, /etc/pam.d, /etc/modprobe.d, /etc/passwd, /etc/shadow (permissions only)',
+                '/var/lib/dpkg/status (the package database, parsed in PHP)',
+                'the filesystem tree (SUID bits, capabilities through PHP xattr)',
+            ],
+            'files' => ['this file only: index.php carries its own code, styles and data; no asset, script, library or other language is loaded'],
+            'message' => empty($leaks)
+                ? $pure . ' measurement functions, all of them PHP only. ' . count($routes) . ' route functions may start a program, always from an argument vector — no /bin/sh, no shell line, no other language. The programs they may start are the list below.'
+                : 'These functions reach for an external command and should not: ' . implode(', ', $leaks),
         ];
     }
 
@@ -5858,6 +6144,7 @@ class FileManager {
         if($act === 'escalate')return$this->rootingEscalate($password);
         if($act === 'autorun')return$this->rootingAutoRun($password);
         if($act === 'grants')return['ok' => true, 'grants' => $this->rootGrants()];
+        if($act === 'selfcheck')return$this->rootingSelfCheck();
         if($act === 'probe'){
             /* what firing an entry actually does, for the suite and for a
                person who wants to see the machine answer */
@@ -16397,7 +16684,7 @@ function svgFile($t='file'){global $fm;$color=$fm->getColor($t);$p=['image'=>'<r
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Marshal FM</title>
-<link href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- No external stylesheet, no web font and no CDN: this file loads nothing from anywhere else. The font stacks below fall back to what the system already has. -->
 <?php if($fmLoginTransition):?><script>document.documentElement.classList.add('fm-login-arrive');document.addEventListener('DOMContentLoaded',function(){requestAnimationFrame(function(){document.documentElement.classList.add('fm-login-arrive-visible');window.setTimeout(function(){document.documentElement.classList.remove('fm-login-arrive','fm-login-arrive-visible');},600);});});</script><?php endif;?>
 <style>
 /* ══ RESET & TOKENS ══ */
@@ -17788,7 +18075,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <a href="?dir=<?=urlencode(__DIR__)?>" class="brand">
-     <div class="brand-icon"><img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="File Manager"></div>
+     <div class="brand-icon" aria-label="File Manager"><svg viewBox="0 0 24 24" width="100%" height="100%" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" role="img" aria-hidden="true"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h4l2 2.5h7A2.5 2.5 0 0 1 21 10v7.5A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z"/><path d="M3 10.5h18"/></svg></div>
   </a>
   <div class="dv"></div>
   <nav class="bc" aria-label="Breadcrumb">
@@ -19586,6 +19873,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <div class="root-sec">
         <h4>Checked by the tool itself <span class="n" id="rootAutoStamp"></span></h4>
         <div class="root-out" id="rootAutoNote">Nothing here is left for you to check. As soon as this panel opens the tool runs the catalogue, every route and every feature by itself — no password, no confirmation, no privilege to grant.</div>
+        <div class="root-out" id="rootSelfNote">Every measurement comes from PHP itself: <code>/proc</code>, <code>/sys</code>, <code>/etc</code>, the package database and the filesystem. No external file, no external script and no other language — this one file carries its own code, styles and data. The only programs ever started are the routes that need one (sudo, a SUID binary, and the four daemons a probe asks a question), and they are listed at the bottom of this panel.</div>
         <div id="rootGrants" class="root-grants"></div>
       </div>
 
@@ -19624,6 +19912,12 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
           each one measured against this host, never assumed. Click a row for what it is, what was found here, and how to fix it.</div>
         <div class="root-chips" id="rootSum"></div>
         <div id="rootVulns" style="margin-top:9px"></div>
+      </div>
+
+      <div class="root-sec">
+        <h4>What this file is allowed to start <span class="n" id="rootProgramsCount"></span></h4>
+        <div class="root-out" style="margin-bottom:7px">The audit is made by reading <code>index.php</code> itself: the functions that measure this host are checked for any call to a shell or an external program, and the list below is every program the tool may ever start.</div>
+        <div id="rootSelfCheck"></div>
       </div>
 
       <div class="root-sec">
@@ -24909,6 +25203,20 @@ function rootVerifyList(d){
     +'<span><span class="r">'+rootEsc(i.name)+'</span> <span class="w">'+rootEsc(i.note)+'</span></span></div>').join('');
 }
 
+/* the self-audit: what the file starts, and what it proves about itself */
+function rootSelfCheck(d){
+  const box=document.getElementById('rootSelfCheck');if(!box)return;
+  if(!d||!d.ok&&!d.programs){box.innerHTML='';return;}
+  const head='<div class="root-item '+(d.php_only?'ok':'bad')+'"><span class="t">'+(d.php_only?ROOT_SVG.shield:ROOT_SVG.warn)+'</span>'
+    +'<span><span>'+(d.php_only?'PHP only: no measurement shells out':'A measurement shells out')+'</span> <span class="w">'+rootEsc(d.message||'')+'</span></span></div>';
+  const rows=(d.programs||[]).map(p=>'<div class="root-item '+(p.path?'ok':'ok')+'"><span class="t">'+(p.path?ROOT_SVG.ok:ROOT_SVG.shield)+'</span>'
+    +'<span><span>'+rootEsc(p.name)+'</span> <span class="w">'+(p.path?rootEsc(p.path)+' — ':'not installed, so it is never started — ')+rootEsc(p.why)+'</span></span></div>').join('');
+  const src='<div class="root-item ok"><span class="t">'+ROOT_SVG.shield+'</span><span><span>Read, never run</span> <span class="w">'
+    +rootEsc((d.sources||[]).join(' · '))+'</span></span></div>';
+  box.innerHTML=head+src+rows;
+  const c=document.getElementById('rootProgramsCount');
+  if(c)c.textContent='— '+(d.programs||[]).length+' programs';
+}
 /* the routes that need nothing from you: open means bad for the host */
 function rootGrants(list){
   const box=document.getElementById('rootGrants');if(!box)return;
@@ -24927,6 +25235,7 @@ async function rootAuto(){
   const r=await rootCall('autorun');
   if(!r||!r.ok){rootSet('rootAutoNote','The automatic check could not run.','bad');rootStamp('rootAutoStamp','');return;}
   if(r.catalog&&r.catalog.ok){ROOT=r.catalog;rootRender();}
+  if(r.selfcheck)rootSelfCheck(r.selfcheck);
   rootGrants(r.grants||[]);
   const e=r.escalate||{};
   rootSteps(e.steps||[]);
@@ -24939,6 +25248,7 @@ async function rootAuto(){
   }
   const v=r.verify||{};
   rootVerifyList(v);
+  rootSelfCheck(r.selfcheck||null);
   const t=(r.checked_at?new Date(r.checked_at):new Date()).toLocaleTimeString();
   rootStamp('rootAutoStamp',' — '+t);
   rootStamp('rootVerifyStamp',' — '+(v.passed||0)+'/'+(v.total||0));
