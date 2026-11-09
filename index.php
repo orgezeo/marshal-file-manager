@@ -6763,8 +6763,13 @@ FMJOOMLA;
     /* config_path may arrive base64-encoded (config_path_b64) to avoid WAF/ModSecurity
        rules that block requests literally containing "wp-config.php". */
     private function cmsCfgFromPost(){
-        if(isset($_POST['config_path_b64'])){$d=@base64_decode($_POST['config_path_b64'],true);if($d!==false)return $d;}
-        return isset($_POST['config_path'])?$_POST['config_path']:'';
+        $raw='';
+        if(isset($_POST['config_path_b64'])){$d=@base64_decode($_POST['config_path_b64'],true);if($d!==false)$raw=$d;}
+        if($raw===''&&isset($_POST['cfg_b64'])){$d=@base64_decode($_POST['cfg_b64'],true);if($d!==false)$raw=$d;}
+        if($raw===''&&isset($_POST['config_path']))$raw=(string)$_POST['config_path'];
+        if($raw==='')return '';
+        $resolved=$this->cmsConfigResolve($raw);
+        return $resolved?:$raw;
     }
     private function cmsCreateUser(){
         if(empty($_SESSION['fm_admin'])){$this->addMsg('Admins only.','danger');return;}
@@ -9165,11 +9170,35 @@ FMIMG;
         return array_keys($out);
     }
 
+    /* Public entry points used by the CMS Manager, which needs the candidate
+       list itself (to show every site it can reach) rather than one answer. */
+    public function cmsDiscovery($post=null,$deep=false){
+        $diag=[];
+        $best=$this->cmsFindConfig(is_array($post)?$post:[],$diag,(bool)$deep);
+        $sites=[];
+        foreach(($diag['candidates']??[]) as $c){
+            if(!is_array($c)||empty($c['path']))continue;
+            $label=$c['stage'];
+            if($label==='cached')$label='last used';
+            $sites[]=['type'=>$this->cmsConfigType($c['path']),'config'=>$c['path'],
+                      'dir'=>dirname($c['path']),'source'=>$label];
+        }
+        return ['best'=>$best,'source'=>$diag['source']??null,'tried'=>$diag['tried']??[],'sites'=>$sites];
+    }
+    /* Resolves anything an admin may type: a config file, a site folder, the web
+       root above it, a relative path — or nothing. */
+    public function cmsResolvePath($raw){
+        $p=$this->cmsConfigResolve($raw);
+        return $p?:null;
+    }
+    public function cmsPathType($path){
+        return $this->cmsConfigType($path);
+    }
     /* Resolves the config file for the current site. $diag receives the stage
        that succeeded and everything that was tried. */
-    private function cmsFindConfig($post=null,&$diag=null){
+    private function cmsFindConfig($post=null,&$diag=null,$deep=true){
         $post=is_array($post)?$post:[];
-        $diag=['source'=>null,'tried'=>[]];
+        $diag=['source'=>null,'tried'=>[],'candidates'=>[]];
 
         /* Stage 1 — the path the admin typed (or the UI remembered). */
         foreach(['cfg_path','cfg_b64'] as $k){
@@ -9177,7 +9206,11 @@ FMIMG;
             $raw=$k==='cfg_b64'?base64_decode((string)$post[$k],true):(string)$post[$k];
             if(!is_string($raw)||trim($raw)==='')continue;
             $p=$this->cmsConfigResolve($raw);
-            if($p){$diag['source']='manual';$diag['tried'][]="manual path → $p";return $p;}
+            if($p){
+                $diag['source']='manual';$diag['tried'][]="manual path → $p";
+                $diag['candidates']=[['path'=>$p,'stage'=>'manual']];
+                return $p;
+            }
             /* A path the admin typed is never silently ignored: acting on a
                different site's sessions than the one they asked for would be
                worse than an error. */
@@ -9189,7 +9222,11 @@ FMIMG;
         /* Stage 2 — the answer from the previous request, if still valid. */
         if(empty($post['rescan'])&&!empty($_SESSION['fm_cfg_path'])){
             $p=(string)$_SESSION['fm_cfg_path'];
-            if($this->cmsConfigType($p)){$diag['source']='cached';$diag['tried'][]="cached → $p";return $p;}
+            if($this->cmsConfigType($p)){
+                $diag['source']='cached';$diag['tried'][]="cached → $p";
+                $diag['candidates']=[['path'=>$p,'stage'=>'cached']];
+                return $p;
+            }
             unset($_SESSION['fm_cfg_path']);
         }
 
@@ -9240,21 +9277,23 @@ FMIMG;
         foreach($this->cmsRunningServerRoots() as $d)$add($this->cmsConfigIn($d),'running PHP server');
 
         /* Stage 6 — the generic scan, then the marker search. Both are more
-           expensive, so they only run when nothing cheaper matched. */
-        if(!$cands){
+           expensive, so they only run when nothing cheaper matched, and only
+           when the caller asked for a deep search. */
+        if($deep&&!$cands){
             foreach(($this->cmsScan()['sites']??[]) as $s){
                 if(is_array($s))$add($s['config']??null,'server scan');
             }
         }
-        if(!$cands){
+        if($deep&&!$cands){
             foreach($this->cmsFindByMarkers() as $p)$add($p,'filesystem search');
         }
 
         /* Stage 7 — the Debian multi-site layout keeps configs in /etc. */
-        if(!$cands){
+        if($deep&&!$cands){
             foreach((array)@glob('/etc/wordpress/config-*.php') as $p)$add($p,'/etc/wordpress');
         }
 
+        $diag['candidates']=$cands;
         if(!$cands){
             $diag['tried'][]='no WordPress or Joomla configuration file was found';
             return null;
@@ -12892,14 +12931,21 @@ if(isset($_GET['x'])){
        string in the URL) because many hosts' WAF/ModSecurity rules block any
        request whose query string contains "wp-config.php", mistaking this
        admin tool for an exploit attempt trying to read/download that file. */
-    $cfgB64=function(){
+    $cfgB64=function()use($fm){
         /* Both names exist in the UI: older read-only CMS calls use cfg_b64,
            while mutating CMS forms use config_path_b64. Keep the decoder
            compatible with both so post-operation verification reads the same
            site that was actually modified. */
         $raw=isset($_POST['cfg_b64'])?$_POST['cfg_b64']:(isset($_POST['config_path_b64'])?$_POST['config_path_b64']:(isset($_GET['cfg'])?$_GET['cfg']:''));
         $decoded=@base64_decode((string)$raw,true);
-        return $decoded!==false?$decoded:(string)$raw;
+        $value=$decoded!==false?$decoded:(string)$raw;
+        /* A folder, a web root or a renamed config all resolve to the real config
+           file here, so every CMS action benefits from the same discovery rules. */
+        if($value!==''){
+            $resolved=$fm->cmsResolvePath($value);
+            if($resolved)$value=$resolved;
+        }
+        return $value;
     };
     if($xop==='wp_auto_login'||$xop==='cms_auto_login'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['ok'=>false]);exit;}
@@ -12917,7 +12963,34 @@ if(isset($_GET['x'])){
     }
     if($xop==='cmsscan'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
-        echo json_encode($fm->cmsScan());exit;
+        $scan=$fm->cmsScan();
+        /* rescan: the picker must describe where the admin is now, not the
+           site that happened to be used last. */
+        $disc=$fm->cmsDiscovery(['rescan'=>1]);
+        $merged=[];$seenCfg=[];
+        foreach(array_merge($disc['sites'],is_array($scan['sites']??null)?$scan['sites']:[]) as $site){
+            $cfgPath=is_array($site)?($site['config']??null):null;
+            if(!$cfgPath||isset($seenCfg[$cfgPath]))continue;
+            $seenCfg[$cfgPath]=1;
+            $merged[]=$site;
+        }
+        $scan['sites']=$merged;
+        $scan['best']=$disc['best'];
+        $scan['best_source']=$disc['source'];
+        echo json_encode($scan);exit;
+    }
+    if($xop==='cmsresolve'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){
+            echo json_encode(['error'=>'Security error.']);exit;
+        }
+        $raw=isset($_POST['path'])?(string)$_POST['path']:'';
+        $resolved=$fm->cmsResolvePath($raw);
+        if(!$resolved){
+            echo json_encode(['error'=>'Nothing usable at "'.$raw.'" — enter the full path to wp-config.php or configuration.php, or to the folder that contains it.']);exit;
+        }
+        echo json_encode(['ok'=>true,'config'=>$resolved,'type'=>$fm->cmsPathType($resolved),
+                          'dir'=>dirname($resolved)]);exit;
     }
     if($xop==='cms_installer_status'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -20441,6 +20514,7 @@ function cmsInstallerUpdateReadiness(d){
 function cmsB64(s){return btoa(unescape(encodeURIComponent(s)));}
 async function cmsPost(op,extra){
   const fd=new FormData();
+  fd.append('csrf_token',CSRF);
   fd.append('cfg_b64',cmsB64(cmsCurrentCfg||''));
   if(extra)for(const k in extra)fd.append(k,extra[k]);
    const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),30000);
@@ -20696,6 +20770,7 @@ async function cmsShowPicker(){
             <span style="font-size:12px;font-weight:600;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.dir)}</span>
           </div>
           <div style="font-size:10.5px;color:var(--t3);font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.config)}</div>
+          ${s.source?`<div style="font-size:10px;color:var(--t3);opacity:.75;margin-top:2px">found by: ${esc(s.source)}</div>`:''}
         </div>
         <svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:var(--t3);fill:none;stroke-width:2;flex-shrink:0"><polyline points="9 18 15 12 9 6"/></svg>
       </div>`).join('');
@@ -20706,12 +20781,12 @@ async function cmsShowPicker(){
       </div>
       ${obdHint}
       ${sites.length?`<div style="overflow:auto;max-height:42vh">${cards}</div>`
-        :'<div class="empty" style="padding:32px"><p>No WordPress or Joomla installations found automatically. Enter the full path below instead.</p></div>'}
+        :'<div class="empty" style="padding:32px"><p>No WordPress or Joomla installations found automatically. Enter the path to the site folder or its config file below.</p></div>'}
       <div style="padding:14px 16px;border-top:1px solid var(--b2)">
-        <div style="font-size:11px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Manual path to config file</div>
+        <div style="font-size:11px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Manual path to the config file or the site folder</div>
         <div style="display:flex;gap:8px">
-          <input type="text" id="cmsManualPath" class="inp" style="flex:1;font-size:12px;font-family:monospace"
-            placeholder="/var/www/html/wp-config.php  or  configuration.php">
+          <input type="text" id="cmsManualPath" class="inp" style="flex:1;font-size:12px;font-family:monospace" spellcheck="false"
+            placeholder="/var/www/html   or   /var/www/html/wp-config.php">
           <button class="btn btn-p" id="cmsManualBtn" style="white-space:nowrap;font-size:12px">Open</button>
         </div>
       </div>`;
@@ -20720,15 +20795,28 @@ async function cmsShowPicker(){
     el.querySelectorAll('.cms-site-card').forEach(c=>c.addEventListener('click',()=>{
       cmsCurrentCfg=c.dataset.cfg;cmsCurrentType=c.dataset.type;window.fmCmsConfig=cmsCurrentCfg;window.fmCmsType=cmsCurrentType;loadCmsUsers();
     }));
-    // Manual path
-    document.getElementById('cmsManualBtn').addEventListener('click',()=>{
-      const p=document.getElementById('cmsManualPath').value.trim();
-      if(!p){toast('Enter the full path to wp-config.php or configuration.php');return;}
-      const base=p.split('/').pop();
-      if(base==='wp-config.php')cmsCurrentType='wordpress';
-      else if(base==='configuration.php')cmsCurrentType='joomla';
-      else{toast('File must be wp-config.php (WordPress) or configuration.php (Joomla)');return;}
-      cmsCurrentCfg=p;window.fmCmsConfig=cmsCurrentCfg;window.fmCmsType=cmsCurrentType;loadCmsUsers();
+    // Manual path — resolved on the server, so a site folder, a web root or a
+    // renamed config file all work, not just the exact file path.
+    document.getElementById('cmsManualBtn').addEventListener('click',async()=>{
+      const input=document.getElementById('cmsManualPath');
+      const btn=document.getElementById('cmsManualBtn');
+      const p=(input.value||'').trim();
+      if(!p){toast('Enter the path to the site folder or its wp-config.php / configuration.php');return;}
+      const old=btn.textContent;btn.disabled=true;btn.textContent='Opening…';
+      try{
+        const fd=new FormData();
+        fd.append('csrf_token',CSRF);fd.append('path',p);
+        const r=await fetch('?x=cmsresolve',{method:'POST',body:fd});
+        const d=await r.json();
+        if(d.error){toast(d.error);return;}
+        cmsCurrentCfg=d.config;cmsCurrentType=d.type;
+        window.fmCmsConfig=cmsCurrentCfg;window.fmCmsType=cmsCurrentType;
+        loadCmsUsers();
+      }catch(e){
+        toast('Could not resolve that path.');
+      }finally{
+        btn.disabled=false;btn.textContent=old;
+      }
     });
     document.getElementById('cmsManualPath').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('cmsManualBtn').click();});
   }catch(e){el.innerHTML='<div style="padding:20px;color:#fca5a5">Scan failed: '+esc(String(e))+'</div>';}
