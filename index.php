@@ -9376,8 +9376,190 @@ FMIMG;
         }
         return $out;
     }
+    /* ── User accounts overview ───────────────────────────────────────────────
+       Answers "who has an account, how many of their sessions still work, and
+       how many are dead?" for both CMSes, and offers the bulk clean-ups. Every
+       figure is computed from the CMS's own tables, so it matches what the site
+       itself believes. */
+
+    private function sessionsUsersWp($link,$c,$cfg){
+        $t=$c['prefix'];
+        $now=time();
+        $rows=[];
+        $r=@mysqli_query($link,"SELECT ID,user_login,user_email,user_registered FROM `{$t}users` ORDER BY user_login ASC LIMIT 2000");
+        if(!$r)return['error'=>'Could not read the users table.'];
+        while($u=mysqli_fetch_assoc($r))$rows[]=$u;
+        $tokens=[];$roles=[];
+        /* session_tokens is the one WordPress meta key that is NOT prefixed;
+           capabilities is. Asking for the prefixed name silently returned zero
+           rows for every user. */
+        $r2=@mysqli_query($link,"SELECT user_id,meta_key,meta_value FROM `{$t}usermeta` WHERE meta_key IN ('session_tokens','{$t}capabilities')");
+        while($r2&&($m=mysqli_fetch_assoc($r2))){
+            $uid=(int)$m['user_id'];
+            if($m['meta_key']==='session_tokens'){
+                $v=@unserialize((string)$m['meta_value']);
+                $tokens[$uid]=is_array($v)?$v:[];
+            }else{
+                $cap=@unserialize((string)$m['meta_value']);
+                if(is_array($cap)&&$cap){$keys=array_keys($cap);$roles[$uid]=(string)$keys[0];}
+            }
+        }
+        $users=[];$activeAll=0;$expiredAll=0;$withSessions=0;
+        foreach($rows as $u){
+            $id=(int)$u['ID'];
+            $active=0;$expired=0;$last=0;$lastIp='';$lastUa='';
+            foreach(($tokens[$id]??[]) as $tk=>$d){
+                if(!is_array($d))continue;
+                $exp=(int)($d['expiration']??0);
+                if($exp>$now)$active++;else $expired++;
+                $login=(int)($d['login']??0);
+                if($login>=$last){$last=$login;$lastIp=(string)($d['ip']??'');$lastUa=(string)($d['ua']??'');}
+            }
+            if($active+$expired>0)$withSessions++;
+            $activeAll+=$active;$expiredAll+=$expired;
+            $users[]=['id'=>$id,'user'=>(string)$u['user_login'],'email'=>(string)$u['user_email'],
+                      'role'=>$roles[$id]??'','registered'=>(string)($u['user_registered']??''),
+                      'blocked'=>false,'active'=>$active,'expired'=>$expired,
+                      'total'=>$active+$expired,'last'=>$last,'ip'=>$lastIp,'ua'=>$lastUa];
+        }
+        usort($users,function($a,$b){
+            if($b['active']!==$a['active'])return $b['active']<=>$a['active'];
+            if($b['expired']!==$a['expired'])return $b['expired']<=>$a['expired'];
+            return strcasecmp($a['user'],$b['user']);
+        });
+        return['ok'=>true,'cms'=>'wordpress','users'=>$users,
+            'totals'=>['users'=>count($users),'with_sessions'=>$withSessions,
+                       'active'=>$activeAll,'expired'=>$expiredAll],
+            'info'=>'Every WordPress login is a token in usermeta → session_tokens. A token counts as active while its own expiry date is in the future.'];
+    }
+
+    private function sessionsCleanupWp($link,$c){
+        $t=$c['prefix'];
+        $now=time();
+        $r=@mysqli_query($link,"SELECT umeta_id,user_id,meta_value FROM `{$t}usermeta` WHERE meta_key='session_tokens'");
+        $removed=0;$kept=0;
+        while($r&&($m=mysqli_fetch_assoc($r))){
+            $arr=@unserialize((string)$m['meta_value']);
+            if(!is_array($arr))continue;
+            $new=[];
+            foreach($arr as $tk=>$d){
+                if((int)($d['expiration']??0)>$now)$new[$tk]=$d;else $removed++;
+            }
+            $kept+=count($new);
+            $id=(int)$m['umeta_id'];
+            if(count($new)!==count($arr)){
+                if($new){
+                    $ser=mysqli_real_escape_string($link,serialize($new));
+                    @mysqli_query($link,"UPDATE `{$t}usermeta` SET meta_value='{$ser}' WHERE umeta_id={$id}");
+                }else{
+                    @mysqli_query($link,"DELETE FROM `{$t}usermeta` WHERE umeta_id={$id}");
+                }
+            }
+        }
+        return['ok'=>true,'notice'=>$removed
+            ?'Removed '.$removed.' expired session(s); '.$kept.' still active.'
+            :'There were no expired sessions to remove.'];
+    }
+
+    private function sessionsRevokeEveryoneWp($link,$c){
+        $t=$c['prefix'];
+        $r=@mysqli_query($link,"SELECT umeta_id,meta_value FROM `{$t}usermeta` WHERE meta_key='session_tokens'");
+        $count=0;
+        $ids=[];
+        while($r&&($m=mysqli_fetch_assoc($r))){
+            $arr=@unserialize((string)$m['meta_value']);
+            if(is_array($arr))$count+=count($arr);
+            $ids[]=(int)$m['umeta_id'];
+        }
+        @mysqli_query($link,"DELETE FROM `{$t}usermeta` WHERE meta_key='session_tokens'");
+        return['ok'=>true,'notice'=>$count
+            ?'Signed out every WordPress user ('.$count.' session(s) removed). Everyone has to sign in again.'
+            :'There were no sessions to end.'];
+    }
+
+    private function sessionsUsersJoomla($link,$c,$cfg){
+        $t=$c['prefix'];
+        $now=time();
+        $life=$this->joomlaLifetime($cfg);
+        $lifeSec=($life?(int)$life:15)*60;
+        $rows=[];
+        $r=@mysqli_query($link,"SELECT id,username,name,email,block,registerDate,lastvisitDate FROM `{$t}users` ORDER BY username ASC LIMIT 2000");
+        if(!$r)return['error'=>'Could not read the users table.'];
+        while($u=mysqli_fetch_assoc($r))$rows[]=$u;
+        /* Per-row times: Joomla keeps one global lifetime, so a row is alive when
+           its own last-activity time plus that lifetime is still in the future. */
+        $alive=[];$dead=[];$lastSeen=[];
+        $r2=@mysqli_query($link,"SELECT userid,`time` FROM `{$t}session` WHERE userid>0");
+        while($r2&&($sr=mysqli_fetch_assoc($r2))){
+            $uid=(int)$sr['userid'];
+            $ts=(int)$sr['time'];
+            if($ts+$lifeSec>=$now)$alive[$uid]=($alive[$uid]??0)+1;else $dead[$uid]=($dead[$uid]??0)+1;
+            if(!isset($lastSeen[$uid])||$ts>$lastSeen[$uid])$lastSeen[$uid]=$ts;
+        }
+        $groups=[];
+        $r3=@mysqli_query($link,"SELECT m.user_id,g.title FROM `{$t}user_usergroup_map` m JOIN `{$t}usergroups` g ON g.id=m.group_id");
+        while($r3&&($g=mysqli_fetch_assoc($r3))){
+            $uid=(int)$g['user_id'];
+            $groups[$uid]=isset($groups[$uid])?$groups[$uid].', '.$g['title']:(string)$g['title'];
+        }
+        $users=[];$activeAll=0;$expiredAll=0;$withSessions=0;
+        foreach($rows as $u){
+            $id=(int)$u['id'];
+            $a=$alive[$id]??0;$e=$dead[$id]??0;
+            if($a+$e>0)$withSessions++;
+            $activeAll+=$a;$expiredAll+=$e;
+            $users[]=['id'=>$id,'user'=>(string)$u['username'],
+                      'name'=>(string)($u['name']??''),'email'=>(string)$u['email'],
+                      'role'=>$groups[$id]??'','registered'=>(string)($u['registerDate']??''),
+                      'blocked'=>((int)$u['block']===1),'active'=>$a,'expired'=>$e,
+                      'total'=>$a+$e,'last'=>$lastSeen[$id]??0,'ip'=>'','ua'=>''];
+        }
+        usort($users,function($a,$b){
+            if($b['active']!==$a['active'])return $b['active']<=>$a['active'];
+            if($b['expired']!==$a['expired'])return $b['expired']<=>$a['expired'];
+            return strcasecmp($a['user'],$b['user']);
+        });
+        return['ok'=>true,'cms'=>'joomla','users'=>$users,
+            'totals'=>['users'=>count($users),'with_sessions'=>$withSessions,
+                       'active'=>$activeAll,'expired'=>$expiredAll],
+            'policy'=>['enabled'=>($life!==null&&$life>=5256000),'value'=>($life!==null?($life.' minutes'):'unknown'),'file'=>$cfg],
+            'info'=>'Joomla keeps one row per session in #__session and applies a single global lifetime, so a row is active while its last activity plus $lifetime is still in the future.'];
+    }
+
+    private function sessionsCleanupJoomla($link,$c,$cfg){
+        $t=$c['prefix'];
+        $now=time();
+        $life=$this->joomlaLifetime($cfg);
+        $lifeSec=($life?(int)$life:15)*60;
+        $cut=$now-$lifeSec;
+        $before=0;
+        $r=@mysqli_query($link,"SELECT COUNT(*) c FROM `{$t}session` WHERE userid>0 AND `time`<{$cut}");
+        if($r&&($row=mysqli_fetch_assoc($r)))$before=(int)$row['c'];
+        $left=0;
+        $r2=@mysqli_query($link,"SELECT COUNT(*) c FROM `{$t}session` WHERE userid>0");
+        if($r2&&($row=mysqli_fetch_assoc($r2)))$left=(int)$row['c']-$before;
+        @mysqli_query($link,"DELETE FROM `{$t}session` WHERE userid>0 AND `time`<{$cut}");
+        return['ok'=>true,'notice'=>$before
+            ?'Removed '.$before.' expired session(s); '.max(0,$left).' still active.'
+            :'There were no expired sessions to remove.'];
+    }
+
+    private function sessionsRevokeEveryoneJoomla($link,$c){
+        $t=$c['prefix'];
+        $count=0;
+        $r=@mysqli_query($link,"SELECT COUNT(*) c FROM `{$t}session` WHERE userid>0");
+        if($r&&($row=mysqli_fetch_assoc($r)))$count=(int)$row['c'];
+        @mysqli_query($link,"DELETE FROM `{$t}session` WHERE userid>0");
+        return['ok'=>true,'notice'=>$count
+            ?'Signed out every Joomla user ('.$count.' session(s) removed). Everyone has to sign in again.'
+            :'There were no sessions to end.'];
+    }
+
     private function sessionsWordPress($link,$c,$cfg,$action,$post){
         $t=$c['prefix'];
+        if($action==='users')return $this->sessionsUsersWp($link,$c,$cfg);
+        if($action==='cleanup_expired')return $this->sessionsCleanupWp($link,$c);
+        if($action==='revoke_everyone')return $this->sessionsRevokeEveryoneWp($link,$c);
         $site='';
         $r=@mysqli_query($link,"SELECT option_value FROM `{$t}options` WHERE option_name='siteurl' LIMIT 1");
         if($r&&($o=mysqli_fetch_assoc($r)))$site=(string)$o['option_value'];
@@ -9459,6 +9641,9 @@ FMIMG;
     }
     private function sessionsJoomla($link,$c,$cfg,$action,$post){
         $t=$c['prefix'];
+        if($action==='users')return $this->sessionsUsersJoomla($link,$c,$cfg);
+        if($action==='cleanup_expired')return $this->sessionsCleanupJoomla($link,$c,$cfg);
+        if($action==='revoke_everyone')return $this->sessionsRevokeEveryoneJoomla($link,$c);
         $life=$this->joomlaLifetime($cfg);
         $permMin=5256000; /* 10 years, in minutes */
         $policyOn=($life!==null&&$life>=$permMin);
@@ -16728,6 +16913,11 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="btn btn-icon btn-g" id="sessClose" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div class="mod-body" style="padding:16px">
+      <div style="display:flex;gap:6px;margin-bottom:12px">
+        <button class="btn btn-p" id="sessTabSessions" style="font-size:12px">Sessions</button>
+        <button class="btn btn-g" id="sessTabUsers" style="font-size:12px">User accounts</button>
+      </div>
+      <div id="sessPaneSessions">
       <div id="sessSummary" style="font-size:12px;color:var(--t2);line-height:1.8;margin-bottom:12px"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
         <button class="btn btn-p" id="sessRefresh">Refresh</button>
@@ -16741,7 +16931,21 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <button class="btn btn-g" id="sessCfgAuto" style="font-size:12px;white-space:nowrap">Auto-detect</button>
       </div>
       <div id="sessCfgInfo" style="font-size:11px;color:var(--t3);margin-bottom:12px;word-break:break-all"></div>
+      <div id="sessFilterInfo"></div>
       <div id="sessList" style="max-height:54vh;overflow:auto"></div>
+      </div>
+      <div id="sessPaneUsers" style="display:none">
+        <div id="sessUsersBar" style="font-size:12px;color:var(--t2);margin-bottom:10px;line-height:1.7"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <input type="text" id="sessUsersSearch" class="inp" placeholder="Filter by user, email or role…"
+                 style="flex:1;min-width:180px;font-size:12px">
+          <button class="btn btn-g" id="sessUsersRefresh" style="font-size:12px">Refresh</button>
+          <button class="btn btn-g" id="sessCleanup" style="font-size:12px">Clean up expired</button>
+          <button class="btn btn-g" id="sessKillAll" style="font-size:12px;color:#f87171">End every session</button>
+        </div>
+        <div id="sessUsersList" style="max-height:50vh;overflow:auto"></div>
+        <div style="font-size:11px;color:var(--t3);margin-top:8px" id="sessUsersHint"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -19651,6 +19855,9 @@ document.getElementById('largeBtn')?.addEventListener('click',()=>{openMod('larg
 
 /* ── SESSION & COOKIE INSPECTOR ───────────────────────────────────────── */
 let SESS_STATE=null;
+let SESS_USERS=null;
+let SESS_VIEW=[];
+let SESS_USER_FILTER=null;
 /* The config file can be pinned by hand when auto-detection cannot reach it.
    Kept in localStorage so it survives a reload; falls back to a page variable
    when storage is blocked (sandboxed iframe). */
@@ -19704,20 +19911,40 @@ async function sessLoad(force){
   }
   SESS_STATE=d;
   sessCfgInfo(d.config||'',d.config_source||'');
+  /* Optional per-user filter, set from the accounts panel. */
+  const allSessions=Array.isArray(d.sessions)?d.sessions:[];
+  SESS_VIEW=SESS_USER_FILTER===null?allSessions
+    :allSessions.filter(x=>String(x.user_id)===String(SESS_USER_FILTER));
+  const filterBox=document.getElementById('sessFilterInfo');
+  if(filterBox){
+    if(SESS_USER_FILTER===null){filterBox.innerHTML='';}
+    else{
+      const who=(SESS_VIEW[0]&&SESS_VIEW[0].user)||('user '+SESS_USER_FILTER);
+      filterBox.innerHTML='<div style="font-size:11px;color:var(--t3);margin-bottom:6px">Showing the sessions of '
+        +'<b style="color:var(--t2)">'+sessEsc(who)+'</b> ('+SESS_VIEW.length+' of '+allSessions.length+') · '
+        +'<a href="#" id="sessFilterClear" style="color:#60a5fa;text-decoration:none">show all sessions</a></div>';
+      const c=document.getElementById('sessFilterClear');
+      if(c)c.addEventListener('click',e=>{e.preventDefault();SESS_USER_FILTER=null;sessLoad();});
+    }
+  }
   const isJ=d.cms==='joomla';
   sum.innerHTML='<b>'+(isJ?'Joomla':'WordPress')+'</b>'+(d.site?' — '+sessEsc(d.site):'')
     +'<br>Session lifetime policy: <b style="color:'+(d.policy&&d.policy.enabled?'#34d399':'#fbbf24')+'">'
     +((d.policy&&d.policy.enabled)?'Permanent (10 years)':'Default')+'</b>'
     +(d.policy&&d.policy.value?' — current value: '+sessEsc(d.policy.value):'')
-    +'<br>Sessions: <b>'+d.sessions.length+'</b>'
+    +'<br>Sessions: <b>'+allSessions.length+'</b>'
     +(d.info?'<br><span style="opacity:.75">'+sessEsc(d.info)+'</span>':'');
   const pb=document.getElementById('sessPolicyBtn');
   if(pb)pb.textContent=(d.policy&&d.policy.enabled)?'Restore default lifetime':'Enable permanent sessions';
-  if(!d.sessions.length){list.innerHTML='<div style="padding:24px;text-align:center;color:var(--t2);font-size:13px">No sessions recorded for this site.</div>';return;}
+  if(!SESS_VIEW.length){
+    list.innerHTML='<div style="padding:24px;text-align:center;color:var(--t2);font-size:13px">'
+      +(SESS_USER_FILTER===null?'No sessions recorded for this site.':'This user has no sessions right now.')+'</div>';
+    return;
+  }
   const seen={};
   let h='<table style="width:100%;border-collapse:collapse;font-size:12px">'
     +'<tr style="color:var(--t3);text-align:right"><th style="padding:6px">User</th><th style="padding:6px">Session</th><th style="padding:6px">Remaining</th><th style="padding:6px">Device / IP</th><th style="padding:6px"></th></tr>';
-  d.sessions.forEach((x,i)=>{
+  SESS_VIEW.forEach((x,i)=>{
     const days=Number(x.days||0);
     const col=days>365?'#34d399':(days>1?'#fbbf24':'#f87171');
     const dev=x.ua?x.ua.slice(0,40):(x.client?(x.client==='admin'?'Admin panel':'Front end'):'—');
@@ -19739,14 +19966,14 @@ async function sessLoad(force){
   });
   h+='</table>';
   list.innerHTML=h;
-  list.querySelectorAll('[data-sess-ext]').forEach(b=>b.addEventListener('click',()=>sessAct('extend',d.sessions[+b.dataset.sessExt])));
+  list.querySelectorAll('[data-sess-ext]').forEach(b=>b.addEventListener('click',()=>sessAct('extend',SESS_VIEW[+b.dataset.sessExt])));
   list.querySelectorAll('[data-sess-rev]').forEach(b=>b.addEventListener('click',()=>{
-    const x=d.sessions[+b.dataset.sessRev];
+    const x=SESS_VIEW[+b.dataset.sessRev];
     if(!confirm('Revoke the session of "'+x.user+'"? That device will be asked to sign in again.'))return;
     sessAct('revoke',x);
   }));
   list.querySelectorAll('[data-sess-all]').forEach(b=>b.addEventListener('click',()=>{
-    const x=d.sessions[+b.dataset.sessAll];
+    const x=SESS_VIEW[+b.dataset.sessAll];
     if(!confirm('Revoke every session of "'+x.user+'" on all devices?'))return;
     sessAct('revoke_all',x);
   }));
@@ -19756,10 +19983,115 @@ async function sessAct(action,x){
   if(d&&d.error){toast(d.error);return;}
   toast((d&&d.notice)||'Done.');
   sessLoad();
+  sessUsersLoad();
+}
+/* ── User accounts ────────────────────────────────────────────────────────
+   Every account of the site with the number of sessions that still work and
+   the number that have expired, plus the bulk actions. */
+function sessSetTab(name){
+  const sp=document.getElementById('sessPaneSessions'),up=document.getElementById('sessPaneUsers');
+  const sb=document.getElementById('sessTabSessions'),ub=document.getElementById('sessTabUsers');
+  if(!sp||!up||!sb||!ub)return;
+  const users=name==='users';
+  sp.style.display=users?'none':'';
+  up.style.display=users?'':'none';
+  sb.className='btn '+(users?'btn-g':'btn-p');
+  ub.className='btn '+(users?'btn-p':'btn-g');
+  if(users)sessUsersLoad();
+}
+function sessUsersRender(){
+  const list=document.getElementById('sessUsersList');
+  const bar=document.getElementById('sessUsersBar');
+  const hint=document.getElementById('sessUsersHint');
+  if(!list||!SESS_USERS)return;
+  const t=SESS_USERS.totals||{};
+  if(bar){
+    bar.innerHTML='<b>'+esc0(t.users)+'</b> account(s) · '
+      +'<b style="color:#34d399">'+esc0(t.active)+'</b> active session(s) · '
+      +'<b style="color:#f87171">'+esc0(t.expired)+'</b> expired · '
+      +esc0(t.with_sessions)+' account(s) with sessions';
+  }
+  if(hint)hint.textContent=SESS_USERS.info||'';
+  const q=(document.getElementById('sessUsersSearch')?.value||'').trim().toLowerCase();
+  const rows=(SESS_USERS.users||[]).filter(u=>!q||
+    (String(u.user)+' '+String(u.name||'')+' '+String(u.email||'')+' '+String(u.role||'')).toLowerCase().includes(q));
+  if(!rows.length){
+    list.innerHTML='<div style="padding:20px;text-align:center;color:var(--t2);font-size:13px">'
+      +(q?'No account matches that filter.':'No user accounts were found.')+'</div>';
+    return;
+  }
+  let h='<table style="width:100%;border-collapse:collapse;font-size:12px">'
+    +'<tr style="color:var(--t3);text-align:right"><th style="padding:6px">User</th><th style="padding:6px">Role</th>'
+    +'<th style="padding:6px">Sessions</th><th style="padding:6px">Last activity</th><th style="padding:6px"></th></tr>';
+  rows.forEach(u=>{
+    const id=String(u.id);
+    const badge=(u.active
+        ?'<span style="color:#34d399;font-weight:700">'+esc0(u.active)+' active</span>'
+        :'<span style="color:var(--t3)">no active session</span>')
+      +(u.expired?' · <span style="color:#f87171">'+esc0(u.expired)+' expired</span>':'');
+    h+='<tr style="border-top:1px solid var(--border)">'
+      +'<td style="padding:7px 6px"><b>'+sessEsc(u.user)+'</b>'
+        +(u.blocked?' <span style="font-size:10px;color:#f87171">blocked</span>':'')
+        +(u.name?'<br><span style="color:var(--t3)">'+sessEsc(u.name)+'</span>':'')
+        +(u.email?'<br><span style="color:var(--t3)">'+sessEsc(u.email)+'</span>':'')
+        +'</td>'
+      +'<td style="padding:7px 6px;color:var(--t2)">'+sessEsc(u.role||'—')+'</td>'
+      +'<td style="padding:7px 6px">'+badge+'</td>'
+      +'<td style="padding:7px 6px;color:var(--t2)">'+(u.last?sessDate(u.last):'—')+'</td>'
+      +'<td style="padding:7px 6px;white-space:nowrap">'
+        +(u.total?'<button class="btn btn-g" style="font-size:11px;padding:3px 8px" data-sess-user-show="'+id+'">Sessions</button> ':'')
+        +(u.active?'<button class="btn btn-g" style="font-size:11px;padding:3px 8px;color:#f87171" data-sess-user-kill="'+id+'">End all</button>':'')
+      +'</td></tr>';
+  });
+  h+='</table>';
+  list.innerHTML=h;
+  list.querySelectorAll('[data-sess-user-show]').forEach(b=>b.addEventListener('click',()=>{
+    SESS_USER_FILTER=+b.dataset.sessUserShow;
+    sessSetTab('sessions');
+    sessLoad();
+  }));
+  list.querySelectorAll('[data-sess-user-kill]').forEach(b=>b.addEventListener('click',()=>{
+    const u=(SESS_USERS.users||[]).find(x=>String(x.id)===String(b.dataset.sessUserKill));
+    if(!u)return;
+    if(!confirm('End every session of "'+u.user+'"? That account will have to sign in again.'))return;
+    sessBulk('revoke_all',{user_id:u.id});
+  }));
+}
+function esc0(v){return sessEsc(v==null?0:v);}
+async function sessUsersLoad(force){
+  const list=document.getElementById('sessUsersList');
+  if(!list)return;
+  list.innerHTML='<div style="padding:20px;color:var(--t2);font-size:12px">Loading…</div>';
+  let d;
+  try{d=await sessCall('users',force?{rescan:1}:null);}
+  catch(e){list.innerHTML='<div style="padding:20px;color:#f87171;font-size:13px">Could not connect.</div>';return;}
+  if(d.error){list.innerHTML='<div style="padding:20px;color:#f87171;font-size:13px">'+sessEsc(d.error)+'</div>';return;}
+  SESS_USERS=d;
+  sessUsersRender();
+}
+async function sessBulk(action,extra){
+  const d=await sessCall(action,extra||{});
+  if(d&&d.error){toast(d.error);return;}
+  toast((d&&d.notice)||'Done.');
+  SESS_USER_FILTER=null;
+  sessLoad(true);
+  sessUsersLoad(true);
 }
 document.getElementById('sessBtn')?.addEventListener('click',()=>{
   const i=document.getElementById('sessCfgPath');if(i)i.value=sessCfgGet();
   openMod('sessOv');sessLoad();
+});
+document.getElementById('sessTabSessions')?.addEventListener('click',()=>sessSetTab('sessions'));
+document.getElementById('sessTabUsers')?.addEventListener('click',()=>sessSetTab('users'));
+document.getElementById('sessUsersRefresh')?.addEventListener('click',()=>sessUsersLoad(true));
+document.getElementById('sessUsersSearch')?.addEventListener('input',sessUsersRender);
+document.getElementById('sessCleanup')?.addEventListener('click',()=>{
+  if(!confirm('Delete every expired session? Sessions that still work are not touched.'))return;
+  sessBulk('cleanup_expired');
+});
+document.getElementById('sessKillAll')?.addEventListener('click',()=>{
+  if(!confirm('End every session of every site user? All of them will have to sign in again. Your file manager sign-in is not affected.'))return;
+  sessBulk('revoke_everyone');
 });
 document.getElementById('sessCfgUse')?.addEventListener('click',()=>{
   const v=(document.getElementById('sessCfgPath')?.value||'').trim();
