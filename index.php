@@ -50,17 +50,15 @@ function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);return (i
    tint when the account is the one running this manager. */
 function fm_owner_cell($info){
     $name=(string)($info['owner']??'');
-    $home=(string)($info['home']??'');
     if($name===''){
         return '<td class="col-owner col-owner-td"><span class="own-cell"><span class="own-name">unknown</span></span></td>';
     }
     $mine=!empty($info['mine']);
-    $title='Owner: '.$name.($home!==''?' · home '.$home:'').' — click to change';
+    $title='Owner: '.$name.' — click to change';
     $e=function($v){return htmlspecialchars((string)$v,ENT_QUOTES|ENT_HTML5);};
     return '<td class="col-owner col-owner-td">'
         .'<span class="own-cell'.($mine?' own-mine':'').'" data-own="'.$e($name).'" title="'.$e($title).'">'
         .'<span class="own-name">'.$e($name).($mine?'<span class="own-me">you</span>':'').'</span>'
-        .'<span class="own-home">'.$e($home!==''?$home:'no home directory').'</span>'
         .'</span></td>';
 }
 function fm_save_theme($f,$t){$t=($t==='light')?'light':'dark';@file_put_contents($f,json_encode(['theme'=>$t]));return $t;}
@@ -15388,13 +15386,11 @@ a.nt:hover{color:var(--link)}
 .mt{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--t3);white-space:nowrap}
 
 /* OWNER column */
-.own-cell{display:inline-flex;flex-direction:column;line-height:1.3;max-width:180px;cursor:pointer;border-radius:6px;padding:2px 5px;transition:background .15s}
+.own-cell{display:inline-flex;align-items:center;line-height:1.3;max-width:180px;cursor:pointer;border-radius:6px;padding:2px 5px;transition:background .15s}
 .own-cell:hover{background:var(--raised)}
 .own-name{display:flex;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .own-cell.own-mine .own-name{color:#7ee2a8}
 .own-me{font-family:inherit;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#7ee2a8;border:1px solid rgba(126,226,168,.45);border-radius:5px;padding:0 4px;line-height:1.5}
-.own-home{display:block;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}
-.own-cell.own-mine .own-home{color:rgba(126,226,168,.62)}
 /* owner picker */
 .own-target{padding:9px 11px;border:1px solid var(--border);border-radius:8px;background:var(--raised)}
 .own-target-name{font-size:13px;font-weight:700;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -23440,9 +23436,8 @@ async function ownApplyNow(){
     /* redraw the row without a full reload */
     document.querySelectorAll('.own-cell[data-own]').forEach(c=>{
       if(c.closest('tr')&&c.closest('tr').dataset.name===OWN_ITEM){
-        const nm=c.querySelector('.own-name'),hm=c.querySelector('.own-home');
+        const nm=c.querySelector('.own-name');
         if(nm)nm.textContent=d.owner||OWN_PICK;
-        if(hm)hm.textContent=d.home||'no home directory';
         c.dataset.own=d.owner||OWN_PICK;
         c.classList.toggle('own-mine',OWN_DATA.manager===(d.owner||OWN_PICK));
       }
