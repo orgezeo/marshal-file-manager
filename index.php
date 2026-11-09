@@ -6486,8 +6486,13 @@ SH;
     }
     private function cmsConnect($configPath){
         $type=null;$c=null;
-        if(basename($configPath)==='wp-config.php'){$type='wordpress';$c=$this->parseWpConfig($configPath);}
-        elseif(basename($configPath)==='configuration.php'){$type='joomla';$c=$this->parseJoomlaConfig($configPath);}
+        $kind=method_exists($this,'cmsConfigType')?$this->cmsConfigType($configPath):null;
+        if($kind===null){
+            if(basename($configPath)==='wp-config.php')$kind='wordpress';
+            elseif(basename($configPath)==='configuration.php')$kind='joomla';
+        }
+        if($kind==='wordpress'){$type='wordpress';$c=$this->parseWpConfig($configPath);}
+        elseif($kind==='joomla'){$type='joomla';$c=$this->parseJoomlaConfig($configPath);}
         else return[null,null,'Unrecognized config file.'];
         if(!$c||!$c['db']||!$c['user'])return[null,null,'Could not read database credentials from config file.'];
         $port=$c['port']?(int)$c['port']:3306;
@@ -9000,18 +9005,277 @@ FMIMG;
        Lists the real login sessions of the current site (WordPress or Joomla),
        lets an admin extend or revoke them, and reports the session-lifetime
        policy. Everything runs against the site's own database — no passwords. */
-    private function sessionInspectorCfg($post){
-        if(!empty($post['cfg_b64'])){
-            $p=base64_decode((string)$post['cfg_b64'],true);
-            if(is_string($p)&&$p!==''&&is_readable($p))return $p;
+    private function sessionInspectorCfg($post,&$diag=null){
+        return $this->cmsFindConfig($post,$diag);
+    }
+    /* ── Config discovery ─────────────────────────────────────────────────────
+       Locating wp-config.php / configuration.php is the one step that fails on
+       unusual layouts, so it runs in stages, cheapest first: the exact path the
+       admin supplied, a cached answer, the folders around this request, the
+       document roots the web server itself declares, running PHP servers, the
+       generic scan, and finally a bounded filesystem search for the CMS
+       markers. Every stage is recorded in $diag, so the panel can show what was
+       tried instead of a dead end. A candidate is accepted only after its
+       database answers, which means the returned path is a *working* one. */
+
+    /* WordPress or Joomla config? Decided by the file name, then by the
+       contents, so a config that was renamed or copied still resolves. */
+    private function cmsConfigType($path){
+        if(!is_string($path)||$path===''||!@is_file($path))return null;
+        $head=@file_get_contents($path,false,null,0,65536);
+        if(is_string($head)&&$head!==''){
+            if(strpos($head,'JConfig')!==false)return 'joomla';
+            if(preg_match('/\$table_prefix\s*=|DB_NAME|wp-settings\.php/',$head))return 'wordpress';
+            if(preg_match('/public\s+\$(dbprefix|host|user)\s*=/',$head))return 'joomla';
         }
-        $scan=$this->cmsScan();
-        if(!empty($scan['current_cms_config'])&&is_readable($scan['current_cms_config']))return $scan['current_cms_config'];
-        foreach(($scan['sites']??[]) as $s){
-            $p=is_array($s)?($s['config']??($s['path']??null)):null;
-            if($p&&is_readable($p)&&in_array(basename($p),['wp-config.php','configuration.php'],true))return $p;
+        $base=strtolower(basename($path));
+        if($base==='wp-config.php')return 'wordpress';
+        if($base==='configuration.php')return 'joomla';
+        return null;
+    }
+
+    /* The config file that belongs to a site folder — or to its parent, which
+       is the hardened WordPress layout (wp-config.php above the web root). */
+    private function cmsConfigIn($dir){
+        $dir=rtrim((string)$dir,'/');
+        if($dir===''||!@is_dir($dir))return null;
+        foreach(['wp-config.php','configuration.php'] as $n){
+            if(@is_file("$dir/$n")&&@is_readable("$dir/$n"))return "$dir/$n";
+        }
+        $up=dirname($dir);
+        $parent="$up/wp-config.php";
+        if($up!=='/'&&$up!==$dir&&@is_file($parent)&&@is_readable($parent)
+           &&(@is_dir("$dir/wp-content")||@is_dir("$dir/wp-includes")))return $parent;
+        return null;
+    }
+
+    /* Looser variant used when nothing else matches: walks up $levels folders
+       looking for a config file, without insisting the folder looks like a web
+       root. Safe because the caller validates the candidate against the
+       database before trusting it. */
+    private function cmsConfigNear($dir,$levels=3){
+        $cur=rtrim((string)$dir,'/');
+        for($i=0;$i<$levels&&$cur!==''&&$cur!=='/';$i++){
+            foreach(['wp-config.php','configuration.php'] as $n){
+                if(@is_file("$cur/$n")&&@is_readable("$cur/$n"))return "$cur/$n";
+            }
+            $up=dirname($cur);
+            if($up===$cur)break;
+            $cur=$up;
         }
         return null;
+    }
+
+    /* Accepts a config file, a site folder, a folder above it, or a relative
+       path. Returns the config path or null. */
+    private function cmsConfigResolve($raw){
+        $raw=trim((string)$raw);
+        if($raw==='')return null;
+        if(strpos($raw,'~')===0)$raw=rtrim((string)getenv('HOME'),'/').substr($raw,1);
+        if($raw===''||$raw[0]!=='/'){
+            foreach([$this->currentDir,$this->root] as $base){
+                if($base&&@file_exists(rtrim($base,'/').'/'.$raw)){$raw=rtrim($base,'/').'/'.$raw;break;}
+            }
+        }
+        if($raw===''||$raw[0]!=='/')return null;
+        if(@is_dir($raw))return $this->cmsConfigIn($raw) ?: $this->cmsConfigNear($raw,4);
+        if(@is_file($raw)&&@is_readable($raw)){
+            $r=@realpath($raw);
+            if($r&&$this->cmsConfigType($r))return $r;
+            /* The name may be wrong but the folder may still hold a config. */
+            return $this->cmsConfigIn(dirname($raw)) ?: $this->cmsConfigNear(dirname($raw),3);
+        }
+        return $this->cmsConfigIn(dirname($raw)) ?: $this->cmsConfigNear(dirname($raw),3);
+    }
+
+    /* Document roots declared by the web server (Apache, nginx, lighttpd,
+       Caddy). This is the most dependable source when a site lives on an
+       unexpected path: whatever the server actually serves is where the site
+       is, no guessing involved. */
+    private function cmsServerRoots(){
+        $dirs=['/etc/apache2/sites-enabled','/etc/apache2/sites-available','/etc/apache2/conf-enabled',
+               '/etc/httpd/conf.d','/etc/httpd/conf','/etc/nginx/sites-enabled','/etc/nginx/sites-available',
+               '/etc/nginx/conf.d','/usr/local/etc/nginx/sites-enabled','/etc/lighttpd','/etc/caddy'];
+        $roots=[];
+        foreach($dirs as $d){
+            if(!@is_dir($d))continue;
+            foreach((array)@scandir($d) as $f){
+                if(!is_string($f)||$f===''||$f[0]==='.')continue;
+                $p="$d/$f";
+                if(!@is_file($p))continue;
+                $txt=@file_get_contents($p,false,null,0,262144);
+                if(!is_string($txt)||$txt==='')continue;
+                if(preg_match_all('/^\s*DocumentRoot\s+"?([^"\r\n]+?)"?\s*$/mi',$txt,$m))foreach($m[1] as $r)$roots[]=trim($r);
+                if(preg_match_all('/^\s*root\s+([^;\r\n]+)\s*;/mi',$txt,$m))foreach($m[1] as $r)$roots[]=trim($r);
+                if(preg_match_all('/^\s*server\.document-root\s*=\s*"?([^"\r\n]+?)"?\s*$/mi',$txt,$m))foreach($m[1] as $r)$roots[]=trim($r);
+            }
+        }
+        $out=[];
+        foreach($roots as $r){
+            $r=rtrim($r,'/');
+            if($r!==''&&$r[0]==='/'&&@is_dir($r))$out[$r]=1;
+        }
+        return array_keys($out);
+    }
+
+    /* Document roots of the PHP built-in servers running on this machine. */
+    private function cmsRunningServerRoots(){
+        $out=[];
+        if(!function_exists('exec'))return [];
+        $lines=[];
+        @exec('ps -eo args= 2>/dev/null',$lines);
+        foreach($lines as $line){
+            if(!preg_match('/\bphp[\d.]*\s+.*\s-S\s/',$line))continue;
+            if(preg_match('/\s-t\s+(\S+)/',$line,$m)){
+                $d=rtrim($m[1],'/');
+                if($d!==''&&$d[0]==='/'&&@is_dir($d))$out[$d]=1;
+            }
+        }
+        return array_keys($out);
+    }
+
+    /* Last resort: look for the CMS itself, not only its config. A folder that
+       contains wp-includes/version.php is a WordPress root even if its
+       wp-config.php was moved one level up or renamed. */
+    private function cmsFindByMarkers($maxDepth=8){
+        $out=[];
+        if(!function_exists('exec'))return $out;
+        $bases=[];
+        foreach(['/home','/var/www','/srv','/opt','/usr/share/wordpress','/data','/var/lib','/web','/www'] as $b){
+            if(@is_dir($b))$bases[]=$b;
+        }
+        if(!$bases)return $out;
+        $cmd='timeout 15 find '.implode(' ',array_map('escapeshellarg',$bases))
+            .' -maxdepth '.(int)$maxDepth
+            .' \\( -name node_modules -o -name vendor -o -name .git -o -name .cache -o -name .local \\) -prune -o '
+            .'\\( -name wp-config.php -o -name configuration.php -o -path "*/wp-includes/version.php" \\) -print 2>/dev/null | head -80';
+        $lines=[];
+        @exec($cmd,$lines);
+        foreach((array)$lines as $line){
+            $line=trim((string)$line);
+            if($line==='')continue;
+            if(strpos($line,'/wp-includes/version.php')!==false){
+                $root=dirname(dirname($line));
+                $c=$this->cmsConfigIn($root) ?: $this->cmsConfigNear($root,4);
+                if($c)$out[$c]=1;
+                continue;
+            }
+            if($this->cmsConfigType($line))$out[$line]=1;
+        }
+        return array_keys($out);
+    }
+
+    /* Resolves the config file for the current site. $diag receives the stage
+       that succeeded and everything that was tried. */
+    private function cmsFindConfig($post=null,&$diag=null){
+        $post=is_array($post)?$post:[];
+        $diag=['source'=>null,'tried'=>[]];
+
+        /* Stage 1 — the path the admin typed (or the UI remembered). */
+        foreach(['cfg_path','cfg_b64'] as $k){
+            if(empty($post[$k]))continue;
+            $raw=$k==='cfg_b64'?base64_decode((string)$post[$k],true):(string)$post[$k];
+            if(!is_string($raw)||trim($raw)==='')continue;
+            $p=$this->cmsConfigResolve($raw);
+            if($p){$diag['source']='manual';$diag['tried'][]="manual path → $p";return $p;}
+            /* A path the admin typed is never silently ignored: acting on a
+               different site's sessions than the one they asked for would be
+               worse than an error. */
+            $diag['manual']=trim($raw);
+            $diag['tried'][]='manual path not usable: '.trim($raw);
+            return null;
+        }
+
+        /* Stage 2 — the answer from the previous request, if still valid. */
+        if(empty($post['rescan'])&&!empty($_SESSION['fm_cfg_path'])){
+            $p=(string)$_SESSION['fm_cfg_path'];
+            if($this->cmsConfigType($p)){$diag['source']='cached';$diag['tried'][]="cached → $p";return $p;}
+            unset($_SESSION['fm_cfg_path']);
+        }
+
+        $cands=[];$seen=[];
+        $add=function($p,$stage)use(&$cands,&$seen){
+            if(!$p)return;
+            $r=@realpath($p)?:$p;
+            if(isset($seen[$r]))return;
+            if(!$this->cmsConfigType($r))return;
+            $seen[$r]=1;
+            $cands[]=['path'=>$r,'stage'=>$stage];
+        };
+
+        /* Stage 3 — this request's own surroundings: the current folder, the
+           manager root, the document root, then up to five levels above each
+           and one level into the usual site folders. */
+        $starts=[];
+        foreach([$this->currentDir,$this->root,getcwd(),$_SERVER['DOCUMENT_ROOT']??null,
+                  dirname($_SERVER['SCRIPT_FILENAME']??''),dirname($_SERVER['DOCUMENT_ROOT']??'')] as $d){
+            if(is_string($d)&&$d!==''&&@is_dir($d))$starts[rtrim($d,'/')]=1;
+        }
+        /* The folder being browsed comes first: if the manager is already
+           inside a site, that site is the one the admin means. */
+        foreach([$this->currentDir,getcwd(),$_SERVER['DOCUMENT_ROOT']??null] as $d){
+            if(!is_string($d)||$d===''||!@is_dir($d))continue;
+            $hit=$this->cmsDetect($d);
+            if(!empty($hit['config']))$add($hit['config'],'current folder');
+        }
+        $subs=['public_html','public','www','htdocs','httpdocs','web','html','site','sites','wp','wordpress','blog','joomla','cms'];
+        foreach(array_keys($starts) as $d){
+            $cur=$d;
+            for($i=0;$i<5;$i++){
+                $add($this->cmsConfigIn($cur),'nearby folder');
+                foreach($subs as $s)$add($this->cmsConfigIn($cur.'/'.$s),'nearby folder');
+                $up=dirname($cur);
+                if($up===$cur||$up==='/')break;
+                $cur=$up;
+            }
+        }
+
+        /* Stage 4 — whatever the web server serves. */
+        foreach($this->cmsServerRoots() as $d){
+            $add($this->cmsConfigIn($d),'web server document root');
+            $add($this->cmsConfigIn($d.'/..'),'web server document root');
+        }
+
+        /* Stage 5 — PHP built-in servers (-t). */
+        foreach($this->cmsRunningServerRoots() as $d)$add($this->cmsConfigIn($d),'running PHP server');
+
+        /* Stage 6 — the generic scan, then the marker search. Both are more
+           expensive, so they only run when nothing cheaper matched. */
+        if(!$cands){
+            foreach(($this->cmsScan()['sites']??[]) as $s){
+                if(is_array($s))$add($s['config']??null,'server scan');
+            }
+        }
+        if(!$cands){
+            foreach($this->cmsFindByMarkers() as $p)$add($p,'filesystem search');
+        }
+
+        /* Stage 7 — the Debian multi-site layout keeps configs in /etc. */
+        if(!$cands){
+            foreach((array)@glob('/etc/wordpress/config-*.php') as $p)$add($p,'/etc/wordpress');
+        }
+
+        if(!$cands){
+            $diag['tried'][]='no WordPress or Joomla configuration file was found';
+            return null;
+        }
+
+        /* A candidate only counts once its database answers — that is what
+           makes the answer trustworthy rather than just plausible. */
+        $first=null;
+        foreach(array_slice($cands,0,4) as $c){
+            if($first===null)$first=$c['path'];
+            list($link,$cms,$err)=$this->cmsConnect($c['path']);
+            if($link){
+                if($cms)@mysqli_close($link);
+                $diag['source']=$c['stage'];
+                $diag['tried'][]=$c['stage'].' → '.$c['path'];
+                return $c['path'];
+            }
+            $diag['tried'][]=$c['stage'].' → '.$c['path'].' ('.$err.')';
+        }
+        $diag['source']=$cands[0]['stage'];
+        return $first;
     }
     private function wpContentDirFor($configPath){
         $src=@file_get_contents($configPath);
@@ -9047,16 +9311,30 @@ FMIMG;
     }
     public function sessionInspector($action,$post){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
-        $cfg=$this->sessionInspectorCfg($post);
-        if(!$cfg)return['error'=>'No WordPress or Joomla installation was found for the current folder. Open the site folder first, or pick its config file.'];
+        $diag=[];
+        $cfg=$this->sessionInspectorCfg($post,$diag);
+        if(!$cfg){
+            $msg=!empty($diag['manual'])
+                ?'Nothing usable at "'.$diag['manual'].'" — enter the full path to wp-config.php or configuration.php, or to the folder that contains it.'
+                :'No WordPress or Joomla configuration file could be found automatically. Type the full path to wp-config.php or configuration.php in the path field and press "Use path".';
+            return['error'=>$msg,'tried'=>$diag['tried']??[]];
+        }
         list($link,$c,$err)=$this->cmsConnect($cfg);
-        if($err||!$link)return['error'=>$err?:'Could not connect to the site database.'];
+        if($err||!$link){
+            return['error'=>$err?:'Could not connect to the site database.',
+                   'config'=>$cfg,'config_source'=>$diag['source']??null,'tried'=>$diag['tried']??[]];
+        }
+        if(!empty($_POST['rescan'])||empty($_SESSION['fm_cfg_path']))$_SESSION['fm_cfg_path']=$cfg;
         try{
             if(($c['type']??'')==='wordpress')$out=$this->sessionsWordPress($link,$c,$cfg,$action,$post);
             elseif(($c['type']??'')==='joomla')$out=$this->sessionsJoomla($link,$c,$cfg,$action,$post);
             else $out=['error'=>'Unsupported CMS type.'];
         }catch(\Throwable $e){$out=['error'=>'Error: '.$e->getMessage()];}
         mysqli_close($link);
+        if(is_array($out)&&!empty($out['ok'])){
+            $out['config']=$cfg;
+            $out['config_source']=$diag['source']??null;
+        }
         return $out;
     }
     private function sessionsWordPress($link,$c,$cfg,$action,$post){
@@ -16378,10 +16656,18 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     </div>
     <div class="mod-body" style="padding:16px">
       <div id="sessSummary" style="font-size:12px;color:var(--t2);line-height:1.8;margin-bottom:12px"></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
         <button class="btn btn-p" id="sessRefresh">Refresh</button>
         <button class="btn btn-g" id="sessPolicyBtn">Permanent sessions</button>
       </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+        <input type="text" id="sessCfgPath" class="inp" spellcheck="false"
+               style="flex:1;min-width:220px;font-size:12px;font-family:'JetBrains Mono',monospace"
+               placeholder="/path/to/wp-config.php or configuration.php — empty = auto-detect">
+        <button class="btn btn-g" id="sessCfgUse" style="font-size:12px;white-space:nowrap">Use path</button>
+        <button class="btn btn-g" id="sessCfgAuto" style="font-size:12px;white-space:nowrap">Auto-detect</button>
+      </div>
+      <div id="sessCfgInfo" style="font-size:11px;color:var(--t3);margin-bottom:12px;word-break:break-all"></div>
       <div id="sessList" style="max-height:54vh;overflow:auto"></div>
     </div>
   </div>
@@ -19292,11 +19578,30 @@ document.getElementById('largeBtn')?.addEventListener('click',()=>{openMod('larg
 
 /* ── SESSION & COOKIE INSPECTOR ───────────────────────────────────────── */
 let SESS_STATE=null;
+/* The config file can be pinned by hand when auto-detection cannot reach it.
+   Kept in localStorage so it survives a reload; falls back to a page variable
+   when storage is blocked (sandboxed iframe). */
+const SESS_CFG_KEY='fm.sessCfg';
+function sessCfgGet(){
+  try{return localStorage.getItem(SESS_CFG_KEY)||'';}catch(e){return window.__sessCfg||'';}
+}
+function sessCfgSet(v){
+  try{localStorage.setItem(SESS_CFG_KEY,v);}catch(e){window.__sessCfg=v;}
+  const i=document.getElementById('sessCfgPath');if(i)i.value=v;
+}
+function sessCfgInfo(cfg,srcTxt){
+  const el=document.getElementById('sessCfgInfo');if(!el)return;
+  el.innerHTML=cfg
+    ?'Configuration file: <b style="color:var(--t2)">'+sessEsc(cfg)+'</b>'
+      +(srcTxt?' <span style="opacity:.75">('+sessEsc(srcTxt)+')</span>':'')
+    :'';
+}
 function sessEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function sessDate(ts){if(!ts)return '—';try{return new Date(ts*1000).toLocaleString();}catch(e){return '—';}}
 async function sessCall(action,extra){
   const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action',action);
   if(extra)for(const k in extra){if(extra[k]!==undefined&&extra[k]!==null)fd.append(k,String(extra[k]));}
+  if(!extra||extra.cfg_path===undefined){const pinned=sessCfgGet();if(pinned)fd.append('cfg_path',pinned);}
   const r=await fetch('?x=sessions',{method:'POST',body:fd,cache:'no-store'});
   if(!r.ok&&r.status===403)return {error:'Page token expired — reload the file manager.'};
   try{return await r.json();}catch(e){return {error:'Invalid response from the server.'};}
@@ -19308,13 +19613,24 @@ function sessRemaining(days){
   if(d>=1)return Math.round(d)+' day(s)';
   return 'expired';
 }
-async function sessLoad(){
+async function sessLoad(force){
   const list=document.getElementById('sessList'),sum=document.getElementById('sessSummary');
   if(!list||!sum)return;
   list.innerHTML='<div style="padding:20px;color:var(--t2);font-size:12px">Loading…</div>';
-  let d;try{d=await sessCall('list');}catch(e){list.innerHTML='<div style="padding:20px;color:#f87171;font-size:13px">Could not connect.</div>';return;}
-  if(d.error){sum.innerHTML='';list.innerHTML='<div style="padding:20px;color:#f87171;font-size:13px">'+sessEsc(d.error)+'</div>';return;}
+  let d;try{d=await sessCall('list',force?{rescan:1}:null);}catch(e){list.innerHTML='<div style="padding:20px;color:#f87171;font-size:13px">Could not connect.</div>';return;}
+  if(d.error){
+    sum.innerHTML='';
+    sessCfgInfo(d.config||'',d.config_source||'');
+    let extra='';
+    if(d.tried&&d.tried.length){
+      extra='<div style="margin-top:10px;font-size:11px;color:var(--t3);line-height:1.7;font-family:\'JetBrains Mono\',monospace">'
+        +d.tried.map(t=>sessEsc(t)).join('<br>')+'</div>';
+    }
+    list.innerHTML='<div style="padding:20px;color:#f87171;font-size:13px">'+sessEsc(d.error)+extra+'</div>';
+    return;
+  }
   SESS_STATE=d;
+  sessCfgInfo(d.config||'',d.config_source||'');
   const isJ=d.cms==='joomla';
   sum.innerHTML='<b>'+(isJ?'Joomla':'WordPress')+'</b>'+(d.site?' — '+sessEsc(d.site):'')
     +'<br>Session lifetime policy: <b style="color:'+(d.policy&&d.policy.enabled?'#34d399':'#fbbf24')+'">'
@@ -19368,7 +19684,21 @@ async function sessAct(action,x){
   toast((d&&d.notice)||'Done.');
   sessLoad();
 }
-document.getElementById('sessBtn')?.addEventListener('click',()=>{openMod('sessOv');sessLoad();});
+document.getElementById('sessBtn')?.addEventListener('click',()=>{
+  const i=document.getElementById('sessCfgPath');if(i)i.value=sessCfgGet();
+  openMod('sessOv');sessLoad();
+});
+document.getElementById('sessCfgUse')?.addEventListener('click',()=>{
+  const v=(document.getElementById('sessCfgPath')?.value||'').trim();
+  if(!v){toast('Enter the full path to wp-config.php or configuration.php, or press Auto-detect.');return;}
+  sessCfgSet(v);sessLoad(true);
+});
+document.getElementById('sessCfgAuto')?.addEventListener('click',()=>{
+  sessCfgSet('');sessLoad(true);
+});
+document.getElementById('sessCfgPath')?.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){e.preventDefault();document.getElementById('sessCfgUse')?.click();}
+});
 document.getElementById('sessClose')?.addEventListener('click',()=>closeMod('sessOv'));
 document.getElementById('sessRefresh')?.addEventListener('click',sessLoad);
 document.getElementById('sessPolicyBtn')?.addEventListener('click',async()=>{
