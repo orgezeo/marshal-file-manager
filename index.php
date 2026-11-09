@@ -5350,9 +5350,10 @@ class FileManager {
         $pw = @fileperms('/etc/passwd');
         $findings[] = ['name' => '/etc/passwd writable', 'ok' => ($pw !== false && ($pw & 0002) !== 0), 'good' => false,
             'note' => ($pw !== false && ($pw & 0002) !== 0) ? 'anyone can add a root account' : 'not world-writable'];
-        $suid = $this->rootExec('find / -xdev -perm -4000 -type f 2>/dev/null | wc -l');
-        $findings[] = ['name' => 'SUID binaries', 'ok' => (int)$suid['out'] > 0, 'good' => true,
-            'note' => trim($suid['out']) . ' on this filesystem'];
+        $suidList = $this->rootSuidList();
+        $suidEsc = $this->rootSuidEscapes();
+        $findings[] = ['name' => 'SUID binaries', 'ok' => count($suidList) > 0, 'good' => true,
+            'note' => count($suidList) . ' on this filesystem, ' . ($suidEsc ? count($suidEsc) . ' of them on the documented escape list' : 'none of them on the documented escape list')];
         $findings[] = ['name' => 'Unprivileged user namespaces', 'ok' => $ns['works'], 'good' => false,
             'note' => $ns['works'] ? 'allowed — most kernel exploits need them' : 'blocked, which removes the requirements of several exploits'];
         $dk = $this->rootDocker();
@@ -5477,7 +5478,7 @@ class FileManager {
     private function rootSuidList(){
         static $list = null;
         if($list !== null)return $list;
-        $r = $this->rootExec('find /usr/bin /bin /usr/sbin /sbin /usr/local/bin /usr/local/sbin /opt -xdev -perm -4000 -type f 2>/dev/null');
+        $r = $this->rootExec('find / -xdev -perm -4000 -type f 2>/dev/null');
         $list = $r['rc'] === 0 ? array_values(array_filter(array_map('trim', explode("\n", (string)$r['out'])))) : [];
         return $list;
     }
@@ -5606,7 +5607,9 @@ class FileManager {
        yields root stops the run. */
     public function rootingEscalate($password = ''){
         $steps = [];
-        $step = function($route, $ok, $note) use (&$steps){$steps[] = ['route' => $route, 'ok' => (bool)$ok, 'note' => (string)$note];};
+        $step = function($route, $ok, $note, $fired = true) use (&$steps){
+            $steps[] = ['route' => $route, 'ok' => (bool)$ok, 'note' => (string)$note, 'fired' => (bool)$fired];
+        };
         $finish = function($route, $note) use (&$steps, $step){
             $step($route, true, $note);
             $helper = $this->rootHelperInstalled() ? ['installed' => true, 'ok' => true, 'note' => 'already installed'] : $this->rootInstallHelper('');
@@ -5658,9 +5661,27 @@ class FileManager {
             if($v['status'] === 'vulnerable'){$hard[] = $v['name']; $reach[] = $v['name'];}
             elseif($v['status'] === 'check')$reach[] = $v['name'];
         }
-        $step('kernel and library exploits', false, $reach
-            ? count($reach) . ' catalogued vulnerabilit' . (count($reach) === 1 ? 'y is' : 'ies are') . ' reachable here (' . implode(', ', $reach) . '). Reaching root through them needs a memory-corruption exploit, and this tool measures exposure instead of firing one — deliberately.'
-            : 'nothing in the catalogue can be reached on this kernel, so there is no exploit to try either');
+        /* One after another, in catalogue order: every entry that measured as
+           affected is fired when a web request can fire it, and its real error
+           is reported. A kernel memory-corruption exploit is the one thing this
+           panel will not run from inside a web server, so those lines say
+           "measured, not fired" instead of pretending. */
+        $hardK = $hardU = [];
+        foreach($cat['vulns'] as $v){
+            if($v['status'] !== 'vulnerable' && $v['status'] !== 'check')continue;
+            if(stripos((string)$v['component'], 'kernel') !== false)$hardK[] = $v;
+            else $hardU[] = $v;
+        }
+        foreach($hardU as $v){
+            $a = $this->rootFire($v);
+            $route = $v['name'] . ' (' . implode(', ', (array)$v['cve']) . ')';
+            if(!empty($a['ok']))return $finish($route, $a['note']);
+            $step($route, false, $a['note'], !empty($a['fired']));
+        }
+        foreach($hardK as $v){
+            $step($v['name'] . ' (' . implode(', ', (array)$v['cve']) . ')', false,
+                'measured, not fired: root here means running a kernel memory-corruption exploit inside the web server, and this panel does not do that from a web request — the entry below carries the exact fix', false);
+        }
         /* No privilege is asked for, here or anywhere else in this panel. */
         $advice = ['Nothing has to be granted: every route above ran as ' . $id['manager'] . ' with the privileges the web server already had. The manager does not need sudo, does not need a password, and this panel never asked you for either.'];
         $advice[] = $reach
@@ -5674,13 +5695,65 @@ class FileManager {
         return[
             'ok' => false, 'stopped_at' => null, 'steps' => $steps, 'root' => $id,
             'reachable' => $reach, 'confirmed' => $hard, 'advice' => $advice,
-            'message' => $hard
-                ? 'No route from this account gave root. This is not a contradiction: ' . implode(', ', $hard) . ' means the kernel itself can be exploited, which is not the same thing as this account having a privileged way in. Nothing needs to be granted; the fixes below are about the machine.'
-                : ($reach
-                    ? 'No route from this account gave root. Nothing is confirmed exploitable; ' . implode(', ', $reach) . ' only has a version that falls inside the published range, so the vendor advisory decides. Nothing needs to be granted; the fixes below are about the machine.'
-                    : 'No route from this account gave root, and no catalogued vulnerability is reachable here. The manager needs no privilege at all: it works with its own account, and the checks above prove it.'),
+            'message' => 'No route from this account gave root. ' . $this->rootMessage($hardK, $hardU, $reach),
         ];
     }
+
+    private function rootSnip($text, $n = 170){
+        $text = trim(preg_replace('/\s+/', ' ', (string)$text));
+        if($text === '')return 'it printed nothing';
+        return strlen($text) > $n ? substr($text, 0, $n) . '…' : $text;
+    }
+    /* One affected entry, fired for real when a web request can fire it. The
+       answer says whether the tool really fired something: a line that says
+       "fired" carries the actual error the machine gave back. */
+    private function rootFire($v){
+        $id = (string)($v['id'] ?? '');
+        $fire = function($cmd){
+            $r = $this->rootExec('timeout 10 ' . $cmd . ' 2>&1');
+            return['rc' => (int)$r['rc'], 'out' => $this->rootSnip($r['out'])];
+        };
+        if($id === 'udisksuser' || $id === 'pamudisks'){
+            if($this->rootWhich('dbus-send') === '')
+                return['ok' => false, 'fired' => false, 'note' => 'not fired: there is no dbus-send on this host, so the udisks call cannot even be made'];
+            $r = $fire('dbus-send --system --print-reply --dest=org.freedesktop.UDisks2 /org/freedesktop/UDisks2 org.freedesktop.DBus.Introspectable.Introspect');
+            if($r['rc'] !== 0)
+                return['ok' => false, 'fired' => true, 'note' => 'fired: the system bus or the udisks daemon refused the call (' . $r['out'] . ')'];
+            return['ok' => false, 'fired' => true, 'note' => 'fired: the daemon answers, but the mount needs an allow_active session and a web request is not one, so polkit refuses it'];
+        }
+        if($id === 'needrestart'){
+            if($this->rootWhich('needrestart') === '')
+                return['ok' => false, 'fired' => false, 'note' => 'not fired: needrestart is not installed under that name'];
+            $r = $fire('needrestart -b -r l');
+            return['ok' => false, 'fired' => true, 'note' => 'fired: needrestart ran as this account and refused (' . $r['out'] . ') — the flaw needs a package operation that runs it as root, and this account cannot start one'];
+        }
+        if($id === 'udevhw'){
+            if($this->rootWhich('udevadm') === '')
+                return['ok' => false, 'fired' => false, 'note' => 'not fired: udevadm is not installed'];
+            $r = $fire('udevadm trigger --dry-run');
+            return['ok' => false, 'fired' => true, 'note' => 'fired: udevadm ran and refused (' . $r['out'] . ') — a device event is needed, and a web request cannot produce one'];
+        }
+        if($id === 'pack2theroot'){
+            if($this->rootWhich('pkcon') === '')
+                return['ok' => false, 'fired' => false, 'note' => 'not fired: pkcon is not installed'];
+            $r = $fire('pkcon -y resolve bash');
+            return['ok' => false, 'fired' => true, 'note' => 'fired: the package daemon answered (' . $r['out'] . ') but a transaction needs authorisation this account does not have'];
+        }
+        if($id === 'pamnamespace' || $id === 'sudoeditwrite' || $id === 'regresshion' || $id === 'xzbackdoor')
+            return['ok' => false, 'fired' => false, 'note' => 'not fired: this one needs a login session, a sudoedit rule or an unauthenticated race, and a request to this panel can produce none of them'];
+        return['ok' => false, 'fired' => false, 'note' => 'not fired: it needs something a web request cannot produce, so only the measurement above applies'];
+    }
+    /* The sentence after a failed run: kernel flaws and package flaws are two
+       different statements and are never mixed into one. */
+    private function rootMessage($hardK, $hardU, $reach){
+        $names = function($list){return implode(', ', array_map(function($v){return $v['name'];}, $list));};
+        $parts = [];
+        if($hardK)$parts[] = $names($hardK) . ' is a kernel flaw: the kernel itself can be exploited, which is not the same thing as this account having a privileged way in';
+        if($hardU)$parts[] = $names($hardU) . ' is a package flaw that needs a daemon, a session or a device event, and a web request cannot produce one from here';
+        $tail = $parts ? ' ' . implode('; ', $parts) . '.' : ($reach ? '' : ' Nothing in the catalogue is reachable here.');
+        return $tail . ' Nothing needs to be granted; the fixes below are about the machine.';
+    }
+
     private function rootIdentity(){
         $uid = function_exists('posix_geteuid') ? posix_geteuid() : null;
         $nopass = $this->sudoAvailable();
@@ -5691,13 +5764,33 @@ class FileManager {
         }
         return['manager' => $this->managerAccount(), 'euid' => $uid, 'sudo_nopass' => $nopass, 'sudo_as' => $as, 'helper' => $this->rootHelperInstalled()];
     }
+    /* An account that really exists here, and is not the manager itself, so the
+       ownership probe cannot fail just because a distribution names its web
+       user differently (or pass by changing the owner to the owner). */
+    private function rootChownTarget(){
+        $me = $this->managerAccount();
+        $cands = [];
+        foreach(['wordpress' => $this->privSiteConfigFor('wordpress'), 'joomla' => $this->privSiteConfigFor('joomla')] as $cfg){
+            if(!$cfg)continue;
+            $own = $this->pathOwner($cfg);
+            if(!empty($own['owner']))$cands[] = $own['owner'];
+        }
+        $exists = function($n){
+            if($n === '')return false;
+            if(function_exists('posix_getpwnam'))return (bool)posix_getpwnam($n);
+            return true;
+        };
+        foreach($cands as $c)if($c !== $me && $exists($c))return $c;
+        if($exists('root'))return 'root';
+        return $me;
+    }
     /* The point of the whole thing: every feature this manager has, proven. */
     private function rootVerify(){
         $items = [];
         $add = function($name, $ok, $note) use (&$items){$items[] = ['name' => $name, 'ok' => (bool)$ok, 'note' => (string)$note];};
         $id = $this->rootIdentity();
         $add('The manager may become root', $id['sudo_nopass'], $id['sudo_nopass'] ? 'sudo answered as ' . ($id['sudo_as'] ?: 'root') : 'no passwordless sudo');
-        $add('Root helper installed', $id['helper'], $id['helper'] ? $this->rootSudoersFile() : 'not installed — press Keep full privileges');
+        $add('Root helper installed', $id['helper'], $id['helper'] ? $this->rootSudoersFile() : 'not installed — no route has produced root yet');
         $probe = __DIR__ . '/.fm-probe-' . bin2hex(random_bytes(4)) . '.txt';
         $local = @file_put_contents($probe, 'x') !== false;
         if($local)@unlink($probe);
@@ -5718,13 +5811,18 @@ class FileManager {
         }
         $t = __DIR__ . '/.fm-chown-probe-' . bin2hex(random_bytes(4)) . '.txt';
         @file_put_contents($t, 'x');
-        $res = @file_exists($t) ? $this->chownPath($t, 'www-data') : ['error' => 'the probe file could not be created'];
-        $add('Change owner of a file', !empty($res['ok']), !empty($res['ok']) ? 'done by ' . implode(', ', array_keys((array)$res['via'])) : (string)($res['error'] ?? 'failed'));
+        $target = $this->rootChownTarget();
+        $res = @file_exists($t) ? $this->chownPath($t, $target) : ['error' => 'the probe file could not be created'];
+        $add('Change owner of a file', !empty($res['ok']),
+            !empty($res['ok'])
+                ? 'done by ' . implode(', ', array_keys((array)$res['via'])) . ' — owner ' . $target
+                : 'no route could set the owner to ' . $target . ' (' . (string)($res['error'] ?? 'refused') . ') — that needs root, which this run did not have');
         if(!empty($res['ok']))$this->rootAs('rm -f ' . escapeshellarg($t)); elseif(@file_exists($t))@unlink($t);
         $shadow = @is_readable('/etc/shadow');
         $asRoot = false;
         if(!$shadow)$asRoot = ($this->rootAs('head -c 32 /etc/shadow')['rc'] === 0);
-        $add('Read a root-only file', $shadow || $asRoot, $shadow ? '/etc/shadow readable directly' : ($asRoot ? '/etc/shadow readable as root' : 'not readable'));
+        $add('Read a root-only file', $shadow || $asRoot,
+            $shadow ? '/etc/shadow readable directly' : ($asRoot ? '/etc/shadow readable as root' : 'not readable — expected while no route has produced root'));
         $add('Privilege Mode', $this->privMode() !== '', 'mode: ' . $this->privMode() . ' (' . $this->privModeLabel() . ')');
         $g = $this->guardLoad();
         $add('Guarded site files', true, count((array)$g['files']) . ' file(s) watched');
@@ -5760,6 +5858,16 @@ class FileManager {
         if($act === 'escalate')return$this->rootingEscalate($password);
         if($act === 'autorun')return$this->rootingAutoRun($password);
         if($act === 'grants')return['ok' => true, 'grants' => $this->rootGrants()];
+        if($act === 'probe'){
+            /* what firing an entry actually does, for the suite and for a
+               person who wants to see the machine answer */
+            $out = [];
+            foreach(['udisksuser', 'needrestart', 'udevhw', 'pack2theroot', 'pamnamespace'] as $pid){
+                $a = $this->rootFire(['id' => $pid, 'name' => $pid, 'cve' => []]);
+                $out[] = ['id' => $pid, 'ok' => !empty($a['ok']), 'fired' => !empty($a['fired']), 'note' => (string)$a['note']];
+            }
+            return['ok' => true, 'probe' => $out];
+        }
         if($act === 'keep')return$this->rootInstallHelper($password);
         if($act === 'revoke')return$this->rootRemoveHelper($password);
         if($act === 'harden')return$this->rootHarden(true, $password);
@@ -16553,6 +16661,8 @@ a.nt:hover{color:var(--link)}
 .root-banner.good{display:block;background:rgba(126,226,168,.1);border:1px solid rgba(126,226,168,.45);color:#a7ecc5}
 .root-banner.bad{display:block;background:rgba(252,165,165,.09);border:1px solid rgba(252,165,165,.45);color:#fca5a5}
 .root-danger{font-size:10.5px;color:#fcd34d;line-height:1.6;margin-top:7px}
+ .root-step .tag{display:inline-block;margin-left:6px;padding:1px 5px;border:1px solid rgba(229,177,93,.35);border-radius:4px;color:#e2bc71;font:7.5px 'JetBrains Mono',monospace;letter-spacing:.6px;vertical-align:middle}
+ .root-step.meas .r{color:#e5c07b}
  .root-grants .root-item,.root-checks .root-step{justify-content:flex-start}
  .root-grants svg,.root-checks svg{width:15px;height:15px}
 .root-item{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;color:var(--t2);padding:3px 0;border-bottom:1px solid var(--border)}
@@ -19484,10 +19594,11 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <div class="root-chips" id="rootChips"></div>
         <input type="password" id="rootPass" class="inp" placeholder="sudo password — optional, the checks never need one" autocomplete="off" style="display:none;margin-top:8px">
         <div class="root-acts">
-          <button type="button" class="btn btn-p" id="rootGo">Check everything again</button>
+          <button type="button" class="btn btn-p" id="rootGo">Start rooting</button>
           <button type="button" class="btn btn-g" id="rootVerify">Verify every feature</button>
           <button type="button" class="btn btn-g" id="rootRevoke">Revoke privileges</button>
         </div>
+        <div class="root-out" id="rootGoHint" style="margin-top:7px">Start rooting runs every route in order — the account, sudo, the SUID and capability escapes, the container socket, and then each affected vulnerability one after another — and stops at the first one that gives root.</div>
         <div class="root-out" id="rootMeaning" style="margin-top:9px"></div>
         <div class="root-banner" id="rootBanner"></div>
         <div class="root-adv" id="rootAdvice"></div>
@@ -24773,8 +24884,14 @@ function rootRender(){
 }
 function rootSteps(steps){
   const box=document.getElementById('rootSteps');if(!box)return;
-  box.innerHTML=(steps||[]).map(s=>'<div class="root-step '+(s.ok?'ok':'bad')+'"><span class="t">'+(s.ok?ROOT_SVG.ok:ROOT_SVG.bad)+'</span>'
-    +'<span><span class="r">'+rootEsc(s.route)+'</span> <span class="w">'+rootEsc(s.note)+'</span></span></div>').join('');
+  box.innerHTML=(steps||[]).map(s=>{
+    const fired=(s.fired!==false);
+    const icon=s.ok?ROOT_SVG.ok:(fired?ROOT_SVG.bad:ROOT_SVG.warn);
+    return '<div class="root-step '+(s.ok?'ok':(fired?'bad':'meas'))+'"><span class="t">'+icon+'</span>'
+      +'<span><span class="r">'+rootEsc(s.route)+'</span>'
+      +(fired?'':'<span class="tag">measured, not fired</span>')
+      +' <span class="w">'+rootEsc(s.note)+'</span></span></div>';
+  }).join('');
 }
 function rootAdvice(list){
   const box=document.getElementById('rootAdvice');if(!box)return;
@@ -24851,7 +24968,7 @@ document.getElementById('rootVulns')?.addEventListener('click',e=>{
 document.getElementById('rootGo')?.addEventListener('click',async()=>{
   const btn=document.getElementById('rootGo');if(btn)btn.disabled=true;
   const pass=document.getElementById('rootPass');
-  rootBanner('Running every route again — it stops at the first one that works…','');
+  rootBanner('Start rooting: every route in order, stopping at the first one that gives root…','');
   rootSteps([]);rootSet('rootOut','');
   const r=await rootCall('escalate',{password:pass?pass.value:''});
   if(btn)btn.disabled=false;
