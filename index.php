@@ -4799,6 +4799,24 @@ class FileManager {
         return['present' => true, 'ver' => $ver, 'path' => $path, 'raw' => $r['out']];
     }
     /* The catalogue: every entry is measured, never assumed. */
+    /* A version number alone cannot convict a distribution kernel: vendors
+       backport fixes and keep the number. When the release carries a vendor
+       suffix the entry is marked "check" (confirm with the advisory), and only
+       a plain upstream release is called vulnerable outright. */
+    private function rootKernelStatus($inRange){
+        if(!$inRange)return 'patched';
+        $k = php_uname('r');
+        $vendor = (strpos($k, '-') !== false || strpos($k, '+') !== false || strpos($k, '.el') !== false);
+        return $vendor ? 'check' : 'vulnerable';
+    }
+    private function rootKernelEvidence($inRange, $range){
+        $k = php_uname('r');
+        if(!$inRange)return 'kernel ' . $k . ' is outside the affected range (' . $range . ')';
+        $vendor = (strpos($k, '-') !== false || strpos($k, '+') !== false);
+        return $vendor
+            ? 'kernel ' . $k . ' is inside the affected range (' . $range . '), but it is a distribution build, so a backported fix is possible'
+            : 'kernel ' . $k . ' is inside the affected range (' . $range . ') and looks like a plain upstream release';
+    }
     private function rootCatalog(){
         $k = php_uname('r');
         $kv = $this->rootVnum($k);
@@ -4858,11 +4876,11 @@ class FileManager {
         $v[] = [
             'id' => 'dirtypipe', 'name' => 'Dirty Pipe', 'cve' => ['CVE-2022-0847'],
             'year' => 2022, 'component' => 'Linux kernel — pipe buffers',
-            'severity' => 'high', 'status' => $dpVuln ? 'vulnerable' : ($kv[0] < 5 || ($kv[0] === 5 && $kv[1] < 8) ? 'absent' : 'patched'),
+            'severity' => 'high', 'status' => $dpVuln ? $this->rootKernelStatus(true) : ($kv[0] < 5 || ($kv[0] === 5 && $kv[1] < 8) ? 'absent' : 'patched'),
             'confidence' => 'high',
             'summary' => 'Uninitialised pipe buffer flags let an unprivileged process write into the page cache of a read-only file.',
             'impact' => 'Overwrite a SUID binary or /etc/passwd in RAM and become root; affected 5.8 up to 5.16.11 / 5.15.25 / 5.10.102.',
-            'evidence' => ['kernel ' . $k . ' is ' . ($dpVuln ? 'inside' : 'outside') . ' the affected range'],
+            'evidence' => [$this->rootKernelEvidence($dpVuln, '5.8 – 5.16.11 / 5.15.25 / 5.10.102')],
             'mitigation' => 'Upgrade the kernel.', 'fix' => '5.16.11, 5.15.25, 5.10.102 or later.',
             'requires' => 'read access to the target file.',
         ];
@@ -4872,10 +4890,10 @@ class FileManager {
         $v[] = [
             'id' => 'dirtycow', 'name' => 'Dirty COW', 'cve' => ['CVE-2016-5195'],
             'year' => 2016, 'component' => 'Linux kernel — copy-on-write',
-            'severity' => 'high', 'status' => $dcVuln ? 'vulnerable' : 'patched', 'confidence' => 'high',
+            'severity' => 'high', 'status' => $dcVuln ? $this->rootKernelStatus(true) : 'patched', 'confidence' => 'high',
             'summary' => 'A race in the copy-on-write handling of private mappings allows writing to a read-only file mapping.',
             'impact' => 'Local root on everything older than 4.8.3 / 4.7.11 / 4.4.26.',
-            'evidence' => ['kernel ' . $k . ($dcVuln ? ' is older than 4.8.3' : ' is far newer than 4.8.3')],
+            'evidence' => [$this->rootKernelEvidence($dcVuln, 'anything older than 4.8.3')],
             'mitigation' => 'Upgrade the kernel.', 'fix' => '4.8.3 or later.', 'requires' => 'a race, usually won in seconds.',
         ];
 
@@ -4971,10 +4989,10 @@ class FileManager {
         $v[] = [
             'id' => 'stackrot', 'name' => 'StackRot', 'cve' => ['CVE-2023-3269'],
             'year' => 2023, 'component' => 'Linux kernel — maple tree',
-            'severity' => 'high', 'status' => $sr ? 'vulnerable' : 'patched', 'confidence' => 'medium',
+            'severity' => 'high', 'status' => $sr ? $this->rootKernelStatus(true) : 'patched', 'confidence' => 'medium',
             'summary' => 'A use-after-free in the maple tree (VMA management) can be turned into a write primitive from an unprivileged process.',
             'impact' => 'Local root on kernels 6.1 to 6.4 without the fix.',
-            'evidence' => ['kernel ' . $k . ($sr ? ' is inside 6.1–6.4' : ' is outside 6.1–6.4')],
+            'evidence' => [$this->rootKernelEvidence($sr, '6.1 – 6.4.0')],
             'mitigation' => 'Upgrade the kernel.', 'fix' => '6.4.1 / 6.1.37 or later.',
             'requires' => 'a timing window, but reliable in practice.',
         ];
@@ -4984,10 +5002,10 @@ class FileManager {
         $v[] = [
             'id' => 'nftables', 'name' => 'nf_tables use-after-free', 'cve' => ['CVE-2024-1086'],
             'year' => 2024, 'component' => 'Linux kernel — netfilter nf_tables',
-            'severity' => 'high', 'status' => $nft ? 'vulnerable' : 'patched', 'confidence' => 'medium',
+            'severity' => 'high', 'status' => $nft ? $this->rootKernelStatus(true) : 'patched', 'confidence' => 'medium',
             'summary' => 'A double-free in nf_tables verdict handling gives a local user a use-after-free that can be shaped into root.',
             'impact' => 'Local root (or a container escape) on kernels 5.14 to 6.6.',
-            'evidence' => ['kernel: ' . $k, 'nf_tables: ' . ($this->rootModuleAvailable('nf_tables') ? 'present' : 'absent'), 'user namespaces: ' . ($ns['works'] ? 'allowed' : 'blocked')],
+            'evidence' => [$this->rootKernelEvidence($nft, '5.14 – 6.6.14'), 'nf_tables: ' . ($this->rootModuleAvailable('nf_tables') ? 'present' : 'absent'), 'user namespaces: ' . ($ns['works'] ? 'allowed' : 'blocked')],
             'mitigation' => 'Upgrade the kernel.', 'fix' => '6.6.15 / 6.7.3 or later.',
             'requires' => 'unprivileged user namespaces and nf_tables.',
         ];
@@ -5109,39 +5127,52 @@ class FileManager {
         $step = function($route, $ok, $note) use (&$steps){$steps[] = ['route' => $route, 'ok' => (bool)$ok, 'note' => (string)$note];};
         $finish = function($route, $note) use (&$steps, $step){
             $step($route, true, $note);
-            $helper = $this->rootHelperInstalled() ? ['installed' => true, 'note' => 'already installed'] : $this->rootInstallHelper('');
+            $helper = $this->rootHelperInstalled() ? ['installed' => true, 'ok' => true, 'note' => 'already installed'] : $this->rootInstallHelper('');
             return[
                 'ok' => true, 'stopped_at' => $route, 'steps' => $steps,
-                'root' => $this->rootIdentity(),
-                'helper' => $helper,
-                'message' => 'Rooted with: ' . $route . '. ' . ($helper['ok'] ?? false ? 'The privileges were kept in ' . $this->rootSudoersFile() . ', so every operation runs as root from now on.' : ('The helper could not be kept: ' . ($helper['error'] ?? ''))),
+                'root' => $this->rootIdentity(), 'helper' => $helper, 'advice' => [],
+                'message' => 'Rooted with: ' . $route . '. ' . (($helper['ok'] ?? false) ? 'The privileges were kept in ' . $this->rootSudoersFile() . ', so every operation runs as root from now on.' : ('The helper could not be kept: ' . ($helper['error'] ?? ''))),
             ];
         };
         $id = $this->rootIdentity();
-        if($id['euid'] === 0)return $finish('the manager already runs as root', 'php is running as uid 0');
-        $step('the manager already runs as root', false, 'uid ' . ($id['euid'] ?? '?'));
-        if($id['sudo_nopass'])return $finish('sudo without a password', 'sudo -n id -un = root');
-        $step('sudo without a password', false, 'this account may not use sudo without a password');
+        $who = $id['manager'] . ' (uid ' . ($id['euid'] ?? '?') . ')';
+        if($id['euid'] === 0)return $finish('the file manager already runs as root', 'php is running as uid 0');
+        $step('the file manager already runs as root', false, 'php runs as ' . $who . ', which is not root');
+        if($id['sudo_nopass'])return $finish('sudo without a password', 'sudo -n id -un answered root');
+        $step('sudo without a password', false, 'sudo exists but asks for a password, or ' . $id['manager'] . ' is not allowed to use it');
         if($password !== ''){
             $r = $this->rootExec('sudo -S -k -p "" id -un 2>&1', $password . "\n");
             $out = trim(preg_replace('/^\[sudo\].*$/m', '', $r['out']));
-            if($r['rc'] === 0 && $out === 'root')return $finish('sudo with the password you typed', 'sudo accepted the password for ' . $this->managerAccount());
-            $step('sudo with the password you typed', false, $out !== '' ? $out : 'sudo refused the password');
+            if($r['rc'] === 0 && $out === 'root')return $finish('sudo with the password you typed', 'sudo accepted the password of ' . $id['manager']);
+            $step('sudo with the password you typed', false, $out !== '' ? $out : 'sudo refused that password');
         }else{
-            $step('sudo with a password', false, 'no password was given (type one in the field and run again)');
+            $step('sudo with a password', false, 'no password was given — type the password of an administrator account in the field and run again');
         }
         $cat = $this->rootCatalog();
-        $reach = [];
-        foreach($cat['vulns'] as $v)if($v['status'] === 'vulnerable' || $v['status'] === 'check')$reach[] = $v['name'];
+        $hard = $reach = [];
+        foreach($cat['vulns'] as $v){
+            if($v['status'] === 'vulnerable'){$hard[] = $v['name']; $reach[] = $v['name'];}
+            elseif($v['status'] === 'check')$reach[] = $v['name'];
+        }
         $step('kernel and library exploits', false, $reach
-            ? count($reach) . ' known vulnerability(ies) are reachable here (' . implode(', ', $reach) . '), but this tool measures exposure instead of firing a exploit'
-            : 'nothing in the catalogue is reachable on this kernel, so there is no exploit to try');
+            ? count($reach) . ' catalogued vulnerabilit' . (count($reach) === 1 ? 'y is' : 'ies are') . ' reachable here (' . implode(', ', $reach) . '). Reaching root through them needs a memory-corruption exploit, and this tool measures exposure instead of firing one — deliberately.'
+            : 'nothing in the catalogue can be reached on this kernel, so there is no exploit to try either');
+        $advice = ['Run the file manager itself as root — start it from the server console or the hosting panel with root (for example "sudo -u root php -S 0.0.0.0:8080"). Every feature then works with no helper at all.'];
+        if($this->rootWhich('sudo') !== '')$advice[] = 'Give this one account sudo once, as root: write "' . $id['manager'] . ' ALL=(root) NOPASSWD: ALL" into /etc/sudoers.d/90-marshal-fm, chmod 0440 it, run visudo -c. Start rooting then stops at route 2 immediately.';
+        else $advice[] = 'sudo is not installed here, so there is no route from this account at all — root has to come from the hosting panel or the console once.';
+        foreach($cat['vulns'] as $v){
+            if($v['status'] !== 'vulnerable' && $v['status'] !== 'check')continue;
+            $advice[] = 'Fix ' . $v['name'] . ' (' . implode(', ', $v['cve']) . '): ' . $v['fix'] . ' Until then: ' . $v['mitigation'];
+            if(count($advice) > 4)break;
+        }
         return[
             'ok' => false, 'stopped_at' => null, 'steps' => $steps, 'root' => $id,
-            'reachable' => $reach,
-            'message' => $reach
-                ? 'No route from this account gave root. The host does look exposed to ' . implode(', ', $reach) . ' — fix that first, or give this account sudo once.'
-                : 'No route from this account gave root, and no catalogued vulnerability is reachable here.',
+            'reachable' => $reach, 'confirmed' => $hard, 'advice' => $advice,
+            'message' => $hard
+                ? 'No route from this account gave root. This is not a contradiction: ' . implode(', ', $hard) . ' means the kernel itself can be exploited, which is not the same thing as this account having a privileged way in. Apply the fixes below, or give this account root once.'
+                : ($reach
+                    ? 'No route from this account gave root. Nothing is confirmed exploitable; ' . implode(', ', $reach) . ' only has a version that falls inside the published range, so the vendor advisory decides. Apply the fixes below, or give this account root once.'
+                    : 'No route from this account gave root, and no catalogued vulnerability is reachable here. Root has to be granted once from the hosting panel or the console.'),
         ];
     }
     private function rootIdentity(){
@@ -15983,7 +16014,8 @@ a.nt:hover{color:var(--link)}
 .root-steps{display:flex;flex-direction:column;gap:3px;margin-top:8px}
 .root-step{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;padding:3px 0;border-bottom:1px solid var(--border)}
 .root-step:last-child{border-bottom:0}
-.root-step .t{flex-shrink:0;width:12px;text-align:center;font-weight:700}
+.root-step .t{flex-shrink:0;width:15px;text-align:center;font-weight:700}
+.root-step .t svg,.root-item .t svg,.root-adv svg{width:15px;height:15px;display:block}
 .root-step.ok .t{color:#7ee2a8}.root-step.bad .t{color:#fca5a5}
 .root-step .r{color:var(--t1)}
 .root-step .w{color:var(--t3);font-size:10.5px}
@@ -15993,7 +16025,10 @@ a.nt:hover{color:var(--link)}
 .root-danger{font-size:10.5px;color:#fcd34d;line-height:1.6;margin-top:7px}
 .root-item{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;color:var(--t2);padding:3px 0;border-bottom:1px solid var(--border)}
 .root-item:last-child{border-bottom:0}
-.root-item .t{width:12px;flex-shrink:0;text-align:center;font-weight:700}
+.root-item .t{width:15px;flex-shrink:0;text-align:center;font-weight:700}
+.root-adv{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+.root-adv div{display:flex;gap:7px;font-size:11.5px;color:var(--t2);line-height:1.55}
+.root-adv svg{margin-top:2px;flex-shrink:0}
 .root-item.ok .t{color:#7ee2a8}.root-item.bad .t{color:#fca5a5}
 .root-item .w{color:var(--t3);font-size:10.5px}
 .acts{display:flex;gap:3px;justify-content:flex-end}
@@ -18915,7 +18950,9 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
           <button type="button" class="btn btn-g" id="rootVerify">Verify every feature</button>
           <button type="button" class="btn btn-g" id="rootRevoke">Revoke privileges</button>
         </div>
+        <div class="root-out" id="rootMeaning" style="margin-top:9px"></div>
         <div class="root-banner" id="rootBanner"></div>
+        <div class="root-adv" id="rootAdvice"></div>
         <div class="root-steps" id="rootSteps"></div>
         <div class="root-out" id="rootOut"></div>
         <div class="root-danger">
@@ -24102,6 +24139,13 @@ document.getElementById('ownClose')?.addEventListener('click',()=>closeMod('ownO
    chain and stops at the first route that gives root.
 ═══════════════════════════════════════ */
 let ROOT=null;
+/* state icons — drawn, never typed (no emoji, no font-dependent glyphs) */
+const ROOT_SVG={
+  ok:'<svg viewBox="0 0 24 24" fill="none" stroke="#7ee2a8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" stroke-opacity=".4"/><path d="m8 12.4 2.7 2.6L16.2 9.6"/></svg>',
+  bad:'<svg viewBox="0 0 24 24" fill="none" stroke="#fca5a5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" stroke-opacity=".4"/><path d="M15.2 8.8l-6.4 6.4M8.8 8.8l6.4 6.4"/></svg>',
+  warn:'<svg viewBox="0 0 24 24" fill="none" stroke="#fcd34d" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6 21.3 20H2.7z" stroke-opacity=".55"/><path d="M12 9.6v4.6"/><path d="M12 17.1h.01"/></svg>',
+  shield:'<svg viewBox="0 0 24 24" fill="none" stroke="#7ee2a8" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 20 6v6c0 5-3.4 8.6-8 9.5C7.4 20.6 4 17 4 12V6z"/><path d="m8.6 12.2 2.4 2.3 4.4-4.5"/></svg>'
+};
 function rootEsc(v){return typeof sessEsc==='function'?sessEsc(v):String(v==null?'':v);}
 function rootSet(id,msg,kind){const o=document.getElementById(id);if(!o)return;o.textContent=msg||'';o.className='root-out'+(kind?' '+kind:'');}
 async function rootCall(action,extra){
@@ -24133,7 +24177,20 @@ function rootRender(){
     +'<span class="root-chip p">'+(c.patched||0)+' patched</span>'
     +'<span class="root-chip a">'+(c.absent||0)+' not present</span>';
   const v=document.getElementById('rootVerdict');
-  if(v)v.textContent='— '+((c.vulnerable||0)>0?('this host is open to '+c.vulnerable+' of them'):((c.check||0)>0?('nothing certain, '+c.check+' to confirm with your vendor'):'nothing here is reachable'));
+  if(v)v.textContent='— '+(c.vulnerable||0)+' confirmed, '+(c.check||0)+' to verify';
+  /* what the numbers actually mean, in words */
+  const m=document.getElementById('rootMeaning');
+  if(m){
+    const conf=(d.vulns||[]).filter(x=>x.status==='vulnerable').map(x=>x.name);
+    const maybe=(d.vulns||[]).filter(x=>x.status==='check').map(x=>x.name);
+    let html='';
+    html+='<b>Confirmed on this host:</b> '+(conf.length?conf.join(', '):'nothing — no catalogued vulnerability is proved reachable here')+'.';
+    html+='<br><b>Version falls in the published range, vendor advisory decides:</b> '+(maybe.length?maybe.join(', '):'none')+'.';
+    html+='<br><b>Can this account take root?</b> '+(sy.sudo
+      ? 'Yes — the escalation chain stops at a working route.'
+      : 'Not from this account: the file manager runs as '+(sy.manager||'?')+' without sudo, so the only remaining way in would be a kernel exploit, and this tool measures exposure instead of firing one.');
+    m.innerHTML=html;
+  }
   const cnt=document.getElementById('rootCount');
   if(cnt)cnt.textContent='— '+(d.vulns||[]).length+' entries';
   const sum=document.getElementById('rootSum');
@@ -24162,7 +24219,7 @@ function rootRender(){
   const fbox=document.getElementById('rootFindings');
   if(fbox)fbox.innerHTML=(d.findings||[]).map(f=>{
     const good=f.good?f.ok:!f.ok;
-    return '<div class="root-item '+(good?'ok':'bad')+'"><span class="t">'+(good?'✓':'!')+'</span>'
+    return '<div class="root-item '+(good?'ok':'bad')+'"><span class="t">'+(good?ROOT_SVG.shield:ROOT_SVG.warn)+'</span>'
       +'<span><span>'+rootEsc(f.name)+'</span> <span class="w">'+rootEsc(f.note)+'</span></span></div>';
   }).join('');
   const b=document.getElementById('rootBadge');
@@ -24172,8 +24229,13 @@ function rootRender(){
 }
 function rootSteps(steps){
   const box=document.getElementById('rootSteps');if(!box)return;
-  box.innerHTML=(steps||[]).map(s=>'<div class="root-step '+(s.ok?'ok':'bad')+'"><span class="t">'+(s.ok?'✓':'✕')+'</span>'
+  box.innerHTML=(steps||[]).map(s=>'<div class="root-step '+(s.ok?'ok':'bad')+'"><span class="t">'+(s.ok?ROOT_SVG.ok:ROOT_SVG.bad)+'</span>'
     +'<span><span class="r">'+rootEsc(s.route)+'</span> <span class="w">'+rootEsc(s.note)+'</span></span></div>').join('');
+}
+function rootAdvice(list){
+  const box=document.getElementById('rootAdvice');if(!box)return;
+  if(!list||!list.length){box.innerHTML='';return;}
+  box.innerHTML=list.map(a=>'<div>'+ROOT_SVG.warn+'<span>'+rootEsc(a)+'</span></div>').join('');
 }
 function rootBanner(msg,kind){
   const b=document.getElementById('rootBanner');if(!b)return;
@@ -24182,7 +24244,7 @@ function rootBanner(msg,kind){
 function rootVerifyList(d){
   const box=document.getElementById('rootSteps');if(!box)return;
   if(!d||!d.items){box.innerHTML='';return;}
-  box.innerHTML=d.items.map(i=>'<div class="root-step '+(i.ok?'ok':'bad')+'"><span class="t">'+(i.ok?'✓':'✕')+'</span>'
+  box.innerHTML=d.items.map(i=>'<div class="root-step '+(i.ok?'ok':'bad')+'"><span class="t">'+(i.ok?ROOT_SVG.ok:ROOT_SVG.bad)+'</span>'
     +'<span><span class="r">'+rootEsc(i.name)+'</span> <span class="w">'+rootEsc(i.note)+'</span></span></div>').join('');
 }
 async function rootLoad(){
@@ -24211,12 +24273,14 @@ document.getElementById('rootGo')?.addEventListener('click',async()=>{
   if(!r){rootBanner('The request failed.','bad');return;}
   rootSteps(r.steps||[]);
   if(r.ok){
+    rootAdvice([]);
     rootBanner('Rooted — stopped at: '+r.stopped_at+'. '+(r.message||''),'good');
     toast('Rooted: '+r.stopped_at);
     rootLoad();
   }else{
     rootBanner('No route gave root. '+(r.message||''),'bad');
-    rootSet('rootOut',(r.reachable&&r.reachable.length)?('Reachable here: '+r.reachable.join(', ')):'Nothing in the catalogue is reachable here.','bad');
+    rootAdvice(r.advice||[]);
+    rootSet('rootOut','');
   }
 });
 document.getElementById('rootVerify')?.addEventListener('click',async()=>{
