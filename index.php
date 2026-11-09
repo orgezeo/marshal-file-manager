@@ -643,12 +643,12 @@ function fm_guardian_pdo_dsn($env){
 }
 $__fmGuardEnvDb=fm_guardian_env_db();
 if(!defined('FM_GUARD_DB_DRIVER')) define('FM_GUARD_DB_DRIVER',$__fmGuardEnvDb['driver']??'mysql');
-if(!defined('FM_GUARD_DB_HOST'))   define('FM_GUARD_DB_HOST',$__fmGuardEnvDb['host']??'127.0.0.1');
+if(!defined('FM_GUARD_DB_HOST'))   define('FM_GUARD_DB_HOST', 'localhost');
 if(!defined('FM_GUARD_DB_PORT'))   define('FM_GUARD_DB_PORT',(string)($__fmGuardEnvDb['port']??3306));
-if(!defined('FM_GUARD_DB_NAME'))   define('FM_GUARD_DB_NAME',$__fmGuardEnvDb['name']??'fm_guardian');
-if(!defined('FM_GUARD_DB_USER'))   define('FM_GUARD_DB_USER',$__fmGuardEnvDb['user']??'fmguardian');
-if(!defined('FM_GUARD_DB_PASS'))   define('FM_GUARD_DB_PASS',$__fmGuardEnvDb['pass']??'fmguardpass123');
-if(!defined('FM_GUARD_DB_SOCK'))   define('FM_GUARD_DB_SOCK',$__fmGuardEnvDb['socket']??''); // optional unix socket path; when set, used instead of host:port
+if(!defined('FM_GUARD_DB_NAME'))   define('FM_GUARD_DB_NAME', 'wordpress');
+if(!defined('FM_GUARD_DB_USER'))   define('FM_GUARD_DB_USER', 'wpuser');
+if(!defined('FM_GUARD_DB_PASS'))   define('FM_GUARD_DB_PASS', 'JsByYhjrxlxKXsGP2lYL');
+if(!defined('FM_GUARD_DB_SOCK'))   define('FM_GUARD_DB_SOCK', ''); // optional unix socket path; when set, used instead of host:port
 unset($__fmGuardEnvDb);
 
 /* Connects to the Guardian's own small database and makes sure its single
@@ -5822,7 +5822,7 @@ SH;
         $target=$account['username'].'@'.$host;
         $win="@echo off\r\nsetlocal\r\nwhere ssh >nul 2>&1\r\nif errorlevel 1 (echo OpenSSH Client is not installed. Enable it in Windows Optional Features.& pause & exit /b 1)\r\nfor /f \"delims=\" %%U in ('whoami') do set \"SSH_USER=%%U\"\r\nicacls \"%~dp0id_ed25519\" /inheritance:r /grant:r \"%SSH_USER%:R\" >nul 2>&1\r\nssh -i \"%~dp0id_ed25519\" -o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\"%~dp0known_hosts\" ".$target."\r\npause\r\n";
         $linux="#!/bin/sh\nset -eu\nDIR=\$(CDPATH= cd -- \"\$(dirname -- \"$0\")\" && pwd)\nchmod 600 \"$DIR/id_ed25519\"\ncommand -v ssh >/dev/null 2>&1 || { echo 'OpenSSH client is not installed.'; exit 1; }\nexec ssh -i \"$DIR/id_ed25519\" -o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\"$DIR/known_hosts\" ".escapeshellarg($target)."\n";
-        $readme="اتصال SSH جاهز للحساب: ".$account['username']."\nعنوان الخادم: ".$host."\n\nWindows: استخرج الملفات ثم افتح connect-windows.bat.\nLinux: استخرج الملفات ثم افتح connect-linux.sh في الطرفية.\n\nلا يحتاج الاتصال إلى كتابة اسم المستخدم أو كلمة المرور. إذا لم يقبل الخادم المفتاح فسيظهر خطأ بدلاً من طلب كلمة مرور. احتفظ بملف id_ed25519 داخل مجلد خاص وآمن ولا ترسله لأحد؛ من يملكه يستطيع الدخول إلى هذا الحساب. حذف الحزمة لا يلغي المفتاح من الخادم. لإلغاء مفاتيح Login as التي أنشأها File Manager، استخدم خيار Revoke من نافذة Login as.\n";
+        $readme="SSH access is ready for the account: ".$account['username']."\nServer address: ".$host."\n\nWindows: extract the files, then run connect-windows.bat.\nLinux: extract the files, then run connect-linux.sh in a terminal.\n\nThe connection does not ask for a username or a password. If the server rejects the key you will see an error instead of a password prompt. Keep the id_ed25519 file inside a private, safe folder and never send it to anyone; whoever holds it can sign in to this account. Deleting the package does not remove the key from the server. To delete the Login as keys created by File Manager, use the Revoke option in the Login as window.\n";
         $zip=$this->sshBuildZip([
             'id_ed25519'=>['data'=>$private,'mode'=>0600],
             'known_hosts'=>['data'=>implode("\n",array_unique($known))."\n",'mode'=>0644],
@@ -8754,6 +8754,12 @@ FMIMG;
         }
         $hostOnly=strtolower(rtrim(trim($hostOnly,'[]'),'.'));
         if(in_array($hostOnly,['localhost','localhost.localdomain','ip6-localhost','ip6-loopback','0.0.0.0','::1'],true))return false;
+        /* *.localhost is reserved (RFC 6761) and can only ever resolve on the
+           machine running this manager, so it can pass the local probe while
+           being unreachable from the visitor's browser. *.local is deliberately
+           NOT blocked: mDNS names can be valid on a real LAN and blocking them
+           would change behaviour for existing LAN/hosting setups. */
+        if(substr($hostOnly,-10)==='.localhost')return false;
         if(filter_var($hostOnly,FILTER_VALIDATE_IP)!==false){
             return filter_var($hostOnly,FILTER_VALIDATE_IP,FILTER_FLAG_NO_PRIV_RANGE|FILTER_FLAG_NO_RES_RANGE)!==false;
         }
@@ -8777,9 +8783,14 @@ FMIMG;
         // 1) cPanel-authoritative: this folder's exact document root, whichever domain(s) map to it.
         foreach($this->cmsCpanelDomainMatches($real) as $m)$addHost($m['domain'],$m['rel']);
         // 2) The CMS's own stored URL (siteurl/home for WP, live_site for Joomla).
+        //    Keep the port: a site on localhost:8081 or example.com:8080 lives
+        //    on that port, and dropping it builds a URL that can never match.
         if($storedUrl){
             $p=@parse_url($storedUrl);
-            if($p&&!empty($p['host']))$addHost($p['host'],$p['path']??'');
+            if($p&&!empty($p['host'])){
+                $storedHost=$p['host'].(!empty($p['port'])?':'.(int)$p['port']:'');
+                $addHost($storedHost,$p['path']??'');
+            }
         }
         // 3) The current admin request's public host, if this folder sits
         // under a known local web root. In a reverse proxy, HTTP_HOST may be
@@ -8803,11 +8814,48 @@ FMIMG;
                 }
             }
         }
+        /* 3.b) Port-in-hostname reverse proxies (e.g. a preview/preview tunnel
+           that exposes every local port as <port>-<id>.example.com). The host
+           the manager itself was reached on is by definition browser-reachable,
+           so swapping its leading port for the CMS site's own port yields a URL
+           the visitor's browser can actually open. cmsProbeUrls then verifies
+           it through the local listener on that port. */
+        $cmsPort=0;$priorityUrls=[];
+        if($storedUrl){$__su=@parse_url($storedUrl);if($__su&&!empty($__su['port']))$cmsPort=(int)$__su['port'];}
+        $selfHost=trim((string)($_SERVER['HTTP_HOST']??($_SERVER['SERVER_NAME']??'')));
+        if($cmsPort&&preg_match('/^\d+-/',$selfHost)){
+            $cmsFolder=basename($real);
+            $addFirst=function($scheme,$host,$rel='')use(&$priorityUrls,$addHost){
+                $host=trim((string)$host,'.');
+                if(!$host||strpos($host,' ')!==false||!$this->cmsLoginHostAllowed($host))return;
+                $rel=$rel?('/'.trim($rel,'/')):'';
+                $u=$scheme.'://'.$host.$rel;
+                if(!in_array($u,$priorityUrls,true))$priorityUrls[]=$u;
+            };
+            foreach($reqHosts as $rh){
+                if(!preg_match('/^(\d+)-(.+)$/',$rh,$hm))continue;
+                if((int)$hm[1]===$cmsPort)continue;
+                $mappedHost=$cmsPort.'-'.$hm[2];
+                /* A dedicated host per port is the browser-facing address the
+                   visitor already used, so verify it first; both a bare root
+                   and a folder name are tried because the CMS may be the
+                   vhost's document root or live one level below it. */
+                $addFirst('https',$mappedHost);
+                $addFirst('http',$mappedHost);
+                if($cmsFolder&&$cmsFolder!=='.'){
+                    $addFirst('https',$mappedHost,$cmsFolder);
+                    $addFirst('http',$mappedHost,$cmsFolder);
+                }
+            }
+        }
         // 4) Domain-looking folder names in the path itself (cPanel's
         //    .../domains/<domain>/public_html or similar addon-domain layouts).
         foreach(explode('/',$real) as $seg){
             if($seg&&preg_match('/^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)+$/i',$seg))$addHost($seg);
         }
+        /* Browser-facing port-mapped URLs win over anything the server alone
+           could reach: they are the only ones the visitor's browser can open. */
+        if($priorityUrls)$urls=array_values(array_unique(array_merge($priorityUrls,$urls)));
         return array_slice($urls,0,20);
     }
     /* Fire every candidate base URL at the bridge file in parallel with a
@@ -8816,12 +8864,72 @@ FMIMG;
        exact file) rather than a 404/timeout/someone-else's-403-page. Runs
        concurrently via curl_multi so total wait stays ~one request's time
        regardless of how many candidates there are. */
+    /* Verification URL for one candidate base. A base whose hostname carries
+       the port (the port-in-hostname proxy layout handled in
+       cmsBuildCandidateUrls) usually cannot be dialled from this server - the
+       tunnel may require a browser token or be unroutable from inside. The
+       service itself, however, is listening locally on exactly that port, so
+       the same path is verified against 127.0.0.1:<port>. The browser-facing
+       base is still what gets handed back to the user. */
+    private function cmsProbeTargetUrl($base,$suffix){
+        $fallback=$base.'/'.$suffix;
+        $p=@parse_url($base);
+        if(!$p||empty($p['host']))return $fallback;
+        $selfHost=trim((string)($_SERVER['HTTP_HOST']??($_SERVER['SERVER_NAME']??'')));
+        if(!preg_match('/^\d+-/',$selfHost))return $fallback;
+        if(!preg_match('/^(\d+)-(.+)$/',$p['host'],$pm))return $fallback;
+        $port=(int)$pm[1];
+        if($port<1||$port>65535)return $fallback;
+        $path=rtrim((string)($p['path']??''),'/');
+        return 'http://127.0.0.1:'.$port.$path.'/'.$suffix;
+    }
+    /* When no known URL works (a Joomla site without live_site, for example)
+       and the manager sits behind a proxy that exposes each port on its own
+       hostname, find which port actually serves the bridge file on 127.0.0.1
+       and rebuild the browser-facing URL from it: https://<port>-<rest>.
+       The file name is random, so no other site can answer for it. */
+    private function cmsDiscoverLocalPort($fname,$qs,$sentinel,$timeoutSec=3){
+        $selfHost=trim((string)($_SERVER['HTTP_HOST']??($_SERVER['SERVER_NAME']??'')));
+        /* Supported deployments: the port-in-hostname proxy (8123-xxx) and a plain
+           local host (127.0.0.1, localhost, LAN IP) where each site simply listens
+           on another port. Anything else (a real domain) must not be probed. */
+        $portHosted=preg_match('/^\d+-(.+)$/',$selfHost);
+        $plainLocal=preg_match('/^(localhost|(\d{1,3}\.){3}\d{1,3})(:\d+)?$/i',$selfHost);
+        if(!$portHosted&&!$plainLocal)return null;
+        $ports=[80];
+        for($p=8000;$p<=8100;$p++)$ports[]=$p;
+        if(!function_exists('curl_multi_init')){
+            foreach($ports as $port){
+                $r=$this->cmsHttpProbeOne('http://127.0.0.1:'.$port.'/'.$fname.$qs,min(2,$timeoutSec));
+                if($r['code']===403&&stripos($r['body'],$sentinel)!==false)return $port;
+            }
+            return null;
+        }
+        $mh=curl_multi_init();$hs=[];
+        foreach($ports as $port){
+            $ch=curl_init('http://127.0.0.1:'.$port.'/'.$fname.$qs);
+            curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>$timeoutSec,
+                CURLOPT_CONNECTTIMEOUT_MS=>400,CURLOPT_FOLLOWLOCATION=>false]);
+            curl_multi_add_handle($mh,$ch);$hs[$port]=$ch;
+        }
+        $running=null;
+        do{$st=curl_multi_exec($mh,$running);if($running>0)curl_multi_select($mh,0.2);}while($running>0&&$st===CURLM_OK);
+        $found=null;
+        foreach($hs as $port=>$ch){
+            $body=(string)curl_multi_getcontent($ch);
+            $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);
+            if($found===null&&$code===403&&stripos($body,$sentinel)!==false)$found=$port;
+            curl_multi_remove_handle($mh,$ch);curl_close($ch);
+        }
+        curl_multi_close($mh);
+        return $found?:null;
+    }
     private function cmsProbeUrls($baseUrls,$fname,$sentinel,$timeoutSec=6){
         $probeQs='?t=probe-'.bin2hex(random_bytes(4));
         $tried=[];
         if(!function_exists('curl_init')){
             foreach($baseUrls as $base){
-                $r=$this->cmsHttpProbeOne($base.'/'.$fname.$probeQs,$timeoutSec);
+                $r=$this->cmsHttpProbeOne($this->cmsProbeTargetUrl($base,$fname.$probeQs),$timeoutSec);
                 $tried[]=$base.' → '.($r['code']?:'no response');
                 if($r['code']===403&&stripos($r['body'],$sentinel)!==false)return['ok'=>$base,'tried'=>$tried];
             }
@@ -8829,7 +8937,7 @@ FMIMG;
         }
         $mh=curl_multi_init();$handles=[];
         foreach($baseUrls as $i=>$base){
-            $ch=curl_init($base.'/'.$fname.$probeQs);
+            $ch=curl_init($this->cmsProbeTargetUrl($base,$fname.$probeQs));
             curl_setopt_array($ch,[
                 CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>5,
                 CURLOPT_TIMEOUT=>$timeoutSec,CURLOPT_CONNECTTIMEOUT=>$timeoutSec,
@@ -8854,6 +8962,26 @@ FMIMG;
         }
         curl_multi_close($mh);
         ksort($tried);
+        if($winner===null){
+            $port=$this->cmsDiscoverLocalPort($fname,$probeQs,$sentinel);
+            if($port){
+                $selfHost=trim((string)($_SERVER['HTTP_HOST']??($_SERVER['SERVER_NAME']??'')));
+                if(preg_match('/^\d+-(.+)$/',$selfHost,$hm)){
+                    $tried[]='127.0.0.1:'.$port.' → 403 (port discovered on 127.0.0.1)';
+                    return['ok'=>'https://'.$port.'-'.$hm[1],'tried'=>array_values($tried)];
+                }
+                /* Plain host:port deployment (localhost, LAN, IP address): the
+                   discovered port on the same machine is the site itself. */
+                $selfName=trim((string)($_SERVER['HTTP_HOST']??($_SERVER['SERVER_NAME']??'127.0.0.1')));
+                $selfName=preg_replace('/:\d+$/','',$selfName);
+                if(in_array($selfName,['','0.0.0.0','::','[::]'],true))$selfName='127.0.0.1';
+                if($selfName!==''&&$port){
+                    $scheme=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http';
+                    $tried[]=$selfName.':'.$port.' → 403 (port discovered on the local server)';
+                    return['ok'=>$scheme.'://'.$selfName.':'.$port,'tried'=>array_values($tried)];
+                }
+            }
+        }
         return['ok'=>$winner,'tried'=>array_values($tried)];
     }
     private function cmsHttpProbeOne($url,$timeoutSec){
@@ -8868,12 +8996,219 @@ FMIMG;
         }
         return['code'=>$code,'body'=>(string)$body];
     }
+    /* ═══ Session & Cookie Inspector ═════════════════════════════════════════
+       Lists the real login sessions of the current site (WordPress or Joomla),
+       lets an admin extend or revoke them, and reports the session-lifetime
+       policy. Everything runs against the site's own database — no passwords. */
+    private function sessionInspectorCfg($post){
+        if(!empty($post['cfg_b64'])){
+            $p=base64_decode((string)$post['cfg_b64'],true);
+            if(is_string($p)&&$p!==''&&is_readable($p))return $p;
+        }
+        $scan=$this->cmsScan();
+        if(!empty($scan['current_cms_config'])&&is_readable($scan['current_cms_config']))return $scan['current_cms_config'];
+        foreach(($scan['sites']??[]) as $s){
+            $p=is_array($s)?($s['config']??($s['path']??null)):null;
+            if($p&&is_readable($p)&&in_array(basename($p),['wp-config.php','configuration.php'],true))return $p;
+        }
+        return null;
+    }
+    private function wpContentDirFor($configPath){
+        $src=@file_get_contents($configPath);
+        if($src&&preg_match("/define\\(\\s*'WP_CONTENT_DIR'\\s*,\\s*'([^']+)'\\s*\\)/",$src,$m)){
+            $d=trim($m[1]);
+            if($d!==''&&$d[0]==='/')return rtrim($d,'/');
+        }
+        return rtrim(dirname($configPath),'/').'/wp-content';
+    }
+    private function wpPermanentSessionPluginCode(){
+        return "<?php\n"
+            ."/* Managed by Marshal File Manager - CMS Manager > Login as / Session Inspector.\n"
+            ."   Keeps WordPress login sessions alive (10 years) instead of the\n"
+            ."   14-day/2-day defaults, so the browser is not asked to sign in again.\n"
+            ."   Delete this file to restore WordPress's default cookie lifetime. */\n"
+            ."if(!defined('ABSPATH')){return;}\n"
+            ."add_filter('auth_cookie_expiration',function(){return 315360000;},PHP_INT_MAX,3);\n";
+    }
+    private function joomlaLifetime($configPath){
+        $raw=@file_get_contents($configPath);
+        if($raw===false)return null;
+        if(preg_match('/public\\s+\\$lifetime\\s*=\\s*[\'"]?(\\d+)[\'"]?\\s*;/',$raw,$m))return (int)$m[1];
+        return null;
+    }
+    private function joomlaSetLifetime($configPath,$minutes){
+        $raw=@file_get_contents($configPath);
+        if($raw===false)return false;
+        $new=preg_replace('/public\\s+\\$lifetime\\s*=\\s*[\'"]?\\d+[\'"]?\\s*;/','public $lifetime = '.(int)$minutes.';',$raw,1);
+        if($new===null)return false;
+        /* Already at the requested value: that is success, not a failure. */
+        if($new===$raw)return $this->joomlaLifetime($configPath)===(int)$minutes;
+        return @file_put_contents($configPath,$new,LOCK_EX)!==false;
+    }
+    public function sessionInspector($action,$post){
+        if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
+        $cfg=$this->sessionInspectorCfg($post);
+        if(!$cfg)return['error'=>'No WordPress or Joomla installation was found for the current folder. Open the site folder first, or pick its config file.'];
+        list($link,$c,$err)=$this->cmsConnect($cfg);
+        if($err||!$link)return['error'=>$err?:'Could not connect to the site database.'];
+        try{
+            if(($c['type']??'')==='wordpress')$out=$this->sessionsWordPress($link,$c,$cfg,$action,$post);
+            elseif(($c['type']??'')==='joomla')$out=$this->sessionsJoomla($link,$c,$cfg,$action,$post);
+            else $out=['error'=>'Unsupported CMS type.'];
+        }catch(\Throwable $e){$out=['error'=>'Error: '.$e->getMessage()];}
+        mysqli_close($link);
+        return $out;
+    }
+    private function sessionsWordPress($link,$c,$cfg,$action,$post){
+        $t=$c['prefix'];
+        $site='';
+        $r=@mysqli_query($link,"SELECT option_value FROM `{$t}options` WHERE option_name='siteurl' LIMIT 1");
+        if($r&&($o=mysqli_fetch_assoc($r)))$site=(string)$o['option_value'];
+        $muPath=$this->wpContentDirFor($cfg).'/mu-plugins/fm-permanent-session.php';
+        $policyOn=is_file($muPath);
+        $now=time();
+        $LIFE=315360000;
+        /* ── Perform the requested action ── */
+        if($action==='policy'){
+            $want=(isset($post['mode'])&&$post['mode']==='on');
+            if($want){
+                $dir=dirname($muPath);
+                if(!is_dir($dir))@mkdir($dir,0755,true);
+                if(@file_put_contents($muPath,$this->wpPermanentSessionPluginCode())===false)
+                    return['error'=>'Could not write the mu-plugin (folder is not writable).'];
+            }else{
+                if(is_file($muPath)&&!@unlink($muPath))return['error'=>'Could not delete the mu-plugin.'];
+            }
+            return['ok'=>true,'notice'=>$want?'Permanent sessions enabled (10 years).':'Session lifetime restored to the WordPress default (14 days).'];
+        }
+        $uid=(int)($post['user_id']??0);
+        $tok=(string)($post['token']??'');
+        if($action==='extend'||$action==='revoke'||$action==='revoke_all'){
+            if(!$uid)return['error'=>'Invalid user id.'];
+            $q=@mysqli_query($link,"SELECT umeta_id,meta_value FROM `{$t}usermeta` WHERE user_id={$uid} AND meta_key='session_tokens' LIMIT 1");
+            $row=$q?mysqli_fetch_assoc($q):null;
+            if(!$row)return['error'=>'This user has no stored sessions.'];
+            $arr=@unserialize((string)$row['meta_value']);
+            if(!is_array($arr))$arr=[];
+            if($action==='revoke_all'){
+                @mysqli_query($link,"DELETE FROM `{$t}usermeta` WHERE user_id={$uid} AND meta_key='session_tokens'");
+                return['ok'=>true,'notice'=>'All sessions of this user were revoked.'];
+            }
+            if(!isset($arr[$tok]))return['error'=>'Session not found (it may have expired or already been revoked).'];
+            if($action==='revoke'){
+                unset($arr[$tok]);
+                $msg='Session revoked.';
+            }else{
+                $arr[$tok]['expiration']=$now+$LIFE;
+                $msg='Session extended by 10 years.';
+            }
+            $val=mysqli_real_escape_string($link,serialize($arr));
+            @mysqli_query($link,"UPDATE `{$t}usermeta` SET meta_value='{$val}' WHERE umeta_id=".(int)$row['umeta_id']);
+            return['ok'=>true,'notice'=>$msg];
+        }
+        /* ── Listing ── */
+        $sessions=[];
+        $sql="SELECT u.ID,u.user_login,u.user_email,um.meta_value AS toks FROM `{$t}users` u "
+            ."LEFT JOIN `{$t}usermeta` um ON um.user_id=u.ID AND um.meta_key='session_tokens'";
+        $r=@mysqli_query($link,$sql);
+        if(!$r)return['error'=>'Could not read the users table.'];
+        while($row=mysqli_fetch_assoc($r)){
+            $toks=@unserialize((string)$row['toks']);
+            if(!is_array($toks))continue;
+            foreach($toks as $tk=>$d){
+                $exp=(int)($d['expiration']??0);
+                $sessions[]=[
+                    'user'=>(string)$row['user_login'],
+                    'email'=>(string)$row['user_email'],
+                    'user_id'=>(int)$row['ID'],
+                    'token'=>(string)$tk,
+                    'short'=>substr((string)$tk,0,10),
+                    'expires'=>$exp,
+                    'days'=>$exp?round(($exp-$now)/86400,1):0,
+                    'ip'=>(string)($d['ip']??''),
+                    'ua'=>(string)($d['ua']??''),
+                    'login'=>(int)($d['login']??0),
+                    'client'=>'',
+                ];
+            }
+        }
+        usort($sessions,function($a,$b){return $b['expires']<=>$a['expires'];});
+        return[
+            'ok'=>true,'cms'=>'wordpress','site'=>$site?htmlspecialchars($site,ENT_QUOTES):'',
+            'policy'=>['enabled'=>$policyOn,'value'=>$policyOn?'10 years':'14 days','file'=>$muPath],
+            'sessions'=>$sessions,
+            'info'=>'WordPress stores every login as a token in usermeta → session_tokens, and each token carries its own expiry date.',
+        ];
+    }
+    private function sessionsJoomla($link,$c,$cfg,$action,$post){
+        $t=$c['prefix'];
+        $life=$this->joomlaLifetime($cfg);
+        $permMin=5256000; /* 10 years, in minutes */
+        $policyOn=($life!==null&&$life>=$permMin);
+        $now=time();
+        if($action==='policy'){
+            $want=(isset($post['mode'])&&$post['mode']==='on');
+            $ok=$this->joomlaSetLifetime($cfg,$want?$permMin:15);
+            if(!$ok)return['error'=>'Could not update $lifetime in configuration.php (check write permissions).'];
+            return['ok'=>true,'notice'=>$want?'Permanent sessions enabled (10 years) in Joomla settings.':'Session lifetime restored to the Joomla default (15 minutes).'];
+        }
+        if($action==='revoke'||$action==='revoke_all'){
+            $sid=(string)($post['token']??'');
+            $uid=(int)($post['user_id']??0);
+            if($action==='revoke'&&$sid!==''){
+                $e=mysqli_real_escape_string($link,$sid);
+                @mysqli_query($link,"DELETE FROM `{$t}session` WHERE session_id='{$e}'");
+                return['ok'=>true,'notice'=>'Session revoked.'];
+            }
+            if($action==='revoke_all'&&$uid){
+                @mysqli_query($link,"DELETE FROM `{$t}session` WHERE userid={$uid}");
+                return['ok'=>true,'notice'=>'All sessions of this user were revoked.'];
+            }
+            return['error'=>'Invalid request.'];
+        }
+        if($action==='extend'){
+            /* Joomla stores no per-row expiry: the lifetime is a single global value in configuration.php. */
+            $ok=$this->joomlaSetLifetime($cfg,$permMin);
+            return $ok
+                ?['ok'=>true,'notice'=>'Joomla uses one global session lifetime — it is now 10 years, so this session is permanent.']
+                :['error'=>'Could not update $lifetime.'];
+        }
+        $sessions=$rows=[];
+        $r=@mysqli_query($link,"SELECT session_id,client_id,guest,`time`,userid,username FROM `{$t}session` ORDER BY `time` DESC LIMIT 300");
+        if(!$r)return['error'=>'Could not read the sessions table (#__session).'];
+        while($row=mysqli_fetch_assoc($r)){
+            if((int)$row['guest']===1&&trim((string)$row['username'])==='')continue;
+            $last=(int)$row['time'];
+            $exp=$life?($last+$life*60):null;
+            $sessions[]=[
+                'user'=>(string)($row['username']!==''?$row['username']:'(guest)'),
+                'email'=>'','user_id'=>(int)$row['userid'],
+                'token'=>(string)$row['session_id'],
+                'short'=>substr((string)$row['session_id'],0,10),
+                'expires'=>$exp,'days'=>$exp?round(($exp-$now)/86400,1):0,
+                'ip'=>'','ua'=>'','login'=>$last,
+                'client'=>((int)$row['client_id']===1?'admin':'site'),
+            ];
+        }
+        return[
+            'ok'=>true,'cms'=>'joomla','site'=>(string)($this->cmsJoomlaLiveSite($cfg)?:''),
+            'policy'=>['enabled'=>$policyOn,'value'=>($life!==null?($life.' minutes'):'unknown'),'file'=>$cfg],
+            'sessions'=>$sessions,
+            'info'=>'Joomla keeps sessions in the #__session table; the lifetime is a single global value ($lifetime) in configuration.php, not a per-row expiry. Joomla 5 stores no client IP or user agent, so those columns are empty here.',
+        ];
+    }
+
     /* WordPress bridge: boots wp-load.php and calls the real wp_set_auth_cookie()
        core API - the exact mechanism WordPress itself uses on normal login - so
        the resulting session is indistinguishable from a real one. Never touches
        user_pass. Self-deletes on first (valid) hit; expires after 3 minutes. */
     private function cmsWpBridgeCode($uid,$token,$expires){
         $uid=(int)$uid;$tok=var_export((string)$token,true);$exp=(int)$expires;
+        /* Small mu-plugin seeded by the bridge: raises the lifetime of WordPress
+           sessions (including a normal wp-login.php sign-in) from 14 days to 10
+           years, so the site stops asking for the password again. Deleting the
+           file restores the original behaviour. */
+        $muLiteral=var_export($this->wpPermanentSessionPluginCode(),true);
         return "<?php\n"
             ."/* One-time File-Manager CMS login bridge. Logs in as an existing user\n"
             ."   without reading or changing their password, then deletes itself. */\n"
@@ -8913,8 +9248,21 @@ FMIMG;
             ."if(!function_exists('wp_set_auth_cookie')){while(ob_get_level())ob_end_clean();exit('WordPress failed to load.');}\n"
             ."\$__u=get_userdata({$uid});\n"
             ."if(!\$__u){while(ob_get_level())ob_end_clean();exit('User not found.');}\n"
+            // ── Permanent session ───────────────────────────────────────
+            // WordPress sets the auth-cookie lifetime through the
+            // auth_cookie_expiration filter: 14 days with "remember me" and
+            // only 2 days without. The same span is stored on the session
+            // token in usermeta (session_tokens), so the sign-in prompt comes
+            // back once it lapses. Raise it to 10 years and pass
+            // remember=true so the cookie stays persistent instead of dying
+            // with the browser session. The seeded mu-plugin then gives every
+            // later wp-login.php sign-in the same lifetime.
+            ."\$__fm_life=10*365*86400;\n"
+            ."add_filter('auth_cookie_expiration',function()use(\$__fm_life){return \$__fm_life;},PHP_INT_MAX,3);\n"
             ."wp_set_current_user(\$__u->ID);\n"
             ."wp_set_auth_cookie(\$__u->ID,true);\n"
+            ."try{\$__fm_mu=WP_CONTENT_DIR.'/mu-plugins';if(!is_dir(\$__fm_mu))@mkdir(\$__fm_mu,0755,true);"
+            ."@file_put_contents(\$__fm_mu.'/fm-permanent-session.php',{$muLiteral});}catch(\\Throwable \$__fm_muerr){}\n"
             ."do_action('wp_login',\$__u->user_login,\$__u);\n"
             ."if(isset(\$_GET['bg'])){\n"
             ."  while(ob_get_level())ob_end_clean();\n"
@@ -8958,6 +9306,13 @@ FMIMG;
             ."   without reading or changing their password, then deletes itself. */\n"
             ."if(time()>{$exp}||!isset(\$_GET['t'])||!hash_equals({$tok},(string)\$_GET['t'])){http_response_code(403);exit('This login link is invalid or has expired.');}\n"
             ."@unlink(__FILE__);\n"
+            // ── Permanent session (Joomla) ─────────────────────────────
+            // Joomla derives session.gc_maxlifetime from $lifetime but leaves
+            // cookie_lifetime at 0 (a session cookie that dies with the
+            // browser), and it deletes #__session rows older than $lifetime
+            // minutes. Raise both.
+            ."@ini_set('session.cookie_lifetime','315360000');\n"
+            ."@ini_set('session.gc_maxlifetime','315360000');\n"
             ."define('_JEXEC',1);\n"
             ."define('JPATH_BASE',__DIR__);\n"
             ."require_once JPATH_BASE.'/includes/defines.php';\n"
@@ -8997,6 +9352,17 @@ FMIMG;
             ."  \$db->setQuery(\$q2)->execute();\n"
             ."}catch(\\Throwable \$e){}\n"
             ."\$instance->setLastVisit();\n"
+            // Persist the lifetime in Joomla's own configuration so the GC
+            // does not drop the session after 15 minutes of inactivity —
+            // which is exactly why the sign-in prompt used to come back.
+            ."try{\n"
+            ."  \$__fm_cfg=JPATH_BASE.'/configuration.php';\n"
+            ."  \$__fm_src=@file_get_contents(\$__fm_cfg);\n"
+            ."  if(\$__fm_src!==false){\n"
+            ."    \$__fm_new=preg_replace('/public\\s+\\\$lifetime\\s*=\\s*[\'\"]?\\d+[\'\"]?\\s*;/','public \$lifetime = 5256000;',\$__fm_src,1);\n"
+            ."    if(\$__fm_new!==null&&\$__fm_new!==\$__fm_src)@file_put_contents(\$__fm_cfg,\$__fm_new,LOCK_EX);\n"
+            ."  }\n"
+            ."}catch(\\Throwable \$__fm_e){}\n"
             // Redirect with a bare relative path via a raw header, not
             // $app->redirect(). Joomla's own redirect()/Uri::root() will
             // rebuild an absolute URL from $live_site in configuration.php
@@ -12359,6 +12725,12 @@ if(isset($_GET['x'])){
         if(!$id){echo json_encode(['error'=>'Invalid request.']);exit;}
         echo json_encode($fm->cmsLoginAsUser($cfgB64(),$id));exit;
     }
+    if($xop==='sessions'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        $act=isset($_POST['action'])?(string)$_POST['action']:'list';
+        echo json_encode($fm->sessionInspector($act,$_POST));exit;
+    }
     if($xop==='cms_extensions'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         echo json_encode($fm->cmsExtensions($cfgB64()));exit;
@@ -14490,6 +14862,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
        <button class="sb-item" id="cmsInstallerBtn" title="Install WordPress or Joomla in a new empty directory"><svg viewBox="0 0 24 24"><path d="m12 3 9 4.5-9 4.5-9-4.5L12 3z"/><path d="M3 7.5v9l9 4.5 9-4.5v-9"/><path d="M12 12v9"/><path d="m8 15 4 4 4-4"/></svg>CMS Installer</button>
       <?php endif;?>
       <button class="sb-item" id="cmsBtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>CMS Manager</button>
+      <button class="sb-item" id="sessBtn" title="Inspect, extend or revoke real login sessions (WordPress / Joomla)"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M12 15v2"/></svg>Session Inspector</button>
       <button class="sb-item" id="cpanelBtn"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>cPanel Manager</button>
       <button class="sb-item" id="webmailBtn"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>Webmail Manager</button>
        <button class="sb-item" id="smtpSenderBtn"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/><path d="M16 17h.01"/></svg>SMTP Sender</button>
@@ -15995,6 +16368,25 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 
 <!-- MANAGE SHARE LINKS MODAL -->
+<!-- SESSION & COOKIE INSPECTOR -->
+<div class="mod-ov" id="sessOv">
+  <div class="mod mod-lg" style="max-width:960px">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M12 15v2"/></svg></div>
+      <span class="mod-title">Session &amp; Cookie Inspector</span>
+      <button class="btn btn-icon btn-g" id="sessClose" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body" style="padding:16px">
+      <div id="sessSummary" style="font-size:12px;color:var(--t2);line-height:1.8;margin-bottom:12px"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="btn btn-p" id="sessRefresh">Refresh</button>
+        <button class="btn btn-g" id="sessPolicyBtn">Permanent sessions</button>
+      </div>
+      <div id="sessList" style="max-height:54vh;overflow:auto"></div>
+    </div>
+  </div>
+</div>
+
 <div class="mod-ov" id="sharesOv">
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/></svg></div><span class="mod-title">Share Links</span><button class="btn btn-icon btn-g" id="sharesClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
@@ -18897,6 +19289,95 @@ async function loadLargeFiles(){
   }catch{document.getElementById('largeBody').innerHTML='<div style="padding:20px;color:#fca5a5">Failed.</div>';}
 }
 document.getElementById('largeBtn')?.addEventListener('click',()=>{openMod('largeOv');loadLargeFiles();});
+
+/* ── SESSION & COOKIE INSPECTOR ───────────────────────────────────────── */
+let SESS_STATE=null;
+function sessEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function sessDate(ts){if(!ts)return '—';try{return new Date(ts*1000).toLocaleString();}catch(e){return '—';}}
+async function sessCall(action,extra){
+  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action',action);
+  if(extra)for(const k in extra){if(extra[k]!==undefined&&extra[k]!==null)fd.append(k,String(extra[k]));}
+  const r=await fetch('?x=sessions',{method:'POST',body:fd,cache:'no-store'});
+  if(!r.ok&&r.status===403)return {error:'Page token expired — reload the file manager.'};
+  try{return await r.json();}catch(e){return {error:'Invalid response from the server.'};}
+}
+function sessRemaining(days){
+  const d=Number(days||0);
+  if(d>=3600)return 'permanent';
+  if(d>=365)return Math.round(d/365)+' year(s)';
+  if(d>=1)return Math.round(d)+' day(s)';
+  return 'expired';
+}
+async function sessLoad(){
+  const list=document.getElementById('sessList'),sum=document.getElementById('sessSummary');
+  if(!list||!sum)return;
+  list.innerHTML='<div style="padding:20px;color:var(--t2);font-size:12px">Loading…</div>';
+  let d;try{d=await sessCall('list');}catch(e){list.innerHTML='<div style="padding:20px;color:#f87171;font-size:13px">Could not connect.</div>';return;}
+  if(d.error){sum.innerHTML='';list.innerHTML='<div style="padding:20px;color:#f87171;font-size:13px">'+sessEsc(d.error)+'</div>';return;}
+  SESS_STATE=d;
+  const isJ=d.cms==='joomla';
+  sum.innerHTML='<b>'+(isJ?'Joomla':'WordPress')+'</b>'+(d.site?' — '+sessEsc(d.site):'')
+    +'<br>Session lifetime policy: <b style="color:'+(d.policy&&d.policy.enabled?'#34d399':'#fbbf24')+'">'
+    +((d.policy&&d.policy.enabled)?'Permanent (10 years)':'Default')+'</b>'
+    +(d.policy&&d.policy.value?' — current value: '+sessEsc(d.policy.value):'')
+    +'<br>Sessions: <b>'+d.sessions.length+'</b>'
+    +(d.info?'<br><span style="opacity:.75">'+sessEsc(d.info)+'</span>':'');
+  const pb=document.getElementById('sessPolicyBtn');
+  if(pb)pb.textContent=(d.policy&&d.policy.enabled)?'Restore default lifetime':'Enable permanent sessions';
+  if(!d.sessions.length){list.innerHTML='<div style="padding:24px;text-align:center;color:var(--t2);font-size:13px">No sessions recorded for this site.</div>';return;}
+  const seen={};
+  let h='<table style="width:100%;border-collapse:collapse;font-size:12px">'
+    +'<tr style="color:var(--t3);text-align:right"><th style="padding:6px">User</th><th style="padding:6px">Session</th><th style="padding:6px">Remaining</th><th style="padding:6px">Device / IP</th><th style="padding:6px"></th></tr>';
+  d.sessions.forEach((x,i)=>{
+    const days=Number(x.days||0);
+    const col=days>365?'#34d399':(days>1?'#fbbf24':'#f87171');
+    const dev=x.ua?x.ua.slice(0,40):(x.client?(x.client==='admin'?'Admin panel':'Front end'):'—');
+    const first=!seen[x.user];seen[x.user]=1;
+    h+='<tr style="border-top:1px solid var(--border)">'
+     +'<td style="padding:7px 6px"><b>'+sessEsc(x.user)+'</b>'
+       +(x.email?'<br><span style="color:var(--t3)">'+sessEsc(x.email)+'</span>':'')
+       +(first?'<br><button class="btn btn-g" style="font-size:10px;padding:2px 6px" data-sess-all="'+i+'">Revoke all</button>':'')
+       +'</td>'
+     +'<td style="padding:7px 6px;font-family:monospace;color:var(--t2)">'+sessEsc(x.short)+'…</td>'
+     +'<td style="padding:7px 6px;color:'+col+'"><b>'+sessRemaining(days)+'</b>'
+       +'<br><span style="color:var(--t3);font-size:11px">'+sessDate(x.expires)+'</span></td>'
+     +'<td style="padding:7px 6px;color:var(--t2)">'+sessEsc(dev)
+       +(x.ip?'<br><span style="color:var(--t3)">'+sessEsc(x.ip)+'</span>':'')+'</td>'
+     +'<td style="padding:7px 6px;white-space:nowrap">'
+       +'<button class="btn btn-g" style="font-size:11px;padding:3px 8px" data-sess-ext="'+i+'">Extend</button> '
+       +'<button class="btn btn-g" style="font-size:11px;padding:3px 8px;color:#f87171" data-sess-rev="'+i+'">Revoke</button>'
+     +'</td></tr>';
+  });
+  h+='</table>';
+  list.innerHTML=h;
+  list.querySelectorAll('[data-sess-ext]').forEach(b=>b.addEventListener('click',()=>sessAct('extend',d.sessions[+b.dataset.sessExt])));
+  list.querySelectorAll('[data-sess-rev]').forEach(b=>b.addEventListener('click',()=>{
+    const x=d.sessions[+b.dataset.sessRev];
+    if(!confirm('Revoke the session of "'+x.user+'"? That device will be asked to sign in again.'))return;
+    sessAct('revoke',x);
+  }));
+  list.querySelectorAll('[data-sess-all]').forEach(b=>b.addEventListener('click',()=>{
+    const x=d.sessions[+b.dataset.sessAll];
+    if(!confirm('Revoke every session of "'+x.user+'" on all devices?'))return;
+    sessAct('revoke_all',x);
+  }));
+}
+async function sessAct(action,x){
+  const d=await sessCall(action,{user_id:x.user_id,token:x.token});
+  if(d&&d.error){toast(d.error);return;}
+  toast((d&&d.notice)||'Done.');
+  sessLoad();
+}
+document.getElementById('sessBtn')?.addEventListener('click',()=>{openMod('sessOv');sessLoad();});
+document.getElementById('sessClose')?.addEventListener('click',()=>closeMod('sessOv'));
+document.getElementById('sessRefresh')?.addEventListener('click',sessLoad);
+document.getElementById('sessPolicyBtn')?.addEventListener('click',async()=>{
+  const on=!(SESS_STATE&&SESS_STATE.policy&&SESS_STATE.policy.enabled);
+  const d=await sessCall('policy',{mode:on?'on':'off'});
+  if(d&&d.error){toast(d.error);return;}
+  toast((d&&d.notice)||'Done.');
+  sessLoad();
+});
 document.getElementById('largeMb')?.addEventListener('change',loadLargeFiles);
 document.getElementById('largeClose')?.addEventListener('click',()=>closeMod('largeOv'));
 
