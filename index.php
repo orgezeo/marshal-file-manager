@@ -46,6 +46,23 @@ $scriptName = basename(__FILE__);
 $usersFile  = __DIR__ . '/.users.json';
 $themeFile  = __DIR__ . '/.theme.json';
 function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);return (is_array($d)&&isset($d['theme'])&&$d['theme']==='light')?'light':'dark';}
+/* One owner cell: the account name, its home directory, and a soft green
+   tint when the account is the one running this manager. */
+function fm_owner_cell($info){
+    $name=(string)($info['owner']??'');
+    $home=(string)($info['home']??'');
+    if($name===''){
+        return '<td class="col-owner col-owner-td"><span class="own-cell"><span class="own-name">unknown</span></span></td>';
+    }
+    $mine=!empty($info['mine']);
+    $title='Owner: '.$name.($home!==''?' · home '.$home:'').' — click to change';
+    $e=function($v){return htmlspecialchars((string)$v,ENT_QUOTES|ENT_HTML5);};
+    return '<td class="col-owner col-owner-td">'
+        .'<span class="own-cell'.($mine?' own-mine':'').'" data-own="'.$e($name).'" title="'.$e($title).'">'
+        .'<span class="own-name">'.$e($name).($mine?'<span class="own-me">you</span>':'').'</span>'
+        .'<span class="own-home">'.$e($home!==''?$home:'no home directory').'</span>'
+        .'</span></td>';
+}
 function fm_save_theme($f,$t){$t=($t==='light')?'light':'dark';@file_put_contents($f,json_encode(['theme'=>$t]));return $t;}
 $currentTheme = fm_get_theme($themeFile);
 
@@ -4486,6 +4503,708 @@ class FileManager {
         }
         return true;
     }
+    /* ── Ownership ────────────────────────────────────────────────────────────
+       fileowner() only gives a uid, so the name, the home directory and the
+       group are resolved here. "mine" means the account running this manager,
+       which is what the file list colours differently. */
+    private $ownNameCache=[];
+    public function uidName($uid){
+        $uid=(int)$uid;
+        if(isset($this->ownNameCache[$uid]))return $this->ownNameCache[$uid];
+        $u=function_exists('posix_getpwuid')?@posix_getpwuid($uid):null;
+        return $this->ownNameCache[$uid]=($u?$u['name']:'#'.$uid);
+    }
+    public function managerAccount(){
+        static $name=null;
+        if($name!==null)return $name;
+        if(function_exists('posix_geteuid')){$u=@posix_getpwuid(@posix_geteuid());if($u)return $name=$u['name'];}
+        $n=function_exists('get_current_user')?@get_current_user():'';
+        return $name=($n!==''?$n:'unknown');
+    }
+    public function pathOwner($path){
+        $out=['path'=>(string)$path,'exists'=>@file_exists($path),'owner'=>null,'group'=>null,'home'=>'','uid'=>null,'gid'=>null,'mine'=>false];
+        if(!$out['exists'])return $out;
+        $uid=@fileowner($path);$gid=@filegroup($path);
+        if($uid!==false){$out['uid']=(int)$uid;$out['owner']=$this->uidName($uid);}
+        if($gid!==false){
+            $out['gid']=(int)$gid;
+            $g=function_exists('posix_getgrgid')?@posix_getgrgid($gid):null;
+            $out['group']=$g?($g['name']??('#'.$gid)):('#'.$gid);
+        }
+        if($out['owner']!==null&&function_exists('posix_getpwnam')){
+            $pw=@posix_getpwnam($out['owner']);
+            if($pw)$out['home']=(string)($pw['dir']??'');
+        }
+        $out['mine']=($out['owner']!==null&&$out['owner']===$this->managerAccount());
+        return $out;
+    }
+    /* Every account on the machine, with the two that matter flagged. */
+    public function systemOwners(){
+        $list=[];
+        $raw=@file('/etc/passwd',FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES);
+        if(is_array($raw))foreach($raw as $line){
+            $p=explode(':',$line);
+            if(count($p)<7)continue;
+            $list[]=['name'=>$p[0],'uid'=>(int)$p[2],'gid'=>(int)$p[3],'home'=>$p[5],'shell'=>$p[6]];
+        }
+        $manager=$this->managerAccount();
+        $siteUser=null;
+        foreach(['wordpress','joomla'] as $type){
+            $cfg=$this->privSiteConfigFor($type);
+            if(!$cfg)continue;
+            $root=$type==='wordpress'?rtrim($this->wpSiteRoot($cfg),'/'):rtrim(dirname($cfg),'/');
+            $ping=$this->privOp('ping',['path'=>$root.'/index.php'],$root.'/index.php',$type);
+            if(!empty($ping['ok'])&&!empty($ping['user'])){$siteUser=(string)$ping['user'];break;}
+        }
+        foreach($list as $i=>$u){
+            $list[$i]['is_manager']=($u['name']===$manager);
+            $list[$i]['is_site']=($siteUser!==null&&$u['name']===$siteUser);
+            $list[$i]['system']=((int)$u['uid']<1000&&(int)$u['uid']!==0);
+        }
+        return['manager'=>$manager,'site'=>$siteUser,'owners'=>$list];
+    }
+    /* sudo is only ever tried after both normal routes failed, and only when the
+       account may already run sudo without a password. */
+    private function sudoAvailable(){
+        static $ok=null;
+        if($ok!==null)return $ok;
+        if(!function_exists('exec'))return $ok=false;
+        $disabled=array_map('trim',explode(',',(string)ini_get('disable_functions')));
+        if(in_array('exec',$disabled,true))return $ok=false;
+        $out=[];$rc=1;
+        @exec('sudo -n true 2>/dev/null',$out,$rc);
+        return $ok=($rc===0);
+    }
+    /* Ownership changes are never allowed on the machine's own files. The
+       manager may browse anywhere, but handing /etc to another account would
+       break the server, so those locations are refused before any route is
+       tried — locally, through the site, or with sudo. */
+    private function ownBlocked($path){
+        $rp=@realpath($path);
+        if($rp===false||$rp==='/')return 'That location cannot be handed to another account.';
+        $rp=str_replace('\\','/',$rp);
+        $blocked=['/etc','/bin','/sbin','/lib','/lib32','/lib64','/libx32','/usr','/boot','/proc','/sys','/dev','/root','/run','/snap','/var/lib','/var/spool','/var/cache','/var/log'];
+        foreach($blocked as $b){
+            if($rp===$b||strpos($rp,$b.'/')===0)return $rp.' belongs to the operating system, so its owner was left alone.';
+        }
+        /* the top-level directories themselves (/home, /tmp, /var, …) */
+        $trim=trim($rp,'/');
+        if($trim!==''&&strpos($trim,'/')===false)return $rp.' is a system location, so its owner was left alone.';
+        if(function_exists('posix_getpwuid')){
+            foreach(['wordpress','joomla'] as $type){
+                $cfg=$this->privSiteConfigFor($type);
+                if(!$cfg)continue;
+                $root=$type==='wordpress'?rtrim($this->wpSiteRoot($cfg),'/'):rtrim(dirname($cfg),'/');
+                if($root!==''&&($rp===$root||strpos($rp,$root.'/')===0))return '';  /* a site is always fair game */
+            }
+        }
+        return '';
+    }
+    private function chownOne($path,$owner,$group){
+        $block=$this->ownBlocked($path);
+        if($block!=='')return['ok'=>false,'tried'=>[$block],'blocked'=>true];
+        if($owner!==''){
+            $ok=@chown($path,$owner);
+            if($group!=='')$ok=@chgrp($path,$group)&&$ok;
+            if($ok)return['ok'=>true,'via'=>'local'];
+        }elseif($group!==''&&@chgrp($path,$group)){
+            return['ok'=>true,'via'=>'local'];
+        }
+        $tried=['the server account was refused'];
+        /* the site itself, exactly like Privilege Mode */
+        $args=['path'=>$path];
+        if($owner!=='')$args['owner']=$owner;
+        if($group!=='')$args['group']=$group;
+        $r=$this->privOp('chown',$args,$path);
+        if(!empty($r['ok']))return['ok'=>true,'via'=>'site'];
+        $tried[]='the site was refused'.(isset($r['error'])?' ('.$r['error'].')':'');
+        /* last resort: an already-allowed sudo, never a password prompt */
+        if($this->sudoAvailable()){
+            $target=$owner!==''?($group!==''?$owner.':'.$group:$owner):(':'.$group);
+            $cmd='sudo -n chown '.escapeshellarg($target).' '.escapeshellarg($path).' 2>&1';
+            $out=[];$rc=1;
+            @exec($cmd,$out,$rc);
+            if($rc===0)return['ok'=>true,'via'=>'sudo'];
+            $tried[]='sudo was refused'.(isset($out[0])?': '.trim((string)$out[0]):'');
+        }
+        return['ok'=>false,'tried'=>$tried];
+    }
+    public function chownPath($path,$owner,$group='',$recursive=false){
+        $path=(string)$path;
+        if($path===''||!@file_exists($path))return['error'=>'That item does not exist.'];
+        $owner=(string)$owner;$group=(string)$group;
+        if($owner===''&&$group==='')return['error'=>'Choose an owner or a group.'];
+        if($owner!==''&&!preg_match('/^[A-Za-z0-9_.-]{1,32}$/',$owner))return['error'=>'Invalid owner name.'];
+        if($group!==''&&!preg_match('/^[A-Za-z0-9_.-]{1,32}$/',$group))return['error'=>'Invalid group name.'];
+        $targets=[$path];
+        if($recursive&&@is_dir($path)){
+            $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path,RecursiveDirectoryIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);
+            foreach($it as $f)$targets[]=$f->getPathname();
+        }
+        $done=0;$failed=0;$via=[];$error='';
+        foreach($targets as $t){
+            $r=$this->chownOne($t,$owner,$group);
+            if(!empty($r['ok'])){$done++;$via[$r['via']]=($via[$r['via']]??0)+1;}
+            else{$failed++;if($error==='')$error=implode('; ',(array)($r['tried']??[]));}
+        }
+        if($done>0)$this->log('chown',$path.' → '.($owner!==''?$owner:'-').':'.($group!==''?$group:'-').' ('.http_build_query($via,'',' ').')');
+        $info=$this->pathOwner($path);
+        return[
+            'ok'=>$done>0&&$failed===0,
+            'path'=>$path,'done'=>$done,'failed'=>$failed,'via'=>$via,
+            'owner'=>$info['owner'],'group'=>$info['group'],'home'=>$info['home'],
+            'error'=>$failed?($error?:'Some items could not be changed.'):null,
+        ];
+    }
+    /* ?x=owners — list the accounts, report one item's owner, or change it. */
+    public function ownersEndpoint($post){
+        $act=(string)($post['action']??'list');
+        $path='';
+        if(!empty($post['path']))$path=(string)$post['path'];
+        elseif(!empty($post['item_name']))$path=rtrim($this->currentDir,'/').'/'.basename((string)$post['item_name']);
+        if($path!==''){
+            $real=@realpath($path);
+            if($real!==false)$path=$real;
+        }
+        if($act==='apply'){
+            if($path==='')return['error'=>'No item was selected.'];
+            if(!$this->pathAllowed($path))return['error'=>'That path is outside the allowed area.'];
+            if($this->isGuardianFile(basename($path),$path))return['error'=>'That file is protected by the manager.'];
+            $r=$this->chownPath($path,(string)($post['owner']??''),(string)($post['group']??''),!empty($post['recursive']));
+            $r['message']=!empty($r['ok'])
+                ? 'Owner of '.basename($path).' is now '.($r['owner']?:$r['group']).' (changed by '.(
+                    isset($r['via']['sudo'])?'the server account with sudo'
+                    :(isset($r['via']['site'])?'the site':(isset($r['via']['local'])?'the file manager':'someone'))).').'
+                : null;
+            return$r;
+        }
+        $sys=$this->systemOwners();
+        return[
+            'ok'=>true,
+            'manager'=>$sys['manager'],
+            'site_user'=>$sys['site'],
+            'owners'=>$sys['owners'],
+            'path'=>$path,
+            'current'=>$path!==''?$this->pathOwner($path):null,
+            'sudo'=>$this->sudoAvailable(),
+            'mode'=>$this->privMode(),
+            'mode_label'=>$this->privModeLabel(),
+        ];
+    }
+
+    /* ── Site files guard ─────────────────────────────────────────────────────
+       Every file this tool installs inside a site (mu-plugins today) is recorded
+       with its sha256 and its content. WordPress cron gets one event per file,
+       and a small mu-plugin ("sentinel") puts a deleted or modified file back.
+       The registry lives next to the manager, so the panel can repair the site
+       even when the site's own copy of a file is gone. Nothing here ever touches
+       a file it did not install itself. */
+    private function guardFile(){return __DIR__.'/.fm_guards.json';}
+    private function guardLoad(){
+        $empty=['files'=>[],'self'=>[],'last_sync'=>0,'last_check'=>0];
+        $f=$this->guardFile();
+        if(!is_file($f))return$empty;
+        $j=json_decode((string)@file_get_contents($f),true);
+        if(!is_array($j))return$empty;
+        if(!isset($j['files'])||!is_array($j['files']))$j['files']=[];
+        if(!isset($j['self'])||!is_array($j['self']))$j['self']=[];
+        return$j+$empty;
+    }
+    private function guardSave($data){
+        $f=$this->guardFile();
+        if(@file_put_contents($f,json_encode($data,JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT),LOCK_EX)===false)return false;
+        @chmod($f,0600);
+        return true;
+    }
+    private function guardKey($path){return substr(md5((string)$path),0,16);}
+    private function guardSiteFor($path){return $this->privSiteFor($path);}
+    /* Reads a file even when the manager may not: the site is asked instead. */
+    private function guardRead($path,$max=262144){
+        if(!is_file($path))return null;
+        $size=@filesize($path);
+        if($size!==false&&$size>$max)return null;
+        $c=@file_get_contents($path);
+        if($c===false)$c=$this->privReadFile($path,$max);
+        return $c===false?null:$c;
+    }
+    /* Registers (or refreshes) one file, keeping the previous content as a version. */
+    public function guardRegister($path,$type=null,$config=null){
+        $path=(string)$path;
+        if(!is_file($path))return['error'=>'Not a file: '.$path];
+        $content=$this->guardRead($path);
+        if($content===null)return['error'=>'The file could not be read: '.$path];
+        $site=$this->guardSiteFor($path);
+        $data=$this->guardLoad();
+        $key=$this->guardKey($path);
+        $now=time();
+        $sha=hash('sha256',$content);
+        $prev=$data['files'][$key]??null;
+        $versions=is_array($prev['versions']??null)?$prev['versions']:[];
+        if($prev&&($prev['sha256']??'')!==$sha){
+            array_unshift($versions,['sha256'=>$prev['sha256']??'','content'=>$prev['content']??'','at'=>$prev['updated']??$now,'size'=>$prev['size']??0]);
+            $versions=array_slice($versions,0,5);
+        }
+        $data['files'][$key]=[
+            'path'=>$path,
+            'type'=>$type?:($site['type']??null),
+            'config'=>$config?:($site['config']??null),
+            'sha256'=>$sha,
+            'size'=>strlen($content),
+            'mode'=>@fileperms($path)&0777,
+            'content'=>base64_encode($content),
+            'updated'=>$now,
+            'versions'=>$versions,
+            'cron'=>true,
+        ];
+        $data['last_sync']=$now;
+        if(!$this->guardSave($data))return['error'=>'Could not save the guard registry ('.dirname($this->guardFile()).' is not writable).'];
+        return['ok'=>true,'key'=>$key,'path'=>$path,'sha256'=>$sha];
+    }
+    public function guardUnregister($key,$deleteFile=false){
+        $data=$this->guardLoad();
+        if(!isset($data['files'][$key]))return['error'=>'Unknown guard entry.'];
+        $path=$data['files'][$key]['path']??'';
+        if($deleteFile&&$path&&is_file($path)){
+            if(!@unlink($path))$this->privOp('delete',['path'=>$path],$path);
+        }
+        $config=$data['files'][$key]['config']??null;
+        unset($data['files'][$key]);
+        $this->guardSave($data);
+        /* the site's own manifest and cron entries must forget it too, otherwise
+           the guard would put back a file that is no longer guarded */
+        if($config)$this->guardSyncSite($config);
+        $this->log('guard_unregister',$path);
+        return['ok'=>true,'path'=>$path];
+    }
+    /* Finds the tool's own files inside a site and registers them. */
+    private function guardCandidates($type,$config){
+        if($type!=='wordpress')return[];
+        $root=$this->wpSiteRoot($config);
+        $out=[];
+        foreach((array)@glob($root.'/wp-content/mu-plugins/*.php') as $f){
+            if(preg_match('/^(000-fm-|fm-|mfm-)/',basename($f)))$out[]=$f;
+        }
+        return$out;
+    }
+    public function guardAdopt(){
+        $added=[];$skipped=[];
+        $data=$this->guardLoad();
+        foreach(['wordpress','joomla'] as $type){
+            $config=$this->privSiteConfigFor($type);
+            if(!$config)continue;
+            foreach($this->guardCandidates($type,$config) as $f){
+                $r=$this->guardRegister($f,$type,$config);
+                if(!empty($r['ok'])){$added[]=$f;}else{$skipped[]=$f.' — '.($r['error']??'');}
+            }
+        }
+        return['ok'=>true,'adopted'=>$added,'skipped'=>$skipped];
+    }
+    /* Checks every guarded file; repairs what is missing or changed. */
+    public function guardVerify($repair=true){
+        $data=$this->guardLoad();
+        $report=[];$restored=0;$failed=0;
+        foreach($data['files'] as $key=>$e){
+            $path=(string)($e['path']??'');
+            $state='missing';$sha=null;
+            if($path&&is_file($path)){
+                $c=$this->guardRead($path);
+                if($c===null){$state='unreadable';}
+                else{$sha=hash('sha256',$c);$state=($sha===($e['sha256']??''))?'ok':'changed';}
+            }
+            if($state!=='ok'&&$repair){
+                $content=base64_decode((string)($e['content']??''),true);
+                if($content!==false&&$content!==''){
+                    if($this->privWriteFile($path,$content)){
+                        @chmod($path,0644);
+                        $restored++;
+                        $state='repaired (was '.$state.')';
+                        $this->log('guard_repair',$path);
+                    }else{$failed++;$state='repair failed (was '.$state.')';}
+                }else{$failed++;$state='repair failed: no stored content';}
+            }
+            $report[]=['key'=>$key,'path'=>$path,'type'=>$e['type']??'','status'=>$state,'updated'=>$e['updated']??0,'versions'=>count((array)($e['versions']??[]))];
+        }
+        $data['last_check']=time();
+        $this->guardSave($data);
+        return['ok'=>true,'files'=>$report,'checked'=>count($report),'repaired'=>$restored,'failed'=>$failed];
+    }
+    /* Manifest + one WordPress cron event per guarded file. */
+    private function guardManifestFor($config){
+        $data=$this->guardLoad();$out=[];
+        foreach($data['files'] as $k=>$e){
+            if(($e['config']??'')!==$config)continue;
+            $out[$k]=['path'=>$e['path'],'sha256'=>$e['sha256']??'','content'=>$e['content']??'','mode'=>$e['mode']??0644,'updated'=>$e['updated']??0];
+        }
+        return$out;
+    }
+    public function guardSyncSite($config){
+        $type=$this->cmsConfigType($config);
+        $entries=$this->guardManifestFor($config);
+        /* Joomla keeps no "options" table, and no cron hook runs there without a
+           scheduled task — the panel watchdog is the repair path for that site,
+           so nothing is written into its database here. */
+        if($type!=='wordpress'){
+            return['ok'=>true,'events'=>0,'removed'=>0,'manifest'=>count($entries),
+                   'note'=>'Joomla has no cron hook that fires without a scheduled task, so the panel watchdog is the repair path for this site.'];
+        }
+        list($link,$c,$err)=$this->cmsConnect($config);
+        if($err)return['error'=>$err];
+        try{
+        $t=$c['prefix'];
+        $blob=mysqli_real_escape_string($link,serialize($entries));
+        $res=@mysqli_query($link,"SELECT option_id FROM `{$t}options` WHERE option_name='fm_site_files_guard' LIMIT 1");
+        if($res&&mysqli_num_rows($res)){
+            @mysqli_query($link,"UPDATE `{$t}options` SET option_value='{$blob}', autoload='no' WHERE option_name='fm_site_files_guard'");
+        }else{
+            @mysqli_query($link,"INSERT INTO `{$t}options` (option_name,option_value,autoload) VALUES ('fm_site_files_guard','{$blob}','no')");
+        }
+        /* Rewrite the site's cron table: every old guard event goes, one fresh
+           event per file is added (a file that was updated gets a new slot). */
+        $res=@mysqli_query($link,"SELECT option_value FROM `{$t}options` WHERE option_name='cron' LIMIT 1");
+        $row=$res?mysqli_fetch_assoc($res):null;
+        $cron=$row?@unserialize((string)$row['option_value'],['allowed_classes'=>false]):[];
+        if(!is_array($cron))$cron=[];
+        $removed=0;
+        foreach($cron as $ts=>$hooks){
+            if(!is_array($hooks))continue;
+            foreach($hooks as $hook=>$v){
+                if(strpos((string)$hook,'fm_guard_file_')===0){unset($cron[$ts][$hook]);$removed++;}
+            }
+            if(isset($cron[$ts])&&is_array($cron[$ts])&&!$cron[$ts])unset($cron[$ts]);
+        }
+        $added=0;
+        foreach($entries as $key=>$e){
+            /* due right away: WordPress runs it on the next cron request and
+               then reschedules it every 15 minutes with the sentinel's schedule */
+            $cron[time()-1]['fm_guard_file_'.$key]=['900'=>1];
+            $added++;
+        }
+        $cron['version']=2;
+        $ser=mysqli_real_escape_string($link,serialize($cron));
+        if($row)@mysqli_query($link,"UPDATE `{$t}options` SET option_value='{$ser}' WHERE option_name='cron'");
+        else @mysqli_query($link,"INSERT INTO `{$t}options` (option_name,option_value,autoload) VALUES ('cron','{$ser}','on')");
+        /* a guard request also proves the plumbing works */
+        @mysqli_query($link,"DELETE FROM `{$t}options` WHERE option_name='_transient_fm_guard_throttle'");
+        mysqli_close($link);
+        return['ok'=>true,'events'=>$added,'removed'=>$removed,'manifest'=>count($entries)];
+        }catch(\Throwable $e){
+            if($link)@mysqli_close($link);
+            return['error'=>'The site database refused the guard update: '.$e->getMessage()];
+        }
+    }
+    /* Fires the site's own cron endpoint so the guard runs immediately instead of
+       waiting for the next visitor. The base URL comes from the privileged bridge
+       that is already proven to reach this exact folder, so it works on a real
+       domain and on a plain host:port setup alike. */
+    public function guardRunCron($config){
+        if($this->cmsConfigType($config)!=='wordpress')return['ok'=>false,'error'=>'Joomla has no cron endpoint; the panel watchdog is used instead.'];
+        $root=rtrim($this->wpSiteRoot($config),'/');
+        $bases=[];
+        $bridge=$this->privBridge(['config'=>$config,'type'=>'wordpress','root'=>$root]);
+        if(empty($bridge['error'])&&!empty($bridge['url'])&&!empty($bridge['file'])){
+            $rel=ltrim(str_replace($root,'',(string)$bridge['file']),'/');
+            if($rel!==''&&substr((string)$bridge['url'],-strlen($rel))===$rel){
+                $bases[]=substr((string)$bridge['url'],0,-(strlen($rel)+1));
+            }
+        }
+        $siteUrl=null;
+        list($link,$c,$err)=$this->cmsConnect($config);
+        if(!$err){
+            try{
+                $res=@mysqli_query($link,"SELECT option_value FROM `{$c['prefix']}options` WHERE option_name='siteurl' LIMIT 1");
+                if($res&&($r=mysqli_fetch_assoc($res)))$siteUrl=(string)$r['option_value'];
+            }catch(\Throwable $e){$siteUrl=null;}
+            if($link)@mysqli_close($link);
+        }
+        if($siteUrl)$bases[]=rtrim($siteUrl,'/');
+        $tried=[];
+        foreach(array_values(array_unique($bases)) as $base){
+            if($base==='')continue;
+            $url=rtrim($base,'/').'/wp-cron.php?doing_wp_cron='.sprintf('%.6F',microtime(true));
+            $ch=@curl_init($url);
+            if(!$ch){$tried[]=$url.' → no curl';continue;}
+            curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>20,CURLOPT_CONNECTTIMEOUT=>6,
+                CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0,CURLOPT_FOLLOWLOCATION=>true,
+                CURLOPT_MAXREDIRS=>2,CURLOPT_USERAGENT=>'MarshalFileManager/1.0 (guard)']);
+            $raw=curl_exec($ch);
+            $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            $body=is_string($raw)?$raw:'';
+            $looksLikeSite=($code>=200&&$code<400)&&stripos($body,'<!DOCTYPE')===false&&stripos($body,'<html')===false;
+            $tried[]=$url.' → '.$code.($looksLikeSite?' (cron)':'');
+            if($looksLikeSite)return['ok'=>true,'url'=>$url,'code'=>$code,'tried'=>$tried];
+        }
+        return['ok'=>false,'error'=>'wp-cron.php did not answer.','tried'=>$tried];
+    }
+    public function guardSentinelPath($config){
+        $root=$this->cmsConfigType($config)==='wordpress'?$this->wpSiteRoot($config):rtrim(dirname($config),'/');
+        return rtrim($root,'/').'/wp-content/mu-plugins/000-fm-site-files-guard.php';
+    }
+    /* The sentinel: restores the files listed in the option, never anything else. */
+    private function guardSentinelCode(){
+        return <<<'FMGUARD'
+<?php
+/* Marshal — site files guard.
+   The file manager records every file it installs in this site inside the
+   option `fm_site_files_guard` (path, sha256, content). This file puts such a
+   file back when it is deleted or changed: WordPress cron calls it every 15
+   minutes (fm_guard_file_* events), and the front end calls it at most once
+   every 5 minutes, so the guard also works when WP-Cron is disabled.
+   It restores only what is in that option — nothing else is ever written. */
+if(!defined('ABSPATH'))return;
+if(!function_exists('fm_guard_manifest')){
+    function fm_guard_manifest(){
+        $m=get_option('fm_site_files_guard');
+        return is_array($m)?$m:[];
+    }
+    function fm_guard_restore($only=null){
+        $done=0;$failed=0;
+        foreach(fm_guard_manifest() as $key=>$e){
+            if($only!==null&&$key!==$only)continue;
+            $path=isset($e['path'])?(string)$e['path']:'';
+            if($path==='')continue;
+            $ok=true;
+            if(!file_exists($path)||@hash_file('sha256',$path)!==(string)($e['sha256']??'')){
+                $content=isset($e['content'])?base64_decode((string)$e['content'],true):false;
+                if($content===false||$content===''){$failed++;continue;}
+                $dir=dirname($path);
+                if(!is_dir($dir))@mkdir($dir,0755,true);
+                $ok=@file_put_contents($path,$content,LOCK_EX)!==false;
+                if($ok)@chmod($path,0644);
+                if($ok){$done++;}else{$failed++;}
+            }
+        }
+        update_option('fm_guard_last_check',time(),false);
+        update_option('fm_guard_stats',['at'=>time(),'restored'=>$done,'failed'=>$failed],false);
+        return$done;
+    }
+    add_filter('cron_schedules',function($s){
+        if(!isset($s['fm_guard_15min']))$s['fm_guard_15min']=['interval'=>900,'display'=>'Marshal guard (15 minutes)'];
+        return$s;
+    });
+    add_action('fm_site_files_guard',function(){fm_guard_restore();});
+    foreach(fm_guard_manifest() as $fm_guard_key=>$fm_guard_e){
+        add_action('fm_guard_file_'.$fm_guard_key,function()use($fm_guard_key){fm_guard_restore($fm_guard_key);});
+    }
+    add_action('init',function(){
+        if(get_transient('fm_guard_throttle'))return;
+        set_transient('fm_guard_throttle',time(),300);
+        fm_guard_restore();
+    },1);
+}
+FMGUARD;
+    }
+    public function guardInstallSentinel($config){
+        if($this->cmsConfigType($config)!=='wordpress')return['error'=>'The cron guard needs a WordPress site.'];
+        $path=$this->guardSentinelPath($config);
+        $dir=dirname($path);
+        if(!is_dir($dir)&&!@mkdir($dir,0755,true)&&!is_dir($dir))return['error'=>'Could not create wp-content/mu-plugins.'];
+        if(!$this->privWriteFile($path,$this->guardSentinelCode()))return['error'=>'Could not write the guard file into '.$dir.'.'];
+        @chmod($path,0644);
+        $reg=$this->guardRegister($path,'wordpress',$config);
+        if(!empty($reg['error']))return['error'=>$reg['error']];
+        return['ok'=>true,'path'=>$path];
+    }
+    public function guardVersions($key){
+        $data=$this->guardLoad();
+        if(!isset($data['files'][$key]))return['error'=>'Unknown guard entry.'];
+        $e=$data['files'][$key];
+        $out=[];
+        if(!empty($e['content']))$out[]=['at'=>$e['updated']??0,'sha256'=>$e['sha256']??'','current'=>true,'size'=>$e['size']??0];
+        foreach((array)($e['versions']??[]) as $v)$out[]=['at'=>$v['at']??0,'sha256'=>$v['sha256']??'','current'=>false,'size'=>$v['size']??0];
+        return['ok'=>true,'path'=>$e['path']??'','versions'=>$out];
+    }
+    public function guardRestoreVersion($key,$index){
+        $data=$this->guardLoad();
+        if(!isset($data['files'][$key]))return['error'=>'Unknown guard entry.'];
+        $e=$data['files'][$key];
+        $path=(string)($e['path']??'');
+        $index=(int)$index;
+        $content=null;
+        if($index===0&&!empty($e['content']))$content=base64_decode((string)$e['content'],true);
+        else{$v=$e['versions'][$index-1]??null;if($v)$content=base64_decode((string)($v['content']??''),true);}
+        if($content===false||$content===null||$content==='')return['error'=>'That version cannot be restored.'];
+        if(!$this->privWriteFile($path,$content))return['error'=>'Could not write the file back into the site.'];
+        @chmod($path,0644);
+        $this->guardRegister($path,$e['type']??null,$e['config']??null);
+        $this->log('guard_restore_version',$path.' #'.$index);
+        return['ok'=>true,'path'=>$path,'index'=>$index];
+    }
+    /* Removes leftovers this tool creates: expired bridges and probe files. */
+    public function guardSweep($dry=false){
+        $items=[];$deleted=0;$now=time();
+        foreach(['wordpress','joomla'] as $type){
+            $config=$this->privSiteConfigFor($type);
+            if(!$config)continue;
+            $root=$type==='wordpress'?$this->wpSiteRoot($config):rtrim(dirname($config),'/');
+            $targets=[];
+            foreach(['/fm-priv-*.php','/.fm-priv/fm-priv-*.php','/fm-bridge-*.php','/.fm-privtest-*.php','/.fm-upload-*'] as $g){
+                foreach((array)@glob(rtrim($root,'/').$g) as $f)$targets[]=$f;
+            }
+            foreach($targets as $f){
+                if(!is_file($f))continue;
+                $age=$now-(int)@filemtime($f);
+                $ttl=strpos($f,'fm-bridge-')!==false?600:900;
+                $entry=['path'=>$f,'age'=>$age,'ttl'=>$ttl,'stale'=>$age>=$ttl,'deleted'=>false];
+                if(!$dry&&$age>=$ttl){
+                    if(!@unlink($f))$this->privOp('delete',['path'=>$f],$f);
+                    $entry['deleted']=!is_file($f);
+                    if($entry['deleted']){$deleted++;$this->log('guard_sweep',$f);}
+                }
+                $items[]=$entry;
+            }
+        }
+        return['ok'=>true,'items'=>$items,'deleted'=>$deleted];
+    }
+    public function guardCronHealth($config){
+        $type=$this->cmsConfigType($config);
+        list($link,$c,$err)=$this->cmsConnect($config);
+        if($err)return['error'=>$err];
+        $t=$c['prefix'];
+        $out=['type'=>$type,'config'=>$config];
+        if($type==='wordpress'){try{
+            $src=(string)@file_get_contents($config);
+            $out['disabled_in_config']=(bool)preg_match('/DISABLE_WP_CRON/i',$src);
+            $out['sentinel']=is_file($this->guardSentinelPath($config));
+            $rows=[];
+            $res=@mysqli_query($link,"SELECT option_name,option_value FROM `{$t}options` WHERE option_name IN ('cron','_transient_doing_cron','fm_guard_last_check','fm_guard_stats','fm_site_files_guard')");
+            if($res)while($r=mysqli_fetch_assoc($res))$rows[$r['option_name']]=$r['option_value'];
+            $cron=isset($rows['cron'])?@unserialize((string)$rows['cron'],['allowed_classes'=>false]):[];
+            $events=0;$next=null;
+            if(is_array($cron))foreach($cron as $ts=>$hooks){
+                if(!is_array($hooks)||!is_numeric($ts))continue;
+                foreach($hooks as $hook=>$v){
+                    if(strpos((string)$hook,'fm_guard_file_')===0){$events++;if($next===null||(int)$ts<$next)$next=(int)$ts;}
+                }
+            }
+            $out['guard_events']=$events;
+            $out['next_guard_run']=$next;
+            $out['cron_last_touched']=isset($rows['_transient_doing_cron'])?(int)$rows['_transient_doing_cron']:0;
+            $out['last_guard_check']=isset($rows['fm_guard_last_check'])?(int)$rows['fm_guard_last_check']:0;
+            $out['manifest_files']=isset($rows['fm_site_files_guard'])?count((array)@unserialize((string)$rows['fm_site_files_guard'],['allowed_classes'=>false])):0;
+            }catch(\Throwable $e){$out['error']=$e->getMessage();}
+        } else {
+            $out['note']='Joomla has no cron hook that runs without a scheduled task; the panel watchdog repairs the files instead.';
+            $out['sentinel']=false;
+            $out['guard_events']=0;
+        }
+        mysqli_close($link);
+        return$out;
+    }
+    /* The manager's own files: a baseline so tampering is visible. */
+    private function guardSelfFiles(){
+        /* The registry itself is deliberately not in the list: it is rewritten by
+           every guard action, so its own hash can never stay stable. */
+        return[__FILE__,__DIR__.'/.users.json',__DIR__.'/.fm_privmode.json',
+               __DIR__.'/.cms_vault_key',__DIR__.'/.cms_pw_vault.json',__DIR__.'/.htaccess'];
+    }
+    public function guardSelfVerify($baseline=false){
+        $data=$this->guardLoad();
+        $out=[];
+        foreach($this->guardSelfFiles() as $f){
+            $h=is_file($f)?@hash_file('sha256',$f):null;
+            $known=array_key_exists($f,(array)$data['self']);
+            $prev=$known?$data['self'][$f]:null;
+            if($baseline||!$known){$data['self'][$f]=$h;$state='baselined';}
+            else{$state=($h===$prev)?'ok':($h===null?'missing':'changed');}
+            $out[]=['path'=>$f,'state'=>$state];
+        }
+        $this->guardSave($data);
+        return['ok'=>true,'files'=>$out];
+    }
+    /* Public API behind ?x=guard */
+    public function guardEndpoint($post){
+        $act=(string)($post['action']??'list');
+        if($act==='adopt'){
+            $adopt=$this->guardAdopt();
+            $sync=[];
+            foreach(['wordpress','joomla'] as $type){
+                $cfg=$this->privSiteConfigFor($type);
+                if($cfg)$sync[$type]=$this->guardSyncSite($cfg);
+            }
+            $msgs=[];
+            foreach($sync as $type=>$r){if(!empty($r['error']))$msgs[]=$type.': '.$r['error'];}
+            return['ok'=>empty($msgs),'adopted'=>$adopt['adopted'],'skipped'=>$adopt['skipped'],'sync'=>$sync,'error'=>$msgs?implode(' ',$msgs):null];
+        }
+        if($act==='verify'){
+            $r=$this->guardVerify(($post['repair']??'1')!=='0');
+            $r['sync']=[];
+            foreach(['wordpress','joomla'] as $type){
+                $cfg=$this->privSiteConfigFor($type);
+                if($cfg)$r['sync'][$type]=$this->guardSyncSite($cfg);
+            }
+            return$r;
+        }
+        if($act==='sync'){
+            $out=[];
+            foreach(['wordpress','joomla'] as $type){
+                $cfg=$this->privSiteConfigFor($type);
+                if($cfg)$out[$type]=$this->guardSyncSite($cfg);
+            }
+            return['ok'=>true,'sites'=>$out];
+        }
+        if($act==='sentinel'){
+            $cfg=$this->privSiteConfigFor('wordpress');
+            if(!$cfg)return['error'=>'No WordPress installation was found.'];
+            $r=$this->guardInstallSentinel($cfg);
+            if(!empty($r['error']))return$r;
+            $r['sync']=$this->guardSyncSite($cfg);
+            $r['notice']='Guard installed in '.dirname($r['path']).'.';
+            return$r;
+        }
+        if($act==='register'){
+            $path=(string)($post['path']??'');
+            if($path===''||!is_file($path))return['error'=>'That file does not exist.'];
+            $site=$this->privSiteFor($path);
+            if(!$site)return['error'=>'That file is not inside a detected site.'];
+            $r=$this->guardRegister($path,$site['type'],$site['config']);
+            if(!empty($r['ok']))$r['sync']=$this->guardSyncSite($site['config']);
+            return$r;
+        }
+        if($act==='unguard'){
+            $key=(string)($post['key']??'');
+            return$this->guardUnregister($key,($post['delete_file']??'')==='1');
+        }
+        if($act==='versions')return$this->guardVersions((string)($post['key']??''));
+        if($act==='restore_version')return$this->guardRestoreVersion((string)($post['key']??''),(int)($post['index']??0));
+        if($act==='run_cron'){
+            $cfg=$this->privSiteConfigFor('wordpress');
+            if(!$cfg)return['error'=>'No WordPress installation was found.'];
+            $r=$this->guardRunCron($cfg);
+            $r['health']=$this->guardCronHealth($cfg);
+            return$r;
+        }
+        if($act==='sweep')return$this->guardSweep(($post['dry']??'')==='1');
+        if($act==='cron'){
+            $out=[];
+            foreach(['wordpress','joomla'] as $type){
+                $cfg=$this->privSiteConfigFor($type);
+                if($cfg)$out[$type]=$this->guardCronHealth($cfg);
+            }
+            return['ok'=>true,'sites'=>$out];
+        }
+        if($act==='selftest')return$this->guardSelfVerify(($post['baseline']??'')==='1');
+        /* list: status of every guarded file, no repair */
+        $data=$this->guardLoad();
+        $files=[];
+        foreach($data['files'] as $key=>$e){
+            $path=(string)($e['path']??'');
+            $state='missing';
+            if($path&&is_file($path)){
+                $c=$this->guardRead($path);
+                $state=($c===null)?'unreadable':((hash('sha256',$c)===($e['sha256']??''))?'ok':'changed');
+            }
+            $files[]=[
+                'key'=>$key,'path'=>$path,'type'=>$e['type']??'','config'=>$e['config']??'',
+                'status'=>$state,'updated'=>$e['updated']??0,'size'=>$e['size']??0,
+                'versions'=>count((array)($e['versions']??[])),'mode'=>$e['mode']??0644,
+                'name'=>basename($path),
+            ];
+        }
+        return['ok'=>true,'files'=>$files,'registry'=>$this->guardFile(),'count'=>count($files),
+               'last_check'=>$data['last_check']??0,'has_sentinel'=>(bool)$this->privSiteConfigFor('wordpress')&&is_file($this->guardSentinelPath($this->privSiteConfigFor('wordpress')))];
+    }
+
     /* The mode tool: state, detected sites, and a live write test. */
     public function privModeEndpoint($post){
         $act=isset($post['action'])?(string)$post['action']:'get';
@@ -4664,6 +5383,24 @@ class FileManager {
             ."    \$mode=isset(\$args['mode'])?(int)\$args['mode']:0644;\n"
             ."    \$ok=@chmod(\$p,\$mode);\n"
             ."    \$fmOut(\$ok?['ok'=>true]:['error'=>'chmod failed: '.(error_get_last()['message']??'permission denied')]);\n"
+            ."  case 'chown':\n"
+            ."    \$owner=isset(\$args['owner'])?(string)\$args['owner']:'';\n"
+            ."    \$group=isset(\$args['group'])?(string)\$args['group']:'';\n"
+            ."    if(\$owner!==''&&!preg_match('/^[A-Za-z0-9_.-]{1,32}\$/D',\$owner))\$fmOut(['error'=>'chown: invalid owner'],400);\n"
+            ."    if(\$group!==''&&!preg_match('/^[A-Za-z0-9_.-]{1,32}\$/D',\$group))\$fmOut(['error'=>'chown: invalid group'],400);\n"
+            ."    \$targets=[\$p];\n"
+            ."    if(!empty(\$args['recursive'])&&is_dir(\$p)){\n"
+            ."        \$it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator(\$p,RecursiveDirectoryIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);\n"
+            ."        foreach(\$it as \$child)\$targets[]=\$child->getPathname();\n"
+            ."    }\n"
+            ."    \$okCount=0;\$fail=0;\$msg='';\n"
+            ."    foreach(\$targets as \$t){\n"
+            ."        \$ok=true;\n"
+            ."        if(\$owner!==''){\$ok=@chown(\$t,\$owner)&&\$ok;}\n"
+            ."        if(\$group!==''){\$ok=@chgrp(\$t,\$group)&&\$ok;}\n"
+            ."        if(\$ok){\$okCount++;}else{\$fail++;if(\$msg==='')\$msg=error_get_last()['message']??'permission denied';}\n"
+            ."    }\n"
+            ."    \$fmOut(\$fail?['error'=>'chown failed: '.\$msg,'done'=>\$okCount,'failed'=>\$fail]:['ok'=>true,'done'=>\$okCount]);\n"
             ."  case 'read':\n"
             ."    if(!is_file(\$p))\$fmOut(['error'=>'read failed: not a file'],404);\n"
             ."    \$d=@file_get_contents(\$p);\n"
@@ -4928,17 +5665,16 @@ class FileManager {
             $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($p,RecursiveDirectoryIterator::SKIP_DOTS));
             foreach($it as $f)$targets[]=$f->getPathname();
         }
-        $changed=0;$failed=0;
+        $changed=0;$failed=0;$via=[];
         foreach($targets as $target){
-            $good=true;
-            if($owner!==''&&function_exists('chown'))$good=@chown($target,$owner)&&$good;
-            elseif($owner!=='')$good=false;
-            if($group!==''&&function_exists('chgrp'))$good=@chgrp($target,$group)&&$good;
-            elseif($group!=='')$good=false;
-            $good?$changed++:$failed++;
+            $res=$this->chownOne($target,$owner,$group);
+            if(!empty($res['ok'])){$changed++;$via[$res['via']]=($via[$res['via']]??0)+1;}
+            else $failed++;
         }
-        $this->log('chown',$n);
-        $this->addMsg("Ownership updated for $changed item(s).".($failed?" $failed failed.":''),$changed?'success':'danger');
+        $byName=['local'=>'the file manager','site'=>'the site','sudo'=>'the server account with sudo'];
+        $by=[];foreach($via as $k=>$v)$by[]=($byName[$k]??$k);
+        $this->log('chown',$n.' → '.($owner?:'-').':'.($group?:'-'));
+        $this->addMsg("Ownership updated for $changed item(s)".($by?' by '.implode(', ',$by):'').". ".($failed?"$failed failed.":''),$changed?'success':'danger');
     }
 
     public function officePreview($name){
@@ -8428,6 +9164,8 @@ FMNUM;
             if(!is_dir($muDir)&&!@mkdir($muDir,0755,true)&&!is_dir($muDir))return false;
             if(@file_put_contents($plugin,$this->wpImageReplacePluginCode(),LOCK_EX)===false&&!$this->privWriteFile($plugin,$this->wpImageReplacePluginCode()))return false;
             @chmod($plugin,0644);
+            $site=$this->privSiteFor($plugin);
+            $this->guardRegister($plugin,'wordpress',$site['config']??null);
         }elseif(is_file($plugin))@unlink($plugin);
         return true;
     }
@@ -10035,6 +10773,7 @@ FMIMG;
                 if(!is_dir($dir))@mkdir($dir,0755,true);
                 if(!$this->privWriteFile($muPath,$this->wpPermanentSessionPluginCode()))
                     return['error'=>'Could not write the mu-plugin (folder is not writable).'];
+                $this->guardRegister($muPath,'wordpress',$cfg);
             }else{
                 if(is_file($muPath)&&!@unlink($muPath))return['error'=>'Could not delete the mu-plugin.'];
             }
@@ -13721,6 +14460,16 @@ if(isset($_GET['x'])){
         if(!$id){echo json_encode(['error'=>'Invalid request.']);exit;}
         echo json_encode($fm->cmsLoginAsUser($cfgB64(),$id));exit;
     }
+    if($xop==='owners'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->ownersEndpoint($_POST));exit;
+    }
+    if($xop==='guard'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        echo json_encode($fm->guardEndpoint($_POST));exit;
+    }
     if($xop==='privmode'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
@@ -14637,6 +15386,36 @@ a.nt:hover{color:var(--link)}
 .mono{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--t2);padding:2px 7px;border-radius:5px;background:var(--raised);white-space:nowrap}
 .sz{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--t2);white-space:nowrap}
 .mt{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--t3);white-space:nowrap}
+
+/* OWNER column */
+.own-cell{display:inline-flex;flex-direction:column;line-height:1.3;max-width:180px;cursor:pointer;border-radius:6px;padding:2px 5px;transition:background .15s}
+.own-cell:hover{background:var(--raised)}
+.own-name{display:flex;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.own-cell.own-mine .own-name{color:#7ee2a8}
+.own-me{font-family:inherit;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#7ee2a8;border:1px solid rgba(126,226,168,.45);border-radius:5px;padding:0 4px;line-height:1.5}
+.own-home{display:block;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}
+.own-cell.own-mine .own-home{color:rgba(126,226,168,.62)}
+/* owner picker */
+.own-target{padding:9px 11px;border:1px solid var(--border);border-radius:8px;background:var(--raised)}
+.own-target-name{font-size:13px;font-weight:700;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.own-target-path{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--t3);margin-top:2px;word-break:break-all}
+.own-target-now{font-size:11.5px;color:var(--t2);margin-top:6px}
+.own-list{max-height:232px;overflow:auto;border:1px solid var(--border);border-radius:8px}
+.own-row{display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--border)}
+.own-row:last-child{border-bottom:0}
+.own-row:hover{background:var(--raised)}
+.own-row.sel{background:rgba(126,226,168,.13);box-shadow:inset 0 0 0 1px rgba(126,226,168,.45)}
+.own-row .own-n{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--t1)}
+.own-row .own-h{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--t3);margin-left:auto;max-width:46%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.own-b{font-size:9px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;padding:1px 5px;border-radius:5px;border:1px solid}
+.own-b.mgr{color:#7ee2a8;border-color:rgba(126,226,168,.45)}
+.own-b.site{color:#7cc7ff;border-color:rgba(124,199,255,.45)}
+.own-b.sys{color:#a1a1aa;border-color:rgba(161,161,170,.32)}
+.own-empty{padding:14px;font-size:12px;color:var(--t3);text-align:center}
+.own-result{font-size:11.5px;color:var(--t2);min-height:16px;line-height:1.5}
+.own-result.bad{color:#fca5a5}
+.own-result.good{color:#7ee2a8}
+.own-chk{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--t2);text-transform:none;letter-spacing:0}
 .acts{display:flex;gap:3px;justify-content:flex-end}
 
 /* ══ GRID VIEW ══ */
@@ -15503,7 +16282,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   .sb-item{padding:11px 12px;min-height:44px}.sb-flink{padding:9px 12px;min-height:40px}
   .content{padding:10px}
   /* Hide table cols on mobile */
-  .col-perms,.col-perms-td,.col-mtime,.col-mtime-td{display:none}
+  .col-perms,.col-perms-td,.col-mtime,.col-mtime-td,.col-owner,.col-owner-td{display:none}
   .ft td,.ft th{padding:11px 10px}
   .nt{max-width:none;flex:1}
   .nc{gap:9px}
@@ -15864,6 +16643,9 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <?php endif;?>
       <button class="sb-item" id="cmsBtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>CMS Manager</button>
       <?php $pmNow=$fm->privMode();$pmShort=['server'=>'server','auto'=>'','wordpress'=>'WP','joomla'=>'Joomla'][$pmNow]??'';$pmLabel=['server'=>'Server account only','auto'=>'Automatic','wordpress'=>'WordPress','joomla'=>'Joomla'][$pmNow]??$pmNow;?>
+      <?php if(!empty($_SESSION['fm_admin'])):?>
+      <button class="sb-item" id="sfgBtn" title="Files this tool installed in a site, backed up and put back if they are deleted (WordPress cron)"><svg viewBox="0 0 24 24"><path d="M12 2l9 4v6c0 5.5-3.8 9.5-9 10-5.2-.5-9-4.5-9-10V6l9-4z"/><path d="M9 12l2 2 4-4"/></svg>Site Files Guard<span id="sfgBadge" style="margin-left:6px;font-size:10px;opacity:.8"></span></button>
+      <?php endif;?>
       <button class="sb-item" id="privModeBtn" title="File changes are performed by: <?=htmlspecialchars($pmLabel)?> — click to change"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>Privilege Mode<span id="privModeBadge" style="margin-left:6px;font-size:10px;opacity:.8"><?=$pmShort===''?'':'· '.htmlspecialchars($pmShort)?></span></button>
       <button class="sb-item" id="sessBtn" title="Inspect, extend or revoke real login sessions (WordPress / Joomla)"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M12 15v2"/></svg>Session Inspector</button>
       <button class="sb-item" id="cpanelBtn"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>cPanel Manager</button>
@@ -16147,6 +16929,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
               <th class="cc"><input type="checkbox" class="rck" id="checkAll"></th>
               <th style="width:99%"><a href="<?=sortUrl('name')?>" class="<?=$curSort==='name'?'sa':''?>">Name<span class="arr" aria-hidden="true"><?=$curSort==='name'?($curDir_==='asc'?'<svg viewBox="0 0 24 24"><path d="m7 14 5-5 5 5"/></svg>':'<svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg>'):'<svg viewBox="0 0 24 24"><path d="m7 10 5-5 5 5"/><path d="m7 14 5 5 5-5"/></svg>'?></span></a></th>
               <th class="col-perms"><span>Perms</span></th>
+              <th class="col-owner"><span>Owner</span></th>
               <th class="col-mtime"><a href="<?=sortUrl('mtime')?>" class="<?=$curSort==='mtime'?'sa':''?>">Modified<span class="arr" aria-hidden="true"><?=$curSort==='mtime'?($curDir_==='asc'?'<svg viewBox="0 0 24 24"><path d="m7 14 5-5 5 5"/></svg>':'<svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg>'):'<svg viewBox="0 0 24 24"><path d="m7 10 5-5 5 5"/><path d="m7 14 5 5 5-5"/></svg>'?></span></a></th>
               <th class="col-size"><a href="<?=sortUrl('size')?>" class="<?=$curSort==='size'?'sa':''?>">Size<span class="arr" aria-hidden="true"><?=$curSort==='size'?($curDir_==='asc'?'<svg viewBox="0 0 24 24"><path d="m7 14 5-5 5 5"/></svg>':'<svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg>'):'<svg viewBox="0 0 24 24"><path d="m7 10 5-5 5 5"/><path d="m7 14 5 5 5-5"/></svg>'?></span></a></th>
               <th style="text-align:right;padding-right:14px">Actions</th>
@@ -16157,6 +16940,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
           <?php foreach($list['folders'] as $f):
             $folderPath=$fm->getCwd().'/'.$f['name'];$folderMode=@fileperms($folderPath);
             $perms=$folderMode===false?'':substr(sprintf('%o',$folderMode),-4);
+            $folderOwn=fm_owner_cell($fm->pathOwner($folderPath));
             $folderOpenUrl=fm_file_open_url($folderPath,true,'');
             $folderInfo=fm_file_info_attr($folderPath,$f['name'],true,'folder',$folderOpenUrl);
           ?>
@@ -16168,10 +16952,12 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
               <div class="nm"><?php if(isset($tags[$f['name']])):?><span class="tag-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:<?=he($tags[$f['name']]['color'])?>;flex-shrink:0" title="<?=he($tags[$f['name']]['label'])?>"></span><?php endif;?><span class="nt"><?=htmlspecialchars($f['name'])?></span><?php if(!empty($tags[$f['name']]['label'])):?><span class="eb" style="background:<?=he($tags[$f['name']]['color'])?>22;color:<?=he($tags[$f['name']]['color'])?>"><?=he($tags[$f['name']]['label'])?></span><?php endif;?><span class="eb">DIR</span></div>
             </div></td>
             <td class="col-perms col-perms-td"><span class="mono"><?=he($perms)?></span></td>
+            <?=$folderOwn?>
             <td class="col-mtime col-mtime-td"><span class="mt"><?=date('d/m/Y H:i',$f['mtime'])?></span></td>
             <td class="col-size"><button type="button" class="btn btn-xs btn-g dsz-btn" data-n="<?=he($f['name'])?>" title="Calculate folder size"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg><span class="bl">Size</span></button></td>
             <td><div class="acts">
               <?php if(!$fm->isRO()):?><button data-a="perm" data-n="<?=he($f['name'])?>" data-perm="<?=he($perms)?>" class="btn btn-xs btn-g" title="Permissions"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span class="bl">Perm</span></button><?php endif;?>
+              <?php if(!$fm->isRO()&&!empty($_SESSION['fm_admin'])):?><button data-a="owner" data-n="<?=he($f['name'])?>" class="btn btn-xs btn-g" title="Change owner"><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="4"/><path d="M2 21v-1a7 7 0 0 1 14 0v1"/><path d="M17 11h5M19 9v4"/></svg><span class="bl">Owner</span></button><?php endif;?>
               <button data-a="ren" data-n="<?=he($f['name'])?>" class="btn btn-xs btn-amb"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg><span class="bl">Rename</span></button>
               <?php if(!$fm->isRO()):?><button data-a="del" data-n="<?=he($f['name'])?>" class="btn btn-xs btn-red"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg><span class="bl">Delete</span></button><?php endif;?>
             </div></td>
@@ -16183,6 +16969,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
             $ext=strtolower(pathinfo($f['name'],PATHINFO_EXTENSION));
             $filePath=$fm->getCwd().'/'.$f['name'];$fileMode=@fileperms($filePath);
             $perms=$fileMode===false?'':substr(sprintf('%o',$fileMode),-4);
+            $fileOwn=fm_owner_cell($fm->pathOwner($filePath));
             $prev=$fm->canPreview($type);$isTar=$fm->isTar($f['name']);
             $rawUrl='?raw='.urlencode($f['name']).'&dir='.urlencode($fm->getCwd());
             $fileOpenUrl=fm_file_open_url($filePath,false,$rawUrl);
@@ -16208,6 +16995,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
               <div class="nm"><?php if(isset($tags[$f['name']])):?><span class="tag-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:<?=he($tags[$f['name']]['color'])?>;flex-shrink:0" title="<?=he($tags[$f['name']]['label'])?>"></span><?php endif;?><span class="nt"><?=htmlspecialchars($f['name'])?></span><?php if(!empty($tags[$f['name']]['label'])):?><span class="eb" style="background:<?=he($tags[$f['name']]['color'])?>22;color:<?=he($tags[$f['name']]['color'])?>"><?=he($tags[$f['name']]['label'])?></span><?php endif;?><?php if($ext):?><span class="eb"><?=strtoupper($ext)?></span><?php endif;?></div>
             </div></td>
             <td class="col-perms col-perms-td"><span class="mono"><?=he($perms)?></span></td>
+            <?=$fileOwn?>
             <td class="col-mtime col-mtime-td"><span class="mt"><?=date('d/m/Y H:i',$f['mtime'])?></span></td>
             <td class="col-size"><span class="sz"><?=fmtSz($f['size'])?></span></td>
             <td><div class="acts">
@@ -16219,6 +17007,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
               <button data-a="hash" data-n="<?=he($f['name'])?>" class="btn btn-xs btn-g" title="Checksum"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span class="bl">Hash</span></button>
               <?php if(!$fm->isRO()):?>
               <button data-a="perm" data-n="<?=he($f['name'])?>" data-perm="<?=he($perms)?>" class="btn btn-xs btn-g" title="Permissions"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span class="bl">Perm</span></button>
+              <?php if(!$fm->isRO()&&!empty($_SESSION['fm_admin'])):?><button data-a="owner" data-n="<?=he($f['name'])?>" class="btn btn-xs btn-g" title="Change owner"><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="4"/><path d="M2 21v-1a7 7 0 0 1 14 0v1"/><path d="M17 11h5M19 9v4"/></svg><span class="bl">Owner</span></button><?php endif;?>
               <button data-a="dup" data-n="<?=he($f['name'])?>" class="btn btn-xs btn-g" title="Duplicate"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span class="bl">Dup</span></button>
               <button data-a="ren" data-n="<?=he($f['name'])?>" class="btn btn-xs btn-amb"><svg viewBox="0 0 24 24"><polyline points="5 12 12 5 19 12"/><line x1="12" y1="5" x2="12" y2="19"/></svg><span class="bl">Rename</span></button>
               <button data-a="del" data-n="<?=he($f['name'])?>" class="btn btn-xs btn-red"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg><span class="bl">Del</span></button>
@@ -17372,6 +18161,37 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 <!-- MANAGE SHARE LINKS MODAL -->
 <!-- SESSION & COOKIE INSPECTOR -->
+<div class="mod-ov" id="sfgOv">
+  <div class="mod" style="max-width:860px">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M12 2l9 4v6c0 5.5-3.8 9.5-9 10-5.2-.5-9-4.5-9-10V6l9-4z"/><path d="M9 12l2 2 4-4"/></svg></div>
+      <span class="mod-title">Site Files Guard</span>
+      <button class="btn btn-icon btn-g" id="sfgClose" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body" style="padding:16px">
+      <div id="sfgSummary" style="font-size:12px;color:var(--t2);line-height:1.8;margin-bottom:12px"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <button class="btn btn-p" id="sfgVerify">Verify &amp; repair</button>
+        <button class="btn btn-g" id="sfgAdopt">Adopt site files</button>
+        <button class="btn btn-g" id="sfgSentinel">Install guard in WordPress</button>
+        <button class="btn btn-g" id="sfgCron">Run cron now</button>
+        <button class="btn btn-g" id="sfgHealth">Cron health</button>
+        <button class="btn btn-g" id="sfgSweep">Sweep leftovers</button>
+        <button class="btn btn-g" id="sfgSelf">Manager files</button>
+        <button class="btn btn-g" id="sfgRefresh">Refresh</button>
+      </div>
+      <div id="sfgOut" style="font-size:11px;color:var(--t2);margin-bottom:10px;min-height:16px;word-break:break-word"></div>
+      <div id="sfgList" style="max-height:46vh;overflow:auto"></div>
+      <div id="sfgVersions" style="margin-top:10px"></div>
+      <div style="font-size:11px;color:var(--t3);margin-top:10px;line-height:1.7">
+        Every file this manager installs inside a site is kept here with its hash and its content.
+        WordPress cron gets one event per file and a small guard file puts a deleted or changed one
+        back within 15 minutes (and immediately when you press <b>Run cron now</b> or <b>Verify &amp; repair</b>).
+        Joomla keeps no cron hook that fires by itself, so there the panel is the watchdog.
+      </div>
+    </div>
+  </div>
+</div>
 <div class="mod-ov" id="privOv">
   <div class="mod" style="max-width:720px">
     <div class="mod-head">
@@ -17483,6 +18303,39 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button type="submit" class="btn btn-p">Apply ownership</button>
       <div style="font-size:10.5px;color:var(--t3)">The server account must have permission to change ownership.</div>
     </form>
+  </div>
+</div>
+<?php endif;?>
+
+<!-- CHANGE OWNER MODAL -->
+<?php if(!empty($_SESSION['fm_admin'])):?>
+<div class="mod-ov" id="ownOv">
+  <div class="mod mod-sm">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="4"/><path d="M2 21v-1a7 7 0 0 1 14 0v1"/><path d="M17 11h5M19 9v4"/></svg></div>
+      <span class="mod-title">Change owner</span>
+      <button type="button" class="btn btn-icon btn-g" id="ownClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body" style="display:flex;flex-direction:column;gap:10px">
+      <div class="own-target">
+        <div class="own-target-name" id="ownTargetName">&mdash;</div>
+        <div class="own-target-path" id="ownTargetPath"></div>
+        <div class="own-target-now" id="ownTargetNow">Reading the current owner&hellip;</div>
+      </div>
+      <input type="text" id="ownPathInput" class="inp" placeholder="Any path on this server — press Enter to load it" autocomplete="off" spellcheck="false">
+      <input type="text" id="ownSearch" class="inp" placeholder="Search accounts by name, uid or home&hellip;" autocomplete="off">
+      <div class="own-list" id="ownList" role="listbox" aria-label="Accounts on this server"><div class="own-empty">Loading accounts&hellip;</div></div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px 14px">
+        <label class="own-chk"><input type="checkbox" id="ownRecursive"> Apply to everything inside the folder</label>
+        <label class="own-chk"><input type="checkbox" id="ownGroupToo"> Change the group as well</label>
+      </div>
+      <div class="own-result" id="ownResult"></div>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="btn btn-p" id="ownApply" disabled>Change owner</button>
+        <button type="button" class="btn btn-g" id="ownCancel">Cancel</button>
+      </div>
+      <div style="font-size:10.5px;color:var(--t3)" id="ownRoutes">The change is tried by the file manager first, then by the site with its own privileges (the same route Privilege Mode uses), and last with sudo &mdash; only when sudo is already allowed without a password.</div>
+    </div>
   </div>
 </div>
 <?php endif;?>
@@ -18633,10 +19486,10 @@ function openMod(id){document.getElementById(id)?.classList.add('open');}
 function closeMod(id){document.getElementById(id)?.classList.remove('open');if(id==='configInspectorOv'&&typeof resetConfigInspectorView==='function')resetConfigInspectorView();if(id==='rootingScanOv'&&typeof resetRootingScanView==='function')resetRootingScanView();}
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
-  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','privOv','sessOv'].forEach(closeMod);
+  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','privOv','sessOv','guardOv','sfgOv','ownOv'].forEach(closeMod);
   closeSheet();closeCtx();
 });
-['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv'].forEach(id=>{
+['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','ownOv'].forEach(id=>{
   document.getElementById(id)?.addEventListener('click',e=>{if(e.target===document.getElementById(id))closeMod(id);});
 });
 document.getElementById('fileInfoClose')?.addEventListener('click',()=>closeMod('fileInfoOv'));
@@ -19012,6 +19865,8 @@ function doAction(action,name,extra={}){
     navigator.clipboard.writeText(p).then(()=>toast('Path copied!'));
   }else if(action==='share'){
     openShareCreate(name);
+  }else if(action==='owner'){
+    openOwner(name);
   }else if(action==='perm'){
     openPerm(name,extra.perm||'');
   }else if(action==='dirsize'){
@@ -19066,6 +19921,7 @@ function showCtx(x,y,data){
   qs('ctx-share').style.display=(isDir||isRO)?'none':'flex';
   qs('ctx-dirsize').style.display=isDir?'flex':'none';
   qs('ctx-perm').style.display=isRO?'none':'flex';
+  const ctxOwn=qs('ctx-owner');if(ctxOwn)ctxOwn.style.display=isRO?'none':'flex';
   qs('ctx-ren').style.display=isRO?'none':'flex';
   qs('ctx-del').style.display=isRO?'none':'flex';
   // Position
@@ -19147,6 +20003,7 @@ qs('ctx-dup')?.addEventListener('click',()=>{closeCtx();doAction('dup',ctxData.n
 qs('ctx-share')?.addEventListener('click',()=>{closeCtx();openShareCreate(ctxData.name);});
 qs('ctx-dirsize')?.addEventListener('click',e=>{closeCtx();calcDirSize(ctxData.name,null);});
 qs('ctx-perm')?.addEventListener('click',()=>{closeCtx();openPerm(ctxData.name,ctxData.perm);});
+qs('ctx-owner')?.addEventListener('click',()=>{closeCtx();openOwner(ctxData.name);});
 qs('ctx-ren')?.addEventListener('click',()=>{closeCtx();doAction('ren',ctxData.name);});
 qs('ctx-del')?.addEventListener('click',()=>{closeCtx();doAction('del',ctxData.name);});
 
@@ -20596,6 +21453,161 @@ document.getElementById('sessCfgAuto')?.addEventListener('click',()=>{
 });
 document.getElementById('sessCfgPath')?.addEventListener('keydown',e=>{
   if(e.key==='Enter'){e.preventDefault();document.getElementById('sessCfgUse')?.click();}
+});
+/* ── Site Files Guard ──────────────────────────────────────────────────────
+   Talks to ?x=guard. The list shows every file this tool installed in a site,
+   its state, and one action per row (versions / unguard). */
+let SFG_DATA=null, SFG_SEL=null;
+async function sfgCall(action,extra){
+  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action',action);
+  if(extra)for(const k in extra){if(extra[k]!==undefined&&extra[k]!==null)fd.append(k,String(extra[k]));}
+  try{
+    const r=await fetch('?x=guard',{method:'POST',body:fd,cache:'no-store'});
+    if(r.status===403){toast('Security token rejected. Reload the page.');return null;}
+    return await r.json();
+  }catch(e){toast('The request failed.');return null;}
+}
+function sfgNote(msg){
+  const out=document.getElementById('sfgOut');
+  if(out)out.textContent=msg||'';
+  if(msg)toast(msg);
+}
+function sfgChip(state){
+  const ok=state==='ok';
+  const color=ok?'#34d399':(String(state).indexOf('repaired')===0?'#60a5fa':'#f87171');
+  return '<span style="font-size:10px;padding:1px 6px;border-radius:6px;border:1px solid '+color+';color:'+color+'">'+sessEsc(state)+'</span>';
+}
+function sfgRender(){
+  const d=SFG_DATA;if(!d)return;
+  const sm=document.getElementById('sfgSummary');
+  if(sm){
+    sm.innerHTML='<b style="color:var(--t1)">'+((d.count||0))+'</b> guarded file(s)'
+      +' · guard file on WordPress: '+(d.has_sentinel?'<b style="color:#34d399">installed</b>':'<b style="color:#f87171">missing</b>')
+      +' · last check: '+(d.last_check?new Date(d.last_check*1000).toLocaleString():'never')
+      +'<br>registry: <span style="font-family:monospace">'+sessEsc(d.registry||'')+'</span>';
+  }
+  const badge=document.getElementById('sfgBadge');
+  if(badge){
+    const bad=(d.files||[]).filter(f=>f.status!=='ok').length;
+    badge.textContent=bad?('· '+bad+' to fix'):'';
+    const btn=document.getElementById('sfgBtn');
+    if(btn)btn.title=(d.count||0)+' guarded file(s); '+(bad?bad+' need attention':'all intact');
+  }
+  const box=document.getElementById('sfgList');
+  if(!box)return;
+  if(!(d.files||[]).length){box.innerHTML='<div style="font-size:12px;color:var(--t3)">Nothing guarded yet — press <b>Adopt site files</b> to register what this tool already installed.</div>';return;}
+  box.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:12px">'
+    +'<thead><tr style="text-align:left;color:var(--t3);font-size:11px">'
+    +'<th style="padding:6px 4px">File</th><th style="padding:6px 4px">Site</th><th style="padding:6px 4px">State</th>'
+    +'<th style="padding:6px 4px">Versions</th><th style="padding:6px 4px"></th></tr></thead><tbody>'
+    +(d.files||[]).map(f=>'<tr style="border-top:1px solid var(--border)">'
+      +'<td style="padding:6px 4px;color:var(--t2)"><b style="color:var(--t1)">'+sessEsc(f.name)+'</b>'
+      +'<br><span style="font-family:monospace;font-size:10px;color:var(--t3)">'+sessEsc(f.path)+'</span></td>'
+      +'<td style="padding:6px 4px;color:var(--t2)">'+sessEsc(f.type||'—')+'</td>'
+      +'<td style="padding:6px 4px">'+sfgChip(f.status)+'</td>'
+      +'<td style="padding:6px 4px;color:var(--t2)">'+(f.versions||0)+'</td>'
+      +'<td style="padding:6px 4px;white-space:nowrap">'
+      +'<button class="btn btn-g" data-sfg-versions="'+sessEsc(f.key)+'" style="font-size:10px;padding:2px 8px">Versions</button> '
+      +'<button class="btn btn-g" data-sfg-unguard="'+sessEsc(f.key)+'" style="font-size:10px;padding:2px 8px;color:#f87171">Unguard</button>'
+      +'</td></tr>').join('')
+    +'</tbody></table>';
+  box.querySelectorAll('[data-sfg-versions]').forEach(b=>b.addEventListener('click',()=>sfgShowVersions(b.getAttribute('data-sfg-versions'))));
+  box.querySelectorAll('[data-sfg-unguard]').forEach(b=>b.addEventListener('click',async()=>{
+    const key=b.getAttribute('data-sfg-unguard');
+    const d2=await sfgCall('unguard',{key:key});
+    if(!d2)return;
+    sfgNote(d2.error||('Removed from the guard: '+(d2.path||key)));
+    sfgLoad();
+  }));
+}
+function sfgVersionsHtml(d){
+  const rows=(d.versions||[]).map((v,i)=>'<div style="display:flex;gap:8px;align-items:center;font-size:11px;color:var(--t2);padding:3px 0">'
+    +'<span style="font-family:monospace;color:var(--t3)">'+sessEsc((v.sha256||'').slice(0,12))+'</span>'
+    +'<span>'+(v.at?new Date(v.at*1000).toLocaleString():'—')+'</span>'
+    +'<span>'+(v.size||0)+' B</span>'
+    +(v.current?'<span style="color:#34d399;font-size:10px">current</span>':'<button class="btn btn-g" data-sfg-restore="'+i+'" style="font-size:10px;padding:1px 8px">Restore</button>')
+    +'</div>').join('');
+  return '<div style="font-size:11px;color:var(--t3);margin-bottom:4px">'+sessEsc(d.path||'')+'</div>'+(rows||'<div style="font-size:11px;color:var(--t3)">No stored versions yet.</div>');
+}
+async function sfgShowVersions(key){
+  SFG_SEL=key;
+  const d=await sfgCall('versions',{key:key});
+  if(!d)return;
+  const box=document.getElementById('sfgVersions');
+  if(!box)return;
+  if(d.error){box.innerHTML='<div style="font-size:11px;color:#f87171">'+sessEsc(d.error)+'</div>';return;}
+  box.innerHTML='<div style="border:1px solid var(--border);border-radius:10px;padding:10px">'+sfgVersionsHtml(d)+'</div>';
+  box.querySelectorAll('[data-sfg-restore]').forEach(b=>b.addEventListener('click',async()=>{
+    const r=await sfgCall('restore_version',{key:key,index:b.getAttribute('data-sfg-restore')});
+    if(!r)return;
+    sfgNote(r.error||('Restored a previous version of '+(r.path||'')));
+    sfgLoad();
+  }));
+}
+async function sfgLoad(){
+  const d=await sfgCall('list');
+  if(!d)return;
+  if(d.error){toast(d.error);return;}
+  SFG_DATA=d;sfgRender();
+}
+document.getElementById('sfgBtn')?.addEventListener('click',()=>{
+  openMod('sfgOv');
+  const v=document.getElementById('sfgVersions');if(v)v.innerHTML='';
+  sfgNote('');
+  sfgLoad();
+});
+document.getElementById('sfgClose')?.addEventListener('click',()=>closeMod('sfgOv'));
+document.getElementById('sfgRefresh')?.addEventListener('click',sfgLoad);
+document.getElementById('sfgVerify')?.addEventListener('click',async()=>{
+  sfgNote('Checking every guarded file…');
+  const d=await sfgCall('verify');
+  if(!d)return;
+  sfgNote(d.error||('Checked '+d.checked+' file(s); repaired '+d.repaired+'.'+(d.failed?(' '+d.failed+' could not be repaired.'):'')));
+  sfgLoad();
+});
+document.getElementById('sfgAdopt')?.addEventListener('click',async()=>{
+  const d=await sfgCall('adopt');
+  if(!d)return;
+  sfgNote(d.error||('Registered '+(d.adopted||[]).length+' file(s) and wrote the cron entries.'));
+  sfgLoad();
+});
+document.getElementById('sfgSentinel')?.addEventListener('click',async()=>{
+  const d=await sfgCall('sentinel');
+  if(!d)return;
+  sfgNote(d.error||d.notice||'Guard installed.');
+  sfgLoad();
+});
+document.getElementById('sfgCron')?.addEventListener('click',async()=>{
+  sfgNote('Asking WordPress to run its cron…');
+  const d=await sfgCall('run_cron');
+  if(!d)return;
+  const h=d.health||{};
+  sfgNote(d.ok?('WordPress cron ran ('+(h.guard_events||0)+' guard event(s), last check '+((h.last_guard_check?new Date(h.last_guard_check*1000).toLocaleTimeString():'—'))+').'):(d.error||'The cron endpoint did not answer.'));
+  sfgLoad();
+});
+document.getElementById('sfgHealth')?.addEventListener('click',async()=>{
+  const d=await sfgCall('cron');
+  if(!d)return;
+  const w=(d.sites||{}).wordpress||{},j=(d.sites||{}).joomla||{};
+  const lines=['WordPress: cron '+(w.disabled_in_config?'disabled in wp-config':'enabled')
+    +', guard events '+(w.guard_events||0)
+    +', guard file '+(w.sentinel?'present':'missing')
+    +', files in manifest '+(w.manifest_files||0)
+    +', last check '+(w.last_guard_check?new Date(w.last_guard_check*1000).toLocaleString():'never'),
+    'Joomla: '+(j.note||'watchdog only')];
+  sfgNote(lines.join(' · '));
+});
+document.getElementById('sfgSweep')?.addEventListener('click',async()=>{
+  const d=await sfgCall('sweep');
+  if(!d)return;
+  sfgNote('Removed '+d.deleted+' leftover file(s); '+(d.items||[]).length+' inspected.');
+  sfgLoad();
+});
+document.getElementById('sfgSelf')?.addEventListener('click',async()=>{
+  const d=await sfgCall('selftest');
+  if(!d)return;
+  const bad=(d.files||[]).filter(f=>f.state==='changed'||f.state==='missing');
+  sfgNote(bad.length?('Manager files need attention: '+bad.map(f=>f.path.split('/').pop()+': '+f.state).join(', ')):'Every manager file matches its recorded hash.');
 });
 /* ── Privilege Mode ────────────────────────────────────────────────────────
    Which identity performs file changes. The state comes from ?x=privmode;
@@ -22294,6 +23306,176 @@ function openPerm(name,perm){
   openMod('permOv');
 }
 document.getElementById('permClose')?.addEventListener('click',()=>closeMod('permOv'));
+
+/* ═══════════════════════════════════════
+   CHANGE OWNER
+   Talks to ?x=owners. The list is every account on the
+   machine; the current owner is read for the chosen item,
+   and the change is applied to that item only.
+═══════════════════════════════════════ */
+let OWN_DATA=null,OWN_ITEM='',OWN_PATH='',OWN_PICK='';
+function ownEsc(v){return typeof sessEsc==='function'?sessEsc(v):String(v==null?'':v);}
+function ownAbsPath(name){return CWD.replace(/\/+$/,'')+'/'+name;}
+async function ownCall(action,extra){
+  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action',action);
+  for(const k in (extra||{})){if(extra[k]!==undefined&&extra[k]!==null)fd.append(k,String(extra[k]));}
+  try{
+    const r=await fetch('?x=owners',{method:'POST',body:fd,cache:'no-store'});
+    if(r.status===403){toast('Security token rejected. Reload the page.');return null;}
+    return await r.json();
+  }catch(e){toast('The request failed.');return null;}
+}
+function ownSetResult(msg,kind){
+  const out=document.getElementById('ownResult');if(!out)return;
+  out.textContent=msg||'';
+  out.className='own-result'+(kind?' '+kind:'');
+}
+function openOwner(name){
+  OWN_ITEM=name||'';OWN_PICK='';OWN_DATA=null;
+  OWN_PATH=OWN_ITEM?ownAbsPath(OWN_ITEM):CWD;
+  const t=document.getElementById('ownTargetName');if(t)t.textContent=OWN_ITEM||'—';
+  const p=document.getElementById('ownTargetPath');if(p)p.textContent=OWN_PATH;
+  const pi=document.getElementById('ownPathInput');if(pi)pi.value=OWN_PATH;
+  const now=document.getElementById('ownTargetNow');if(now)now.textContent='Reading the current owner…';
+  const list=document.getElementById('ownList');if(list)list.innerHTML='<div class="own-empty">Loading accounts…</div>';
+  const srch=document.getElementById('ownSearch');if(srch)srch.value='';
+  const rec=document.getElementById('ownRecursive');if(rec)rec.checked=false;
+  const grp=document.getElementById('ownGroupToo');if(grp)grp.checked=false;
+  const ap=document.getElementById('ownApply');if(ap){ap.disabled=true;ap.textContent='Change owner';}
+  ownSetResult('');
+  openMod('ownOv');
+  ownLoad();
+}
+/* Any path, not only an item from the list: the target can be typed in. */
+function ownUsePath(value){
+  const v=(value||'').trim();
+  if(!v)return;
+  OWN_PATH=v.replace(/\/+$/,'')||'/';
+  OWN_ITEM=OWN_PATH.split('/').pop()||'/';
+  OWN_PICK='';
+  const t=document.getElementById('ownTargetName');if(t)t.textContent=OWN_ITEM;
+  const p=document.getElementById('ownTargetPath');if(p)p.textContent=OWN_PATH;
+  const now=document.getElementById('ownTargetNow');if(now)now.textContent='Reading the current owner…';
+  const ap=document.getElementById('ownApply');if(ap){ap.disabled=true;ap.textContent='Change owner';}
+  ownSetResult('');
+  ownLoad();
+}
+async function ownLoad(){
+  const d=await ownCall('list',{path:OWN_PATH});
+  if(!d||!d.ok){ownSetResult('The account list could not be read.','bad');return;}
+  OWN_DATA=d;
+  const cur=d.current||{};
+  const now=document.getElementById('ownTargetNow');
+  if(now){
+    if(!cur.exists)now.innerHTML='<span style="color:#fca5a5">That item no longer exists.</span>';
+    else now.innerHTML='Now owned by <b style="color:'+(cur.mine?'#7ee2a8':'var(--t1)')+'">'+ownEsc(cur.owner||'unknown')+'</b>'
+      +(cur.group?(' · group <b style="color:var(--t1)">'+ownEsc(cur.group)+'</b>'):'')
+      +' · home <span style="font-family:monospace">'+ownEsc(cur.home||'—')+'</span>';
+  }
+  const note=document.getElementById('ownRoutes');
+  if(note&&d.mode_label){
+    note.textContent='The change is tried by the file manager first, then by the site with its own privileges (Privilege Mode is “'+d.mode_label+'”), and last with sudo '
+      +(d.sudo?'— which this account may run without a password.':'— which is not available without a password here, so it will not be tried.');
+  }
+  ownRender();
+}
+function ownRender(){
+  const box=document.getElementById('ownList');if(!box)return;
+  const d=OWN_DATA;if(!d)return;
+  const q=(document.getElementById('ownSearch')?.value||'').trim().toLowerCase();
+  const cur=(d.current&&d.current.owner)?d.current.owner:'';
+  let rows=(d.owners||[]);
+  if(q)rows=rows.filter(u=>u.name.toLowerCase().indexOf(q)>=0||String(u.uid)===q||(u.home||'').toLowerCase().indexOf(q)>=0);
+  if(!rows.length){box.innerHTML='<div class="own-empty">No account matches “'+ownEsc(q)+'”.</div>';return;}
+  /* the current owner first, then the manager, then the site account, then the rest */
+  const rank=u=>u.name===cur?0:(u.is_manager?1:(u.is_site?2:(u.system?4:3)));
+  rows=rows.slice().sort((a,b)=>rank(a)-rank(b)||a.name.localeCompare(b.name));
+  box.innerHTML=rows.map(u=>{
+    const badges=''
+      +(u.is_manager?'<span class="own-b mgr">file manager</span>':'')
+      +(u.is_site?'<span class="own-b site">site</span>':'')
+      +(u.system?'<span class="own-b sys">system</span>':'');
+    return '<div class="own-row'+(u.name===OWN_PICK?' sel':'')+'" role="option" tabindex="0" data-pick="'+ownEsc(u.name)+'">'
+      +'<span class="own-n">'+ownEsc(u.name)+'</span>'
+      +'<span style="font-size:10px;color:var(--t3)">'+ownEsc(u.uid)+'</span>'
+      +badges
+      +'<span class="own-h">'+ownEsc(u.home||'—')+'</span>'
+      +'</div>';
+  }).join('');
+}
+function ownPick(name){
+  OWN_PICK=name;
+  document.querySelectorAll('#ownList .own-row').forEach(r=>r.classList.toggle('sel',r.dataset.pick===name));
+  const cur=OWN_DATA&&OWN_DATA.current&&OWN_DATA.current.owner;
+  const ap=document.getElementById('ownApply');
+  if(ap){ap.disabled=!name||name===cur;ap.textContent=name?('Make “'+name+'” the owner'):'Change owner';}
+  if(name&&name===cur)ownSetResult('That account already owns this item. Choose a different one.','');
+  else ownSetResult('');
+}
+async function ownApplyNow(){
+  if(!OWN_PICK)return;
+  const ap=document.getElementById('ownApply');if(ap){ap.disabled=true;ap.textContent='Changing…';}
+  ownSetResult('Trying the file manager, then the site, then sudo…');
+  const rec=document.getElementById('ownRecursive');
+  const grp=document.getElementById('ownGroupToo');
+  const extra={path:OWN_PATH,owner:OWN_PICK};
+  if(rec&&rec.checked)extra.recursive=1;
+  if(grp&&grp.checked)extra.group=OWN_PICK;
+  const d=await ownCall('apply',extra);
+  if(ap){ap.textContent='Change owner';}
+  if(!d){ownSetResult('The request failed.','bad');return;}
+  if(d.ok){
+    const n=(d.done||0);
+    ownRender();ownPick('');
+    if(OWN_DATA&&OWN_DATA.current){
+      OWN_DATA.current.owner=d.owner;OWN_DATA.current.group=d.group;OWN_DATA.current.home=d.home;
+      OWN_DATA.current.mine=(OWN_DATA.manager===d.owner);
+      const now=document.getElementById('ownTargetNow');
+      if(now)now.innerHTML='Now owned by <b style="color:'+(OWN_DATA.current.mine?'#7ee2a8':'var(--t1)')+'">'+ownEsc(d.owner||OWN_PICK)+'</b>'
+        +(d.group?(' · group <b style="color:var(--t1)">'+ownEsc(d.group)+'</b>'):'');
+    }
+    const who=d.owner||OWN_PICK;
+    ownSetResult((d.message||('Owner changed to '+who+'.'))+(n>1?' '+n+' items were changed.':''),'good');
+    toast('Owner changed to '+who);
+    /* redraw the row without a full reload */
+    document.querySelectorAll('.own-cell[data-own]').forEach(c=>{
+      if(c.closest('tr')&&c.closest('tr').dataset.name===OWN_ITEM){
+        const nm=c.querySelector('.own-name'),hm=c.querySelector('.own-home');
+        if(nm)nm.textContent=d.owner||OWN_PICK;
+        if(hm)hm.textContent=d.home||'no home directory';
+        c.dataset.own=d.owner||OWN_PICK;
+        c.classList.toggle('own-mine',OWN_DATA.manager===(d.owner||OWN_PICK));
+      }
+    });
+  }else{
+    ownSetResult((d.error||'The owner could not be changed.'),'bad');
+    const ap2=document.getElementById('ownApply');if(ap2)ap2.disabled=false;
+  }
+}
+document.getElementById('ownClose')?.addEventListener('click',()=>closeMod('ownOv'));
+document.getElementById('ownCancel')?.addEventListener('click',()=>closeMod('ownOv'));
+document.getElementById('ownApply')?.addEventListener('click',ownApplyNow);
+document.getElementById('ownSearch')?.addEventListener('input',ownRender);
+document.getElementById('ownPathInput')?.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){e.preventDefault();ownUsePath(e.target.value);}
+});
+document.getElementById('ownPathInput')?.addEventListener('change',e=>ownUsePath(e.target.value));
+document.getElementById('ownList')?.addEventListener('click',e=>{
+  const row=e.target.closest('[data-pick]');if(row)ownPick(row.dataset.pick);
+});
+document.getElementById('ownList')?.addEventListener('keydown',e=>{
+  const row=e.target.closest('[data-pick]');
+  if(row&&(e.key==='Enter'||e.key===' ')){e.preventDefault();ownPick(row.dataset.pick);}
+});
+/* the OWNER cell in the table is a shortcut to the same dialog */
+document.addEventListener('click',e=>{
+  if(!document.getElementById('ownOv'))return;   /* the picker is for administrators */
+  const cell=e.target.closest('[data-own]');
+  if(!cell||e.target.closest('[data-a]'))return;
+  const tr=cell.closest('tr');
+  openOwner(tr&&tr.dataset.name?tr.dataset.name:cell.dataset.own);
+});
+
 
 /* ═══════════════════════════════════════
    SHARE LINKS
