@@ -24103,14 +24103,14 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
          <svg viewBox="0 0 24 24" style="stroke:#93c5fd"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="9.5" cy="11" r="2"/><path d="M13.2 9.6a2.6 2.6 0 0 1 0 5.2"/><path d="M16 12h.01"/></svg>MFM Admin
        </button>
        <?php endif;?>
-       <?php if(!empty($_SESSION['auth'])&&fm_can('pma')):?>
-       <button class="sb-item" id="pmaBtn" title="Every phpMyAdmin on this host: its version, its files, its database account, its address — and a press that signs you in">
-         <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7" ry="3"/><path d="M5 5.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/><path d="M5 11.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>phpMyAdmin Manager
-       </button>
-       <?php endif;?>
        <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?>
        <button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account">
          <svg viewBox="0 0 24 24" style="stroke:#2563eb"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/><path d="m15 5 3 3"/></svg>CMS MFM ACC Login
+       </button>
+       <?php endif;?>
+       <?php if(!empty($_SESSION['auth'])&&fm_can('pma')):?>
+       <button class="sb-item" id="pmaBtn" title="Every phpMyAdmin on this host: its version, its files, its database account, its address — and a press that signs you in">
+         <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7" ry="3"/><path d="M5 5.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/><path d="M5 11.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>phpMyAdmin Manager
        </button>
        <?php endif;?>
        <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?>
