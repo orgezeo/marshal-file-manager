@@ -19436,6 +19436,916 @@ FMIMG;
         }
         mysqli_close($link);exit;
     }
+    /* ══ Plugins Installer ═══════════════════════════════════════════════════
+       One window that installs extensions on either CMS the way that CMS's
+       own "Add New" screen does it.
+
+       WordPress is served by the public repository API (api.wordpress.org),
+       the same one wp-admin itself calls, so Featured / Popular / Newest /
+       Recently Updated / search / one-click install all really work.
+
+       Joomla has no public directory API: update.joomla.org publishes only
+       core update feeds, and extensions.joomla.org answers HTML. So for
+       Joomla this window does what can be done honestly — it reads the
+       installed extensions from the site's own database, installs a package
+       you upload, enables and disables, and opens the Joomla Extensions
+       Directory in a browser tab for browsing. It never pretends to list the
+       directory.
+
+       Installing writes files and updates the CMS's own tables. It does not
+       bootstrap the CMS inside this manager's process: one fatal error in a
+       plugin would take the file manager down with it. */
+
+    private function pieJson($d){
+        if($d===false)return['ok'=>false,'error'=>'The request to the repository did not complete.'];
+        $j=json_decode((string)$d,true);
+        if(!is_array($j))return['ok'=>false,'error'=>'The repository answered something this window cannot read.'];
+        return $j;
+    }
+
+    /* Every outbound call goes through here, so a slow repository cannot hold
+       the PHP worker open and every failure comes back as a readable reason. */
+    private function pieHttp($url,$post=null,$timeout=30){
+        if(!function_exists('curl_init'))return['ok'=>false,'error'=>'This PHP build has no cURL, so the repository cannot be reached.'];
+        $ch=@curl_init($url);
+        if(!$ch)return['ok'=>false,'error'=>'A cURL handle could not be created.'];
+        @curl_setopt_array($ch,[
+            CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>5,
+            CURLOPT_CONNECTTIMEOUT=>12,CURLOPT_TIMEOUT=>(int)$timeout,
+            CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_SSL_VERIFYHOST=>2,
+            CURLOPT_USERAGENT=>'MarshalFM-PluginsInstaller/1.0',
+            CURLOPT_ENCODING=>'',
+        ]);
+        if($post!==null){
+            @curl_setopt($ch,CURLOPT_POST,true);
+            @curl_setopt($ch,CURLOPT_POSTFIELDS,is_array($post)?http_build_query($post):$post);
+        }
+        $body=@curl_exec($ch);
+        $code=(int)@curl_getinfo($ch,CURLINFO_HTTP_CODE);
+        $err=(string)@curl_error($ch);
+        @curl_close($ch);
+        if($body===false)return['ok'=>false,'error'=>'The repository could not be reached'.($err!==''?' ('.$err.')':'').'.'];
+        if($code<200||$code>=300)return['ok'=>false,'error'=>'The repository answered HTTP '.$code.'.'];
+        return['ok'=>true,'body'=>(string)$body,'code'=>$code];
+    }
+
+    /* The repository API takes GET only — a POST is answered with HTTP 405 and
+       the words "This API only serves GET requests.", so nothing is posted. */
+    private function pieWpApi($action,array $req){
+        $args=['action'=>$action];
+        foreach($req as $k=>$v){
+            if($v===null||$v==='')continue;
+            $args['request['.$k.']']=$v;
+        }
+        $r=$this->pieHttp('https://api.wordpress.org/plugins/info/1.2/?'.http_build_query($args));
+        if(empty($r['ok']))return $r;
+        $j=$this->pieJson($r['body']);
+        if(isset($j['error']))return['ok'=>false,'error'=>'The repository refused that request: '.(is_string($j['error'])?$j['error']:json_encode($j['error']))];
+        return $j+['ok'=>true];
+    }
+
+    private function pieWpIcon($p){
+        $icons=(array)($p['icons']??[]);
+        foreach(['svg','2x','1x'] as $k)if(!empty($icons[$k])&&is_string($icons[$k]))return $icons[$k];
+        return '';
+    }
+    private function pieWpBanner($p){
+        $b=(array)($p['banners']??[]);
+        foreach(['low','high'] as $k)if(!empty($b[$k])&&is_string($b[$k]))return $b[$k];
+        return '';
+    }
+
+    /* the repository's own fields, trimmed to what the window draws */
+    private function pieWpSlim($p){
+        $p=(array)$p;
+        $tested=(string)($p['tested']??'');
+        return[
+            'slug'      =>(string)($p['slug']??''),
+            'name'      =>trim((string)html_entity_decode((string)($p['name']??''),ENT_QUOTES,'UTF-8')),
+            'version'   =>(string)($p['version']??''),
+            'tested'    =>$tested,
+            'requires'  =>(string)($p['requires']??''),
+            'requires_php'=>(string)($p['requires_php']??''),
+            'rating'    =>(int)($p['rating']??0),
+            'ratings'   =>(array)($p['ratings']??[]),
+            'num_ratings'=>(int)($p['num_ratings']??0),
+            'active'    =>(int)($p['active_installs']??0),
+            'downloaded'=>(int)($p['downloaded']??0),
+            'last_updated'=>(string)($p['last_updated']??''),
+            'author'    =>trim(strip_tags((string)($p['author']??''))),
+            'short'     =>trim((string)html_entity_decode(strip_tags((string)($p['short_description']??'')),ENT_QUOTES,'UTF-8')),
+            'download'  =>(string)($p['download_link']??''),
+            'homepage'  =>(string)($p['homepage']??''),
+            'icon'      =>$this->pieWpIcon($p),
+            'banner'    =>$this->pieWpBanner($p),
+            'compat'    =>$tested!==''?version_compare((string)$this->pieWpCoreVersion(),$tested,'<='):true,
+        ];
+    }
+
+    private function pieWpCoreVersion(){
+        $root=$this->pieWpRoot();
+        /* with no site chosen yet this still answers from the first WordPress
+           on the server, so the window can say what a plugin was tested
+           against before the reader has picked anything */
+        if($root===''){
+            foreach((array)($this->cmsScan()['sites']??[]) as $s){
+                if((string)($s['type']??'')!=='wordpress')continue;
+                $root=$this->wpSiteRoot((string)($s['config']??''));
+                if($root!=='')break;
+            }
+        }
+        if($root==='')return '';
+        $f=$root.'/wp-includes/version.php';
+        if(!is_file($f))return '';
+        $s=(string)@file_get_contents($f,false,null,0,8192);
+        if($s!==''&&preg_match("/\\\$wp_version\\s*=\\s*'([^']+)'/",$s,$m))return $m[1];
+        return '';
+    }
+
+    /* ── browsing the repository ─────────────────────────────────────────── */
+    public function pieRepoBrowse($browse='featured',$search='',$page=1,$perPage=24){
+        $browse=(string)$browse;
+        $known=['featured','popular','new','updated','top-rated','recommended'];
+        if(!in_array($browse,$known,true))$browse='featured';
+        $page=max(1,min(999,(int)$page));
+        $perPage=max(6,min(60,(int)$perPage));
+        $req=['per_page'=>$perPage,'page'=>$page];
+        $search=trim((string)$search);
+        if($search!=='')$req['search']=$search;
+        else $req['browse']=$browse;
+        /* "top-rated" is the repository's own browse value; "recommended" is
+           the same list under the name wp-admin gives it, so both are kept. */
+        $j=$this->pieWpApi('query_plugins',$req);
+        if(isset($j['error']))return['ok'=>false,'error'=>$j['error']];
+        if(!isset($j['plugins'])&&!isset($j['info']))return['ok'=>false,'error'=>'The repository answered with no plugin list.'];
+        $out=[];
+        foreach((array)($j['plugins']??[]) as $p)$out[]=$this->pieWpSlim($p);
+        $info=(array)($j['info']??[]);
+        return['ok'=>true,'browse'=>$browse,'search'=>$search,'page'=>$page,
+               'per_page'=>$perPage,'pages'=>(int)($info['pages']??1),
+               'results'=>(int)($info['results']??count($out)),'plugins'=>$out];
+    }
+
+    public function pieRepoInfo($slug){
+        $slug=trim((string)$slug);
+        if($slug==='')return['ok'=>false,'error'=>'No plugin was named.'];
+        $j=$this->pieWpApi('plugin_information',['slug'=>$slug]);
+        if(isset($j['error']))return['ok'=>false,'error'=>$j['error']];
+        if(empty($j['slug'])&&empty($j['name']))return['ok'=>false,'error'=>'The repository has no plugin under that name.'];
+        $d=$this->pieWpSlim($j);
+        $sec=[];
+        foreach(['description','installation','faq','screenshots','changelog','reviews','other_notes'] as $k){
+            $v=trim((string)($j['sections'][$k]??''));
+            if($v!=='')$sec[$k]=$v;
+        }
+        $d['sections']=$sec;
+        $tags=[];
+        foreach((array)($j['tags']??[]) as $k=>$v)$tags[]=['slug'=>(string)$k,'name'=>(string)$v];
+        $d['tags']=array_slice($tags,0,14);
+        $compat=[];
+        foreach((array)($j['compatibility']??[]) as $core=>$rows){
+            foreach((array)$rows as $ver=>$row){
+                if(!is_array($row))continue;
+                $compat[]=['core'=>(string)$core,'plugin'=>(string)$ver,'works'=>(string)($row[2]??''),'votes'=>(int)($row[3]??0)];
+            }
+        }
+        $d['compatibility_table']=array_slice($compat,0,12);
+        $d['donate']=(string)($j['donate_link']??'');
+        $d['added']=(string)($j['added']??'');
+        return['ok'=>true,'plugin'=>$d];
+    }
+
+    /* ── the site under the window ───────────────────────────────────────── */
+    public function pieSites(){
+        $scan=$this->cmsScan();
+        $out=[];
+        foreach((array)($scan['sites']??[]) as $s){
+            $cfg=(string)($s['config']??'');
+            if($cfg==='')continue;
+            $out[]=['type'=>(string)($s['type']??''),'config'=>$cfg,'dir'=>(string)($s['dir']??dirname($cfg))];
+        }
+        usort($out,function($a,$b){return strcmp($a['dir'],$b['dir']);});
+        return['ok'=>true,'sites'=>$out,'wp_core'=>$this->pieWpCoreVersion(),'php'=>PHP_VERSION];
+    }
+
+    private function pieWpRoot(){
+        $cfg=$this->pieCfg();
+        return $cfg!==''?$this->wpSiteRoot($cfg):'';
+    }
+    private $pieConfigPath='';
+    private function pieCfg(){return (string)$this->pieConfigPath;}
+
+    private function pieWpPluginsDir(){
+        $cfg=$this->pieCfg();
+        if($cfg==='')return[null,'No site was named.'];
+        if($this->cmsConfigType($cfg)!=='wordpress')return[null,'That config file is not a WordPress site.'];
+        $root=$this->wpSiteRoot($cfg);
+        if($root==='')return[null,'The WordPress root could not be found from that config file.'];
+        $dir=$root.'/wp-content/plugins';
+        if(!is_dir($dir))return[null,'This site has no plugins folder at '.$dir.'.'];
+        return[$dir,''];
+    }
+
+    /* Installed plugins, read the way the CMS itself records them: the files on
+       disk, cross-checked against the active_plugins option. A dead database
+       still lists the files, because the files are the truth about what is
+       installed — only "active" needs the database. */
+    public function pieWpInstalled(){
+        list($dir,$why)=$this->pieWpPluginsDir();
+        if(!$dir)return['ok'=>false,'error'=>$why];
+        $root=$this->pieWpRoot();
+        $list=[];
+        foreach((array)@scandir($dir) as $e){
+            if($e==='.'||$e==='..')continue;
+            $full=$dir.'/'.$e;
+            if(is_dir($full)){
+                foreach((array)@glob($full.'/*.php') as $pf){
+                    $head=@file_get_contents($pf,false,null,0,8192);
+                    if($head&&stripos($head,'Plugin Name:')!==false){
+                        $list[]=['file'=>$e.'/'.basename($pf),'slug'=>$e];
+                        break;
+                    }
+                }
+            }elseif(is_file($full)&&substr($e,-4)==='.php'){
+                $head=@file_get_contents($full,false,null,0,8192);
+                if($head&&stripos($head,'Plugin Name:')!==false)$list[]=['file'=>$e,'slug'=>$e];
+            }
+        }
+        $active=[];$dbError='';
+        list($link,$c,$err)=$this->cmsConnect($this->pieCfg());
+        if($err)$dbError=$err;
+        else{
+            $t=$c['prefix'];
+            $res=@mysqli_query($link,"SELECT option_value FROM `{$t}options` WHERE option_name='active_plugins' LIMIT 1");
+            if($res&&($r=mysqli_fetch_assoc($res))){$u=@unserialize($r['option_value']);if(is_array($u))$active=$u;}
+            @mysqli_close($link);
+        }
+        $out=[];
+        foreach($list as $p){
+            $full=$dir.'/'.$p['file'];
+            $head=(string)@file_get_contents($full,false,null,0,8192);
+            $hdr=$this->cmsParseHeader($head,['name'=>'Plugin Name','version'=>'Version','description'=>'Description','author'=>'Author','req'=>'Requires at least','reqphp'=>'Requires PHP']);
+            $out[]=[
+                'file'=>$p['file'],'slug'=>$p['slug'],
+                'name'=>$hdr['name']?:$p['slug'],
+                'version'=>$hdr['version']?:'',
+                'description'=>trim(strip_tags((string)$hdr['description'])),
+                'author'=>trim(strip_tags((string)$hdr['author'])),
+                'requires'=>$hdr['req']?:'','requires_php'=>$hdr['reqphp']?:'',
+                'active'=>in_array($p['file'],$active,true),
+                'writable'=>@is_writable($full),
+            ];
+        }
+        usort($out,function($a,$b){
+            if($a['active']!==$b['active'])return $a['active']?-1:1;
+            return strcasecmp($a['name'],$b['name']);
+        });
+        return['ok'=>true,'cms'=>'wordpress','plugins'=>$out,'active'=>count($active),
+               'root'=>$root,'wp_core'=>$this->pieWpCoreVersion(),
+               'dir_writable'=>@is_writable($dir),'db_error'=>$dbError];
+    }
+
+    /* find a plugin on disk by the folder name the repository calls it */
+    private function pieWpFind($slug){
+        list($dir)=$this->pieWpPluginsDir();
+        if(!$dir)return null;
+        $slug=$this->pieName($slug);
+        if($slug==='')return null;
+        if(@is_dir($dir.'/'.$slug)){
+            /* the path the CMS records is the main file inside the folder, not
+               the folder name, so both are carried and they are not confused */
+            $main='';
+            foreach((array)@glob($dir.'/'.$slug.'/*.php') as $pf){
+                $head=(string)@file_get_contents($pf,false,null,0,8192);
+                if($head!==''&&stripos($head,'Plugin Name:')!==false){$main=basename($pf);break;}
+            }
+            return['dir'=>$dir.'/'.$slug,'file'=>$slug,'slug'=>$slug,'kind'=>'dir',
+                   'plugin_file'=>$main!==''?$slug.'/'.$main:''];
+        }
+        if(@is_file($dir.'/'.$slug.'.php'))
+            return['dir'=>$dir,'file'=>$slug.'.php','slug'=>$slug,'kind'=>'file',
+                   'plugin_file'=>$slug.'.php'];
+        foreach((array)@scandir($dir) as $e){
+            if($e==='.'||$e==='..'||!@is_dir($dir.'/'.$e))continue;
+            foreach((array)@glob($dir.'/'.$e.'/*.php') as $pf){
+                $head=@file_get_contents($pf,false,null,0,8192);
+                if($head&&stripos($head,'Plugin Name:')===false)continue;
+                if($head&&preg_match('/^[ \t\/*#@]*Text Domain:(.*)$/mi',$head,$m)){
+                    if(trim($m[1])!==''&&strcasecmp(trim($m[1]),$slug)===0)
+                        return['dir'=>$dir.'/'.$e,'file'=>$e.'/'.basename($pf),'slug'=>$e,'kind'=>'dir',
+                               'plugin_file'=>$e.'/'.basename($pf)];
+                }
+                break;
+            }
+        }
+        return null;
+    }
+
+    private function pieWpMainFile($dir,$file){
+        $full=$dir.'/'.$file;
+        if(!is_file($full))return[];
+        $head=(string)@file_get_contents($full,false,null,0,8192);
+        $hdr=$this->cmsParseHeader($head,['name'=>'Plugin Name','version'=>'Version','description'=>'Description','author'=>'Author','req'=>'Requires at least','reqphp'=>'Requires PHP']);
+        return['name'=>$hdr['name']?:basename($file),'version'=>$hdr['version']?:'',
+               'description'=>trim(strip_tags((string)$hdr['description'])),
+               'author'=>trim(strip_tags((string)$hdr['author'])),
+               'requires'=>$hdr['req']?:'','requires_php'=>$hdr['reqphp']?:''];
+    }
+
+    /* ── activation, done on the option the CMS reads ──────────────────────
+       The active_plugins option is a serialized array of "folder/main.php"
+       strings in the order WordPress keeps them. It is rewritten here rather
+       than through activate_plugin(), because loading a plugin's own code
+       inside this manager's process would let one broken plugin end the whole
+       file manager. The consequence is stated to the user, not hidden: the
+       plugin's activation hooks do not run. */
+    private function pieWpSetActive($file,$want){
+        $cfg=$this->pieCfg();
+        list($link,$c,$err)=$this->cmsConnect($cfg);
+        if($err)return['ok'=>false,'error'=>'The site database could not be reached: '.$err];
+        $t=$c['prefix'];
+        $file=(string)$file;
+        $res=@mysqli_query($link,"SELECT option_value FROM `{$t}options` WHERE option_name='active_plugins' LIMIT 1");
+        $row=$res?@mysqli_fetch_assoc($res):null;
+        $arr=$row?@unserialize($row['option_value']):[];
+        if(!is_array($arr))$arr=[];
+        $arr=array_values(array_filter(array_map('strval',$arr),function($v){return $v!=='';}));
+        $has=in_array($file,$arr,true);
+        if($want===$has){
+            @mysqli_close($link);
+            return['ok'=>true,'active'=>$want,'changed'=>false,
+                   'note'=>$want?'That plugin was already active.':'That plugin was already inactive.'];
+        }
+        if($want)$arr[]=$file;
+        else $arr=array_values(array_filter($arr,function($v)use($file){return $v!==$file;}));
+        sort($arr);
+        $blob=mysqli_real_escape_string($link,serialize($arr));
+        if($row)@mysqli_query($link,"UPDATE `{$t}options` SET option_value='{$blob}' WHERE option_name='active_plugins'");
+        else @mysqli_query($link,"INSERT INTO `{$t}options` (option_name,option_value,autoload) VALUES ('active_plugins','{$blob}','yes')");
+        $errno=@mysqli_errno($link);
+        $error=$errno?(string)@mysqli_error($link):'';
+        @mysqli_close($link);
+        if($errno!==0)return['ok'=>false,'error'=>'The active_plugins option could not be written: '.$error];
+        return['ok'=>true,'active'=>$want,'changed'=>true,'count'=>count($arr),
+               'note'=>$want
+                 ?'Active. The plugin\'s own activation routine did not run — this window writes the option the CMS reads instead of loading plugin code inside the manager. If the plugin needs a one-time setup, open wp-admin once and it will finish there.'
+                 :'Inactive. Its deactivation routine did not run, for the same reason.'];
+    }
+
+    public function pieWpActivate($file,$want){
+        list($dir,$why)=$this->pieWpPluginsDir();
+        if(!$dir)return['ok'=>false,'error'=>$why];
+        $file=trim((string)$file);
+        if($file==='')return['ok'=>false,'error'=>'No plugin was named.'];
+        if(strpos($file,'..')!==false||$file[0]==='/'||strpos($file,"\0")!==false)
+            return['ok'=>false,'error'=>'That is not a plugin of this site.'];
+        $seg=explode('/',$file);
+        foreach($seg as $s)if($this->pieName($s)==='')return['ok'=>false,'error'=>'That is not a plugin of this site.'];
+        $real=realpath($dir.'/'.$file);
+        $base=realpath($dir);
+        if($real===false||$base===false||strpos($real,$base.'/')!==0||!is_file($real))
+            return['ok'=>false,'error'=>'That plugin is not on this site any more.'];
+        $want=(bool)$want;
+        $r=$this->pieWpSetActive($file,$want);
+        if(empty($r['ok']))return $r;
+        $hdr=$this->pieWpMainFile($dir,$file);
+        $this->log($want?'plugin_activate':'plugin_deactivate',$file);
+        return $r+['file'=>$file,'name'=>$hdr['name']??''];
+    }
+
+    /* ── installing a package ────────────────────────────────────────────── */
+    private function pieTmp($prefix='pie-'){
+        $base=sys_get_temp_dir();
+        if(!is_dir($base)||!@is_writable($base))$base=$this->pieWpRoot().'/wp-content';
+        $n=$prefix.bin2hex(function_exists('random_bytes')?random_bytes(6):openssl_random_pseudo_bytes(6));
+        return rtrim((string)$base,'/').'/'.$n;
+    }
+
+    /* Unpack a package into a staging folder and say what kind of thing it is.
+       A zip slip (an entry that climbs out with ..) is refused outright. */
+    private function pieUnpack($zipPath,$stage){
+        if(!class_exists('ZipArchive'))return['ok'=>false,'error'=>'This PHP build has no zip extension, so a package cannot be unpacked.'];
+        $zip=new ZipArchive();
+        if(@$zip->open($zipPath)!==true)return['ok'=>false,'error'=>'That file is not a readable zip archive.'];
+        if(!@mkdir($stage,0755,true)&&!is_dir($stage)){$zip->close();return['ok'=>false,'error'=>'The staging folder could not be created.'];}
+        $real=realpath($stage);
+        $n=$zip->numFiles;
+        for($i=0;$i<$n;$i++){
+            $name=(string)$zip->getNameIndex($i);
+            if($name===''||strpos($name,'..')!==false||$name[0]==='/'||$name[0]==='\\'){
+                $zip->close();return['ok'=>false,'error'=>'The archive contains an unsafe path ('.$name.'), so nothing was unpacked.'];
+            }
+        }
+        if(@$zip->extractTo($stage)!==true){$zip->close();return['ok'=>false,'error'=>'The archive could not be unpacked — check the free disk space and the folder permissions.'];}
+        $zip->close();
+        $tops=[];
+        foreach((array)@scandir($stage) as $e){if($e!=='.'&&$e!=='..')$tops[]=$e;}
+        if(!$tops)return['ok'=>false,'error'=>'The archive was empty.'];
+        $root=$stage;
+        if(count($tops)===1&&is_dir($stage.'/'.$tops[0]))$root=$stage.'/'.$tops[0];
+        return['ok'=>true,'stage'=>$stage,'root'=>$root,'folder'=>basename($root),'single'=>count($tops)===1];
+    }
+
+    /* A folder name is one path segment. Nothing else is accepted, so a name
+       can never describe a place outside the folder it is read from. */
+    private function pieName($n){
+        $n=trim((string)$n);
+        if($n===''||$n==='.'||$n==='..')return '';
+        if(strpos($n,"\0")!==false)return '';
+        if($n[0]==='/'||$n[0]==='\\')return '';
+        if(strpos($n,'/')!==false||strpos($n,'\\')!==false)return '';
+        if(preg_match('/[\x00-\x1f]/',$n))return '';
+        return $n;
+    }
+
+    /* Removing is the one action here that cannot be undone, so it refuses any
+       path that is not inside the site it was asked about. Without this a
+       folder name like "../.." would have walked up out of the plugins folder
+       and removed the site itself. */
+    private function pieRmTree($p){
+        if($p==='')return false;
+        $cfg=$this->pieCfg();
+        if($cfg==='')return false;
+        $root=(string)($this->cmsConfigType($cfg)==='joomla'
+            ?$this->pieJoomlaRoot()[0]
+            :$this->wpSiteRoot($cfg));
+        if($root===''||!is_dir($root))return false;
+        $rp=realpath($root);
+        $tp=realpath($p);
+        if($rp===false||$tp===false)return false;
+        if($tp===$rp||strpos($tp,$rp.'/')!==0)return false;
+        if(is_file($tp)||is_link($tp))return @unlink($tp);
+        foreach((array)@scandir($tp) as $e){
+            if($e==='.'||$e==='..')continue;
+            $this->pieRmTree($tp.'/'.$e);
+        }
+        return @rmdir($tp);
+    }
+
+    public function pieWpInstallRepo($slug,$overwrite=false){
+        $slug=trim((string)$slug);
+        if($slug==='')return['ok'=>false,'error'=>'No plugin was named.'];
+        $info=$this->pieRepoInfo($slug);
+        if(empty($info['ok']))return $info;
+        $url=(string)($info['plugin']['download']??'');
+        if($url==='')return['ok'=>false,'error'=>'The repository gave no download address for that plugin.'];
+        return $this->pieWpInstallFromUrl($url,$info['plugin'],(bool)$overwrite);
+    }
+
+    private function pieWpInstallFromUrl($url,$meta,$overwrite=false){
+        list($dir,$why)=$this->pieWpPluginsDir();
+        if(!$dir)return['ok'=>false,'error'=>$why];
+        $r=$this->pieHttp($url,null,180);
+        if(empty($r['ok']))return $r;
+        $zipPath=$this->pieTmp('pie-dl-').'.zip';
+        if(@file_put_contents($zipPath,$r['body'])===false)
+            return['ok'=>false,'error'=>'The package could not be saved to the temporary folder.'];
+        $out=$this->pieWpPlaceZip($zipPath,$meta,$overwrite);
+        @unlink($zipPath);
+        return $out;
+    }
+
+    /* One place decides where an unpacked plugin goes, whatever the source was:
+       the repository, an upload, or a URL. */
+    private function pieFirstPhp($dir){
+        foreach((array)@glob(rtrim($dir,'/').'/*.php') as $f){
+            $head=@file_get_contents($f,false,null,0,8192);
+            if($head&&stripos($head,'Plugin Name:')!==false)return basename($f);
+        }
+        return '';
+    }
+
+    private function pieWpPlaceZip($zipPath,$meta,$overwrite=false){
+        list($dir,$why)=$this->pieWpPluginsDir();
+        if(!$dir)return['ok'=>false,'error'=>$why];
+        if(!@is_writable($dir))
+            return['ok'=>false,'error'=>'The plugins folder is not writable by this account: '.$dir];
+        $stage=$this->pieTmp('pie-st-');
+        $u=$this->pieUnpack($zipPath,$stage);
+        if(empty($u['ok'])){$this->pieRmTree($stage);return $u;}
+        $root=(string)$u['root'];
+        /* a real plugin carries one PHP file with the Plugin Name header */
+        $main='';
+        foreach((array)@glob($root.'/*.php') as $pf){
+            $head=@file_get_contents($pf,false,null,0,8192);
+            if($head&&stripos($head,'Plugin Name:')!==false){$main=basename($pf);break;}
+        }
+        if($main===''){
+            $this->pieRmTree($stage);
+            return['ok'=>false,'error'=>'That package holds no WordPress plugin — no PHP file in it carries a "Plugin Name" header. A theme or a Joomla package will not install here.'];
+        }
+        $hdr=$this->cmsParseHeader((string)@file_get_contents($root.'/'.$main,false,null,0,8192),
+            ['name'=>'Plugin Name','version'=>'Version','description'=>'Description','author'=>'Author','req'=>'Requires at least','reqphp'=>'Requires PHP']);
+        $slug=(string)($u['single']?$u['folder']:preg_replace('/\.php$/','',$main));
+        $slug=preg_replace('/[^A-Za-z0-9._-]/','-',$slug);
+        $target=$dir.'/'.$slug;
+        $existed=@file_exists($target);
+        if($existed){
+            if(!$overwrite){
+                $cur=is_dir($target)?$this->pieWpMainFile($dir,$slug.'/'.$this->pieFirstPhp($target)):$this->pieWpMainFile($dir,$slug);
+                return['ok'=>false,'error'=>'A plugin already lives at '.$slug.'/. Choose "Replace the installed copy" to overwrite it.',
+                       'exists'=>true,'slug'=>$slug,'installed_version'=>(string)($cur['version']??'')];
+            }
+            $this->pieRmTree($target);
+        }
+        if(!@rename($root,$target)){
+            /* a rename across filesystems fails; copy instead */
+            if(!@mkdir($target,0755,true)){
+                $this->pieRmTree($stage);
+                return['ok'=>false,'error'=>'The plugin folder could not be created at '.$target.'.'];
+            }
+            $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);
+            foreach($it as $f){
+                $rel=substr($f->getPathname(),strlen($root)+1);
+                $dst=$target.'/'.$rel;
+                if($f->isDir()){if(!@is_dir($dst))@mkdir($dst,0755,true);}
+                elseif(!@copy($f->getPathname(),$dst)){
+                    $this->pieRmTree($stage);
+                    return['ok'=>false,'error'=>'A file could not be copied into '.$slug.'/.'];
+                }
+            }
+        }
+        $this->pieRmTree($stage);
+        $file=$slug.'/'.$main;
+        if(!is_file($dir.'/'.$file))return['ok'=>false,'error'=>'The plugin was unpacked but its main file is missing.'];
+        $this->log('plugin_install',$slug.(empty($meta['slug'])?'':' (from the repository)'));
+        return['ok'=>true,'slug'=>$slug,'file'=>$file,'replaced'=>$existed,
+               'name'=>$hdr['name']?:$slug,'version'=>$hdr['version']?:'',
+               'description'=>trim(strip_tags((string)$hdr['description'])),
+               'author'=>trim(strip_tags((string)$hdr['author'])),
+               'requires'=>$hdr['req']?:'','requires_php'=>$hdr['reqphp']?:'',
+               'message'=>'Installed '.($hdr['name']?:$slug).($existed?' over the copy that was there':'').'. It is not active yet.'];
+    }
+
+    /* ── deleting ────────────────────────────────────────────────────────── */
+    public function pieWpDelete($slug){
+        list($dir,$why)=$this->pieWpPluginsDir();
+        if(!$dir)return['ok'=>false,'error'=>$why];
+        $f=$this->pieWpFind(trim((string)$slug));
+        if(!$f)return['ok'=>false,'error'=>'No plugin of that name is on this site.'];
+        /* never delete a plugin the CMS still counts as active */
+        list($link,$c,$err)=$this->cmsConnect($this->pieCfg());
+        $active=[];
+        if(!$err){
+            $t=$c['prefix'];
+            $res=@mysqli_query($link,"SELECT option_value FROM `{$t}options` WHERE option_name='active_plugins' LIMIT 1");
+            if($res&&($r=mysqli_fetch_assoc($res))){$u=@unserialize($r['option_value']);if(is_array($u))$active=$u;}
+            @mysqli_close($link);
+        }
+        $rec=(string)($f['plugin_file']??$f['file']);
+        if($rec!==''&&in_array($rec,$active,true))
+            return['ok'=>false,'error'=>'That plugin is active. Deactivate it first — deleting an active plugin leaves the site calling files that are gone.'];
+        $this->pieRmTree($f['dir']);
+        if(@file_exists($f['dir']))return['ok'=>false,'error'=>'The folder could not be removed — it is not writable by this account.'];
+        $this->log('plugin_delete',$f['slug']);
+        return['ok'=>true,'slug'=>$f['slug'],'message'=>'Deleted '.$f['slug'].'.'];
+    }
+
+    /* ── Joomla ──────────────────────────────────────────────────────────── */
+    private function pieJoomlaRoot(){
+        $cfg=$this->pieCfg();
+        if($cfg==='')return[null,'No site was named.'];
+        if($this->cmsConfigType($cfg)!=='joomla')return[null,'That config file is not a Joomla site.'];
+        $root=dirname($cfg);
+        if(!is_dir($root.'/administrator'))return[null,'That folder does not look like a Joomla installation.'];
+        return[$root,''];
+    }
+
+    public function pieJoomlaInstalled(){
+        list($root,$why)=$this->pieJoomlaRoot();
+        if(!$root)return['ok'=>false,'error'=>$why];
+        list($link,$c,$err)=$this->cmsConnect($this->pieCfg());
+        if($err)return['ok'=>false,'error'=>$err];
+        $t=$c['prefix'];
+        $sql="SELECT extension_id,name,type,element,folder,client_id,enabled,protected,manifest_cache
+              FROM `{$t}extensions`
+              WHERE type IN ('component','module','plugin','template','library','file','package')
+              ORDER BY protected ASC, type ASC, name ASC";
+        $res=@mysqli_query($link,$sql);
+        if(!$res){$e=@mysqli_error($link);@mysqli_close($link);return['ok'=>false,'error'=>'The extensions table could not be read: '.$e];}
+        $out=[];
+        while($row=@mysqli_fetch_assoc($res)){
+            $mc=@json_decode((string)($row['manifest_cache']??''),true);
+            if(!is_array($mc))$mc=[];
+            $type=(string)$row['type'];
+            $el=(string)$row['element'];
+            $folder=(string)($row['folder']??'');
+            $client=(int)$row['client_id']===1?'administrator':'site';
+            /* "Core" means the manifest this row points at lives in the folder
+               Joomla itself ships that kind of extension in. The protected
+               flag alone does not mean that: Joomla leaves most of its own
+               extensions unprotected, so calling the rest "third party" would
+               have been wrong on a freshly installed site. */
+            /* the manifest is not always named after the element — Joomla's own
+               com_actionlogs ships actionlogs.xml — so any manifest in the
+               folder counts as the folder being a real one */
+            $hasManifest=function($d){
+                if(!@is_dir($d))return false;
+                foreach((array)@glob($d.'/*.xml') as $f){
+                    $h=(string)@file_get_contents($f,false,null,0,4096);
+                    if(stripos($h,'<extension')!==false)return true;
+                }
+                return false;
+            };
+            $core=false;
+            if($type==='component')$core=$hasManifest($root.'/administrator/components/'.$el)
+                                          ||$hasManifest($root.'/components/'.$el);
+            elseif($type==='module')$core=$hasManifest($root.'/modules/'.$el)
+                                          ||$hasManifest($root.'/administrator/modules/'.$el);
+            elseif($type==='plugin')$core=$folder!==''&&$hasManifest($root.'/plugins/'.$folder.'/'.$el);
+            elseif($type==='template')$core=@is_file($root.'/templates/'.$el.'/templateDetails.xml')
+                                          ||@is_file($root.'/administrator/templates/'.$el.'/templateDetails.xml');
+            elseif($type==='library')$core=$hasManifest($root.'/libraries/'.$el)
+                                         ||@is_dir($root.'/libraries/vendor/joomla/'.$el);
+            $out[]=[
+                'id'=>(int)$row['extension_id'],
+                'name'=>(string)$row['name'],
+                'type'=>$type,
+                'element'=>$el,
+                'folder'=>$folder,
+                'client'=>$client,
+                'enabled'=>(int)$row['enabled']===1,
+                'protected'=>(int)$row['protected']===1,
+                'core'=>$core,
+                'version'=>(string)($mc['version']??''),
+                'author'=>(string)($mc['author']??''),
+                'date'=>(string)($mc['creationDate']??''),
+            ];
+        }
+        @mysqli_close($link);
+        $jv=$this->pieJoomlaVersion($root);
+        usort($out,function($a,$b){
+            if($a['protected']!==$b['protected'])return $a['protected']?1:-1;
+            return strcasecmp($a['name'],$b['name']);
+        });
+        return['ok'=>true,'cms'=>'joomla','extensions'=>$out,'root'=>$root,'joomla_version'=>$jv,
+               'core_count'=>count(array_filter($out,function($x){return $x['core'];})),
+               'protected_count'=>count(array_filter($out,function($x){return $x['protected'];})),
+               'third_party'=>count(array_filter($out,function($x){return !$x['core'];}))];
+    }
+
+    private function pieJoomlaVersion($root){
+        $f=$root.'/libraries/src/Version.php';
+        if(!is_file($f))$f=$root.'/libraries/cms/version/version.php';
+        if(!is_file($f))return '';
+        $s=(string)@file_get_contents($f,false,null,0,8192);
+        if(preg_match("/MAJOR_VERSION\\s*=\\s*'?([0-9]+)/",$s,$a)&&preg_match("/MINOR_VERSION\\s*=\\s*'?([0-9]+)/",$s,$b))
+            return $a[1].'.'.$b[1];
+        if(preg_match("/\\\$RELEASE\\s*=\\s*'([^']+)'/",$s,$m))return $m[1];
+        return '';
+    }
+
+    public function pieJoomlaEnable($id,$want){
+        list($root,$why)=$this->pieJoomlaRoot();
+        if(!$root)return['ok'=>false,'error'=>$why];
+        list($link,$c,$err)=$this->cmsConnect($this->pieCfg());
+        if($err)return['ok'=>false,'error'=>$err];
+        $t=$c['prefix'];
+        $id=(int)$id;
+        $res=@mysqli_query($link,"SELECT name,enabled,protected,type FROM `{$t}extensions` WHERE extension_id=$id LIMIT 1");
+        $row=$res?@mysqli_fetch_assoc($res):null;
+        if(!$row){@mysqli_close($link);return['ok'=>false,'error'=>'No extension carries that id on this site.'];}
+        if((int)$row['protected']===1){
+            @mysqli_close($link);
+            return['ok'=>false,'error'=>$row['name'].' is a core extension. Joomla protects it, and disabling one can leave the site unable to start.'];
+        }
+        $want=(bool)$want;
+        if(((int)$row['enabled']===1)===$want){
+            @mysqli_close($link);
+            return['ok'=>true,'enabled'=>$want,'changed'=>false,'name'=>$row['name'],
+                   'note'=>$want?'That extension was already enabled.':'That extension was already disabled.'];
+        }
+        @mysqli_query($link,"UPDATE `{$t}extensions` SET enabled=".(int)$want." WHERE extension_id=$id");
+        $errno=@mysqli_errno($link);
+        $error=$errno?(string)@mysqli_error($link):'';
+        @mysqli_close($link);
+        if($errno!==0)return['ok'=>false,'error'=>'The row could not be written: '.$error];
+        /* Joomla caches its plugin list; drop it so the change takes effect now */
+        $cache=$root.'/cache';
+        foreach((array)@glob($cache.'/*') as $f){if(is_file($f))@unlink($f);}
+        $this->log($want?'extension_enable':'extension_disable',$row['name']);
+        return['ok'=>true,'enabled'=>$want,'changed'=>true,'name'=>$row['name'],
+               'note'=>$want
+                 ?'Enabled. The extension\'s own install routine did not run — this window writes the row Joomla reads. If it needs a one-time setup, open its own screen in the administrator once.'
+                 :'Disabled. The Joomla cache was cleared so the change applies at once.'];
+    }
+
+    public function pieJoomlaDelete($id){
+        list($root,$why)=$this->pieJoomlaRoot();
+        if(!$root)return['ok'=>false,'error'=>$why];
+        list($link,$c,$err)=$this->cmsConnect($this->pieCfg());
+        if($err)return['ok'=>false,'error'=>$err];
+        $t=$c['prefix'];
+        $id=(int)$id;
+        $res=@mysqli_query($link,"SELECT name,protected,type,element FROM `{$t}extensions` WHERE extension_id=$id LIMIT 1");
+        $row=$res?@mysqli_fetch_assoc($res):null;
+        @mysqli_close($link);
+        if(!$row)return['ok'=>false,'error'=>'No extension carries that id on this site.'];
+        if((int)$row['protected']===1)
+            return['ok'=>false,'error'=>$row['name'].' is a core extension and is not removed from here.'];
+        return['ok'=>false,'error'=>'Removing a Joomla extension means undoing its manifest — the files, its menu entries, its schema and its update row. That is Joomla\'s own uninstaller\'s job, and guessing at it leaves a site half-removed. Use Uninstall in the administrator for this one; this window installs, enables and disables.'];
+    }
+
+    /* ── the endpoint ────────────────────────────────────────────────────── */
+    public function pieEndpoint($post){
+        $act=(string)($post['action']??'');
+        $this->pieConfigPath=(string)($post['config']??'');
+        if($act==='sites')return $this->pieSites();
+
+        /* repository browsing needs no site at all */
+        if($act==='browse')return $this->pieRepoBrowse(
+            (string)($post['browse']??'featured'),(string)($post['search']??''),
+            (int)($post['page']??1),(int)($post['per_page']??24));
+        if($act==='info')return $this->pieRepoInfo((string)($post['slug']??''));
+        if($act==='jed')return['ok'=>true,'url'=>'https://extensions.joomla.org/'];
+
+        /* everything below acts on one named site */
+        if($this->pieCfg()==='')return['ok'=>false,'error'=>'No site was named. Pick the site this should apply to.'];
+        if($act==='installed'){
+            if($this->cmsConfigType($this->pieCfg())==='joomla')return $this->pieJoomlaInstalled();
+            return $this->pieWpInstalled();
+        }
+        if($act==='wp_install'){
+            return $this->pieWpInstallRepo((string)($post['slug']??''),!empty($post['overwrite'])&&$post['overwrite']!=='0');
+        }
+        if($act==='wp_activate'){
+            return $this->pieWpActivate((string)($post['file']??''),!empty($post['want'])&&$post['want']!=='0');
+        }
+        if($act==='wp_delete')return $this->pieWpDelete((string)($post['slug']??''));
+        if($act==='j_enable'){
+            return $this->pieJoomlaEnable((int)($post['id']??0),!empty($post['want'])&&$post['want']!=='0');
+        }
+        if($act==='j_delete')return $this->pieJoomlaDelete((int)($post['id']??0));
+        return['ok'=>false,'error'=>'Unknown request.'];
+    }
+
+    /* the upload arrives as a real file, so it is handled where the other
+       uploads are handled and then handed to the same placing code */
+    public function pieUpload($post,$file){
+        $this->pieConfigPath=(string)($post['config']??'');
+        if($this->pieCfg()==='')return['ok'=>false,'error'=>'No site was named.'];
+        if((int)($file['error']??UPLOAD_ERR_NO_FILE)===UPLOAD_ERR_NO_FILE)
+            return['ok'=>false,'error'=>'No package arrived with that request.'];
+        if((int)$file['error']!==UPLOAD_ERR_OK)
+            return['ok'=>false,'error'=>'The upload failed (code '.$file['error'].'). The server allows up to '.ini_get('upload_max_filesize').'.'];
+        $tmp=(string)($file['tmp_name']??'');
+        if($tmp===''||!is_readable($tmp))return['ok'=>false,'error'=>'The uploaded package could not be read.'];
+        if(!is_uploaded_file($tmp))return['ok'=>false,'error'=>'That file did not arrive as an upload, so it is not installed.'];
+        $name=basename((string)($file['name']??'package.zip'));
+        if(strtolower(substr($name,-4))!=='.zip')
+            return['ok'=>false,'error'=>'Only a .zip package can be installed. That file is named '.$name.'.'];
+        if($this->cmsConfigType($this->pieCfg())==='joomla')
+            return $this->pieJoomlaUpload($tmp,$name,!empty($post['overwrite'])&&$post['overwrite']!=='0');
+        return $this->pieWpPlaceZip($tmp,['uploaded'=>$name],!empty($post['overwrite'])&&$post['overwrite']!=='0');
+    }
+
+    /* A Joomla package is unpacked and placed by its manifest. This covers the
+       extension kinds whose files simply live in a known folder, and it says
+       plainly when it cannot, rather than leaving a half-installed extension
+       behind and reporting success. */
+    private function pieJoomlaUpload($tmp,$name,$overwrite=false){
+        /* mysqli throws on a failed query in PHP 8, and an uncaught throw here
+           would reach the reader as a server error page instead of a sentence */
+        try{
+            return $this->pieJoomlaPlace($tmp,$name,$overwrite);
+        }catch(\Throwable $e){
+            return['ok'=>false,'error'=>'The install stopped: '.$e->getMessage()];
+        }
+    }
+
+    private function pieJoomlaPlace($tmp,$name,$overwrite=false){
+        list($root,$why)=$this->pieJoomlaRoot();
+        if(!$root)return['ok'=>false,'error'=>$why];
+        $stage=$this->pieTmp('pie-j-');
+        $u=$this->pieUnpack($tmp,$stage);
+        if(empty($u['ok'])){$this->pieRmTree($stage);return $u;}
+        $srcRoot=(string)$u['root'];
+        $xml='';
+        foreach((array)@glob($srcRoot.'/*.xml') as $f){
+            $head=(string)@file_get_contents($f,false,null,0,4096);
+            if(stripos($head,'<extension')!==false||stripos($head,'<install')!==false){$xml=$f;break;}
+        }
+        if($xml===''){
+            $this->pieRmTree($stage);
+            return['ok'=>false,'error'=>'That package holds no Joomla manifest — no XML file in it declares an <extension>. A WordPress plugin will not install here.'];
+        }
+        $x=@simplexml_load_file($xml);
+        if(!$x){$this->pieRmTree($stage);return['ok'=>false,'error'=>'The manifest could not be parsed.'];}
+        $type=(string)($x->attributes()->type??'');
+        $element='';
+        if(isset($x->element))$element=(string)$x->element;
+        if($element==='')$element=basename($srcRoot);
+        if(!in_array($type,['module','plugin','template','library','file','component','package'],true)){
+            $this->pieRmTree($stage);
+            return['ok'=>false,'error'=>'The manifest names an unknown extension type ('.($type?:'none').').'];
+        }
+        $dest='';$clientDir='';
+        $clientId=0;
+        if(isset($x->client)&&strtolower((string)$x->client)==='administrator'){$clientId=1;$clientDir='/administrator';}
+        switch($type){
+            case 'module':
+                $folder=(isset($x->namespace)?'':'');
+                $dest=$root.$clientDir.'/modules/'.$element;break;
+            case 'plugin':
+                $group=(string)($x->attributes()->group??'');
+                $dest=$root.'/plugins/'.($group!==''?$group:'system').'/'.$element;break;
+            case 'template':
+                $dest=$root.$clientDir.'/templates/'.$element;break;
+            case 'library':
+                $dest=$root.'/libraries/'.$element;break;
+            case 'file':
+                $dest=$root.'/';break;
+            case 'component':
+                $dest=$root.$clientDir.'/components/'.$element;break;
+            case 'package':
+                $this->pieRmTree($stage);
+                return['ok'=>false,'error'=>'A Joomla package installs several extensions at once, each with its own schema and rows. That is Joomla\'s own installer\'s job; unpacking it here would leave the site with files and no extension behind them. Install this one from the administrator, or install the pieces one by one.'];
+        }
+        if($dest===''||strpos($dest,$root.'/')!==0){
+            $this->pieRmTree($stage);
+            return['ok'=>false,'error'=>'The manifest points outside this Joomla installation, so nothing was written.'];
+        }
+        if(!@is_writable(dirname($dest))&&!@is_writable($dest)){
+            $this->pieRmTree($stage);
+            return['ok'=>false,'error'=>'The target folder is not writable by this account: '.dirname($dest)];
+        }
+        if(@is_dir($dest)&&!$overwrite){
+            /* what is in that folder now is the installed copy of this
+               extension; replacing it silently would take its settings and any
+               file of its own with it */
+            $this->pieRmTree($stage);
+            return['ok'=>false,'exists'=>true,'placed'=>$dest,
+                   'error'=>'That extension is already installed at '.$dest.'. Replace the installed copy?'];
+        }
+        if(@is_dir($dest))$this->pieRmTree($dest);
+        /* placing files and then finding out the row cannot be written leaves an
+           extension on disk that Joomla does not know about, so the table is
+           checked before anything is written */
+        list($link0,$c0,$err0)=$this->cmsConnect($this->pieCfg());
+        if($err0){
+            $this->pieRmTree($stage);
+            return['ok'=>false,'error'=>'The site database could not be reached, so nothing was installed: '.$err0];
+        }
+        $probe=@mysqli_query($link0,"SELECT extension_id FROM `{$c0['prefix']}extensions` LIMIT 1");
+        if(!$probe){
+            $e=(string)@mysqli_error($link0);@mysqli_close($link0);$this->pieRmTree($stage);
+            return['ok'=>false,'error'=>'The extensions table could not be read, so nothing was installed: '.$e];
+        }
+        @mysqli_close($link0);
+        if(!@mkdir($dest,0755,true)&&!is_dir($dest)){
+            $this->pieRmTree($stage);
+            return['ok'=>false,'error'=>'The target folder could not be created: '.$dest];
+        }
+        $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($srcRoot,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);
+        foreach($it as $f){
+            $rel=substr($f->getPathname(),strlen($srcRoot)+1);
+            $dst=$dest.'/'.$rel;
+            if($f->isDir()){if(!@is_dir($dst))@mkdir($dst,0755,true);}
+            elseif(!@copy($f->getPathname(),$dst)){
+                $this->pieRmTree($stage);
+                return['ok'=>false,'error'=>'A file could not be copied into '.$dest.'.'];
+            }
+        }
+        $this->pieRmTree($stage);
+        /* the extension row Joomla lists it from */
+        list($link,$c,$err)=$this->cmsConnect($this->pieCfg());
+        if($err)return['ok'=>true,'placed'=>$dest,'row'=>false,
+            'error'=>'The files were placed, but the extension row could not be written: '.$err];
+        $t=$c['prefix'];
+        $dbError='';
+        $nameS=mysqli_real_escape_string($link,(string)($x->name??$element));
+        $elS=mysqli_real_escape_string($link,$element);
+        $tyS=mysqli_real_escape_string($link,$type);
+        $grS=mysqli_real_escape_string($link,(string)($x->attributes()->group??''));
+        $mc=mysqli_real_escape_string($link,json_encode([
+            'name'=>(string)($x->name??$element),'version'=>(string)($x->version??''),
+            'creationDate'=>(string)($x->creationDate??''),'author'=>(string)($x->author??''),
+            'authorUrl'=>(string)($x->authorUrl??''),'copyright'=>(string)($x->copyright??''),
+            'description'=>(string)($x->description??''),
+        ]));
+        $res=@mysqli_query($link,"SELECT extension_id FROM `{$t}extensions` WHERE type='$tyS' AND element='$elS' AND client_id=$clientId LIMIT 1");
+        $have=$res&&($r=@mysqli_fetch_assoc($res))?(int)$r['extension_id']:0;
+        if($have){
+            @mysqli_query($link,"UPDATE `{$t}extensions` SET name='$nameS', manifest_cache='$mc', folder='$grS' WHERE extension_id=$have");
+        }else{
+            /* every column Joomla declares NOT NULL without a default is named
+               here; leaving one out makes the driver throw instead of returning
+               an error this window can report */
+            @mysqli_query($link,"INSERT INTO `{$t}extensions` (name,type,element,folder,client_id,enabled,protected,manifest_cache,access,params,custom_data,checked_out,checked_out_time,ordering,state)
+                                 VALUES ('$nameS','$tyS','$elS','$grS',$clientId,0,0,'$mc',1,'{}','{}',0,NULL,0,0)");
+            $have=(int)@mysqli_insert_id($link);
+        }
+        $errno=@mysqli_errno($link);
+        $error=$errno?(string)@mysqli_error($link):'';
+        @mysqli_close($link);
+        if($dbError!==''||$errno!==0)return['ok'=>true,'placed'=>$dest,'row'=>false,
+            'error'=>'The files were placed, but the extension row could not be written: '.($dbError!==''?$dbError:$error)
+                    .' Install it again once the row can be written, or finish it from the administrator.'];
+        $this->log('extension_install',$element.' ('.$type.')');
+        return['ok'=>true,'id'=>$have,'element'=>$element,'type'=>$type,'name'=>(string)($x->name??$element),
+               'version'=>(string)($x->version??''),'placed'=>$dest,'row'=>true,
+               'message'=>'Installed '.$element.' ('.$type.'). It is not enabled yet, and its own install script and SQL did not run — enable it here, then open its screen in the administrator once so it can finish any setup it needs.'];
+    }
 }
 
 function fm_agent_action_label($type,$command=''){
@@ -21317,6 +22227,22 @@ if(isset($_GET['x'])){
             http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
         }
         echo json_encode(fm_cpm_endpoint($_POST),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    /* ── Plugins Installer ──────────────────────────────────────────────────
+       Installing writes files, so this carries the same two guards every other
+       mutating action does: the account must be an administrator, and the
+       request must carry this session's own token. */
+    if($xop==='pie'){
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
+        if((string)($_POST['action']??'')==='upload'){
+            $f=$_FILES['pie_file']??null;
+            if(!is_array($f)){echo json_encode(['ok'=>false,'error'=>'No package arrived with that request.']);exit;}
+            echo json_encode($fm->pieUpload($_POST,$f),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+        }
+        echo json_encode($fm->pieEndpoint($_POST),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
     }
     if($xop==='mail'){
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
@@ -24016,6 +24942,181 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   .fm-music-play.fm-loading:after,.fm-music-mini-play.fm-loading:after,.fm-music-loading-spinner{animation:none}
   .fm-music-progress-wrap.fm-buffering:after,.fm-music-cover.fm-art-loading:after,.fm-music-queue-art.fm-art-loading:after{animation:none}
 }
+
+/* ══ Plugins Installer ══════════════════════════════════════════════════════
+   Built from the app's own tokens so the window belongs to the manager in
+   either theme, and sized so a plugin card grid and a long description both
+   fit without the window itself scrolling. */
+.pie-win{width:min(1120px,96vw);height:min(860px,92vh);background:var(--surf);
+  border:1px solid var(--border2);border-radius:var(--rlg);display:flex;flex-direction:column;
+  overflow:hidden;animation:fadeUp .3s var(--spring) both}
+.pie-hd{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:13px 16px;border-bottom:1px solid var(--border2);background:var(--panel);flex:none}
+.pie-hd-l{display:flex;align-items:center;gap:11px;min-width:0}
+.pie-ico{width:34px;height:34px;flex:none;border-radius:9px;display:grid;place-items:center;
+  background:var(--raised);border:1px solid var(--border2);color:var(--t1)}
+.pie-ico svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.pie-hd .mod-title{display:block;font-size:14px;font-weight:var(--fw-strong);color:var(--t1)}
+.pie-sub{display:block;font-size:11.5px;color:var(--t3);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(620px,52vw)}
+
+.pie-sites{display:flex;align-items:center;gap:9px;padding:9px 16px;flex:none;
+  border-bottom:1px solid var(--border);background:var(--panel)}
+.pie-lab{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--t3);flex:none}
+.pie-sel,.pie-inp{background:var(--field);border:1px solid var(--fieldb);color:var(--t1);
+  border-radius:8px;font:inherit;font-size:12px;padding:7px 10px;outline:none;min-width:0}
+.pie-sel:focus,.pie-inp:focus{border-color:var(--fieldb-h);background:var(--fieldh)}
+.pie-sel{max-width:min(430px,42vw);flex:1 1 auto}
+.pie-site-meta{font-size:11px;color:var(--t3);flex:none;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+
+.pie-tabs{display:flex;gap:2px;padding:8px 16px 0;flex:none;background:var(--panel)}
+.pie-tab{background:none;border:1px solid transparent;border-bottom:none;color:var(--t2);
+  font:inherit;font-size:12.5px;font-weight:var(--fw-medium);padding:8px 14px;border-radius:9px 9px 0 0;
+  cursor:pointer;transition:.15s}
+.pie-tab:hover{color:var(--t1);background:var(--hov)}
+.pie-tab.is-on{color:var(--t1);background:var(--surf);border-color:var(--border2)}
+
+.pie-pane{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.pie-pane[hidden]{display:none}
+.pie-bar{display:flex;align-items:center;gap:10px;padding:12px 16px;flex:none;flex-wrap:wrap}
+.pie-search{position:relative;flex:1 1 240px;min-width:200px}
+.pie-search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:14px;height:14px;
+  fill:none;stroke:var(--t3);stroke-width:2;stroke-linecap:round;pointer-events:none}
+.pie-search .pie-inp{width:100%;padding-left:31px}
+.pie-browses{display:flex;gap:5px;flex-wrap:wrap}
+.pie-chip{background:var(--raised);border:1px solid var(--border2);color:var(--t2);
+  font:inherit;font-size:11.5px;padding:5px 11px;border-radius:99px;cursor:pointer;transition:.15s;white-space:nowrap}
+.pie-chip:hover{color:var(--t1);border-color:var(--fieldb-h)}
+.pie-chip.is-on{background:var(--t1);border-color:var(--t1);color:var(--bg);font-weight:var(--fw-medium)}
+.pie-jed{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--t2);
+  text-decoration:none;border:1px dashed var(--border2);border-radius:99px;padding:5px 11px;transition:.15s}
+.pie-jed:hover{color:var(--t1);border-color:var(--fieldb-h)}
+.pie-jed svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+.pie-note{padding:0 16px 9px;font-size:11.5px;color:var(--t3);flex:none}
+.pie-note:empty{display:none}
+.pie-note b{color:var(--t2);font-weight:var(--fw-medium)}
+
+.pie-grid{flex:1 1 auto;min-height:0;overflow-y:auto;padding:2px 16px 14px;
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px;align-content:start}
+.pie-card{background:var(--panel);border:1px solid var(--border);border-radius:var(--r);
+  padding:12px;display:flex;flex-direction:column;gap:8px;transition:.15s}
+.pie-card:hover{border-color:var(--border2);background:var(--raised)}
+.pie-c-top{display:flex;gap:10px;align-items:flex-start}
+.pie-c-ico{width:38px;height:38px;flex:none;border-radius:8px;background:var(--raised);
+  border:1px solid var(--border);object-fit:contain;display:grid;place-items:center;color:var(--t3);font-size:15px;font-weight:var(--fw-strong)}
+.pie-c-ico img{width:100%;height:100%;object-fit:contain;border-radius:8px}
+.pie-c-id{min-width:0;flex:1 1 auto}
+.pie-c-name{display:block;font-size:12.5px;font-weight:var(--fw-medium);color:var(--t1);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.pie-c-name:hover{text-decoration:underline}
+.pie-c-meta{display:block;font-size:10.5px;color:var(--t3);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pie-c-desc{font-size:11.5px;color:var(--t2);line-height:1.5;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:34px}
+.pie-c-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:auto}
+.pie-stats{display:flex;gap:12px;font-size:11px;color:var(--t3);flex-wrap:wrap}
+.pie-stats b{color:var(--t1);font-weight:var(--fw-medium)}
+.pie-stat{display:inline-flex;align-items:center;gap:6px}
+.pie-stars{display:inline-flex;align-items:center;gap:3px;color:var(--amber);font-size:11px}
+.pie-stars svg{width:11px;height:11px;fill:currentColor;stroke:none}
+.pie-c-acts{display:flex;gap:5px}
+.pie-tagline{display:inline-block;font-size:10px;padding:2px 7px;border-radius:99px;
+  background:var(--raised);border:1px solid var(--border);color:var(--t3)}
+.pie-tagline.installed{color:var(--green);border-color:rgba(34,197,94,.3)}
+.pie-tagline.active{color:var(--green);border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.08)}
+.pie-tagline.warn{color:var(--amber);border-color:rgba(245,158,11,.3)}
+
+.pie-pager{display:flex;align-items:center;justify-content:center;gap:9px;padding:11px 16px;
+  border-top:1px solid var(--border);flex:none;font-size:11.5px;color:var(--t3)}
+.pie-pager:empty{display:none}
+
+.pie-empty,.pie-busy{grid-column:1/-1;padding:44px 18px;text-align:center;color:var(--t3);font-size:12.5px;line-height:1.7}
+.pie-empty b,.pie-busy b{display:block;color:var(--t2);font-size:13px;margin-bottom:5px;font-weight:var(--fw-medium)}
+.pie-spin{width:20px;height:20px;margin:0 auto 10px;border:2px solid var(--border2);
+  border-top-color:var(--t1);border-radius:50%;animation:pieSpin .7s linear infinite}
+@keyframes pieSpin{to{transform:rotate(360deg)}}
+
+.pie-list{flex:1 1 auto;min-height:0;overflow-y:auto;padding:0 16px 14px;display:flex;flex-direction:column;gap:7px}
+.pie-row{background:var(--panel);border:1px solid var(--border);border-radius:var(--r);
+  padding:10px 12px;display:flex;align-items:center;gap:11px}
+.pie-row:hover{border-color:var(--border2)}
+.pie-r-id{min-width:0;flex:1 1 auto}
+.pie-r-name{font-size:12.5px;color:var(--t1);font-weight:var(--fw-medium);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pie-r-sub{font-size:10.5px;color:var(--t3);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pie-r-acts{display:flex;gap:5px;flex:none;align-items:center}
+
+.pie-up{padding:18px 16px;display:flex;flex-direction:column;gap:13px;overflow-y:auto}
+.pie-drop{border:1.5px dashed var(--border2);border-radius:var(--rlg);padding:38px 20px;
+  text-align:center;color:var(--t2);display:flex;flex-direction:column;align-items:center;gap:7px;
+  cursor:pointer;transition:.15s;background:var(--panel);position:relative}
+.pie-drop:hover,.pie-drop.is-over{border-color:var(--t2);background:var(--raised)}
+.pie-drop svg{width:26px;height:26px;fill:none;stroke:var(--t3);stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.pie-drop b{font-size:13px;color:var(--t1);font-weight:var(--fw-medium)}
+.pie-drop span{font-size:11.5px;color:var(--t3);max-width:520px;line-height:1.6}
+.pie-drop input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer}
+.pie-up-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.pie-file-name{font-size:11.5px;color:var(--t2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px}
+.pie-check{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--t2);cursor:pointer}
+.pie-check input{accent-color:var(--green)}
+.pie-msg{font-size:11.5px;color:var(--t3);line-height:1.65;background:var(--panel);
+  border:1px solid var(--border);border-left:2px solid var(--border2);border-radius:8px;padding:10px 12px}
+.pie-msg code{font-size:11px;background:var(--raised);padding:1px 4px;border-radius:4px;color:var(--t1)}
+.pie-msg.good{border-left-color:var(--green);color:var(--t2)}
+.pie-msg.bad{border-left-color:var(--red);color:var(--t2)}
+.pie-msg b{color:var(--t1)}
+
+.pie-ft{flex:none;padding:9px 16px;border-top:1px solid var(--border);background:var(--panel);
+  font-size:11px;color:var(--t3);display:flex;gap:14px;flex-wrap:wrap}
+.pie-ft:empty{display:none}
+.pie-ft b{color:var(--t2);font-weight:var(--fw-medium)}
+
+/* one plugin, read before it is installed */
+.pie-detail{width:min(880px,94vw);height:min(760px,90vh)}
+.pie-d-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;
+  padding:12px 16px;border-bottom:1px solid var(--border);flex:none;flex-wrap:wrap}
+.pie-acts{display:flex;gap:7px;flex:none}
+.pie-d-tabs{display:flex;gap:2px;padding:9px 16px 0;flex:none;flex-wrap:wrap}
+.pie-d-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:14px 16px 22px;
+  font-size:12.5px;line-height:1.7;color:var(--t2)}
+.pie-d-body h1,.pie-d-body h2,.pie-d-body h3,.pie-d-body h4{color:var(--t1);margin:16px 0 7px;line-height:1.35}
+.pie-d-body h1{font-size:16px}.pie-d-body h2{font-size:14.5px}.pie-d-body h3{font-size:13px}
+.pie-d-body p{margin:0 0 10px}
+.pie-d-body ul,.pie-d-body ol{margin:0 0 10px;padding-left:20px}
+.pie-d-body li{margin-bottom:4px}
+.pie-d-body a{color:var(--blue)}
+.pie-d-body code{font-size:11.5px;background:var(--raised);padding:1px 5px;border-radius:4px;color:var(--t1)}
+.pie-d-body pre{background:var(--field);border:1px solid var(--border);border-radius:8px;
+  padding:11px;overflow-x:auto;font-size:11.5px;line-height:1.55}
+.pie-d-body pre code{background:none;padding:0}
+.pie-d-body img{max-width:100%;height:auto;border-radius:8px}
+.pie-d-body table{border-collapse:collapse;width:100%;margin:0 0 12px;font-size:11.5px}
+.pie-d-body th,.pie-d-body td{border:1px solid var(--border);padding:6px 9px;text-align:left}
+.pie-d-body th{background:var(--raised);color:var(--t1);font-weight:var(--fw-medium)}
+.pie-d-body blockquote{margin:0 0 10px;padding-left:11px;border-left:2px solid var(--border2);color:var(--t3)}
+.pie-facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin-bottom:14px}
+.pie-fact{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:8px 10px}
+.pie-fact i{display:block;font-style:normal;font-size:10px;text-transform:uppercase;
+  letter-spacing:.06em;color:var(--t3);margin-bottom:3px}
+.pie-fact b{font-size:12px;color:var(--t1);font-weight:var(--fw-medium);word-break:break-word}
+.pie-bars{display:flex;flex-direction:column;gap:4px;margin-bottom:14px}
+.pie-bar-row{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--t3)}
+.pie-bar-row span:first-child{width:34px;flex:none}
+.pie-bar{flex:1 1 auto;height:6px;border-radius:99px;background:var(--raised);overflow:hidden}
+.pie-bar i{display:block;height:100%;background:var(--amber);border-radius:99px}
+.pie-bar-row em{font-style:normal;width:52px;text-align:right;flex:none}
+
+@media (max-width:760px){
+  .pie-grid{grid-template-columns:1fr}
+  .pie-sub{display:none}
+  .pie-row{flex-wrap:wrap}
+  .pie-r-acts{width:100%;justify-content:flex-end}
+}
 </style>
 </head>
 <body class="<?=$terminalStandalone?'term-standalone':''?>">
@@ -24111,6 +25212,11 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
        <?php if(!empty($_SESSION['auth'])&&fm_can('pma')):?>
        <button class="sb-item" id="pmaBtn" title="Every phpMyAdmin on this host: its version, its files, its database account, its address — and a press that signs you in">
          <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7" ry="3"/><path d="M5 5.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/><path d="M5 11.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>phpMyAdmin Manager
+       </button>
+       <?php endif;?>
+       <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?>
+       <button class="sb-item" id="pieBtn" title="Install WordPress plugins from the official repository, and Joomla extensions from a package - search, read, install, activate">
+         <svg viewBox="0 0 24 24"><path d="M12 2v13"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg>Plugins Installer
        </button>
        <?php endif;?>
        <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?>
@@ -25473,6 +26579,111 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 <!-- WEBMAIL MANAGER MODAL -->
 <!-- WEBMAIL MANAGER — every mailbox on the host, opened without a sign-in -->
+<!-- PLUGINS INSTALLER MODAL -->
+<div class="mod-ov" id="pieOv">
+  <div class="mod-win pie-win">
+    <header class="pie-hd">
+      <div class="pie-hd-l">
+        <span class="pie-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v13"/><path d="M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg></span>
+        <div>
+          <span class="mod-title">Plugins Installer</span>
+          <span class="pie-sub" id="pieSub">WordPress plugins from the official repository, and Joomla extensions from a package you upload</span>
+        </div>
+      </div>
+      <button type="button" class="btn btn-icon btn-g" id="pieClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </header>
+
+    <div class="pie-sites">
+      <label class="pie-lab" for="pieSite">Site</label>
+      <select class="pie-sel" id="pieSite"></select>
+      <span class="pie-site-meta" id="pieSiteMeta"></span>
+      <button type="button" class="btn btn-xs btn-g" id="pieRescan" title="Look for sites on this server again">Rescan</button>
+    </div>
+
+    <nav class="pie-tabs" id="pieTabs">
+      <button type="button" class="pie-tab is-on" data-tab="browse">Add new</button>
+      <button type="button" class="pie-tab" data-tab="installed">Installed</button>
+      <button type="button" class="pie-tab" data-tab="upload">Upload a package</button>
+    </nav>
+
+    <!-- ── Add new ─────────────────────────────────────────────────────── -->
+    <section class="pie-pane" id="piePaneBrowse">
+      <div class="pie-bar">
+        <div class="pie-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="search" class="pie-inp" id="pieSearch" placeholder="Search 78,000 WordPress plugins…" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="pie-browses" id="pieBrowses">
+          <button type="button" class="pie-chip is-on" data-browse="featured">Featured</button>
+          <button type="button" class="pie-chip" data-browse="popular">Popular</button>
+          <button type="button" class="pie-chip" data-browse="new">Newest</button>
+          <button type="button" class="pie-chip" data-browse="updated">Recently updated</button>
+        </div>
+        <a class="pie-jed" id="pieJed" href="https://extensions.joomla.org/" target="_blank" rel="noopener" title="Joomla has no public directory API, so its directory opens in a tab">Joomla directory <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
+      </div>
+      <div class="pie-note" id="pieBrowseNote"></div>
+      <div class="pie-grid" id="pieGrid"></div>
+      <div class="pie-pager" id="piePager"></div>
+    </section>
+
+    <!-- ── Installed ───────────────────────────────────────────────────── -->
+    <section class="pie-pane" id="piePaneInstalled" hidden>
+      <div class="pie-bar">
+        <div class="pie-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="search" class="pie-inp" id="pieInstSearch" placeholder="Filter what is installed…" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="pie-browses" id="pieInstFilters">
+          <button type="button" class="pie-chip is-on" data-filter="all">All</button>
+          <button type="button" class="pie-chip" data-filter="active">Active</button>
+          <button type="button" class="pie-chip" data-filter="inactive">Inactive</button>
+        </div>
+      </div>
+      <div class="pie-note" id="pieInstNote"></div>
+      <div class="pie-list" id="pieList"></div>
+    </section>
+
+    <!-- ── Upload ──────────────────────────────────────────────────────── -->
+    <section class="pie-pane" id="piePaneUpload" hidden>
+      <form class="pie-up" id="pieUpForm">
+        <div class="pie-drop" id="pieDrop">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <b>Drop a .zip package here</b>
+          <span>or choose one — a WordPress plugin, or a Joomla component, module, plugin, template or library</span>
+          <input type="file" id="pieFile" name="pie_file" accept=".zip,application/zip">
+        </div>
+        <div class="pie-up-row">
+          <span class="pie-file-name" id="pieFileName">No file chosen</span>
+          <label class="pie-check"><input type="checkbox" id="pieUpOverwrite"> Replace the installed copy if one exists</label>
+          <button type="submit" class="btn btn-p" id="pieUpBtn">Install the package</button>
+        </div>
+        <div class="pie-msg" id="pieUpMsg">The package is unpacked here and checked before anything is written: a WordPress plugin must carry a file with a <code>Plugin Name</code> header, a Joomla package must carry a manifest. Nothing is installed from a path that climbs out of the archive.</div>
+      </form>
+    </section>
+
+    <div class="pie-ft" id="pieFoot"></div>
+  </div>
+</div>
+
+<!-- PLUGINS INSTALLER — ONE PLUGIN, READ BEFORE IT IS INSTALLED -->
+<div class="mod-ov" id="pieDetailOv">
+  <div class="mod-win pie-win pie-detail">
+    <header class="pie-hd">
+      <div class="pie-hd-l"><span class="pie-ico" id="pieDetailIco"></span><div><span class="mod-title" id="pieDetailName">Plugin</span><span class="pie-sub" id="pieDetailSub"></span></div></div>
+      <button type="button" class="btn btn-icon btn-g" id="pieDetailClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </header>
+    <div class="pie-d-bar">
+      <div class="pie-stats" id="pieDetailStats"></div>
+      <div class="pie-acts">
+        <button type="button" class="btn btn-p" id="pieDetailInstall">Install now</button>
+        <a class="btn btn-g" id="pieDetailHome" href="#" target="_blank" rel="noopener">Plugin page</a>
+      </div>
+    </div>
+    <div class="pie-d-tabs" id="pieDetailTabs"></div>
+    <div class="pie-d-body" id="pieDetailBody"></div>
+  </div>
+</div>
+
 <div class="mod-ov" id="webmailOv">
   <div class="mod wm-mod">
     <div class="mod-head">
@@ -37420,5 +38631,588 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
 })();
 </script>
 <?php endif;?>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   PLUGINS INSTALLER
+   WordPress: the official repository, browsed and installed from here.
+   Joomla: what is installed, a package you upload, enable and disable — and
+   the Joomla Extensions Directory in a tab, because Joomla publishes no
+   directory API to browse.
+═══════════════════════════════════════════════════════════════════════════ */
+(function(){
+'use strict';
+
+const S={
+  sites:[], site:null, tab:'browse',
+  browse:'featured', search:'', page:1, perPage:24,
+  results:null, installed:null, detail:null, detailTab:'description',
+  filter:'all', instSearch:'', booted:false
+};
+
+const el=(id)=>document.getElementById(id);
+const qa=(sel,root)=>Array.prototype.slice.call((root||document).querySelectorAll(sel));
+
+/* ── talking to the server ─────────────────────────────────────────────── */
+async function api(action,fields,form){
+  const fd=form||new FormData();
+  if(!form){
+    fd.append('csrf_token',CSRF);
+    fd.append('action',action);
+    Object.keys(fields||{}).forEach(k=>{
+      const v=fields[k];
+      if(v!==undefined&&v!==null&&v!=='')fd.append(k,v);
+    });
+  }
+  const ctl=new AbortController();
+  const timer=setTimeout(()=>ctl.abort(),action==='browse'?30000:120000);
+  let d={ok:false,error:'The server answered nothing.'};
+  try{
+    const r=await fetch('?x=pie',{method:'POST',body:fd,signal:ctl.signal,cache:'no-store',credentials:'same-origin'});
+    const txt=await r.text();
+    try{d=JSON.parse(txt);}
+    catch(e){d={ok:false,error:r.status===403?'This account is not allowed to use the Plugins Installer.':'The server sent an answer this window cannot read.'};}
+    if(r.status===403)d={ok:false,error:'This account is not allowed to use the Plugins Installer. Ask the administrator for the CMS permission.'};
+  }catch(e){
+    d={ok:false,error:(e&&e.name==='AbortError')?'That request took too long and was stopped.':'The manager could not be reached: '+e.message};
+  }
+  clearTimeout(timer);
+  return d;
+}
+
+function msg(box,kind,text){
+  const n=el(box);
+  if(!n)return;
+  n.className='pie-msg'+(kind?' '+kind:'');
+  n.innerHTML=text||'';
+}
+function foot(parts){
+  const n=el('pieFoot');
+  if(!n)return;
+  n.innerHTML=(parts||[]).filter(Boolean).map(p=>'<span>'+p+'</span>').join('');
+}
+
+/* ── small formatters ──────────────────────────────────────────────────── */
+const num=(n)=>{
+  n=Number(n)||0;
+  if(n>=1e6)return (n/1e6).toFixed(n>=1e7?0:1).replace(/\.0$/,'')+'M';
+  if(n>=1e3)return (n/1e3).toFixed(n>=1e4?0:1).replace(/\.0$/,'')+'K';
+  return String(n);
+};
+const stars=(rating)=>{
+  const pct=Math.max(0,Math.min(100,Number(rating)||0));
+  const full=pct/20;
+  let out='';
+  for(let i=1;i<=5;i++){
+    out+='<svg viewBox="0 0 24 24" style="opacity:'+(i<=Math.round(full)?'1':'.22')+'"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.9L12 17.8 5.8 21l1.2-6.9-5-4.9 6.9-1z"/></svg>';
+  }
+  return '<span class="pie-stars" title="'+pct+'%">'+out+'</span>';
+};
+const when=(s)=>{
+  if(!s)return '';
+  const d=new Date(String(s).replace(' ','T'));
+  if(isNaN(d.getTime()))return String(s).slice(0,10);
+  return d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
+};
+/* the repository sends real HTML; it is shown inside this window, so the
+   tags that can run or navigate away are taken out and the rest is kept */
+function safeHtml(h){
+  let s=String(h==null?'':h);
+  s=s.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'');
+  s=s.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,'');
+  s=s.replace(/<(iframe|object|embed|form|base|meta|link|svg|math)\b[^>]*>[\s\S]*?<\/\1>/gi,'');
+  s=s.replace(/<(iframe|object|embed|form|base|meta|link)\b[^>]*\/?>/gi,'');
+  s=s.replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi,'');
+  s=s.replace(/(href|src)\s*=\s*(["']?)\s*javascript:[^"'>\s]*\2?/gi,'$1="#"');
+  s=s.replace(/<a\s/gi,'<a target="_blank" rel="noopener noreferrer" ');
+  return s;
+}
+
+/* ── the site chooser ──────────────────────────────────────────────────── */
+async function loadSites(){
+  const sel=el('pieSite');
+  if(!sel)return;
+  sel.innerHTML='<option value="">Looking for sites…</option>';
+  const d=await api('sites');
+  if(!d.ok){sel.innerHTML='<option value="">No site could be found</option>';msg('pieUpMsg','bad',esc(d.error||''));return;}
+  S.sites=d.sites||[];
+  if(!S.sites.length){
+    sel.innerHTML='<option value="">No WordPress or Joomla site was found on this server</option>';
+    foot(['<b>No site found.</b> Browsing the WordPress repository still works — installing needs a site to install into.']);
+    return;
+  }
+  sel.innerHTML=S.sites.map((s,i)=>
+    '<option value="'+i+'">'+esc((s.type==='joomla'?'Joomla':'WordPress')+' — '+s.dir)+'</option>').join('');
+  const keep=S.site?S.sites.indexOf(S.site):-1;
+  sel.value=String(keep>=0?keep:0);
+  pickSite();
+}
+function pickSite(){
+  const sel=el('pieSite');
+  if(!sel)return;
+  const i=parseInt(sel.value,10);
+  S.site=(isFinite(i)&&S.sites[i])?S.sites[i]:null;
+  const m=el('pieSiteMeta');
+  if(m)m.textContent=S.site?(S.site.type==='joomla'?'Joomla':'WordPress'):'';
+  S.installed=null;
+  renderBrowseChrome();
+  if(S.tab==='installed')loadInstalled();
+  else renderInstalledChrome();
+}
+
+/* what this window can do changes with the kind of site under it, and it says
+   so instead of showing a button that cannot work */
+function isJoomla(){return !!(S.site&&S.site.type==='joomla');}
+function renderBrowseChrome(){
+  const j=isJoomla();
+  const browses=el('pieBrowses');
+  const search=el('pieSearch');
+  const jed=el('pieJed');
+  if(browses)browses.style.display=j?'none':'';
+  if(search){
+    search.disabled=j;
+    search.placeholder=j?'Browsing is WordPress only — Joomla has no public directory API':'Search 78,000 WordPress plugins…';
+  }
+  if(jed)jed.style.display=j?'':'none';
+  const note=el('pieBrowseNote');
+  if(note)note.innerHTML=j
+    ? 'This is a <b>Joomla</b> site. Joomla publishes no directory API — <code>update.joomla.org</code> serves core update feeds only and the Extensions Directory answers HTML. Browse it in a tab, then install the package you download from <b>Upload a package</b>.'
+    : '';
+  if(j&&el('pieGrid'))el('pieGrid').innerHTML='<div class="pie-empty"><b>Nothing to list here</b>Choose <b>Upload a package</b> to install a Joomla extension, or <b>Installed</b> to see and enable what this site already has.</div>';
+}
+function renderInstalledChrome(){
+  const wrap=el('pieInstFilters');
+  if(wrap)wrap.style.display=isJoomla()?'none':'';
+  const note=el('pieInstNote');
+  if(note)note.innerHTML=isJoomla()
+    ? 'Enabling writes the row Joomla reads and clears its cache. The extension\'s own install script and SQL never run here — open its screen in the administrator once so it can finish any setup. Uninstalling is left to Joomla: undoing a manifest by guessing leaves a site half-broken.'
+    : 'Activating writes the <code>active_plugins</code> option WordPress reads. The plugin\'s own activation routine does not run here, because loading plugin code inside the file manager would let one bad plugin take the manager down with it — if a plugin needs a one-time setup, open wp-admin once and it will finish there.';
+}
+
+/* ── browsing the repository ───────────────────────────────────────────── */
+function busy(box,text){
+  const n=el(box);
+  if(n)n.innerHTML='<div class="pie-busy"><div class="pie-spin"></div>'+esc(text||'Working…')+'</div>';
+}
+async function loadBrowse(){
+  if(isJoomla()){renderBrowseChrome();return;}
+  const grid=el('pieGrid');
+  if(!grid)return;
+  busy('pieGrid','Asking the WordPress repository…');
+  el('piePager').innerHTML='';
+  const d=await api('browse',{browse:S.browse,search:S.search,page:S.page,per_page:S.perPage});
+  if(!d.ok){
+    grid.innerHTML='<div class="pie-empty"><b>The repository could not be reached</b>'+esc(d.error||'')+'</div>';
+    return;
+  }
+  S.results=d;
+  /* what is already on the site is marked in the list, so the same plugin is
+     not installed twice by accident */
+  const have={};
+  ((S.installed&&S.installed.plugins)||[]).forEach(p=>{have[String(p.slug).toLowerCase()]=p;});
+  if(!d.plugins.length){
+    grid.innerHTML='<div class="pie-empty"><b>Nothing matches that</b>'+(S.search?'No plugin in the repository is called “'+esc(S.search)+'”. Try one word instead of a sentence.':'This list is empty at the moment.')+'</div>';
+    return;
+  }
+  grid.innerHTML=d.plugins.map(p=>{
+    const h=have[String(p.slug).toLowerCase()];
+    const tag=h?(h.active?'<span class="pie-tagline active">installed · active</span>':'<span class="pie-tagline installed">installed</span>'):'';
+    const warn=(!p.compat&&p.tested)?'<span class="pie-tagline warn">tested up to '+esc(p.tested)+'</span>':'';
+    const ico=p.icon?'<img src="'+esc(p.icon)+'" alt="" loading="lazy" onerror="this.outerHTML=\'<span>'+esc((p.name||'?').charAt(0).toUpperCase())+'</span>\'">':'<span>'+esc((p.name||'?').charAt(0).toUpperCase())+'</span>';
+    return '<article class="pie-card" data-slug="'+esc(p.slug)+'">'
+      +'<div class="pie-c-top"><span class="pie-c-ico">'+ico+'</span>'
+      +'<span class="pie-c-id"><span class="pie-c-name" data-open="'+esc(p.slug)+'">'+esc(p.name||p.slug)+'</span>'
+      +'<span class="pie-c-meta">v'+esc(p.version||'?')+(p.tested?' · tested with WP '+esc(p.tested):'')+(p.last_updated?' · updated '+esc(when(p.last_updated)):'')+'</span></span></div>'
+      +'<div class="pie-c-desc">'+esc(p.short||'')+'</div>'
+      +'<div class="pie-c-foot"><div class="pie-stats">'
+        +'<span class="pie-stat">'+stars(p.rating)+'</span>'
+        +'<span><b>'+num(p.active)+'</b> active</span>'
+        +tag+warn
+      +'</div><div class="pie-c-acts">'
+        +'<button type="button" class="btn btn-xs btn-g" data-open="'+esc(p.slug)+'">Details</button>'
+        +(h?(h.active?'':(h.writable?'<button type="button" class="btn btn-xs btn-p" data-act="'+esc(h.file)+'">Activate</button>':''))
+            :'<button type="button" class="btn btn-xs btn-p" data-install="'+esc(p.slug)+'">Install</button>')
+      +'</div></div></article>';
+  }).join('');
+  qa('#pieGrid [data-open]').forEach(b=>b.addEventListener('click',()=>openDetail(b.dataset.open)));
+  qa('#pieGrid [data-install]').forEach(b=>b.addEventListener('click',()=>installFromRepo(b.dataset.install,b)));
+  qa('#pieGrid [data-act]').forEach(b=>b.addEventListener('click',()=>togglePlugin(b.dataset.act,true,b)));
+  renderPager();
+  foot([
+    '<b>'+num(d.results)+'</b> plugin'+(d.results===1?'':'s')+(d.search?' matching “'+esc(d.search)+'”':' in the '+esc(labelOf(d.browse))+' list'),
+    'page <b>'+d.page+'</b> of <b>'+num(d.pages)+'</b>',
+    S.site?('into <b>'+esc(S.site.dir)+'</b>'):'<b>no site chosen</b>'
+  ]);
+}
+const labelOf=(b)=>({featured:'Featured',popular:'Popular','new':'Newest',updated:'Recently updated','top-rated':'Top rated',recommended:'Recommended'}[b]||b);
+function renderPager(){
+  const box=el('piePager');
+  if(!box||!S.results)return;
+  const d=S.results;
+  if(d.pages<=1){box.innerHTML='';return;}
+  box.innerHTML='<button type="button" class="btn btn-xs btn-g" id="piePrev"'+(d.page<=1?' disabled':'')+'>← Newer</button>'
+    +'<span>Page '+d.page+' / '+num(d.pages)+'</span>'
+    +'<button type="button" class="btn btn-xs btn-g" id="pieNext"'+(d.page>=d.pages?' disabled':'')+'>Older →</button>';
+  const p=el('piePrev'),n=el('pieNext');
+  if(p)p.addEventListener('click',()=>{if(S.page>1){S.page--;loadBrowse();scrollGrid();}});
+  if(n)n.addEventListener('click',()=>{if(S.page<S.results.pages){S.page++;loadBrowse();scrollGrid();}});
+}
+const scrollGrid=()=>{const g=el('pieGrid');if(g)g.scrollTop=0;};
+
+/* ── one plugin, read before it is installed ───────────────────────────── */
+async function openDetail(slug){
+  openMod('pieDetailOv');
+  el('pieDetailName').textContent='Loading…';
+  el('pieDetailSub').textContent=slug;
+  el('pieDetailStats').innerHTML='';
+  el('pieDetailTabs').innerHTML='';
+  el('pieDetailBody').innerHTML='<div class="pie-busy"><div class="pie-spin"></div>Reading the repository…</div>';
+  const d=await api('info',{slug:slug});
+  if(!d.ok){
+    el('pieDetailName').textContent='Not available';
+    el('pieDetailBody').innerHTML='<div class="pie-empty"><b>The repository has nothing for that name</b>'+esc(d.error||'')+'</div>';
+    el('pieDetailTabs').innerHTML='';
+    return;
+  }
+  S.detail=d.plugin;S.detailTab='description';
+  const p=S.detail;
+  el('pieDetailName').textContent=p.name||p.slug;
+  el('pieDetailIco').innerHTML=p.icon?'<img src="'+esc(p.icon)+'" alt="" style="width:100%;height:100%;object-fit:contain;border-radius:9px">':'';
+  el('pieDetailSub').textContent='by '+(p.author||'unknown')+' · v'+(p.version||'?');
+  const home=el('pieDetailHome');
+  if(home){home.href=p.homepage||('https://wordpress.org/plugins/'+p.slug+'/');home.style.display=(p.homepage||p.slug)?'':'none';}
+  el('pieDetailStats').innerHTML=
+      stars(p.rating)+'<span><b>'+num(p.active)+'</b> active installs</span>'
+    +'<span><b>'+num(p.num_ratings)+'</b> ratings</span>'
+    +(p.downloaded?'<span><b>'+num(p.downloaded)+'</b> downloads</span>':'');
+  const secs=Object.keys(p.sections||{});
+  el('pieDetailTabs').innerHTML=secs.map(k=>
+    '<button type="button" class="pie-tab'+(k===S.detailTab?' is-on':'')+'" data-sec="'+esc(k)+'">'+esc(k.charAt(0).toUpperCase()+k.slice(1).replace('_',' '))+'</button>').join('');
+  qa('#pieDetailTabs [data-sec]').forEach(b=>b.addEventListener('click',()=>{
+    S.detailTab=b.dataset.sec;
+    qa('#pieDetailTabs [data-sec]').forEach(x=>x.classList.toggle('is-on',x===b));
+    renderDetailBody();
+  }));
+  renderDetailBody();
+}
+function renderDetailBody(){
+  const p=S.detail;
+  if(!p)return;
+  const body=el('pieDetailBody');
+  const facts='<div class="pie-facts">'
+    +[['Version',p.version||'?'],['Last updated',when(p.last_updated)||'?'],['Tested with',p.tested||'?']]
+       .concat([['Requires WordPress',p.requires||'any'],['Requires PHP',p.requires_php||'any'],['Added',when(p.added)||'?']])
+       .map(f=>'<div class="pie-fact"><i>'+esc(f[0])+'</i><b>'+esc(String(f[1]))+'</b></div>').join('')
+    +'</div>';
+  const bars=(()=>{
+    const r=p.ratings||{};
+    const total=Object.keys(r).reduce((a,k)=>a+(Number(r[k])||0),0);
+    if(!total)return '';
+    let out='<div class="pie-bars">';
+    [5,4,3,2,1].forEach(k=>{
+      const v=Number(r[k])||0;
+      out+='<div class="pie-bar-row"><span>'+k+' ★</span><span class="pie-bar"><i style="width:'+(total?(v/total*100):0).toFixed(1)+'%"></i></span><em>'+num(v)+'</em></div>';
+    });
+    return out+'</div>';
+  })();
+  const tags=(p.tags&&p.tags.length)?'<p>'+p.tags.map(t=>'<span class="pie-tagline">'+esc(t.name)+'</span>').join(' ')+'</p>':'';
+  const compat=(p.compatibility_table&&p.compatibility_table.length)
+    ?'<table><thead><tr><th>WordPress</th><th>Plugin</th><th>Works</th><th>Votes</th></tr></thead><tbody>'
+     +p.compatibility_table.map(c=>'<tr><td>'+esc(c.core)+'</td><td>'+esc(c.plugin)+'</td><td>'+esc(c.works)+'</td><td>'+num(c.votes)+'</td></tr>').join('')
+     +'</tbody></table>':'';
+  const sec=(p.sections||{})[S.detailTab]||'';
+  body.innerHTML=facts
+    +(S.detailTab==='description'?(bars+tags+compat):'')
+    +(sec?safeHtml(sec):'<p>Nothing to read in this section.</p>');
+  body.scrollTop=0;
+}
+
+/* ── installing ────────────────────────────────────────────────────────── */
+function needSite(){
+  if(!S.site){
+    msg('pieUpMsg','bad','Choose the site this should be installed into, at the top of this window.');
+    return false;
+  }
+  if(isJoomla()){
+    msg('pieUpMsg','bad','This is a Joomla site. The WordPress repository does not serve Joomla packages — use <b>Upload a package</b>.');
+    return false;
+  }
+  return true;
+}
+async function installFromRepo(slug,btn){
+  if(!needSite())return;
+  const label=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;btn.textContent='Installing…';}
+  foot(['Installing <b>'+esc(slug)+'</b> — the package is downloaded from wordpress.org and unpacked here…']);
+  let d=await api('wp_install',{slug:slug});
+  if(!d.ok&&d.exists){
+    if(window.confirm('A plugin already lives at '+d.slug+'/'
+      +(d.installed_version?' (version '+d.installed_version+')':'')
+      +'.\n\nReplace the installed copy?')){
+      d=await api('wp_install',{slug:slug,overwrite:'1'});
+    }else{
+      if(btn){btn.disabled=false;btn.textContent=label;}
+      foot([]);
+      return;
+    }
+  }
+  if(btn){btn.disabled=false;btn.textContent=label;}
+  if(!d.ok){
+    foot(['<b>Not installed.</b> '+esc(d.error||'')]);
+    return;
+  }
+  foot(['<b>Installed '+esc(d.name||d.slug)+' '+esc(d.version||'')+'</b>'+(d.replaced?' (replaced the copy that was there)':'')+'. It is not active yet — activate it from the Installed tab.']);
+  S.installed=null;
+  if(el('pieDetailOv').classList.contains('open'))closeMod('pieDetailOv');
+  setTab('installed');
+}
+el('pieDetailInstall').addEventListener('click',()=>{
+  if(S.detail)installFromRepo(S.detail.slug,el('pieDetailInstall'));
+});
+
+/* ── what is installed ─────────────────────────────────────────────────── */
+async function loadInstalled(){
+  if(!S.site){
+    el('pieList').innerHTML='<div class="pie-empty"><b>No site chosen</b>Pick the site at the top of this window to see what it has installed.</div>';
+    foot([]);return;
+  }
+  busy('pieList','Reading the site…');
+  const d=await api('installed',{config:S.site.config});
+  if(!d.ok){
+    el('pieList').innerHTML='<div class="pie-empty"><b>Could not be read</b>'+esc(d.error||'')+'</div>';
+    foot([]);return;
+  }
+  S.installed=d;
+  renderInstalled();
+}
+function renderInstalled(){
+  const box=el('pieList');
+  const d=S.installed;
+  if(!d||!box)return;
+  if(d.cms==='joomla')return renderJoomla();
+  let rows=(d.plugins||[]).slice();
+  const term=(S.instSearch||'').trim().toLowerCase();
+  if(term)rows=rows.filter(p=>(p.name+' '+p.slug+' '+p.description+' '+p.author).toLowerCase().indexOf(term)>=0);
+  if(S.filter==='active')rows=rows.filter(p=>p.active);
+  if(S.filter==='inactive')rows=rows.filter(p=>!p.active);
+  if(!rows.length){
+    box.innerHTML='<div class="pie-empty"><b>Nothing here</b>'
+      +((d.plugins||[]).length?'No installed plugin matches that filter.':'This site has no plugins installed yet. Use <b>Add new</b>.')+'</div>';
+  }else{
+    box.innerHTML=rows.map(p=>'<div class="pie-row">'
+      +'<div class="pie-r-id"><div class="pie-r-name">'+esc(p.name)+'</div>'
+      +'<div class="pie-r-sub">'+esc(p.file)+(p.version?' · v'+esc(p.version):'')
+      +(p.requires?' · needs WP '+esc(p.requires):'')+(p.requires_php?' · needs PHP '+esc(p.requires_php):'')
+      +(p.author?' · '+esc(p.author):'')+'</div></div>'
+      +'<div class="pie-r-acts">'
+        +'<span class="pie-tagline'+(p.active?' active':'')+'">'+(p.active?'active':'inactive')+'</span>'
+        +'<button type="button" class="btn btn-xs '+(p.active?'btn-g':'btn-p')+'" data-toggle="'+esc(p.file)+'" data-want="'+(p.active?'0':'1')+'"'+((p.active||p.writable)?'':' disabled title="The plugin file is not writable by this account"')+'>'+(p.active?'Deactivate':'Activate')+'</button>'
+        +'<button type="button" class="btn btn-xs btn-g" data-del="'+esc(p.slug)+'"'+(p.active?' disabled title="Deactivate it first"':'')+'>Delete</button>'
+      +'</div></div>').join('');
+    qa('#pieList [data-toggle]').forEach(b=>b.addEventListener('click',()=>togglePlugin(b.dataset.toggle,b.dataset.want==='1',b)));
+    qa('#pieList [data-del]').forEach(b=>b.addEventListener('click',()=>deletePlugin(b.dataset.del,b)));
+  }
+  foot([
+    '<b>'+num((d.plugins||[]).length)+'</b> installed · <b>'+num(d.active)+'</b> active',
+    'WordPress <b>'+esc(d.wp_core||'?')+'</b> · PHP <b>'+esc(d.php||'')+'</b>',
+    d.dir_writable?'the plugins folder is writable':'<b>the plugins folder is not writable</b>',
+    d.db_error?'<b>database: '+esc(d.db_error)+'</b>':''
+  ]);
+}
+function renderJoomla(){
+  const box=el('pieList');
+  const d=S.installed;
+  let rows=(d.extensions||[]).slice();
+  const term=(S.instSearch||'').trim().toLowerCase();
+  if(term)rows=rows.filter(x=>(x.name+' '+x.element+' '+x.type+' '+x.author).toLowerCase().indexOf(term)>=0);
+  if(!rows.length){
+    box.innerHTML='<div class="pie-empty"><b>Nothing here</b>'
+      +((d.extensions||[]).length?'No extension matches that.':'This site has no extensions recorded.')+'</div>';
+  }else{
+    box.innerHTML=rows.map(x=>'<div class="pie-row">'
+      +'<div class="pie-r-id"><div class="pie-r-name">'+esc(x.name)+'</div>'
+      +'<div class="pie-r-sub">'+esc(x.type)+' · '+esc(x.element)+(x.folder?'/'+esc(x.folder):'')
+      +(x.version?' · v'+esc(x.version):'')+(x.author?' · '+esc(x.author):'')+' · '+esc(x.client)+'</div></div>'
+      +'<div class="pie-r-acts">'
+        +(x.protected?'<span class="pie-tagline">core</span>':'')
+        +'<span class="pie-tagline'+(x.enabled?' active':'')+'">'+(x.enabled?'enabled':'disabled')+'</span>'
+        +(x.protected?'':'<button type="button" class="btn btn-xs '+(x.enabled?'btn-g':'btn-p')+'" data-jtoggle="'+x.id+'" data-want="'+(x.enabled?'0':'1')+'">'+(x.enabled?'Disable':'Enable')+'</button>')
+      +'</div></div>').join('');
+    qa('#pieList [data-jtoggle]').forEach(b=>b.addEventListener('click',()=>toggleJoomla(b.dataset.jtoggle,b.dataset.want==='1',b)));
+  }
+  foot([
+    '<b>'+num(d.third_party||0)+'</b> not shipped by Joomla · <b>'+num(d.core_count||0)+'</b> core · <b>'+num(d.protected_count||0)+'</b> protected',
+    'Joomla <b>'+esc(d.joomla_version||'?')+'</b>',
+    'enabling writes the row Joomla reads and clears its cache'
+  ]);
+}
+
+async function togglePlugin(file,want,btn){
+  if(!needSite())return;
+  const label=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;btn.textContent='Working…';}
+  const d=await api('wp_activate',{config:S.site.config,file:file,want:want?'1':'0'});
+  if(!d.ok){
+    if(btn){btn.disabled=false;btn.textContent=label;}
+    foot(['<b>Not changed.</b> '+esc(d.error||'')]);
+    return;
+  }
+  foot(['<b>'+esc(d.name||file)+' is now '+(d.active?'active':'inactive')+'.</b> '+esc(d.note||'')]);
+  S.installed=null;
+  loadInstalled();
+}
+async function deletePlugin(slug,btn){
+  if(!needSite())return;
+  if(!window.confirm('Delete '+slug+' from this site?\n\nIts files are removed for good. Deactivate it first if it is active.'))return;
+  const label=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;btn.textContent='Deleting…';}
+  const d=await api('wp_delete',{config:S.site.config,slug:slug});
+  if(!d.ok){
+    if(btn){btn.disabled=false;btn.textContent=label;}
+    foot(['<b>Not deleted.</b> '+esc(d.error||'')]);
+    return;
+  }
+  foot(['<b>'+esc(d.message||('Deleted '+slug+'.'))+'</b>']);
+  S.installed=null;
+  loadInstalled();
+}
+async function toggleJoomla(id,want,btn){
+  if(!S.site)return;
+  const label=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;btn.textContent='Working…';}
+  const d=await api('j_enable',{config:S.site.config,id:id,want:want?'1':'0'});
+  if(!d.ok){
+    if(btn){btn.disabled=false;btn.textContent=label;}
+    foot(['<b>Not changed.</b> '+esc(d.error||'')]);
+    return;
+  }
+  foot(['<b>'+esc(d.name||'')+' is now '+(d.enabled?'enabled':'disabled')+'.</b> '+esc(d.note||'')]);
+  S.installed=null;
+  loadInstalled();
+}
+
+/* ── uploading a package ───────────────────────────────────────────────── */
+function initUpload(){
+  const drop=el('pieDrop'),file=el('pieFile'),name=el('pieFileName'),form=el('pieUpForm');
+  if(!drop||!file||!form)return;
+  const show=()=>{
+    const f=file.files&&file.files[0];
+    name.textContent=f?(f.name+' — '+(f.size/1048576).toFixed(2)+' MB'):'No file chosen';
+  };
+  file.addEventListener('change',show);
+  ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('is-over');}));
+  ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('is-over');}));
+  drop.addEventListener('drop',e=>{
+    if(e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files.length){
+      file.files=e.dataTransfer.files;show();
+    }
+  });
+  form.addEventListener('submit',async e=>{
+    e.preventDefault();
+    if(!S.site){msg('pieUpMsg','bad','Choose the site at the top of this window first.');return;}
+    const f=file.files&&file.files[0];
+    if(!f){msg('pieUpMsg','bad','Choose the .zip package to install.');return;}
+    if(!/\.zip$/i.test(f.name)){msg('pieUpMsg','bad','Only a <b>.zip</b> package can be installed. That file is named <b>'+esc(f.name)+'</b>.');return;}
+    const fd=new FormData();
+    fd.append('csrf_token',CSRF);
+    fd.append('action','upload');
+    fd.append('config',S.site.config);
+    if(el('pieUpOverwrite').checked)fd.append('overwrite','1');
+    fd.append('pie_file',f,f.name);
+    const btn=el('pieUpBtn'),label=btn.textContent;
+    btn.disabled=true;btn.textContent='Installing…';
+    msg('pieUpMsg','','Unpacking <b>'+esc(f.name)+'</b> and checking what it holds…');
+    let d=await api('upload',null,fd);
+    /* the same question WordPress asks: an installed copy is only replaced
+       when the reader says so */
+    if(!d.ok&&d.exists){
+      if(window.confirm((d.error||'That extension is already installed.')+'\n\nReplace it?')){
+        fd.set('overwrite','1');
+        d=await api('upload',null,fd);
+      }else{
+        btn.disabled=false;btn.textContent=label;
+        msg('pieUpMsg','','Left the installed copy alone.');
+        return;
+      }
+    }
+    btn.disabled=false;btn.textContent=label;
+    if(!d.ok){msg('pieUpMsg','bad','<b>Not installed.</b> '+esc(d.error||''));return;}
+    msg('pieUpMsg','good','<b>'+esc(d.message||('Installed '+(d.name||d.slug||d.element||'')+'.'))+'</b>'
+      +(d.placed?' Placed in <code>'+esc(d.placed)+'</code>.':''));
+    S.installed=null;
+    setTab('installed');
+    loadInstalled();
+  });
+}
+
+/* ── tabs and wiring ───────────────────────────────────────────────────── */
+function setTab(t){
+  S.tab=t;
+  qa('#pieTabs .pie-tab').forEach(b=>b.classList.toggle('is-on',b.dataset.tab===t));
+  el('piePaneBrowse').hidden=t!=='browse';
+  el('piePaneInstalled').hidden=t!=='installed';
+  el('piePaneUpload').hidden=t!=='upload';
+  if(t==='browse')loadBrowse();
+  if(t==='installed')loadInstalled();
+  if(t==='upload')msg('pieUpMsg','','The package is unpacked here and checked before anything is written: a WordPress plugin must carry a file with a <code>Plugin Name</code> header, a Joomla package must carry a manifest. Nothing is installed from a path that climbs out of the archive.');
+}
+function wire(){
+  qa('#pieTabs .pie-tab').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tab)));
+  qa('#pieBrowses .pie-chip').forEach(b=>b.addEventListener('click',()=>{
+    S.browse=b.dataset.browse;S.search='';S.page=1;
+    el('pieSearch').value='';
+    qa('#pieBrowses .pie-chip').forEach(x=>x.classList.toggle('is-on',x===b));
+    loadBrowse();
+  }));
+  qa('#pieInstFilters .pie-chip').forEach(b=>b.addEventListener('click',()=>{
+    S.filter=b.dataset.filter;
+    qa('#pieInstFilters .pie-chip').forEach(x=>x.classList.toggle('is-on',x===b));
+    renderInstalled();
+  }));
+  let t=null;
+  el('pieSearch').addEventListener('input',e=>{
+    clearTimeout(t);
+    const v=e.target.value;
+    t=setTimeout(()=>{
+      S.search=v.trim();S.page=1;
+      qa('#pieBrowses .pie-chip').forEach(x=>x.classList.remove('is-on'));
+      loadBrowse();
+    },450);
+  });
+  el('pieSearch').addEventListener('keydown',e=>{
+    if(e.key==='Enter'){e.preventDefault();clearTimeout(t);S.search=e.target.value.trim();S.page=1;loadBrowse();}
+    if(e.key==='Escape'&&e.target.value){e.target.value='';S.search='';S.page=1;loadBrowse();}
+  });
+  el('pieInstSearch').addEventListener('input',e=>{S.instSearch=e.target.value;renderInstalled();});
+  el('pieSite').addEventListener('change',pickSite);
+  el('pieRescan').addEventListener('click',async()=>{
+    el('pieRescan').disabled=true;el('pieRescan').textContent='Scanning…';
+    S.site=null;
+    await loadSites();
+    el('pieRescan').disabled=false;el('pieRescan').textContent='Rescan';
+  });
+  el('pieClose').addEventListener('click',()=>closeMod('pieOv'));
+  el('pieOv').addEventListener('click',e=>{if(e.target===el('pieOv'))closeMod('pieOv');});
+  el('pieDetailClose').addEventListener('click',()=>closeMod('pieDetailOv'));
+  el('pieDetailOv').addEventListener('click',e=>{if(e.target===el('pieDetailOv'))closeMod('pieDetailOv');});
+  document.addEventListener('keydown',e=>{
+    if(e.key!=='Escape')return;
+    if(el('pieDetailOv').classList.contains('open')){closeMod('pieDetailOv');return;}
+    if(el('pieOv').classList.contains('open'))closeMod('pieOv');
+  });
+  initUpload();
+}
+
+function boot(){
+  if(!el('pieOv'))return;
+  if(!S.booted){wire();S.booted=true;}
+  loadSites();
+  loadBrowse();
+}
+const btn=el('pieBtn');
+if(btn)btn.addEventListener('click',()=>{openMod('pieOv');boot();});
+
+})(); // end Plugins Installer IIFE
+</script>
 </body>
 </html>
