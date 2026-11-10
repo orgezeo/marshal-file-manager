@@ -19659,26 +19659,37 @@ FMIMG;
             if($e==='.'||$e==='..')continue;
             $full=$dir.'/'.$e;
             if(is_dir($full)){
-                foreach((array)@glob($full.'/*.php') as $pf){
+                foreach((array)@glob($full.'/*') as $pf){
+                    if(!is_file($pf)||strtolower(substr(basename($pf),-4))!=='.php')continue;
                     $head=@file_get_contents($pf,false,null,0,8192);
                     if($head&&stripos($head,'Plugin Name:')!==false){
                         $list[]=['file'=>$e.'/'.basename($pf),'slug'=>$e];
                         break;
                     }
                 }
-            }elseif(is_file($full)&&substr($e,-4)==='.php'){
+            }elseif(is_file($full)&&strtolower(substr($e,-4))==='.php'){
                 $head=@file_get_contents($full,false,null,0,8192);
                 if($head&&stripos($head,'Plugin Name:')!==false)$list[]=['file'=>$e,'slug'=>$e];
             }
         }
         $active=[];$dbError='';
-        list($link,$c,$err)=$this->cmsConnect($this->pieCfg());
-        if($err)$dbError=$err;
-        else{
-            $t=$c['prefix'];
-            $res=@mysqli_query($link,"SELECT option_value FROM `{$t}options` WHERE option_name='active_plugins' LIMIT 1");
-            if($res&&($r=mysqli_fetch_assoc($res))){$u=@unserialize($r['option_value']);if(is_array($u))$active=$u;}
-            @mysqli_close($link);
+        /* mysqli throws in PHP 8 rather than returning false, and @ does not
+           suppress exceptions. A site whose tables are missing, half-installed
+           or unreachable must therefore be caught here — otherwise one failed
+           query escapes as a server error with a stack trace in the middle of
+           the manager's page, and the whole window stops answering. The list
+           of what is on disk is still returned, with the reason alongside. */
+        try{
+            list($link,$c,$err)=$this->cmsConnect($this->pieCfg());
+            if($err)$dbError=$err;
+            else{
+                $t=$c['prefix'];
+                $res=@mysqli_query($link,"SELECT option_value FROM `{$t}options` WHERE option_name='active_plugins' LIMIT 1");
+                if($res&&($r=mysqli_fetch_assoc($res))){$u=@unserialize($r['option_value']);if(is_array($u))$active=$u;}
+                @mysqli_close($link);
+            }
+        }catch(\Throwable $e){
+            $dbError='the site database could not be read: '.$e->getMessage();
         }
         $out=[];
         foreach($list as $p){
@@ -19908,11 +19919,60 @@ FMIMG;
     /* One place decides where an unpacked plugin goes, whatever the source was:
        the repository, an upload, or a URL. */
     private function pieFirstPhp($dir){
-        foreach((array)@glob(rtrim($dir,'/').'/*.php') as $f){
+        /* glob is case-sensitive on Linux, but .PHP and .Php both occur in
+           the wild and the installer accepts them, so the extension is matched
+           without regard to case here too. */
+        foreach((array)@glob(rtrim($dir,'/').'/*') as $f){
+            if(!is_file($f)||strtolower(substr(basename($f),-4))!=='.php')continue;
             $head=@file_get_contents($f,false,null,0,8192);
             if($head&&stripos($head,'Plugin Name:')!==false)return basename($f);
         }
         return '';
+    }
+
+    /* Where the plugin actually lives inside an unpacked package.
+       A package turns up in whatever shape its author zipped it: one folder
+       holding the plugin, the files loose at the top, a __MACOSX folder left
+       behind by Finder, or the main file one level down inside the folder.
+       The old rule was "a PHP file with a Plugin Name header sits directly in
+       the unpacked root", which refused any zip that did not match exactly.
+       The rule here is the one WordPress itself uses: a plugin is the folder
+       that directly holds that PHP file. So the shallowest directory holding
+       one is what gets installed, which also guarantees WordPress will list
+       the result. Matching is case-insensitive because .PHP and .Php both
+       occur in the wild and glob on Linux is not. Junk folders are skipped so
+       a stray __MACOSX is never mistaken for the plugin. */
+    private function pieWpFindPluginFile($root,$maxDepth=4){
+        $root=rtrim((string)$root,'/');
+        $skip=['__MACOSX','node_modules','vendor','.git','.svn','.hg','tests','docs','languages','assets'];
+        $hits=[];$seen=0;
+        $walk=function($dir,$depth)use(&$walk,$maxDepth,$skip,&$hits,&$seen){
+            if($depth>$maxDepth||$seen>4000)return;
+            foreach((array)@glob($dir.'/*') as $f){
+                if($seen++>4000)return;
+                $b=basename($f);
+                if($b===''||$b[0]==='.'||!is_file($f))continue;
+                if(strtolower(substr($b,-4))!=='.php')continue;
+                $head=(string)@file_get_contents($f,false,null,0,8192);
+                if($head!==''&&stripos($head,'Plugin Name:')!==false)
+                    $hits[]=['dir'=>$dir,'file'=>$b,'depth'=>$depth];
+            }
+            if($depth>=$maxDepth)return;
+            foreach((array)@glob($dir.'/*',GLOB_ONLYDIR) as $d){
+                $b=basename($d);
+                if($b===''||$b[0]==='.'||in_array($b,$skip,true))continue;
+                $walk($d,$depth+1);
+            }
+        };
+        $walk($root,0);
+        if(!$hits)return null;
+        /* shallowest first, then the folder's own name, so the result is the
+           same every time the same package is installed */
+        usort($hits,function($a,$b){
+            if($a['depth']!==$b['depth'])return $a['depth']<=$b['depth']?-1:1;
+            return strcmp($a['file'],$b['file']);
+        });
+        return['dir'=>$hits[0]['dir'],'file'=>$hits[0]['file'],'others'=>count($hits)-1];
     }
 
     private function pieWpPlaceZip($zipPath,$meta,$overwrite=false){
@@ -19923,20 +19983,28 @@ FMIMG;
         $stage=$this->pieTmp('pie-st-');
         $u=$this->pieUnpack($zipPath,$stage);
         if(empty($u['ok'])){$this->pieRmTree($stage);return $u;}
-        $root=(string)$u['root'];
-        /* a real plugin carries one PHP file with the Plugin Name header */
-        $main='';
-        foreach((array)@glob($root.'/*.php') as $pf){
-            $head=@file_get_contents($pf,false,null,0,8192);
-            if($head&&stripos($head,'Plugin Name:')!==false){$main=basename($pf);break;}
-        }
-        if($main===''){
+        $root=rtrim((string)$u['root'],'/');
+        $found=$this->pieWpFindPluginFile($root);
+        if(!$found){
             $this->pieRmTree($stage);
             return['ok'=>false,'error'=>'That package holds no WordPress plugin — no PHP file in it carries a "Plugin Name" header. A theme or a Joomla package will not install here.'];
         }
-        $hdr=$this->cmsParseHeader((string)@file_get_contents($root.'/'.$main,false,null,0,8192),
+        $srcDir=$found['dir'];$main=$found['file'];
+        $hdr=$this->cmsParseHeader((string)@file_get_contents($srcDir.'/'.$main,false,null,0,8192),
             ['name'=>'Plugin Name','version'=>'Version','description'=>'Description','author'=>'Author','req'=>'Requires at least','reqphp'=>'Requires PHP']);
-        $slug=(string)($u['single']?$u['folder']:preg_replace('/\.php$/','',$main));
+        /* The folder holding the main file is the plugin folder, because that
+           is the only shape WordPress will list. Files unpacked loose at the
+           top have no folder to name themselves after, so the file's own name
+           is used instead. */
+        /* Careful: $u['single'] only means "one entry at the top", which is
+           also true of a single loose file, and naming the plugin after the
+           staging folder in that case puts a folder called pie-st-… in the
+           plugins directory. Only the stage root itself counts as loose. */
+        $slug=($srcDir===$stage)
+            ? preg_replace('/\.php$/i','',$main)
+            : basename($srcDir);
+        if($slug===''||$slug==='.'||$slug==='..')
+            $slug=preg_replace('/\.php$/i','',$main);
         $slug=preg_replace('/[^A-Za-z0-9._-]/','-',$slug);
         $target=$dir.'/'.$slug;
         $existed=@file_exists($target);
@@ -19948,15 +20016,15 @@ FMIMG;
             }
             $this->pieRmTree($target);
         }
-        if(!@rename($root,$target)){
+        if(!@rename($srcDir,$target)){
             /* a rename across filesystems fails; copy instead */
             if(!@mkdir($target,0755,true)){
                 $this->pieRmTree($stage);
                 return['ok'=>false,'error'=>'The plugin folder could not be created at '.$target.'.'];
             }
-            $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);
+            $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($srcDir,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);
             foreach($it as $f){
-                $rel=substr($f->getPathname(),strlen($root)+1);
+                $rel=substr($f->getPathname(),strlen($srcDir)+1);
                 $dst=$target.'/'.$rel;
                 if($f->isDir()){if(!@is_dir($dst))@mkdir($dst,0755,true);}
                 elseif(!@copy($f->getPathname(),$dst)){
@@ -19969,12 +20037,16 @@ FMIMG;
         $file=$slug.'/'.$main;
         if(!is_file($dir.'/'.$file))return['ok'=>false,'error'=>'The plugin was unpacked but its main file is missing.'];
         $this->log('plugin_install',$slug.(empty($meta['slug'])?'':' (from the repository)'));
+        $msg='Installed '.($hdr['name']?:$slug).($existed?' over the copy that was there':'').'. It is not active yet.';
+        if(!empty($found['others']))
+            $msg.=' The package held '.($found['others']+1).' plugins; the other '.$found['others'].' were left unpacked.';
         return['ok'=>true,'slug'=>$slug,'file'=>$file,'replaced'=>$existed,
                'name'=>$hdr['name']?:$slug,'version'=>$hdr['version']?:'',
                'description'=>trim(strip_tags((string)$hdr['description'])),
                'author'=>trim(strip_tags((string)$hdr['author'])),
                'requires'=>$hdr['req']?:'','requires_php'=>$hdr['reqphp']?:'',
-               'message'=>'Installed '.($hdr['name']?:$slug).($existed?' over the copy that was there':'').'. It is not active yet.'];
+               'from'=>ltrim(substr($srcDir,strlen($root)),'/'),
+               'message'=>$msg];
     }
 
     /* ── deleting ────────────────────────────────────────────────────────── */
@@ -19983,14 +20055,22 @@ FMIMG;
         if(!$dir)return['ok'=>false,'error'=>$why];
         $f=$this->pieWpFind(trim((string)$slug));
         if(!$f)return['ok'=>false,'error'=>'No plugin of that name is on this site.'];
-        /* never delete a plugin the CMS still counts as active */
-        list($link,$c,$err)=$this->cmsConnect($this->pieCfg());
+        /* Never delete a plugin the CMS still counts as active. Note this
+           fails closed: if the site's database cannot be reached there is no
+           way to know whether the plugin is active, so the deletion is
+           refused rather than going ahead on an empty answer — an unreachable
+           database used to look exactly like "nothing is active". */
         $active=[];
-        if(!$err){
+        try{
+            list($link,$c,$err)=$this->cmsConnect($this->pieCfg());
+            if($err)
+                return['ok'=>false,'error'=>'Whether that plugin is active is recorded in the site database, which could not be reached: '.$err];
             $t=$c['prefix'];
             $res=@mysqli_query($link,"SELECT option_value FROM `{$t}options` WHERE option_name='active_plugins' LIMIT 1");
             if($res&&($r=mysqli_fetch_assoc($res))){$u=@unserialize($r['option_value']);if(is_array($u))$active=$u;}
             @mysqli_close($link);
+        }catch(\Throwable $e){
+            return['ok'=>false,'error'=>'Whether that plugin is active could not be read, so nothing was deleted: '.$e->getMessage()];
         }
         $rec=(string)($f['plugin_file']??$f['file']);
         if($rec!==''&&in_array($rec,$active,true))
@@ -20148,6 +20228,18 @@ FMIMG;
 
     /* ── the endpoint ────────────────────────────────────────────────────── */
     public function pieEndpoint($post){
+        /* Every caller of this endpoint expects JSON. An uncaught throwable
+           would instead produce a half-rendered error page, so the whole thing
+           runs inside a guard: whatever goes wrong below is reported as a
+           message the window can show, never as a stack trace. */
+        try{
+            return $this->pieEndpointWork($post);
+        }catch(\Throwable $e){
+            return['ok'=>false,'error'=>'The installer stopped: '.$e->getMessage()];
+        }
+    }
+
+    private function pieEndpointWork($post){
         $act=(string)($post['action']??'');
         $this->pieConfigPath=(string)($post['config']??'');
         if($act==='sites')return $this->pieSites();
@@ -24998,6 +25090,10 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .pie-jed svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 
 .pie-note{padding:0 16px 9px;font-size:11.5px;color:var(--t3);flex:none}
+/* the same wording sits inside the pager row, where it is a sibling of the
+   buttons rather than a block of its own */
+.pie-pager .pie-note{padding:0;flex:1 1 100%;text-align:center}
+.pie-pager{display:flex;align-items:center;gap:10px;padding:0 16px 12px;flex:none;flex-wrap:wrap;justify-content:center}
 .pie-note:empty{display:none}
 .pie-note b{color:var(--t2);font-weight:var(--fw-medium)}
 
@@ -38697,6 +38793,7 @@ function foot(parts){
 /* ── small formatters ──────────────────────────────────────────────────── */
 const num=(n)=>{
   n=Number(n)||0;
+  if(n<1e4)return n.toLocaleString('en-US');
   if(n>=1e6)return (n/1e6).toFixed(n>=1e7?0:1).replace(/\.0$/,'')+'M';
   if(n>=1e3)return (n/1e3).toFixed(n>=1e4?0:1).replace(/\.0$/,'')+'K';
   return String(n);
@@ -38796,13 +38893,16 @@ function busy(box,text){
   const n=el(box);
   if(n)n.innerHTML='<div class="pie-busy"><div class="pie-spin"></div>'+esc(text||'Working…')+'</div>';
 }
+let browseSeq=0;
 async function loadBrowse(){
   if(isJoomla()){renderBrowseChrome();return;}
   const grid=el('pieGrid');
   if(!grid)return;
+  const seq=++browseSeq;
   busy('pieGrid','Asking the WordPress repository…');
   el('piePager').innerHTML='';
   const d=await api('browse',{browse:S.browse,search:S.search,page:S.page,per_page:S.perPage});
+  if(seq!==browseSeq)return;   /* a newer question has already been asked */
   if(!d.ok){
     grid.innerHTML='<div class="pie-empty"><b>The repository could not be reached</b>'+esc(d.error||'')+'</div>';
     return;
@@ -38852,9 +38952,17 @@ function renderPager(){
   if(!box||!S.results)return;
   const d=S.results;
   if(d.pages<=1){box.innerHTML='';return;}
+  /* The repository answers a search with the number of matches but refuses to
+     page past roughly a thousand of them, so the page count and the match
+     count do not agree. Left unexplained that looks like a bug in the window,
+     so the ceiling is stated where the pages run out. */
+  const reach=d.pages*d.per_page;
+  const capped=d.results&&reach&&d.results>reach;
   box.innerHTML='<button type="button" class="btn btn-xs btn-g" id="piePrev"'+(d.page<=1?' disabled':'')+'>← Newer</button>'
     +'<span>Page '+d.page+' / '+num(d.pages)+'</span>'
-    +'<button type="button" class="btn btn-xs btn-g" id="pieNext"'+(d.page>=d.pages?' disabled':'')+'>Older →</button>';
+    +'<button type="button" class="btn btn-xs btn-g" id="pieNext"'+(d.page>=d.pages?' disabled':'')+'>Older →</button>'
+    +(capped?'<span class="pie-note">The repository lists the first '+num(reach)
+       +' results of '+num(d.results)+' and pages no further — narrow the search to reach the rest.</span>':'');
   const p=el('piePrev'),n=el('pieNext');
   if(p)p.addEventListener('click',()=>{if(S.page>1){S.page--;loadBrowse();scrollGrid();}});
   if(n)n.addEventListener('click',()=>{if(S.page<S.results.pages){S.page++;loadBrowse();scrollGrid();}});
@@ -39182,8 +39290,16 @@ function wire(){
     },450);
   });
   el('pieSearch').addEventListener('keydown',e=>{
-    if(e.key==='Enter'){e.preventDefault();clearTimeout(t);S.search=e.target.value.trim();S.page=1;loadBrowse();}
-    if(e.key==='Escape'&&e.target.value){e.target.value='';S.search='';S.page=1;loadBrowse();}
+    if(e.key==='Enter'){
+      e.preventDefault();clearTimeout(t);browseSeq++;
+      S.search=e.target.value.trim();S.page=1;
+      qa('#pieBrowses .pie-chip').forEach(x=>x.classList.remove('is-on'));
+      loadBrowse();
+    }
+    if(e.key==='Escape'&&e.target.value){
+      clearTimeout(t);browseSeq++;
+      e.target.value='';S.search='';S.page=1;loadBrowse();
+    }
   });
   el('pieInstSearch').addEventListener('input',e=>{S.instSearch=e.target.value;renderInstalled();});
   el('pieSite').addEventListener('change',pickSite);
