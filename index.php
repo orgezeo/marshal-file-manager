@@ -25158,7 +25158,6 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 /* the same wording sits inside the pager row, where it is a sibling of the
    buttons rather than a block of its own */
 .pie-pager .pie-note{padding:0;flex:1 1 100%;text-align:center}
-.pie-pager{display:flex;align-items:center;gap:10px;padding:0 16px 12px;flex:none;flex-wrap:wrap;justify-content:center}
 .pie-note:empty{display:none}
 .pie-note b{color:var(--t2);font-weight:var(--fw-medium)}
 
@@ -25321,10 +25320,9 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .pie-i-card{display:flex;gap:13px;padding:13px;background:var(--panel);
   border:1px solid var(--border);border-radius:var(--r);transition:.15s}
 .pie-i-card:hover{border-color:var(--border2);background:var(--raised)}
-.pie-i-ico{width:56px;height:56px;flex:none;border-radius:10px;background:var(--raised);
+.pie-i-ico{position:relative;width:56px;height:56px;flex:none;border-radius:10px;background:var(--raised);
   border:1px solid var(--border);display:grid;place-items:center;overflow:hidden;
   font-size:19px;font-weight:var(--fw-strong);color:var(--t2)}
-.pie-i-ico{position:relative}
 .pie-i-ini{position:absolute;inset:0;display:grid;place-items:center}
 .pie-i-ico img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;
   background:var(--raised);border-radius:10px}
@@ -25341,6 +25339,23 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .pie-i-state.on{background:rgba(52,211,153,.15);color:#34d399}
 .pie-i-state.off{background:rgba(125,129,132,.16);color:var(--t3)}
 .pie-i-upd{background:rgba(244,163,51,.15);color:#f4a333}
+
+/* ── the site is chosen in its own window, before the installer opens ───── */
+.pie-choose{width:min(620px,94vw);height:auto;max-height:min(640px,88vh)}
+.pie-choose .pie-sites{border-bottom:0}
+.pie-choose .pie-site-list{max-height:min(340px,46vh)}
+.pie-choose-ft{justify-content:flex-start;color:var(--t3)}
+.pie-choose-ft:empty{display:none}
+
+/* ── and the choice stays visible inside the installer ──────────────────── */
+.pie-sitebar{display:flex;align-items:center;gap:11px;padding:10px 16px;flex:none;
+  background:var(--panel);border-bottom:1px solid var(--border)}
+.pie-sitebar .btn{margin-left:auto}
+.pie-sitebar-id{min-width:0;flex:1 1 auto;display:flex;flex-direction:column;gap:1px}
+.pie-sitebar .pie-site-dir{font-size:12px;font-weight:600}
+.pie-sitebar .pie-site-cfg{font-size:10.5px;color:var(--t3);
+  font-family:var(--mono,ui-monospace,monospace);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style>
 </head>
 <body class="<?=$terminalStandalone?'term-standalone':''?>">
@@ -26817,19 +26832,17 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button type="button" class="btn btn-icon btn-g" id="pieClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </header>
 
-    <!-- The site is chosen from a list of what was actually found, the way the
-         manager's own CMS Manager shows it, rather than typed or assumed.
-         Installing into a site that was never picked is how a plugin lands in
-         the wrong place, so the choice is explicit and it says where it
-         looked when the site someone expects is not listed. -->
-    <div class="pie-sites">
-      <div class="pie-sites-hd">
-        <span class="pie-lab" id="pieSitesLabel">Site</span>
-        <span class="pie-sites-n" id="pieSitesN"></span>
-        <button type="button" class="btn btn-xs btn-g" id="pieRescan" title="Look for sites on this server again">Rescan</button>
-      </div>
-      <div class="pie-site-list" id="pieSiteList"></div>
-      <div class="pie-sites-foot" id="pieSitesFoot"></div>
+    <!-- The site is chosen before this window opens, so this is a reminder of
+         where everything here will be written rather than another control to
+         remember. Every action in this window writes into that one folder. -->
+    <div class="pie-sitebar" id="pieSiteBar">
+      <span class="pie-site-badge" id="pieBarBadge"></span>
+      <span class="pie-sitebar-id">
+        <span class="pie-site-dir" id="pieBarDir"></span>
+        <span class="pie-site-cfg" id="pieBarCfg"></span>
+      </span>
+      <button type="button" class="btn btn-xs btn-g" id="pieChangeSite"
+              title="Pick a different site">Change site</button>
     </div>
 
     <nav class="pie-tabs" id="pieTabs">
@@ -26894,6 +26907,42 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     </section>
 
     <div class="pie-ft" id="pieFoot"></div>
+  </div>
+</div>
+
+<!-- PLUGINS INSTALLER — THE SITE IS CHOSEN FIRST, IN ITS OWN WINDOW
+     Everything the installer does is written into one folder, so which folder
+     it is gets asked before the installer itself appears rather than being a
+     row at the top of it that is easy to leave on the wrong site. One card
+     per installation found, in the same shape the manager's own CMS Manager
+     uses. This window sits after the main one in the document so that it
+     stacks above it when a site is being changed. -->
+<div class="mod-ov" id="pieChooseOv">
+  <div class="mod-win pie-win pie-choose">
+    <header class="pie-hd">
+      <div class="pie-hd-l">
+        <span class="pie-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span>
+        <div>
+          <span class="mod-title">Which site?</span>
+          <span class="pie-sub">Plugins Installer works on one site at a time. Everything below is written into the folder you pick.</span>
+        </div>
+      </div>
+      <button type="button" class="btn btn-icon btn-g" id="pieChooseClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </header>
+
+    <div class="pie-sites">
+      <div class="pie-sites-hd">
+        <span class="pie-lab">Found on this server</span>
+        <span class="pie-sites-n" id="pieSitesN"></span>
+        <button type="button" class="btn btn-xs btn-g" id="pieRescan" title="Look for sites on this server again">Rescan</button>
+      </div>
+      <div class="pie-site-list" id="pieSiteList"></div>
+      <div class="pie-sites-foot" id="pieSitesFoot"></div>
+    </div>
+
+    <div class="pie-ft pie-choose-ft">
+      <span id="pieChooseHint">Pick a site to open the installer.</span>
+    </div>
   </div>
 </div>
 
@@ -39011,11 +39060,34 @@ async function loadSites(){
   pickSite(keep>=0?keep:0);
 }
 
+/* The installer only ever acts on one folder, so the folder is asked for
+   before the installer appears — not chosen from a row inside it that is easy
+   to leave pointing at the wrong site. */
+function chooseSite(i){
+  const site=(isFinite(i)&&S.sites[i])?S.sites[i]:null;
+  if(!site)return;
+  S.site=site;
+  S.installed=null;
+  renderSiteList();
+  closeMod('pieChooseOv');
+  openMod('pieOv');
+  renderBrowseChrome();
+  renderInstalledChrome();
+  if(S.tab==='installed')loadInstalled();
+  else loadBrowse();
+}
+
+function openChooser(){
+  openMod('pieChooseOv');
+  loadSites();
+}
+
 /* One card per site found, in the shape the manager's own CMS Manager uses:
    a badge for the kind of site, the folder, and the config file it was
    recognised by. The folder is the thing being installed into, so it is what
    the card leads with. */
 function renderSiteList(){
+  renderSiteBar();
   const box=el('pieSiteList');
   if(!box)return;
   const n=el('pieSitesN');
@@ -39038,7 +39110,7 @@ function renderSiteList(){
       +'<span class="pie-site-tick">'+(on?'<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>':'')+'</span>'
       +'</button>';
   }).join('');
-  qa('#pieSiteList .pie-site').forEach(b=>b.addEventListener('click',()=>pickSite(parseInt(b.dataset.site,10))));
+  qa('#pieSiteList .pie-site').forEach(b=>b.addEventListener('click',()=>chooseSite(parseInt(b.dataset.site,10))));
   /* where the scan looked, so a site that is missing can be explained */
   const f=el('pieSitesFoot');
   if(f){
@@ -39049,6 +39121,20 @@ function renderSiteList(){
       parts.push('Searched: '+esc(S.scanRoots.slice(0,6).join(' · '))+(S.scanRoots.length>6?' …':''));
     f.innerHTML=parts.length?'<span>'+parts.join(' ')+'</span>':'';
   }
+}
+
+/* Which site is being worked on stays on screen the whole time. It is easy to
+   install into the wrong folder when the only reminder of it is a choice made
+   once in a window that has since closed. */
+function renderSiteBar(){
+  const badge=el('pieBarBadge'),dir=el('pieBarDir'),cfg=el('pieBarCfg');
+  if(!badge||!dir||!cfg)return;
+  if(!S.site){badge.textContent='';badge.className='pie-site-badge';dir.textContent='No site chosen';cfg.textContent='';return;}
+  const j=S.site.type==='joomla';
+  badge.textContent=j?'Joomla':'WordPress';
+  badge.className='pie-site-badge '+(j?'j':'w');
+  dir.textContent=S.site.dir||'';
+  cfg.textContent=S.site.config||'';
 }
 
 function pickSite(i){
@@ -39247,19 +39333,12 @@ function renderDetailBody(){
    it. Now the list at the top is pointed at directly. */
 function needSite(){
   if(!S.site){
-    const box=el('pieSiteList');
-    if(box){
-      box.classList.remove('pie-nudge');
-      void box.offsetWidth;               /* restart the animation */
-      box.classList.add('pie-nudge');
-      box.scrollIntoView({block:'nearest',behavior:'smooth'});
-    }
-    if(typeof window.toast==='function')
-      window.toast(S.sites&&S.sites.length
-        ? 'Choose which site to install into — the list is at the top of this window.'
-        : 'No site was found on this server, so there is nowhere to install. Press Rescan once one exists.');
-    else
-      msg('pieUpMsg','bad','Choose the site this should be installed into, at the top of this window.');
+    /* The list now lives in the window that asks for it, so the thing to do is
+       to show that window rather than try to draw attention to a row that is
+       no longer on screen. */
+    openChooser();
+    if(typeof window.toast==='function'&&(!S.sites||!S.sites.length))
+      window.toast('No site was found on this server, so there is nowhere to install. Press Rescan once one exists.');
     return false;
   }
   if(isJoomla()){
@@ -39591,13 +39670,18 @@ function wire(){
     await loadSites();
     el('pieRescan').disabled=false;el('pieRescan').textContent='Rescan';
   });
+  el('pieChangeSite').addEventListener('click',openChooser);
+  el('pieChooseClose').addEventListener('click',()=>closeMod('pieChooseOv'));
+  el('pieChooseOv').addEventListener('click',e=>{if(e.target===el('pieChooseOv'))closeMod('pieChooseOv');});
   el('pieClose').addEventListener('click',()=>closeMod('pieOv'));
   el('pieOv').addEventListener('click',e=>{if(e.target===el('pieOv'))closeMod('pieOv');});
   el('pieDetailClose').addEventListener('click',()=>closeMod('pieDetailOv'));
   el('pieDetailOv').addEventListener('click',e=>{if(e.target===el('pieDetailOv'))closeMod('pieDetailOv');});
   document.addEventListener('keydown',e=>{
     if(e.key!=='Escape')return;
+    /* the chooser sits above the installer, so it is the one Escape closes */
     if(el('pieDetailOv').classList.contains('open')){closeMod('pieDetailOv');return;}
+    if(el('pieChooseOv').classList.contains('open')){closeMod('pieChooseOv');return;}
     if(el('pieOv').classList.contains('open'))closeMod('pieOv');
   });
   initUpload();
@@ -39606,11 +39690,19 @@ function wire(){
 function boot(){
   if(!el('pieOv'))return;
   if(!S.booted){wire();S.booted=true;}
-  loadSites();
-  loadBrowse();
+  /* A site that was already picked this session goes straight to the
+     installer; otherwise the site is asked for first. */
+  if(S.site){
+    renderSiteList();
+    openMod('pieOv');
+    if(S.tab==='installed')loadInstalled();
+    else loadBrowse();
+  }else{
+    openChooser();
+  }
 }
 const btn=el('pieBtn');
-if(btn)btn.addEventListener('click',()=>{openMod('pieOv');boot();});
+if(btn)btn.addEventListener('click',boot);
 
 })(); // end Plugins Installer IIFE
 </script>
