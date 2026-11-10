@@ -19471,7 +19471,7 @@ FMIMG;
         if(!$ch)return['ok'=>false,'error'=>'A cURL handle could not be created.'];
         @curl_setopt_array($ch,[
             CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>5,
-            CURLOPT_CONNECTTIMEOUT=>12,CURLOPT_TIMEOUT=>(int)$timeout,
+            CURLOPT_CONNECTTIMEOUT=>10,CURLOPT_TIMEOUT=>max(5,min((int)$timeout,20)),
             CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_SSL_VERIFYHOST=>2,
             CURLOPT_USERAGENT=>'MarshalFM-PluginsInstaller/1.0',
             CURLOPT_ENCODING=>'',
@@ -19622,10 +19622,74 @@ FMIMG;
         foreach((array)($scan['sites']??[]) as $s){
             $cfg=(string)($s['config']??'');
             if($cfg==='')continue;
-            $out[]=['type'=>(string)($s['type']??''),'config'=>$cfg,'dir'=>(string)($s['dir']??dirname($cfg))];
+            $dir=(string)($s['dir']??dirname($cfg));
+            $out[]=['type'=>(string)($s['type']??''),'config'=>$cfg,'dir'=>$dir,
+                    /* "found by" is the manager's own account of how a site was
+                       located. It is passed on because a site list that cannot
+                       say where it looked is impossible to diagnose when the
+                       site someone expects is missing. */
+                    'source'=>(string)($s['source']??''),
+                    'writable'=>@is_writable($dir.'/'.(($s['type']??'')==='joomla'?'configuration.php':'wp-config.php'))];
         }
         usort($out,function($a,$b){return strcmp($a['dir'],$b['dir']);});
-        return['ok'=>true,'sites'=>$out,'wp_core'=>$this->pieWpCoreVersion(),'php'=>PHP_VERSION];
+        return['ok'=>true,'sites'=>$out,'wp_core'=>$this->pieWpCoreVersion(),'php'=>PHP_VERSION,
+               'scanned_roots'=>(array)($scan['scanned_roots']??[]),
+               'open_basedir'=>(array)($scan['open_basedir']??[])];
+    }
+
+    /* ── repository detail for plugins that are already installed ───────────
+       The installed list is read from the files on disk, so it carries no
+       icon, rating or update information. Those all live in the repository,
+       which has to be asked one slug at a time — done here in parallel,
+       because asking in series would hold a PHP worker for one round trip per
+       plugin and this server only has a handful of them. A slow or unreachable
+       repository costs the list its icons, never the list itself. */
+    public function pieRepoMeta($slugs){
+        $slugs=is_array($slugs)?$slugs:explode(',',(string)$slugs);
+        $want=[];
+        foreach($slugs as $sl){
+            $sl=strtolower(preg_replace('/[^A-Za-z0-9._-]/','',trim((string)$sl)));
+            if($sl!==''&&!isset($want[$sl])&&count($want)<60)$want[$sl]=true;
+        }
+        if(!$want)return['ok'=>true,'meta'=>[]];
+        $mh=@curl_multi_init();
+        if(!$mh)return['ok'=>true,'meta'=>[],'note'=>'cURL could not be used, so the repository detail was skipped.'];
+        $handles=[];
+        foreach(array_keys($want) as $sl){
+            $url='https://api.wordpress.org/plugins/info/1.2/?action=plugin_information'
+                .'&request%5Bslug%5D='.rawurlencode($sl)
+                .'&request%5Bfields%5D%5Bicons%5D=1&request%5Bfields%5D%5Bbanners%5D=1'
+                .'&request%5Bfields%5D%5Bsections%5D=0';
+            $ch=@curl_init($url);
+            if(!$ch)continue;
+            @curl_setopt_array($ch,[
+                CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,
+                CURLOPT_CONNECTTIMEOUT=>8,CURLOPT_TIMEOUT=>15,
+                CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_SSL_VERIFYHOST=>2,
+                CURLOPT_USERAGENT=>'MarshalFM-PluginsInstaller/1.0',CURLOPT_ENCODING=>'',
+            ]);
+            @curl_multi_add_handle($mh,$ch);
+            $handles[$sl]=$ch;
+        }
+        /* drive the whole set at once rather than one at a time */
+        $running=0;
+        do{
+            @curl_multi_exec($mh,$running);
+            if($running)@curl_multi_select($mh,0.2);
+        }while($running>0);
+        $meta=[];
+        foreach($handles as $sl=>$ch){
+            $body=@curl_multi_getcontent($ch);
+            $code=(int)@curl_getinfo($ch,CURLINFO_HTTP_CODE);
+            @curl_multi_remove_handle($mh,$ch);
+            @curl_close($ch);
+            if($body===false||$body===''||$code<200||$code>=300)continue;
+            $j=@json_decode($body,true);
+            if(!is_array($j)||empty($j['slug']))continue;
+            $meta[$sl]=$this->pieWpSlim($j);
+        }
+        @curl_multi_close($mh);
+        return['ok'=>true,'meta'=>$meta,'asked'=>count($handles),'answered'=>count($meta)];
     }
 
     private function pieWpRoot(){
@@ -20249,6 +20313,7 @@ FMIMG;
             (string)($post['browse']??'featured'),(string)($post['search']??''),
             (int)($post['page']??1),(int)($post['per_page']??24));
         if($act==='info')return $this->pieRepoInfo((string)($post['slug']??''));
+        if($act==='repo_meta')return $this->pieRepoMeta($post['slugs']??'');
         if($act==='jed')return['ok'=>true,'url'=>'https://extensions.joomla.org/'];
 
         /* everything below acts on one named site */
@@ -25215,6 +25280,67 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   .pie-row{flex-wrap:wrap}
   .pie-r-acts{width:100%;justify-content:flex-end}
 }
+
+/* ── the site list ────────────────────────────────────────────────────────
+   One card per installation found, shaped after the manager's own CMS
+   Manager: a badge for the kind of site, the folder that will be installed
+   into, and the config file it was recognised by. */
+.pie-sites{flex:none;border-bottom:1px solid var(--border);background:var(--panel);
+  display:flex;flex-direction:column}
+.pie-sites-hd{display:flex;align-items:center;gap:9px;padding:9px 16px}
+.pie-sites-hd .btn{margin-left:auto}
+.pie-sites-n{font-size:11px;color:var(--t3)}
+.pie-site-list{display:flex;flex-direction:column;max-height:172px;overflow-y:auto}
+.pie-site-list:empty{display:none}
+.pie-scanning{display:flex;align-items:center;gap:9px;padding:11px 16px;font-size:11.5px;color:var(--t3)}
+.pie-scanning .pie-spin{width:13px;height:13px;border-width:2px}
+.pie-site{display:flex;align-items:center;gap:11px;padding:11px 16px;width:100%;
+  background:none;border:0;border-bottom:1px solid var(--border);color:inherit;
+  font:inherit;text-align:left;cursor:pointer;transition:background .15s}
+.pie-site:hover{background:var(--hov)}
+.pie-site.is-on{background:var(--raised)}
+.pie-site-badge{flex:none;font-size:10px;font-weight:700;padding:2px 9px;border-radius:99px;
+  letter-spacing:.02em}
+.pie-site-badge.w{background:rgba(33,117,155,.2);color:#5bc0de}
+.pie-site-badge.j{background:rgba(244,163,51,.15);color:#f4a333}
+.pie-site-id{min-width:0;flex:1 1 auto;display:flex;flex-direction:column;gap:2px}
+.pie-site-dir{font-size:12px;font-weight:600;color:var(--t1);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pie-site-cfg{font-size:10.5px;color:var(--t3);font-family:var(--mono,ui-monospace,monospace);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pie-site-tick{flex:none;width:16px;height:16px;color:var(--t1)}
+.pie-site-tick svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.4;
+  stroke-linecap:round;stroke-linejoin:round}
+.pie-sites-foot{padding:0 16px 10px;font-size:11px;color:var(--t3);line-height:1.5}
+.pie-sites-foot:empty{display:none}
+@keyframes pieNudge{0%,100%{box-shadow:none}25%,75%{box-shadow:inset 0 0 0 2px var(--amber)}}
+.pie-nudge{animation:pieNudge 1.1s ease-in-out 2}
+
+/* ── installed plugins, with what the repository knows about them ──────── */
+.pie-inst{display:flex;flex-direction:column;gap:9px;padding:2px 16px 14px}
+.pie-i-card{display:flex;gap:13px;padding:13px;background:var(--panel);
+  border:1px solid var(--border);border-radius:var(--r);transition:.15s}
+.pie-i-card:hover{border-color:var(--border2);background:var(--raised)}
+.pie-i-ico{width:56px;height:56px;flex:none;border-radius:10px;background:var(--raised);
+  border:1px solid var(--border);display:grid;place-items:center;overflow:hidden;
+  font-size:19px;font-weight:var(--fw-strong);color:var(--t2)}
+.pie-i-ico{position:relative}
+.pie-i-ini{position:absolute;inset:0;display:grid;place-items:center}
+.pie-i-ico img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;
+  background:var(--raised);border-radius:10px}
+.pie-i-body{min-width:0;flex:1 1 auto;display:flex;flex-direction:column;gap:5px}
+.pie-i-top{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.pie-i-name{font-size:13px;font-weight:var(--fw-medium);color:var(--t1)}
+.pie-i-ver{font-size:11px;color:var(--t3)}
+.pie-i-desc{font-size:11.5px;color:var(--t3);line-height:1.5;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pie-i-meta{display:flex;flex-wrap:wrap;gap:10px;font-size:11px;color:var(--t3);align-items:center}
+.pie-i-meta b{color:var(--t2);font-weight:var(--fw-medium)}
+.pie-i-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.pie-i-state{font-size:10px;font-weight:700;padding:2px 8px;border-radius:99px}
+.pie-i-state.on{background:rgba(52,211,153,.15);color:#34d399}
+.pie-i-state.off{background:rgba(125,129,132,.16);color:var(--t3)}
+.pie-i-upd{background:rgba(244,163,51,.15);color:#f4a333}
 </style>
 </head>
 <body class="<?=$terminalStandalone?'term-standalone':''?>">
@@ -26691,11 +26817,19 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button type="button" class="btn btn-icon btn-g" id="pieClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </header>
 
+    <!-- The site is chosen from a list of what was actually found, the way the
+         manager's own CMS Manager shows it, rather than typed or assumed.
+         Installing into a site that was never picked is how a plugin lands in
+         the wrong place, so the choice is explicit and it says where it
+         looked when the site someone expects is not listed. -->
     <div class="pie-sites">
-      <label class="pie-lab" for="pieSite">Site</label>
-      <select class="pie-sel" id="pieSite"></select>
-      <span class="pie-site-meta" id="pieSiteMeta"></span>
-      <button type="button" class="btn btn-xs btn-g" id="pieRescan" title="Look for sites on this server again">Rescan</button>
+      <div class="pie-sites-hd">
+        <span class="pie-lab" id="pieSitesLabel">Site</span>
+        <span class="pie-sites-n" id="pieSitesN"></span>
+        <button type="button" class="btn btn-xs btn-g" id="pieRescan" title="Look for sites on this server again">Rescan</button>
+      </div>
+      <div class="pie-site-list" id="pieSiteList"></div>
+      <div class="pie-sites-foot" id="pieSitesFoot"></div>
     </div>
 
     <nav class="pie-tabs" id="pieTabs">
@@ -38752,6 +38886,13 @@ const el=(id)=>document.getElementById(id);
 const qa=(sel,root)=>Array.prototype.slice.call((root||document).querySelectorAll(sel));
 
 /* ── talking to the server ─────────────────────────────────────────────── */
+/* Actions that only read and are safe to abandon. A search that is no longer
+   wanted is cancelled rather than left to finish: every request in flight
+   occupies one of the server's PHP workers, and this server runs five of
+   them, so a few stale searches were enough to make the whole manager — and
+   the next install — queue behind them and appear to hang. */
+const ABANDONABLE={browse:1};
+const inflight={};
 async function api(action,fields,form){
   const fd=form||new FormData();
   if(!form){
@@ -38761,9 +38902,24 @@ async function api(action,fields,form){
       const v=fields[k];
       if(v!==undefined&&v!==null&&v!=='')fd.append(k,v);
     });
+    /* The site is added here rather than trusting every caller to remember it.
+       One caller did not, and installing from the repository answered "No site
+       was named" every single time — a request-level detail reported to the
+       reader as if it were their mistake. */
+    if(fields&&('config' in fields)===false&&S.site&&S.site.config)
+      fd.append('config',S.site.config);
+  }
+  if(ABANDONABLE[action]&&inflight[action]){
+    try{inflight[action].abort();}catch(e){}
   }
   const ctl=new AbortController();
-  const timer=setTimeout(()=>ctl.abort(),action==='browse'?30000:120000);
+  inflight[action]=ctl;
+  /* Browsing used to be cut off at 30 seconds, the same moment the server's
+     own request to the repository timed out, so a slow answer was reported as
+     "that request took too long" — a message about this window's patience
+     rather than about the repository. Browsing now waits longer than the
+     server ever will, so what arrives is a real answer or a real error. */
+  const timer=setTimeout(()=>ctl.abort(),action==='browse'?60000:120000);
   let d={ok:false,error:'The server answered nothing.'};
   try{
     const r=await fetch('?x=pie',{method:'POST',body:fd,signal:ctl.signal,cache:'no-store',credentials:'same-origin'});
@@ -38775,6 +38931,7 @@ async function api(action,fields,form){
     d={ok:false,error:(e&&e.name==='AbortError')?'That request took too long and was stopped.':'The manager could not be reached: '+e.message};
   }
   clearTimeout(timer);
+  if(inflight[action]===ctl)delete inflight[action];
   return d;
 }
 
@@ -38829,35 +38986,82 @@ function safeHtml(h){
 
 /* ── the site chooser ──────────────────────────────────────────────────── */
 async function loadSites(){
-  const sel=el('pieSite');
-  if(!sel)return;
-  sel.innerHTML='<option value="">Looking for sites…</option>';
+  const box=el('pieSiteList');
+  if(!box)return;
+  box.innerHTML='<div class="pie-scanning"><span class="pie-spin"></span>Looking for WordPress and Joomla on this server…</div>';
   const d=await api('sites');
-  if(!d.ok){sel.innerHTML='<option value="">No site could be found</option>';msg('pieUpMsg','bad',esc(d.error||''));return;}
+  if(!d.ok){
+    /* A failed scan used to leave the window with no site and no explanation,
+       so the next Install simply reported "No site was named". It is retried
+       once, and failing that it says the scan itself failed. */
+    const again=await api('sites');
+    if(!again.ok){
+      box.innerHTML='<div class="pie-empty"><b>The scan did not finish</b>'+esc(again.error||d.error||'')+'</div>';
+      foot(['<b>No site.</b> Browsing still works — installing needs a site to install into.']);
+      S.sites=[];S.site=null;renderSiteList();renderBrowseChrome();renderInstalledChrome();
+      return;
+    }
+    Object.assign(d,again);
+  }
   S.sites=d.sites||[];
+  S.scanRoots=d.scanned_roots||[];
+  S.baseDir=d.open_basedir||[];
+  renderSiteList();
+  const keep=S.site?S.sites.findIndex(x=>x.config===S.site.config):-1;
+  pickSite(keep>=0?keep:0);
+}
+
+/* One card per site found, in the shape the manager's own CMS Manager uses:
+   a badge for the kind of site, the folder, and the config file it was
+   recognised by. The folder is the thing being installed into, so it is what
+   the card leads with. */
+function renderSiteList(){
+  const box=el('pieSiteList');
+  if(!box)return;
+  const n=el('pieSitesN');
+  if(n)n.textContent=S.sites.length?(S.sites.length+' found'):'';
   if(!S.sites.length){
-    sel.innerHTML='<option value="">No WordPress or Joomla site was found on this server</option>';
-    foot(['<b>No site found.</b> Browsing the WordPress repository still works — installing needs a site to install into.']);
+    box.innerHTML='<div class="pie-empty"><b>No WordPress or Joomla site was found on this server</b>'
+      +'Browsing the repository still works. To install, put a site where the scan looks, or press Rescan after one appears.</div>';
     return;
   }
-  sel.innerHTML=S.sites.map((s,i)=>
-    '<option value="'+i+'">'+esc((s.type==='joomla'?'Joomla':'WordPress')+' — '+s.dir)+'</option>').join('');
-  const keep=S.site?S.sites.indexOf(S.site):-1;
-  sel.value=String(keep>=0?keep:0);
-  pickSite();
+  box.innerHTML=S.sites.map((s,i)=>{
+    const on=S.site&&S.site.config===s.config;
+    const kind=s.type==='joomla'?'Joomla':'WordPress';
+    return '<button type="button" class="pie-site'+(on?' is-on':'')+'" data-site="'+i+'"'
+      +(on?' aria-current="true"':'')+'>'
+      +'<span class="pie-site-badge '+(s.type==='joomla'?'j':'w')+'">'+kind+'</span>'
+      +'<span class="pie-site-id">'
+        +'<span class="pie-site-dir">'+esc(s.dir)+'</span>'
+        +'<span class="pie-site-cfg">'+esc(s.config)+(s.source?' · found by '+esc(s.source):'')+'</span>'
+      +'</span>'
+      +'<span class="pie-site-tick">'+(on?'<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>':'')+'</span>'
+      +'</button>';
+  }).join('');
+  qa('#pieSiteList .pie-site').forEach(b=>b.addEventListener('click',()=>pickSite(parseInt(b.dataset.site,10))));
+  /* where the scan looked, so a site that is missing can be explained */
+  const f=el('pieSitesFoot');
+  if(f){
+    const parts=[];
+    if(S.baseDir&&S.baseDir.length)
+      parts.push('PHP is restricted to '+esc(S.baseDir.join(', '))+', so only those folders were searched.');
+    if(S.scanRoots&&S.scanRoots.length)
+      parts.push('Searched: '+esc(S.scanRoots.slice(0,6).join(' · '))+(S.scanRoots.length>6?' …':''));
+    f.innerHTML=parts.length?'<span>'+parts.join(' ')+'</span>':'';
+  }
 }
-function pickSite(){
-  const sel=el('pieSite');
-  if(!sel)return;
-  const i=parseInt(sel.value,10);
+
+function pickSite(i){
   S.site=(isFinite(i)&&S.sites[i])?S.sites[i]:null;
-  const m=el('pieSiteMeta');
-  if(m)m.textContent=S.site?(S.site.type==='joomla'?'Joomla':'WordPress'):'';
+  renderSiteList();
   S.installed=null;
   renderBrowseChrome();
   if(S.tab==='installed')loadInstalled();
   else renderInstalledChrome();
+  const up=el('pieUpMsg');
+  if(up)msg('pieUpMsg','','');
 }
+
 
 /* what this window can do changes with the kind of site under it, and it says
    so instead of showing a button that cannot work */
@@ -39038,9 +39242,24 @@ function renderDetailBody(){
 }
 
 /* ── installing ────────────────────────────────────────────────────────── */
+/* Installing without a site used to reach the server and come back as "No
+   site was named", which describes the request rather than what to do about
+   it. Now the list at the top is pointed at directly. */
 function needSite(){
   if(!S.site){
-    msg('pieUpMsg','bad','Choose the site this should be installed into, at the top of this window.');
+    const box=el('pieSiteList');
+    if(box){
+      box.classList.remove('pie-nudge');
+      void box.offsetWidth;               /* restart the animation */
+      box.classList.add('pie-nudge');
+      box.scrollIntoView({block:'nearest',behavior:'smooth'});
+    }
+    if(typeof window.toast==='function')
+      window.toast(S.sites&&S.sites.length
+        ? 'Choose which site to install into — the list is at the top of this window.'
+        : 'No site was found on this server, so there is nowhere to install. Press Rescan once one exists.');
+    else
+      msg('pieUpMsg','bad','Choose the site this should be installed into, at the top of this window.');
     return false;
   }
   if(isJoomla()){
@@ -39054,12 +39273,12 @@ async function installFromRepo(slug,btn){
   const label=btn?btn.textContent:'';
   if(btn){btn.disabled=true;btn.textContent='Installing…';}
   foot(['Installing <b>'+esc(slug)+'</b> — the package is downloaded from wordpress.org and unpacked here…']);
-  let d=await api('wp_install',{slug:slug});
+  let d=await api('wp_install',{slug:slug,config:S.site.config});
   if(!d.ok&&d.exists){
     if(window.confirm('A plugin already lives at '+d.slug+'/'
       +(d.installed_version?' (version '+d.installed_version+')':'')
       +'.\n\nReplace the installed copy?')){
-      d=await api('wp_install',{slug:slug,overwrite:'1'});
+      d=await api('wp_install',{slug:slug,config:S.site.config,overwrite:'1'});
     }else{
       if(btn){btn.disabled=false;btn.textContent=label;}
       foot([]);
@@ -39088,6 +39307,11 @@ async function loadInstalled(){
   }
   busy('pieList','Reading the site…');
   const d=await api('installed',{config:S.site.config});
+  /* The files on disk say what is installed; they carry no icon, no rating and
+     no notion of a newer version. That is asked for separately, after the list
+     is already on screen, so a slow repository can cost these cards their
+     icons but never their contents. */
+  if(d.ok&&d.cms!=='joomla'&&(d.plugins||[]).length)fetchRepoMeta(d.plugins);
   if(!d.ok){
     el('pieList').innerHTML='<div class="pie-empty"><b>Could not be read</b>'+esc(d.error||'')+'</div>';
     foot([]);return;
@@ -39109,16 +39333,42 @@ function renderInstalled(){
     box.innerHTML='<div class="pie-empty"><b>Nothing here</b>'
       +((d.plugins||[]).length?'No installed plugin matches that filter.':'This site has no plugins installed yet. Use <b>Add new</b>.')+'</div>';
   }else{
-    box.innerHTML=rows.map(p=>'<div class="pie-row">'
-      +'<div class="pie-r-id"><div class="pie-r-name">'+esc(p.name)+'</div>'
-      +'<div class="pie-r-sub">'+esc(p.file)+(p.version?' · v'+esc(p.version):'')
-      +(p.requires?' · needs WP '+esc(p.requires):'')+(p.requires_php?' · needs PHP '+esc(p.requires_php):'')
-      +(p.author?' · '+esc(p.author):'')+'</div></div>'
-      +'<div class="pie-r-acts">'
-        +'<span class="pie-tagline'+(p.active?' active':'')+'">'+(p.active?'active':'inactive')+'</span>'
-        +'<button type="button" class="btn btn-xs '+(p.active?'btn-g':'btn-p')+'" data-toggle="'+esc(p.file)+'" data-want="'+(p.active?'0':'1')+'"'+((p.active||p.writable)?'':' disabled title="The plugin file is not writable by this account"')+'>'+(p.active?'Deactivate':'Activate')+'</button>'
-        +'<button type="button" class="btn btn-xs btn-g" data-del="'+esc(p.slug)+'"'+(p.active?' disabled title="Deactivate it first"':'')+'>Delete</button>'
-      +'</div></div>').join('');
+    box.innerHTML='<div class="pie-inst">'+rows.map(p=>{
+      const m=((S.metaAlias||{})[String(p.slug).toLowerCase()])
+            ||((S.repoMeta||{})[String(p.slug).toLowerCase()])||null;
+      const upd=m&&m.version&&p.version&&m.version!==p.version;
+      /* The initial sits underneath the icon rather than being swapped in by
+         an onerror handler: if the repository image never arrives the letter
+         is simply revealed, and no inline JavaScript is needed for it. */
+      const ico=m&&m.icon
+        ? '<img src="'+esc(m.icon)+'" alt="" loading="lazy">'
+        : '';
+      const initial=esc((p.name||p.slug||'?').charAt(0).toUpperCase());
+      return '<article class="pie-i-card">'
+        +'<span class="pie-i-ico"><span class="pie-i-ini">'+initial+'</span>'+ico+'</span>'
+        +'<div class="pie-i-body">'
+          +'<div class="pie-i-top">'
+            +'<span class="pie-i-name">'+esc(p.name||p.slug)+'</span>'
+            +'<span class="pie-i-ver">v'+esc(p.version||'?')+'</span>'
+            +(upd?'<span class="pie-i-state pie-i-upd">'+esc(m.version)+' available</span>':'')
+            +'<span class="pie-i-state '+(p.active?'on':'off')+'">'+(p.active?'active':'inactive')+'</span>'
+          +'</div>'
+          +'<div class="pie-i-desc">'+esc(m&&m.short?m.short:(p.description||'No description is recorded in the plugin header.'))+'</div>'
+          +'<div class="pie-i-meta">'
+            +'<span>'+esc(p.file)+'</span>'
+            +(p.author?'<span>by <b>'+esc(p.author)+'</b></span>':'')
+            +(m&&m.rating?'<span>'+stars(m.rating)+' <b>'+num(m.rating)+'%</b></span>':'')
+            +(m&&m.active?'<span><b>'+num(m.active)+'</b> installs</span>':'')
+            +(m&&m.tested?'<span>tested with WP <b>'+esc(m.tested)+'</b></span>':'')
+            +(p.requires_php?'<span>needs PHP <b>'+esc(p.requires_php)+'</b></span>':'')
+          +'</div>'
+          +'<div class="pie-i-acts">'
+            +'<button type="button" class="btn btn-xs '+(p.active?'btn-g':'btn-p')+'" data-toggle="'+esc(p.file)+'" data-want="'+(p.active?'0':'1')+'"'+((p.active||p.writable)?'':' disabled title="The plugin file is not writable by this account"')+'>'+(p.active?'Deactivate':'Activate')+'</button>'
+            +(m?'<a class="btn btn-xs btn-g" href="'+esc(m.homepage||('https://wordpress.org/plugins/'+encodeURIComponent(p.slug))+'/')+'" target="_blank" rel="noopener">Details</a>':'')
+            +'<button type="button" class="btn btn-xs btn-g" data-del="'+esc(p.slug)+'"'+(p.active?' disabled title="Deactivate it first"':'')+'>Delete</button>'
+          +'</div>'
+        +'</div></article>';
+    }).join('')+'</div>';
     qa('#pieList [data-toggle]').forEach(b=>b.addEventListener('click',()=>togglePlugin(b.dataset.toggle,b.dataset.want==='1',b)));
     qa('#pieList [data-del]').forEach(b=>b.addEventListener('click',()=>deletePlugin(b.dataset.del,b)));
   }
@@ -39129,6 +39379,40 @@ function renderInstalled(){
     d.db_error?'<b>database: '+esc(d.db_error)+'</b>':''
   ]);
 }
+/* One request for every installed plugin's repository detail rather than one
+   request per plugin: the server fetches them in parallel, so a site with
+   thirty plugins costs one round trip instead of thirty. Failure is silent —
+   the cards simply keep the information the files on disk already gave. */
+async function fetchRepoMeta(plugins){
+  /* A single-file plugin is known to WordPress by its filename — hello.php —
+     while the repository files it under hello-dolly. So each plugin is looked
+     up under three names: the slug as it stands, the slug with .php taken off,
+     and its own title turned into a slug. The first that answers wins. */
+  const cands=[];
+  const keysFor={};
+  for(const p of plugins){
+    const slug=String(p.slug||'').toLowerCase();
+    if(!slug)continue;
+    const keys=[];
+    for(const k of [slug, slug.replace(/\.php$/i,''),
+                    String(p.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')]){
+      if(!k||keys.indexOf(k)>=0)continue;
+      keys.push(k);
+      if(cands.indexOf(k)<0)cands.push(k);
+    }
+    keysFor[slug]=keys;
+  }
+  if(!cands.length)return;
+  const d=await api('repo_meta',{slugs:cands.slice(0,60).join(',')});
+  if(!d.ok||!d.meta)return;
+  S.repoMeta=Object.assign(S.repoMeta||{},d.meta);
+  S.metaAlias={};
+  for(const slug in keysFor)
+    for(const k of keysFor[slug])
+      if(d.meta[k]){S.metaAlias[slug]=d.meta[k];break;}
+  if(S.tab==='installed')renderInstalled();
+}
+
 function renderJoomla(){
   const box=el('pieList');
   const d=S.installed;
@@ -39302,10 +39586,8 @@ function wire(){
     }
   });
   el('pieInstSearch').addEventListener('input',e=>{S.instSearch=e.target.value;renderInstalled();});
-  el('pieSite').addEventListener('change',pickSite);
   el('pieRescan').addEventListener('click',async()=>{
     el('pieRescan').disabled=true;el('pieRescan').textContent='Scanning…';
-    S.site=null;
     await loadSites();
     el('pieRescan').disabled=false;el('pieRescan').textContent='Rescan';
   });
