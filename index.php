@@ -3118,14 +3118,78 @@ function fm_pma_signature($dir){
         $t=(string)@file_get_contents($dir.'/'.$entry,false,null,0,20000);
         if(preg_match('/phpMyAdmin[^0-9]{0,20}([0-9]+\\.[0-9]+\\.[0-9]+)/',$t,$m))$version=$m[1];
     }
+    $paths=fm_pma_config_paths($dir);
     return ['path'=>$dir,'version'=>$version,'entry'=>$dir.'/'.$entry,
-            'entry_rel'=>$entry,'has_config'=>is_file($dir.'/config.inc.php'),
-            'config'=>is_file($dir.'/config.inc.php')?$dir.'/config.inc.php':(is_file($dir.'/config.sample.inc.php')?$dir.'/config.sample.inc.php':''),
+            'entry_rel'=>$entry,
+            'has_config'=>$paths['file']!='',
+            'config'=>$paths['file'],
+            'config_dir'=>$paths['dir'],
+            'config_sample'=>$paths['sample'],
+            'config_pointer'=>$paths['vendor']?'libraries/vendor_config.php':'',
             'writable'=>@is_writable($dir),'readable'=>@is_readable($dir)];
 }
 
+/* Where this installation keeps its configuration. phpMyAdmin says so itself
+   in libraries/vendor_config.php, and the packages on Debian and Ubuntu move
+   that file to /etc/phpmyadmin — which is why the configuration of a perfectly
+   healthy installation looks missing when only its own folder is searched. */
+function fm_pma_config_paths($dir){
+    $dir=rtrim($dir,'/');
+    $out=['file'=>'','dir'=>'','sample'=>'','vendor'=>false];
+    $vendor=$dir.'/libraries/vendor_config.php';
+    if(@is_file($vendor)){
+        $raw=(string)@file_get_contents($vendor);
+        $out['vendor']=true;
+        $cfgDir='';$cfgFile='';
+        if(preg_match("/define\s*\(\s*'CONFIG_DIR'\s*,\s*([^)]*)\)/",$raw,$m)){
+            $v=trim($m[1]);
+            if(preg_match("/^ROOT_PATH\s*\.\s*'([^']*)'/",$v,$m2))$cfgDir=$dir.$m2[1];
+            elseif(preg_match("/^'([^']*)'/",$v,$m3))$cfgDir=$m3[1];
+        }
+        if(preg_match("/define\s*\(\s*'CONFIG_FILE'\s*,\s*([^)]*)\)/",$raw,$m)){
+            $v=trim($m[1]);
+            if(preg_match("/^CONFIG_DIR\s*\.\s*'([^']*)'/",$v,$m2)&&$cfgDir!=='')$cfgFile=rtrim($cfgDir,'/').$m2[1];
+            elseif(preg_match("/^ROOT_PATH\s*\.\s*'([^']*)'/",$v,$m3))$cfgFile=$dir.$m3[1];
+            elseif(preg_match("/^'([^']*)'/",$v,$m4))$cfgFile=$m4[1];
+        }
+        $out['dir']=$cfgDir;
+        if($cfgFile!==''&&@is_file($cfgFile))$out['file']=$cfgFile;
+    }
+    if($out['file']===''&&@is_file($dir.'/config.inc.php'))$out['file']=$dir.'/config.inc.php';
+    if($out['file']===''&&@is_file('/etc/phpmyadmin/config.inc.php')){
+        $out['file']='/etc/phpmyadmin/config.inc.php';
+        if($out['dir']==='')$out['dir']='/etc/phpmyadmin/';
+    }
+    if(@is_file($dir.'/config.sample.inc.php'))$out['sample']=$dir.'/config.sample.inc.php';
+    return $out;
+}
+/* The Debian package keeps the cookie secret and the servers apart from the main
+   file; they are part of the same configuration and are read with it. */
+function fm_pma_config_extra($cfgDir){
+    if($cfgDir===''||!@is_dir($cfgDir))return '';
+    $raw='';
+    foreach((array)@glob(rtrim($cfgDir,'/').'/blowfish_secret.inc.php') as $f)$raw.="\n".(string)@file_get_contents($f);
+    foreach((array)@glob(rtrim($cfgDir,'/').'/conf.d/*.php') as $f)$raw.="\n".(string)@file_get_contents($f);
+    foreach((array)@glob(rtrim($cfgDir,'/').'/conf.d/*.inc.php') as $f)$raw.="\n".(string)@file_get_contents($f);
+    return $raw;
+}
+/* everything this installation says about itself, in one place */
+function fm_pma_cfg($inst){
+    $dir=rtrim((string)($inst['path']??''),'/');
+    $paths=fm_pma_config_paths($dir);
+    $cfg=fm_pma_config($paths['file'],$paths['dir']);
+    $cfg['sample']=$paths['sample'];
+    $cfg['config_file']=$paths['file'];
+    $cfg['config_dir']=$paths['dir'];
+    $cfg['vendor_pointer']=!empty($paths['vendor']);
+    $cfg['version']=(string)($inst['version']??'');
+    if($cfg['config_file']==='')$cfg['source']='none';
+    elseif(strpos($cfg['config_file'],$dir.'/')===0)$cfg['source']='installation';
+    else $cfg['source']='system file '.$cfg['config_file'];
+    return $cfg;
+}
 /* ── what the configuration file says ──────────────────────────────────── */
-function fm_pma_config($cfgPath){
+function fm_pma_config($cfgPath,$cfgDir=''){
     $out=['blowfish'=>false,'blowfish_len'=>0,'session_name'=>'','session_path'=>'',
           'server'=>1,'host'=>'','port'=>'','socket'=>'','auth'=>'','allow_no_password'=>false,
           'cookie_validity'=>0,'servers'=>0,'readable'=>false,'error'=>''];
@@ -3133,8 +3197,15 @@ function fm_pma_config($cfgPath){
     $raw=@file_get_contents($cfgPath);
     if($raw===false){$out['error']='The configuration file could not be read.';return $out;}
     $out['readable']=true;
+    $extra=$cfgDir!==''?fm_pma_config_extra($cfgDir):'';
+    if($extra!=='')$raw.=$extra;
+    /* a file that includes another one often leaves an empty placeholder
+       behind, so the first NON-EMPTY value is the one that counts */
     $one=function($key)use($raw){
-        if(preg_match('/\\$cfg\\[\\s*[\'"]'.preg_quote($key,'/').'[\'"]\\s*\\]\\s*=\\s*([\'"])(.*?)\\1/s',$raw,$m))return $m[2];
+        if(preg_match_all('/\$cfg\[\s*[\'"]' . preg_quote($key,'/') . '[\'"]\s*\]\s*=\s*([\'"])(.*?)\1/s', $raw, $mm, PREG_SET_ORDER)){
+            foreach($mm as $m){if($m[2]!=='')return $m[2];}
+            return '';
+        }
         return null;
     };
     $bs=$one('blowfish_secret');
@@ -3285,6 +3356,12 @@ function fm_pma_urls($dir){
     $dir=rtrim($dir,'/');
     $base=basename($dir);
     $cands=[];
+    /* an installation outside the web root — the Debian package, a control
+       panel — is published under its own name on this very host; that guess
+       comes first because it is the one that is right most often */
+    $schemeEarly=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http';
+    $hostEarly=$_SERVER['HTTP_HOST']??'127.0.0.1';
+    $cands[]=rtrim($schemeEarly.'://'.$hostEarly,'/').'/'.$base.'/';
     $host=$_SERVER['HTTP_HOST']??'127.0.0.1';
     $scheme=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http';
     $docroot=@realpath($_SERVER['DOCUMENT_ROOT']??'')?:'';
@@ -3338,7 +3415,13 @@ function fm_pma_probe_many($urls){
    marker is the folder's address — a web server that answers every path with
    some page (the file manager itself does this) can never pass. The marker is
    deleted at once, whatever the answer. */
-function fm_pma_pick_url($dir,$limit=18){
+function fm_pma_suggest_url($dir){
+    $base=basename(rtrim($dir,'/'));
+    $scheme=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http';
+    $host=$_SERVER['HTTP_HOST']??'127.0.0.1';
+    return rtrim($scheme.'://'.$host,'/').'/'.$base.'/';
+}
+function fm_pma_pick_url($dir,$limit=18,$version=''){
     $dir=rtrim($dir,'/');
     $rand=bin2hex(random_bytes(8));
     $name='fm-pma-probe-'.$rand.'.txt';
@@ -3359,20 +3442,41 @@ function fm_pma_pick_url($dir,$limit=18){
         }
         @unlink($path);
     } else {
-        /* the folder cannot hold the marker: fall back to asking for the login
-           form, and say that the address is a guess from its page, not a proof */
+        /* The folder cannot hold a marker — the usual case for a packaged
+           installation. Its own login page names its version, so an address is
+           accepted only when that page names THIS installation's version: a
+           different phpMyAdmin under the same name is not mistaken for it. */
         $targets=[];
-        foreach($urls as $u)$targets[rtrim($u,'/').'/index.php']=$u;
+        foreach($urls as $u){
+            $targets[rtrim($u,'/').'/index.php']=$u;
+            $targets[rtrim($u,'/').'/']=$u;
+        }
         $answers=fm_pma_probe_many(array_keys($targets));
+        $graded=[];$loose=[];
         foreach($targets as $probe=>$base){
             $a=$answers[$probe]??['code'=>0,'body'=>'','error'=>'not asked'];
-            $form=isset($a['body'])&&(strpos($a['body'],'pma_username')!==false||strpos($a['body'],'login_form')!==false);
-            $tried[]=['url'=>$base,'code'=>$a['code'],'match'=>$form,'error'=>$a['error']];
-            if($form&&$hit==='')$hit=rtrim($base,'/').'/';
+            $body=(string)($a['body']??'');
+            $form=(strpos($body,'pma_username')!==false||strpos($body,'login_form')!==false);
+            $sameVersion=($version!==''&&preg_match('/\b'.preg_quote($version,'/').'\b/',$body));
+            $tried[]=['url'=>$base,'code'=>$a['code'],'match'=>$form&&($sameVersion||$version===''),
+                      'error'=>$a['error']];
+            if($form&&$sameVersion)$graded[$base]=1;
+            elseif($form)$loose[$base]=1;
         }
+        if($graded){$b=array_key_first($graded);$hit=rtrim($b,'/').'/';$sig=true;}
+        elseif($loose){$b=array_key_first($loose);$hit=rtrim($b,'/').'/';$sig=false;}
+        else $sig=false;
+        if($hit!=='')return ['url'=>$hit,'tried'=>$tried,'ok'=>true,'proved'=>false,'signed'=>$sig,
+            'suggest'=>fm_pma_suggest_url($dir),
+            'how'=>$sig
+                ?'the login page at that address names this installation\'s own version ('.$version.'), so it is this one'
+                :'the login page answers there but does not name this version — check the address'];
     }
     return ['url'=>$hit,'tried'=>$tried,'ok'=>$hit!=='','proved'=>$writable,
-            'how'=>$writable?'proved with a marker file in that folder':'guessed from the login form (the folder is not writable)'];
+            'suggest'=>fm_pma_suggest_url($dir),
+            'how'=>$hit===''
+                ?'nothing answered yet — the address below is this host plus the folder name, and it can be changed'
+                :'proved with a marker file in that folder'];
 }
 
 /* ── the database accounts this host already holds ─────────────────────── */
@@ -3467,10 +3571,133 @@ function fm_pma_db_try($host,$port,$user,$pass){
     return ['ok'=>false,'error'=>$last?:'The database refused the connection.'];
 }
 
+/* ── signing in without writing anything ─────────────────────────────────
+   phpMyAdmin keeps its sign-in in cookies: one for the account name, one for
+   the password, both encrypted with the installation's own secret, plus a
+   session that holds the key they were encrypted with. When phpMyAdmin and this
+   manager are served from the same host (the usual case: /phpmyadmin on the
+   same domain), those cookies can be set from here — nothing is written into
+   the installation, nothing is typed, and the browser is simply signed in. */
+function fm_pma_cookie_scheme($dir,$version=''){
+    $dir=rtrim($dir,'/');
+    $cands=[$dir.'/libraries/classes/Plugins/Auth/AuthenticationCookie.php',
+            $dir.'/libraries/classes/Crypto/Crypto.php'];
+    foreach((array)@glob($dir.'/libraries/classes/Crypto/*.php') as $g)$cands[]=$g;
+    foreach((array)@glob($dir.'/libraries/classes/Plugins/Auth/*.php') as $g)$cands[]=$g;
+    $sodium=false;$legacy=false;
+    foreach(array_unique($cands) as $f){
+        if(!@is_file($f))continue;
+        $t=(string)@file_get_contents($f,false,null,0,400000);
+        if($t==='')continue;
+        if(strpos($t,'sodium_crypto_secretbox')!==false)$sodium=true;
+        if(strpos($t,'AES-128-CBC')!==false)$legacy=true;
+    }
+    if($sodium&&!$legacy)return 'sodium';
+    if($legacy&&!$sodium)return 'legacy';
+    if($sodium&&$legacy)return version_compare($version,'5.1','>=')?'sodium':'legacy';
+    /* nothing readable to read the format from: the version still says it */
+    if($version!=='')return version_compare($version,'5.1','>=')?'sodium':'legacy';
+    return '';
+}
+/* phpMyAdmin 4.x and 5.0: AES-128-CBC with a MAC, wrapped in JSON */
+function fm_pma_cookie_legacy($data,$secret){
+    $len=strlen($secret);
+    $enlarge=function($s){while(strlen($s)<16)$s.=$s;return substr($s,0,16);};
+    $mac=$len>16?substr($secret,0,16):$enlarge($len===1?$secret:substr($secret,0,-1));
+    $aes=$len>16?substr($secret,-16):$enlarge($len===1?$secret:substr($secret,1));
+    $iv=random_bytes(16);
+    $payload=openssl_encrypt($data,'AES-128-CBC',$aes,0,$iv);
+    $ivb=base64_encode($iv);
+    return json_encode(['iv'=>$ivb,'mac'=>hash_hmac('sha1',$ivb.$payload,$mac),'payload'=>$payload]);
+}
+/* phpMyAdmin 5.1 and later: sodium secretbox with the nonce in front */
+function fm_pma_cookie_sodium($data,$secret){
+    if(strlen($secret)!==32)$secret=hash('sha256',$secret,true);
+    $nonce=random_bytes(24);
+    return base64_encode($nonce.sodium_crypto_secretbox($data,$nonce,$secret));
+}
+function fm_pma_same_origin($url){
+    $p=@parse_url($url);
+    if(!is_array($p)||empty($p['host']))return false;
+    $scheme=strtolower($p['scheme']??'http');
+    $port=(int)($p['port']??($scheme==='https'?443:80));
+    $myScheme=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http';
+    $myHost=strtolower($_SERVER['HTTP_HOST']??'');
+    $myPort=(int)($_SERVER['SERVER_PORT']??($myScheme==='https'?443:80));
+    if(strpos($myHost,':')!==false){$parts=explode(':',$myHost,2);$myHost=$parts[0];$myPort=(int)($parts[1]??$myPort);}
+    return $scheme===$myScheme&&strtolower($p['host'])===$myHost&&$port===$myPort;
+}
+/* what the browser must hold for phpMyAdmin to consider it signed in */
+function fm_pma_auth_plan($dir,$cfg,$user,$pass,$server=1){
+    $scheme=fm_pma_cookie_scheme($dir,(string)($cfg['version']??''));
+    if($scheme==='')return ['ok'=>false,'error'=>'The cookie format of this phpMyAdmin could not be recognised, so it cannot be signed in from here.'];
+    if(!function_exists('openssl_encrypt'))return ['ok'=>false,'error'=>'This PHP has no openssl, so the phpMyAdmin cookie cannot be written.'];
+    if($scheme==='sodium'&&!function_exists('sodium_crypto_secretbox'))return ['ok'=>false,'error'=>'This PHP has no sodium, which this phpMyAdmin needs for its cookie.'];
+    $secret=(string)($cfg['blowfish_secret_raw']??'');
+    $key=random_bytes(32);
+    $enc=function($data,$s)use($scheme){
+        return $scheme==='sodium'?fm_pma_cookie_sodium($data,$s):fm_pma_cookie_legacy($data,$s);
+    };
+    /* phpMyAdmin uses the secret from its configuration for the account cookie
+       when it is exactly the length it expects, and the session key otherwise */
+    $userSecret=$secret;
+    if($scheme==='sodium'){$userSecret=(strlen($secret)===32)?$secret:$key;}
+    elseif($secret===''){$userSecret=$key;}
+    $cookies=[
+        'pmaUser-'.$server=>$enc($user,$userSecret),
+        'pmaAuth-'.$server=>$enc(json_encode(['password'=>$pass]),$key),
+    ];
+    $sessionName=(string)($cfg['session_name']??'');
+    if($sessionName==='')$sessionName='phpMyAdmin';
+    $sessionPath=(string)($cfg['session_path']??'');
+    if($sessionPath==='')$sessionPath=session_save_path();
+    if($sessionPath===''||$sessionPath===false)$sessionPath=sys_get_temp_dir();
+    $sid=bin2hex(random_bytes(16));
+    $data='encryption_key|'.serialize($key)
+        .'browser_access_time|'.serialize(['default'=>time()]);
+    return ['ok'=>true,'scheme'=>$scheme,'cookies'=>$cookies,
+            'session'=>['name'=>$sessionName,'id'=>$sid,'path'=>rtrim($sessionPath,'/'),'data'=>$data]];
+}
+function fm_pma_auth_apply($plan){
+    $sess=$plan['session']??null;
+    if(!is_array($sess))return ['ok'=>false,'error'=>'The session of that phpMyAdmin could not be prepared.'];
+    $dir=rtrim((string)$sess['path'],'/');
+    if($dir===''||!@is_dir($dir))return ['ok'=>false,'error'=>'The session folder of this PHP ('.$dir.') does not exist, so phpMyAdmin cannot be given a session.'];
+    if(!@is_writable($dir))return ['ok'=>false,'error'=>'The session folder of this PHP ('.$dir.') is not writable, so phpMyAdmin cannot be given a session.'];
+    $file=$dir.'/sess_'.$sess['id'];
+    if(@file_put_contents($file,(string)$sess['data'],LOCK_EX)===false){
+        return ['ok'=>false,'error'=>'The session file of phpMyAdmin could not be written in '.$dir.'.'];
+    }
+    @chmod($file,0600);
+    $secure=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off');
+    $opts=['expires'=>0,'path'=>'/','httponly'=>true,'samesite'=>'Lax','secure'=>$secure];
+    @setcookie((string)$sess['name'],(string)$sess['id'],$opts);
+    foreach(($plan['cookies']??[]) as $name=>$value)@setcookie($name,$value,$opts);
+    return ['ok'=>true];
+}
+/* does the dashboard answer with these cookies? asked from the server itself */
+function fm_pma_http_cookies($url,$cookies,$timeout=6){
+    if(!function_exists('curl_init'))return ['code'=>0,'ok'=>false,'logged'=>false,'error'=>'curl is not available'];
+    $pairs=[];
+    foreach($cookies as $k=>$v)$pairs[]=$k.'='.rawurlencode((string)$v);
+    $ch=curl_init($url);
+    curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>$timeout,CURLOPT_CONNECTTIMEOUT=>$timeout,
+        CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0,
+        CURLOPT_HTTPHEADER=>['Cookie: '.implode('; ',$pairs)],
+        CURLOPT_USERAGENT=>'MFM/1.0 (+phpMyAdmin Manager sign-in check)']);
+    $body=(string)curl_exec($ch);
+    $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);
+    $err=(string)curl_error($ch);
+    unset($ch);
+    $logged=(strpos($body,'pma_navigation')!==false||strpos($body,'server_databases')!==false||strpos($body,'pma_console')!==false);
+    $form=(strpos($body,'pma_username')!==false||strpos($body,'login_form')!==false);
+    return ['code'=>$code,'ok'=>$code>0,'logged'=>$logged,'form'=>$form,'error'=>$err,'body'=>substr($body,0,400)];
+}
 /* ── the one-time sign-in file ─────────────────────────────────────────── */
 function fm_pma_bridge($install,$cfg,$user,$pass,$server=1){
     $dir=rtrim($install['path'],'/');
-    if(!@is_writable($dir))return ['ok'=>false,'error'=>'The installation folder ('.$dir.') is not writable, so a one-time sign-in file cannot be placed there.'];
+    /* a folder that cannot be written by this account is not the end: the file
+       is written through the site's own privileges at the end of this function */
     $token=bin2hex(random_bytes(16));
     $name='fm-pma-'.bin2hex(random_bytes(6)).'.php';
     $path=$dir.'/'.$name;
@@ -3532,7 +3759,14 @@ PHPEOF;
         [$token,(string)$exp,(string)(int)$server,var_export($user,true),var_export($pass,true),addcslashes($enter,"'\\")],
         $php);
     if(@file_put_contents($path,$php)===false){
-        return ['ok'=>false,'error'=>'The one-time sign-in file could not be written into '.$dir.'.'];
+        /* the folder belongs to the web server: write it the way the CMS
+           bridges are written, through the site's own privileges */
+        $fm=$GLOBALS['fm']??null;
+        $done=false;
+        if(is_object($fm)&&method_exists($fm,'siteWriteFile')){
+            $done=(bool)@$fm->siteWriteFile($path,$php)&&@is_file($path);
+        }
+        if(!$done)return ['ok'=>false,'error'=>'The address given for this installation is on another host, and its folder '.$dir.' cannot be written by the account this manager runs as, so a one-time file cannot be placed beside phpMyAdmin. Publish phpMyAdmin on this same host (the usual /phpmyadmin beside the file manager) and it is signed in without writing anything at all.','nowrite'=>true];
     }
     @chmod($path,0644);
     return ['ok'=>true,'path'=>$path,'token'=>$token];
@@ -3548,7 +3782,7 @@ function fm_pma_endpoint($post){
         $scan=fm_pma_scan($deep);
         $out=[];
         foreach($scan['installs'] as $i){
-            $cfg=fm_pma_config($i['config']);
+            $cfg=fm_pma_cfg($i);
             $i['config_info']=$cfg;
             $i['auth']=$cfg['auth'];
             $i['host']=$cfg['host'];
@@ -3563,8 +3797,8 @@ function fm_pma_endpoint($post){
         if($dir===''||!@is_dir($dir))return ['ok'=>false,'error'=>'That folder does not exist: '.htmlspecialchars((string)($post['path']??''))];
         $sig=fm_pma_signature($dir);
         if(!$sig)return ['ok'=>false,'error'=>'That folder is not a phpMyAdmin installation: it has no phpMyAdmin code (no index.php with libraries, no config.sample.inc.php).'];
-        $cfg=fm_pma_config($sig['config']);
-        $url=fm_pma_pick_url($dir);
+        $cfg=fm_pma_cfg($sig);
+        $url=fm_pma_pick_url($dir,18,(string)($sig['version']??''));
         $creds=fm_pma_creds($dir,$cfg);
         $tries=[];
         foreach($creds as $c){
@@ -3589,20 +3823,24 @@ function fm_pma_endpoint($post){
         if($dir===''||!@is_dir($dir))return ['ok'=>false,'error'=>'Choose an installation first.'];
         $sig=fm_pma_signature($dir);
         if(!$sig)return ['ok'=>false,'error'=>'That folder is not a phpMyAdmin installation.'];
-        $cfg=fm_pma_config($sig['config']);
-        /* the URL must be known and must really answer with phpMyAdmin */
+        $cfg=fm_pma_cfg($sig);
+        /* the address the browser will use: the one typed, the one proved, or
+           the one this host always uses for a folder of that name */
         $given=trim((string)($post['url']??''));
         $url=$given!==''?$given:'';
+        $proved=false;
         if($url===''){
-            $pick=fm_pma_pick_url($dir);
-            if(empty($pick['ok']))return ['ok'=>false,'error'=>'No address answered with phpMyAdmin for this folder.','tried'=>$pick['tried']];
-            $url=$pick['url'];
+            $pick=fm_pma_pick_url($dir,18,(string)($sig['version']??''));
+            if(!empty($pick['ok'])){$url=$pick['url'];$proved=!empty($pick['proved']);}
+            else $url=fm_pma_suggest_url($dir);
         }
+        $url=rtrim($url,'/').'/';
         $mode=(string)($post['mode']??'direct');
         if($mode==='direct'){
-            return ['ok'=>true,'url'=>rtrim($url,'/').'/', 'mode'=>'direct',
+            return ['ok'=>true,'url'=>$url,'mode'=>'direct',
                     'message'=>'phpMyAdmin is open at that address; sign in with a database account.'];
         }
+        /* which database account: the one chosen from this host, or one typed */
         $user=(string)($post['user']??'');
         $pass=(string)($post['pass']??'');
         if(isset($post['cred'])&&$post['cred']!==''){
@@ -3611,29 +3849,60 @@ function fm_pma_endpoint($post){
             if(!isset($list[$idx]))return ['ok'=>false,'error'=>'That database account is no longer on this host; scan again.'];
             $user=$list[$idx]['user'];$pass=$list[$idx]['pass'];
         }
-        if($user==='')return ['ok'=>false,'error'=>'A database account is needed to sign in automatically.'];
+        if($user===''){
+            /* nothing chosen: take the first account this host accepts, so the
+               administrator never has to type a password */
+            foreach(fm_pma_creds($dir,$cfg) as $c){
+                $t=fm_pma_db_try($c['host'],$c['port'],$c['user'],$c['pass']);
+                if(!empty($t['ok'])){$user=$c['user'];$pass=$c['pass'];break;}
+            }
+        }
+        if($user==='')return ['ok'=>false,'error'=>'No database account on this host was accepted, so there is nothing to sign in with. The accounts that were tried are listed above.'];
         $try=fm_pma_db_try($cfg['host']?:'localhost',$cfg['port']?:null,$user,$pass);
         if(empty($try['ok']))return ['ok'=>false,'error'=>'The database refused that account: '.($try['error']??''),'db'=>$try];
+
+        /* 1. same host: the cookies phpMyAdmin itself would set are set here,
+              and nothing at all is written into the installation */
+        if(fm_pma_same_origin($url)){
+            $plan=fm_pma_auth_plan($dir,$cfg,$user,$pass,1);
+            if(empty($plan['ok']))return ['ok'=>false,'error'=>$plan['error'],'db'=>$try];
+            $apply=fm_pma_auth_apply($plan);
+            if(empty($apply['ok']))return ['ok'=>false,'error'=>$apply['error'],'db'=>$try];
+            $enter=$url.'index.php?server=1';
+            $check=fm_pma_http_cookies($enter,array_merge(
+                [(string)$plan['session']['name']=>(string)$plan['session']['id']],
+                $plan['cookies']),6);
+            if($check['ok']&&!$check['logged']&&!empty($check['form'])){
+                return ['ok'=>false,'error'=>'The cookies were set but phpMyAdmin answered with its sign-in form again, so the link was not opened. Its cookie format is "'.$plan['scheme'].'".',
+                        'db'=>$try,'check'=>$check];
+            }
+            return ['ok'=>true,'url'=>$enter,'mode'=>'cookies','db'=>$try,
+                    'scheme'=>$plan['scheme'],'verified'=>!empty($check['logged']),
+                    'cookies'=>array_keys($plan['cookies']),
+                    'message'=>'This browser is signed in already; the dashboard is one click away, and nothing was written into the installation.'];
+        }
+
+        /* 2. another host: a one-time file beside the installation */
         $br=fm_pma_bridge($sig,$cfg,$user,$pass,1);
-        if(empty($br['ok']))return ['ok'=>false,'error'=>$br['error']];
+        if(empty($br['ok']))return ['ok'=>false,'error'=>$br['error'],'db'=>$try];
         /* the link is only handed back once the very file that was written
            answers on the web: a deliberate wrong token must reach it */
         $sentinel='This login link is invalid or has expired.';
-        $probeUrl=rtrim($url,'/').'/'.basename($br['path']).'?t=probe';
+        $probeUrl=$url.basename($br['path']).'?t=probe';
         $probe=fm_pma_http($probeUrl,6);
         if($probe['code']!==403||strpos((string)($probe['body']??''),$sentinel)===false){
             @unlink($br['path']);
             return ['ok'=>false,'error'=>'The one-time file was written but the web server does not serve it at that address, so no link was opened. Tried '.$probeUrl.' (answer '.$probe['code'].').',
-                    'probe'=>$probe];
+                    'probe'=>$probe,'db'=>$try];
         }
-        return ['ok'=>true,'url'=>rtrim($url,'/').'/'.basename($br['path']).'?t='.$br['token'],
-                'mode'=>'auto','db'=>$try,'bridge'=>basename($br['path']),
+        return ['ok'=>true,'url'=>$url.basename($br['path']).'?t='.$br['token'],
+                'mode'=>'bridge','db'=>$try,'bridge'=>basename($br['path']),
                 'message'=>'That link signs this browser in once and deletes itself.'];
     }
     if($act==='creds'){
         $sig=$dir!==''?fm_pma_signature($dir):null;
         if(!$sig)return ['ok'=>false,'error'=>'Choose an installation first.'];
-        $cfg=fm_pma_config($sig['config']);
+        $cfg=fm_pma_cfg($sig);
         $creds=fm_pma_creds($dir,$cfg);
         $tries=[];
         foreach($creds as $c){
@@ -9665,6 +9934,12 @@ FMGUARD;
         $r=$this->privOp('write',['path'=>$path,'data'=>base64_encode($content),'b64'=>1],$path);
         return !empty($r['ok']);
     }
+
+    /* A file that must land in a folder this account cannot write (the one-time
+       phpMyAdmin sign-in file beside a packaged installation): written here and,
+       if that is refused, by the site's own account. Public on purpose — the
+       phpMyAdmin Manager calls it from outside the class. */
+    public function siteWriteFile($path,$content){return $this->privWriteFile($path,$content);}
 
     private function saveFile(){$n=basename(isset($_POST['filename'])?$_POST['filename']:'');if(!$n||$this->isSelf($n))return;$p=$this->currentDir.'/'.$n;if(!file_exists($p)||!is_file($p)){$this->addMsg('File not found.','danger');return;}$c=isset($_POST['content'])?$_POST['content']:'';$delta=max(0,strlen($c)-(int)@filesize($p));if(!$this->quotaAllows($delta)){$this->addMsg('Quota exceeded. Free space or ask an administrator for a larger limit.','danger');return;}$res=$this->runOp('write',['path'=>$p,'data'=>base64_encode($c),'b64'=>1],$p,function()use($p,$c){return@file_put_contents($p,$c)!==false;});
         if(!empty($res['ok'])){
@@ -20690,8 +20965,11 @@ input[type=file]{display:none}
 
 /* <<PMA-CSS-BEGIN>> */
 /* ══ phpMyAdmin Manager — installations, addresses, sign-in ═══════════════ */
-.pma-mod{width:min(1180px,96vw);height:min(800px,92vh);max-height:92vh}
-.pma-wrap{display:flex;min-height:0;flex:1}
+.pma-mod{width:min(1180px,96vw);height:min(820px,92vh);max-height:92vh;min-height:0}
+.pma-wrap{display:flex;min-height:0;flex:1;overflow:hidden}
+/* the pane shows either the placeholder or the body — never both, whatever
+   display the two of them ask for */
+.pma-pane>[hidden],#pmaOv [hidden]{display:none!important}
 .pma-rail{width:264px;flex-shrink:0;border-right:1px solid var(--border);background:var(--raised);display:flex;flex-direction:column;min-height:0}
 .pma-rail-lab{padding:11px 12px 6px;font-size:10px;letter-spacing:.8px;text-transform:uppercase;color:var(--t3);font-weight:700}
 .pma-list{overflow:auto;padding:0 8px;display:flex;flex-direction:column;gap:4px;flex:1;min-height:0}
@@ -20707,22 +20985,23 @@ input[type=file]{display:none}
 .pma-add label{font-size:10.5px;color:var(--t3);font-weight:600}
 .pma-add input{width:100%;font:inherit;font-size:11.5px;padding:7px 9px;border-radius:8px;border:1px solid var(--border);background:var(--surf);color:var(--t1)}
 .pma-add input:focus{outline:none;border-color:rgba(37,99,235,.5)}
-.pma-pane{flex:1;min-width:0;overflow:auto;padding:14px}
-.pma-placeholder{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;color:var(--t3);text-align:center;padding:40px 30px}
+.pma-pane{flex:1;min-width:0;min-height:0;overflow:auto;padding:14px;display:flex;flex-direction:column}
+.pma-pane>.pma-body{flex:0 0 auto}
+.pma-placeholder{flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;color:var(--t3);text-align:center;padding:40px 30px}
 .pma-placeholder svg{width:38px;height:38px;stroke:currentColor;fill:none;stroke-width:1.4;opacity:.55}
 .pma-placeholder b{font-size:13.5px;color:var(--t2)}
 .pma-placeholder span{font-size:11.5px;max-width:430px;line-height:1.6}
-.pma-body{display:flex;flex-direction:column;gap:12px}
-.pma-head{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
-.pma-name{font-size:15px;font-weight:700;color:var(--t1);word-break:break-all}
+.pma-body{display:flex;flex-direction:column;gap:12px;min-width:0}
+.pma-head{display:flex;flex-direction:column;align-items:stretch;gap:7px}
+.pma-name{font-size:15px;font-weight:700;color:var(--t1);overflow-wrap:anywhere}
 .pma-sub{font-size:11px;color:var(--t3);margin-top:3px;word-break:break-all}
-.pma-chips{display:flex;flex-wrap:wrap;gap:5px;margin-left:auto}
+.pma-chips{display:flex;flex-wrap:wrap;gap:5px;max-width:100%}
 .pma-chip{font-size:10px;padding:2.5px 8px;border-radius:20px;border:1px solid var(--border);background:var(--raised);color:var(--t2);white-space:nowrap}
 .pma-chip.ok{border-color:rgba(134,239,172,.32);background:rgba(134,239,172,.09);color:#86efac}
 .pma-chip.warn{border-color:rgba(252,211,77,.3);background:rgba(252,211,77,.08);color:#fcd34d}
 .pma-chip.bad{border-color:rgba(148,163,184,.3);background:rgba(148,163,184,.08);color:#94a3b8}
 .pma-chip.acc{border-color:rgba(37,99,235,.4);background:rgba(37,99,235,.13);color:#bfdbfe}
-.pma-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,420px);gap:12px;align-items:start}
+.pma-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,380px);gap:12px;align-items:start}
 @media (max-width:1000px){.pma-grid{grid-template-columns:1fr}}
 .pma-col{display:flex;flex-direction:column;gap:12px;min-width:0}
 .pma-block{border:1px solid var(--border);border-radius:11px;background:var(--surf);padding:11px 12px;min-width:0}
@@ -20732,11 +21011,13 @@ input[type=file]{display:none}
 .pma-table th{text-align:left;font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:var(--t3);font-weight:700;padding:5px 6px;border-bottom:1px solid var(--border)}
 .pma-table td{padding:6px;border-bottom:1px solid rgba(255,255,255,.045);color:var(--t2);vertical-align:top}
 .pma-table tr:last-child td{border-bottom:none}
-.pma-table td.path{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--t3);word-break:break-all;max-width:340px}
+.pma-table td.path{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--t3);max-width:1px;width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pma-table td{white-space:nowrap}
+.pma-table td.path{white-space:nowrap}
 .pma-table td b{color:var(--t1);font-weight:650}
 .pma-line{display:flex;gap:8px;font-size:11.5px;padding:3px 0;align-items:baseline}
-.pma-line .k{color:var(--t3);flex-shrink:0;min-width:118px}
-.pma-line .v{color:var(--t1);word-break:break-all}
+.pma-line .k{color:var(--t3);flex-shrink:0;min-width:96px;max-width:96px}
+.pma-line .v{color:var(--t1);overflow-wrap:anywhere;word-break:normal;min-width:0}
 .pma-lab{display:block;font-size:10.5px;color:var(--t3);font-weight:600;margin:9px 0 5px}
 .pma-row{display:flex;gap:7px;align-items:center}
 .pma-row input{flex:1;min-width:0;font:inherit;font-size:11.5px;padding:7px 9px;border-radius:8px;border:1px solid var(--border);background:var(--raised);color:var(--t1)}
@@ -20757,7 +21038,7 @@ input[type=file]{display:none}
 .pma-cred .s.bad{color:#94a3b8}
 .pma-cred .s.ok{color:#86efac}
 .pma-empty{font-size:11px;color:var(--t3);padding:8px 12px}
-.pma-foot{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:2px}
+.pma-foot{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0 2px;position:sticky;bottom:-14px;background:var(--surf);z-index:2}
 .pma-foot .btn{display:inline-flex;align-items:center;gap:6px}
 .pma-foot .btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
 .pma-msg{font-size:11px;color:var(--t3)}
@@ -21886,7 +22167,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
        <?php endif;?>
        <?php if(!empty($_SESSION['auth'])&&fm_can('pma')):?>
        <button class="sb-item" id="pmaBtn" title="Every phpMyAdmin on this host: its version, its files, its database account, its address — and a press that signs you in">
-         <svg viewBox="0 0 24 24" style="stroke:#a78bfa"><ellipse cx="12" cy="5.5" rx="7" ry="3"/><path d="M5 5.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/><path d="M5 11.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>phpMyAdmin Manager
+         <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7" ry="3"/><path d="M5 5.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/><path d="M5 11.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>phpMyAdmin Manager
        </button>
        <?php endif;?>
        <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?>
@@ -24022,18 +24303,14 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
                   <input type="text" id="pmaUrl" placeholder="http://127.0.0.1/phpmyadmin/" autocomplete="off" spellcheck="false">
                   <button type="button" class="btn btn-g" id="pmaUrlCheck">Check</button>
                 </div>
-                <div class="pma-note" id="pmaUrlNote">The tool asks every web port of this host for a file it wrote into that exact folder, so the address is proven and not guessed.</div>
+                <div class="pma-note" id="pmaUrlNote">When the folder can be written to, a file written into it proves the address. When it cannot — a packaged installation owned by the system — the page at that address must name this installation's own version, and a different phpMyAdmin under the same name is not accepted.</div>
                 <div class="pma-answers" id="pmaUrlList"></div>
               </div>
 
               <div class="pma-block">
                 <div class="pma-block-h"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 20v-1.5a4 4 0 0 1 4-4h5a4 4 0 0 1 4 4V20"/><path d="M17 11.5h4M19 9.5v4"/></svg>Its database account</div>
                 <div class="pma-creds" id="pmaCreds"></div>
-                <div class="pma-row" style="margin-top:8px">
-                  <input type="text" id="pmaUser" placeholder="user" autocomplete="off" spellcheck="false">
-                  <input type="password" id="pmaPass" placeholder="password" autocomplete="new-password">
-                </div>
-                <div class="pma-note">An account found on this host is offered with the reason it was offered; nothing is signed in until you press the button.</div>
+                <div class="pma-note">Every account here was found on this host, with the reason it was offered. The password never leaves the server and is never typed into this window: choosing an installation signs in with the account already marked as working.</div>
               </div>
             </div>
           </div>
@@ -30390,31 +30667,61 @@ function pmaRenderList(){
       +'</button>';
   }).join('');
 }
-async function pmaPick(path){
+var PMA_TURN=0;
+/* A window opened later, after the round trip to the server, is blocked by every
+   browser. So the tab is taken now, while the click is still a click, and it is
+   pointed at phpMyAdmin the moment the sign-in is ready. */
+function pmaSlot(){
+  var w=null;
+  try{w=window.open('','_blank');}catch(e){w=null;}
+  if(w){
+    try{
+      w.document.write('<title>phpMyAdmin</title><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#181b20;color:#c7ccd4;font:13px system-ui,sans-serif">Signing in to phpMyAdmin…</body>');
+      w.document.close();
+    }catch(e){}
+  }
+  return w;
+}
+function pmaSlotClose(w){if(w){try{w.close();}catch(e){}}}
+async function pmaPick(path,gesture){
+  var turn=++PMA_TURN;
+  var slot=gesture?pmaSlot():null;
   PMA_SEL=path;
   pmaRenderList();
   pmaSay('Reading that installation…');
   var d=await pmaCall('probe',{path:path});
-  if(!d||!d.ok){pmaSay((d&&d.error)||'That folder could not be read.','bad');return;}
+  if(turn!==PMA_TURN){pmaSlotClose(slot);return;}   /* another installation was chosen meanwhile */
+  if(!d||!d.ok){pmaSlotClose(slot);pmaSay((d&&d.error)||'That folder could not be read.','bad');return;}
   PMA_DETAIL=d.install;
   pmaRender();
   pmaSay('');
+  /* a choice is the whole gesture: the next thing that happens is the
+     signed-in window, with no password and no second press */
+  var works=(d.install.cred_tries||[]).some(function(c){return c.ok;});
+  if(works&&gesture)pmaOpen('auto',turn,slot);
+  else if(works){pmaSlotClose(slot);pmaSay('Press “Sign in and open” — or click the installation again — and it opens already signed in.');}
+  else{pmaSlotClose(slot);pmaSay('No database account on this host was accepted, so there is nothing to sign in with.','bad');}
 }
 function pmaRender(){
   var i=PMA_DETAIL;if(!i)return;
   pmaHas('pmaPlaceholder').hidden=true;
   var body=pmaHas('pmaBody');body.hidden=false;
-  pmaHas('pmaTitle').textContent=(i.path.split('/').pop()||i.path)+' — '+i.path;
+  pmaHas('pmaTitle').textContent=i.path.split('/').pop()||i.path;
   var cfg=i.config_info||{};
-  pmaHas('pmaSub').textContent=i.entry;
+  pmaHas('pmaSub').textContent=i.path+'  ·  entry file '+i.entry_rel;
   var chips=[];
   chips.push(pmaChip(i.version?('phpMyAdmin '+i.version):'version unknown',i.version?'acc':'warn'));
   chips.push(pmaChip(cfg.auth?('sign-in: '+cfg.auth):'sign-in: unknown',cfg.auth?'':'warn'));
-  if(cfg.blowfish)chips.push(pmaChip('secret set ('+cfg.blowfish_len+' characters)','ok'));
-  else chips.push(pmaChip('no blowfish secret','warn'));
+  var src=String(cfg.source||'none');
+  if(src==='installation')chips.push(pmaChip('configuration in its own folder','ok'));
+  else if(src.indexOf('system file ')>0)chips.push(pmaChip('configuration: '+src.slice(12),'ok'));
+  else if(i.has_config)chips.push(pmaChip('configuration found','ok'));
+  else chips.push(pmaChip(cfg.sample?'only config.sample.inc.php':'no configuration file','warn'));
+  if(cfg.blowfish)chips.push(pmaChip('cookie secret set ('+cfg.blowfish_len+' characters)','ok'));
+  else chips.push(pmaChip('cookie secret: none in the configuration',''));
   chips.push(pmaChip(i.writable?'folder writable':'folder not writable',i.writable?'ok':'bad'));
-  if(i.has_config)chips.push(pmaChip('configuration file','ok'));
-  else chips.push(pmaChip('no configuration file','warn'));
+  if(cfg.session_name)chips.push(pmaChip('session name '+cfg.session_name,''));
+  if(cfg.session_path)chips.push(pmaChip('session folder '+cfg.session_path,''));
   pmaHas('pmaChips').innerHTML=chips.join('');
 
   /* the files that make it up */
@@ -30425,11 +30732,15 @@ function pmaRender(){
 
   /* the address */
   var u=i.url||{};
-  pmaHas('pmaUrlFound').textContent=u.ok?u.url:'not proved yet';
-  pmaHas('pmaUrlHow').textContent=u.how||'—';
+  pmaHas('pmaUrlFound').textContent=u.ok?u.url:(u.suggest||'not known yet');
+  pmaHas('pmaUrlHow').textContent=u.ok?(u.how||''):((u.how||'')+' — that is this host plus the folder name; change it if the installation is published elsewhere');
   var input=pmaHas('pmaUrl');
-  input.value=u.ok?u.url:'';
-  pmaHas('pmaUrlList').innerHTML=(u.tried||[]).slice(0,14).map(function(t){
+  input.value=u.ok?u.url:(u.suggest||'');
+  input.classList.toggle('is-guess',!u.ok);
+  var seen={};
+  pmaHas('pmaUrlList').innerHTML=(u.tried||[]).filter(function(t){
+    var key=(t.match?'y':'n')+t.url;if(seen[key])return false;seen[key]=1;return true;
+  }).slice(0,14).map(function(t){
     return '<div class="pma-ans'+(t.match?' yes':'')+'"><span class="c">'+(t.match?'✓':(t.code||'—'))+'</span>'
       +'<span class="u">'+pmaEsc(t.url)+'</span></div>';
   }).join('');
@@ -30442,10 +30753,6 @@ function pmaRender(){
     return '<label class="pma-cred"><input type="radio" name="pmaCred" data-idx="'+idx+'"'+(c.ok&&idx===creds.findIndex(function(x){return x.ok;})?' checked':'')+'>'
       +'<span class="u">'+pmaEsc(c.user)+'</span><span class="s '+cls+'" title="'+pmaEsc(c.source)+'">'+pmaEsc(txt)+'</span></label>';
   }).join('')||'<div class="pma-note">No database account was found on this host. Type one below.</div>';
-  if(creds.length){
-    var best=creds.filter(function(c){return c.ok;})[0];
-    if(best){pmaHas('pmaUser').value=best.user;}
-  }
   pmaHas('pmaResult').hidden=true;
 }
 /* which account is ticked; the password behind it never reaches this window */
@@ -30472,13 +30779,18 @@ async function pmaCheckUrl(){
 function pmaShowResult(d){
   var box=pmaHas('pmaResult');
   box.hidden=false;
-  box.innerHTML='<div class="h"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>'+pmaEsc(d.mode==='auto'?'One-time sign-in link':'The address of that installation')+'</div>'
+  var howOpen=d.mode==='cookies'?'Signed in — this browser holds the phpMyAdmin cookies'
+    :(d.mode==='bridge'?'One-time sign-in link':'The address of that installation');
+  box.innerHTML='<div class="h"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>'+pmaEsc(howOpen)+'</div>'
     +'<div class="link">'+pmaEsc(d.url)+'</div>'
     +'<div class="acts"><button type="button" class="btn btn-p" id="pmaGo">Open</button>'
     +'<button type="button" class="btn btn-g" id="pmaCopy">Copy the link</button></div>'
-    +'<div class="txt">'+(d.mode==='auto'
-      ?'The link points at a file written beside phpMyAdmin; it signs one browser in, then deletes itself. It stops working after three minutes, and no password is part of the link.'
-      :'Sign in with a database account of this server.')+'</div>';
+    +'<div class="txt">'+(d.mode==='cookies'
+      ?'Nothing was written anywhere: this browser was given the cookies phpMyAdmin itself sets, so the window opens straight into the database. The account is '
+        +pmaEsc((d.db&&d.db.who)||'')+(d.verified?' and the dashboard was checked from this server.':'.')
+      :(d.mode==='bridge'
+        ?'The link points at a file written beside phpMyAdmin; it signs one browser in, then deletes itself. It stops working after three minutes, and no password is part of the link.'
+        :'Sign in with a database account of this server.'))+'</div>';
   var go=pmaHas('pmaGo');
   if(go)go.addEventListener('click',function(){window.open(d.url,'_blank','noopener');});
   var cp=pmaHas('pmaCopy');
@@ -30487,34 +30799,34 @@ function pmaShowResult(d){
     cp.textContent='Copied';
   });
 }
-async function pmaOpen(mode){
+async function pmaOpen(mode,turn,slot){
   if(!PMA_DETAIL){pmaSay('Choose an installation first.','bad');return;}
+  if(turn!==undefined&&turn!==PMA_TURN)return;
   if(PMA_BUSY)return;
   PMA_BUSY=true;
   var url=(pmaHas('pmaUrl').value||'').trim();
   var extra={path:PMA_DETAIL.path,mode:mode,url:url};
   if(mode==='auto'){
-    var typedUser=(pmaHas('pmaUser').value||'').trim();
+    /* the account is always one that was found on this host; its password is
+       read on the server and never asked for here */
     var c=pmaChosenCred();
-    if(c&&(!typedUser||typedUser===c.user)){
-      /* an account found on this host: the server already holds the password */
-      extra.cred=c.idx;
-      extra.user=c.user;
-    } else {
-      if(!typedUser){PMA_BUSY=false;pmaSay('Choose or type a database account first.','bad');return;}
-      var typed=window.prompt('The password of the database account "'+typedUser+'":','');
-      if(typed===null){PMA_BUSY=false;pmaSay('Nothing was opened.','');return;}
-      extra.user=typedUser;
-      extra.pass=typed;
-    }
+    if(c){extra.cred=c.idx;extra.user=c.user;}
   }
-  pmaSay(mode==='auto'?'Proving the address and writing the one-time file…':'Checking the address…');
+  pmaSay(mode==='auto'?'Signing in…':'Checking the address…');
   var d=await pmaCall('open',extra);
   PMA_BUSY=false;
-  if(!d||!d.ok){pmaSay((d&&d.error)||'Nothing was opened.','bad');return;}
-  pmaSay('');
+  if(turn!==undefined&&turn!==PMA_TURN){pmaSlotClose(slot);return;}
+  if(!d||!d.ok){pmaSlotClose(slot);pmaSay((d&&d.error)||'Nothing was opened.','bad');return;}
+  pmaSay(d.mode==='cookies'?'Signed in. The window below opens already signed in.':'Signed-in link ready.');
   pmaShowResult(d);
-  if(mode==='auto'&&typeof toast==='function')toast('Signed-in link ready; it works once.');
+  /* the tab taken at the click is pointed at phpMyAdmin, already signed in */
+  if(mode==='auto'){
+    var w=slot;
+    if(w){try{w.location.replace(d.url);}catch(e){w=null;}}
+    if(!w)w=window.open(d.url,'_blank');
+    if(w&&typeof toast==='function')toast('Opened phpMyAdmin, already signed in.');
+    else if(typeof toast==='function')toast('The browser blocked the new tab — press Open.');
+  }
 }
 /* ── wiring ───────────────────────────────────────────────────────────────── */
 (function(){
@@ -30533,13 +30845,13 @@ async function pmaOpen(mode){
   var list=pmaHas('pmaList');
   if(list)list.addEventListener('click',function(e){
     var b=e.target.closest('.pma-item');if(!b)return;
-    pmaPick(b.getAttribute('data-path'));
+    pmaPick(b.getAttribute('data-path'),true);
   });
   var add=pmaHas('pmaAdd');
   if(add)add.addEventListener('click',function(){
     var p=(pmaHas('pmaPath').value||'').trim();
     if(!p){pmaSay('Type the folder first.','bad');return;}
-    pmaPick(p);
+    pmaPick(p,true);
   });
   var pc=pmaHas('pmaUrlCheck');if(pc)pc.addEventListener('click',pmaCheckUrl);
   var oa=pmaHas('pmaOpenAuto');if(oa)oa.addEventListener('click',function(){pmaOpen('auto');});
@@ -30547,7 +30859,8 @@ async function pmaOpen(mode){
   var creds=pmaHas('pmaCreds');
   if(creds)creds.addEventListener('change',function(e){
     var r=e.target.closest('input[type=radio]');if(!r)return;
-    var c=pmaChosenCred();if(c&&pmaHas('pmaUser'))pmaHas('pmaUser').value=c.user;
+    var c=pmaChosenCred();
+    if(c)pmaSay('The account '+c.user+' is the one that will be used.');
   });
 })();
 
