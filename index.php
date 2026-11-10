@@ -1150,11 +1150,11 @@ function fm_guardian_pdo_dsn($env){
 }
 $__fmGuardEnvDb=fm_guardian_env_db();
 if(!defined('FM_GUARD_DB_DRIVER')) define('FM_GUARD_DB_DRIVER',$__fmGuardEnvDb['driver']??'mysql');
-if(!defined('FM_GUARD_DB_HOST'))   define('FM_GUARD_DB_HOST', 'localhost');
+if(!defined('FM_GUARD_DB_HOST'))   define('FM_GUARD_DB_HOST', '127.0.0.1');
 if(!defined('FM_GUARD_DB_PORT'))   define('FM_GUARD_DB_PORT',(string)($__fmGuardEnvDb['port']??3306));
-if(!defined('FM_GUARD_DB_NAME'))   define('FM_GUARD_DB_NAME', 'wordpress');
-if(!defined('FM_GUARD_DB_USER'))   define('FM_GUARD_DB_USER', 'wpuser');
-if(!defined('FM_GUARD_DB_PASS'))   define('FM_GUARD_DB_PASS', 'JsByYhjrxlxKXsGP2lYL');
+if(!defined('FM_GUARD_DB_NAME'))   define('FM_GUARD_DB_NAME', 'wp_marshal');
+if(!defined('FM_GUARD_DB_USER'))   define('FM_GUARD_DB_USER', 'wp_user');
+if(!defined('FM_GUARD_DB_PASS'))   define('FM_GUARD_DB_PASS', 'acd0205842c5e39157e1d2f1033044c9');
 if(!defined('FM_GUARD_DB_SOCK'))   define('FM_GUARD_DB_SOCK', ''); // optional unix socket path; when set, used instead of host:port
 unset($__fmGuardEnvDb);
 
@@ -3874,9 +3874,11 @@ function wm2_maildir_files($path){
 }
 function wm2_maildir_flags($file){
     $name=basename($file);
+    /* The info field of a Maildir name is ":1," or ":2," plus the flags, and
+       it is the last thing in the name — so the split is anchored to the end
+       instead of trusting a ":2," that may appear inside a unique id. */
     $flags='';
-    $c=strrpos($name,':2,');
-    if($c!==false)$flags=substr($name,$c+3);
+    if(preg_match('/:[12],([A-Za-z]*)$/',$name,$m))$flags=$m[1];
     return [
         'seen'=>strpos($flags,'S')!==false,
         'flagged'=>strpos($flags,'F')!==false,
@@ -3892,14 +3894,22 @@ function wm2_maildir_set_flags($file,$flags){
     $base=$name;
     $c=strrpos($name,':2,');
     if($c!==false)$base=substr($name,0,$c);
-    $new=$dir.'/'.$base.':2,'.implode('',array_unique(str_split($flags)));
-    if($new===$file)return $file;
+    /* Maildir asks for the flags in alphabetical order, and an empty set is a
+       name with no comma at all — ":2," on its own is not a valid name. */
+    $set=array_values(array_unique(array_filter(str_split(strtoupper((string)$flags)),function($f){
+        return strpos('PRSTDF',$f)!==false;
+    })));
+    sort($set);
+    $info=$set?':2,'.implode('',$set):'';
     /* a message in new/ becomes seen mail the moment it is touched */
     $target=$dir;
     if(basename($dir)==='new')$target=dirname($dir).'/cur';
-    $new=$target.'/'.$base.':2,'.implode('',array_unique(str_split($flags)));
-    if(@rename($file,$new))return $new;
-    return $file;
+    $new=$target.'/'.$base.$info;
+    if($new===$file)return $file;
+    /* A folder this account cannot write to is reported as a failure, not
+       dressed up as a success, so the window can say why nothing changed. */
+    if(!@rename($file,$new))return '';
+    return $new;
 }
 function wm2_maildir_list($path){
     $out=[];
@@ -3940,7 +3950,9 @@ function wm2_maildir_message($path,$uid){
     if(!$fl['seen']){
         $fl2=$fl['raw']===''?'S':$fl['raw'].'S';
         $moved=wm2_maildir_set_flags($file,$fl2);
-        $m['uid']=basename($moved);
+        /* an empty answer means the folder could not be written to: the
+           message is still where it was, so its name is unchanged */
+        if($moved!=='')$m['uid']=basename($moved);
     }
     $m['file']=$file;
     return $m;
@@ -4713,7 +4725,7 @@ function wm2_capability($acc){
         return ['read'=>true,'delete'=>true,'send'=>'smtp','why'=>''];
     }
     if($kind==='cpanel'){
-        return ['read'=>false,'delete'=>false,'send'=>'','why'=>'cPanel holds the mailbox; open it with its own webmail sign-on'];
+        return ['read'=>false,'delete'=>false,'send'=>'','why'=>'cPanel holds this mailbox and does not hand its mail to this server. Use “Open in webmail” to read it signed in.'];
     }
     return ['read'=>false,'delete'=>false,'send'=>'','why'=>'this address is known to the site but has no mailbox on this server'];
 }
@@ -4939,10 +4951,16 @@ function wm2_message($acc,$folder,$uid){
     if(!$cap['read'])return null;
     if($acc['kind']==='maildir'){
         $folder=$folder===''?'INBOX':$folder;
+        $m=null;
         foreach(wm2_maildir_folders($acc['where']) as $f){
-            if($f['id']===$folder)return wm2_maildir_message($f['path'],$uid);
+            if($f['id']===$folder){$m=wm2_maildir_message($f['path'],$uid);break;}
         }
-        return wm2_maildir_message($acc['where'],$uid);
+        if($m===null)$m=wm2_maildir_message($acc['where'],$uid);
+        /* A message already carrying the Seen flag is never renamed, so it
+           comes back with no name of its own — and the window needs that
+           name to flag, delete or download it afterwards. */
+        if($m&&!isset($m['uid']))$m['uid']=(string)$uid;
+        return $m;
     }
     if($acc['kind']==='mbox'){
         $m=wm2_mbox_message($acc['where'],$uid);
@@ -5083,6 +5101,9 @@ function wm2_flag_one($acc,$folder,$uid,$seen){
             $flags=str_replace('S','',$flags);
             if($seen)$flags.='S';
             $new=wm2_maildir_set_flags($file,$flags);
+            if($new===''){
+                return ['ok'=>false,'error'=>'That message could not be marked: its folder is not writable by this account.'];
+            }
             return ['ok'=>true,'uid'=>basename($new)];
         }
         return ['ok'=>false,'error'=>'That message is no longer there.'];
@@ -5231,13 +5252,30 @@ function wm2_endpoint($post){
     }
     $id=$get('account');
     $acc=$id!==''?wm2_account_by_id($id):null;
-    if($act!=='send_any'&&!$acc)return ['ok'=>false,'error'=>'That mailbox is not on this server any more. Open the window again.'];
+    /* 'send_any' and 'signin' both accept an address that was never
+       discovered, so neither is held to a known account here. */
+    if($act!=='send_any'&&$act!=='signin'&&!$acc)return ['ok'=>false,'error'=>'That mailbox is not on this server any more. Open the window again.'];
 
     if($act==='folders'){
-        $conn=wm2_conn($acc);
         $out=wm2_folders($acc);
-        $res=['ok'=>true,'account'=>$acc['email'],'folders'=>$out,'can'=>wm2_capability($acc)];
-        if(!$out)$res['why']=$conn['error']??(wm2_capability($acc)['why']?:'That mailbox answered with no folders.');
+        $cap=wm2_capability($acc);
+        $res=['ok'=>true,'account'=>$acc['email'],'folders'=>$out,'can'=>$cap];
+        if(!$out){
+            /* Only a mailbox read over the network has a connection to fail.
+               Every other kind is answered with the reason of its own. */
+            $why='';
+            if($acc['kind']==='imap'||$acc['kind']==='pop3'){
+                $conn=wm2_conn($acc);
+                if(empty($conn['ok']))$why=(string)($conn['error']??'');
+            }
+            if($why==='')$why=(string)($cap['why']?:'');
+            if($why===''){
+                $why=($acc['kind']==='maildir'||$acc['kind']==='mbox')
+                    ?'That mailbox is empty — it has no folder with messages in it yet.'
+                    :'That mailbox has no folder to open.';
+            }
+            $res['why']=$why;
+        }
         return $res;
     }
     if($act==='messages'){
@@ -5281,6 +5319,16 @@ function wm2_endpoint($post){
     }
     if($act==='signin'){
         /* the cPanel server's own webmail sign-on for this address */
+        if(!$acc){
+            /* The window promises webmail for any address given to it, so an
+               address that was never discovered still gets its own sign-on. */
+            $addr=strtolower($get('email'));
+            if(!filter_var($addr,FILTER_VALIDATE_EMAIL)){
+                return ['ok'=>false,'error'=>'That is not an address this server can sign on to.'];
+            }
+            $acc=wm2_account(['email'=>$addr,'name'=>$addr,'kind'=>'cpanel',
+                'where'=>'cPanel','origin'=>'an address typed into this window']);
+        }
         $route=fm_cpm_route();
         if(empty($route['ok']))return ['ok'=>false,'error'=>'cPanel is not reachable from here, so its webmail sign-on cannot be used.'];
         $user=strtolower($acc['email']);
@@ -21503,27 +21551,44 @@ if(isset($_GET['x'])){
         if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
         echo json_encode(fm_smtp_send_request($xop==='smtp_send',$fm),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
     }
-    /* ── Webmail Manager endpoints ── */
-    if($xop==='webmail_mailboxes'){
-        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
-        echo json_encode($fm->webmailListMailboxes());exit;
-    }
-    if($xop==='webmail_folders'){
-        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
-        echo json_encode($fm->webmailListFolders(isset($_GET['mailbox'])?$_GET['mailbox']:''));exit;
-    }
-    if($xop==='webmail_messages'){
-        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
-        echo json_encode($fm->webmailListMessages(isset($_GET['mailbox'])?$_GET['mailbox']:'',isset($_GET['folder'])?$_GET['folder']:'INBOX'));exit;
-    }
-    if($xop==='webmail_message'){
-        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
-        echo json_encode($fm->webmailGetMessage(isset($_GET['mailbox'])?$_GET['mailbox']:'',isset($_GET['folder'])?$_GET['folder']:'INBOX',isset($_GET['uid'])?$_GET['uid']:'0'));exit;
+    /* ── Webmail Manager endpoints ──────────────────────────────────────
+       These reach the same mail engine the window itself posts to (?x=mail),
+       so a request shaped the old way is answered instead of dying on methods
+       this class never had. */
+    if(in_array($xop,['webmail_mailboxes','webmail_folders','webmail_messages','webmail_message'],true)){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['ok'=>false,'error'=>'Admins only.']);exit;}
+        $wmAct=['webmail_mailboxes'=>'discover','webmail_folders'=>'folders',
+                'webmail_messages'=>'messages','webmail_message'=>'message'][$xop];
+        echo json_encode(wm2_endpoint([
+            'action'=>$wmAct,
+            'account'=>isset($_GET['mailbox'])?(string)$_GET['mailbox']:'',
+            'folder'=>isset($_GET['folder'])?(string)$_GET['folder']:'INBOX',
+            'uid'=>isset($_GET['uid'])?(string)$_GET['uid']:'',
+        ]),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        exit;
     }
     if($xop==='webmail_attachment'){
-        if(empty($_SESSION['fm_admin'])){http_response_code(403);exit;}
-        $fm->webmailDownloadAttachment(isset($_GET['mailbox'])?$_GET['mailbox']:'',isset($_GET['folder'])?$_GET['folder']:'INBOX',isset($_GET['uid'])?$_GET['uid']:'0',isset($_GET['part'])?$_GET['part']:'1',isset($_GET['name'])?$_GET['name']:'attachment');/* exits internally */exit;
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Admins only.']);exit;}
+        $file=wm2_download([
+            'account'=>isset($_GET['mailbox'])?(string)$_GET['mailbox']:'',
+            'folder'=>isset($_GET['folder'])?(string)$_GET['folder']:'INBOX',
+            'uid'=>isset($_GET['uid'])?(string)$_GET['uid']:'',
+            'what'=>'att',
+            'index'=>isset($_GET['part'])?(string)$_GET['part']:'1',
+        ],(string)($_GET['t']??''));
+        if(isset($file['error'])){http_response_code(403);echo json_encode(['ok'=>false,'error'=>$file['error']]);exit;}
+        $name=str_replace(['"',"\r","\n"],'',$file['name']);
+        @ini_set('zlib.output_compression','0');
+        while(ob_get_level())@ob_end_clean();
+        header('Content-Type: '.$file['type']);
+        header('Content-Disposition: attachment; filename="'.$name.'"; filename*=UTF-8\'\''.rawurlencode($name));
+        header('Content-Length: '.strlen($file['data']));
+        header('X-Content-Type-Options: nosniff');
+        header('Cache-Control: no-store');
+        echo $file['data'];
+        exit;
     }
+
     if($xop==='sqlscan'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         echo json_encode($fm->sqlScan());exit;
@@ -34299,7 +34364,14 @@ async function openMailbox(a){
   renderFolders();
   const first=S.folders.filter(f=>f.id==='INBOX')[0]||S.folders[0];
   if(!first){
-    el('wmMsgs').innerHTML='<div class="wm-empty">'+esc(d.why||(S.can.why||'This mailbox has no folder to open.'))+'</div>';
+    /* A mailbox that cannot be read here is not a dead end: the cPanel
+       sign-on still opens it, and that is the way out this window offers. */
+    const why=d.why||(S.can.why||'This mailbox has no folder to open.');
+    el('wmMsgs').innerHTML='<div class="wm-empty">'+esc(why)
+      +((S.acc&&S.acc.webmail)?'<div style="margin-top:10px"><button type="button" class="btn btn-xs btn-g" id="wmWebmailEmpty">Open this address in cPanel webmail</button></div>':'')
+      +'</div>';
+    const be=el('wmWebmailEmpty');
+    if(be)be.addEventListener('click',openInWebmail);
     return false;
   }
   await selectFolder(first.id);
@@ -34523,13 +34595,15 @@ function renderRead(){
     flash('good','Deleted'+(d.moved?' (moved to '+d.moved+')':'')+'.');
     refreshFolder();
   });
-  on('wmWebmail',async()=>{
-    flash('','Opening cPanel webmail…');
-    const d=await api('signin',{account:S.acc.id});
-    if(!d.ok){flash('bad',d.error||'cPanel refused to open it.');return;}
-    window.open(d.url,'_blank','noopener');
-    flash('good','cPanel webmail opened signed in.');
-  });
+  on('wmWebmail',openInWebmail);
+}
+async function openInWebmail(){
+  if(!S.acc){flash('bad','Pick a mailbox first.');return;}
+  flash('','Opening cPanel webmail…');
+  const d=await api('signin',{account:S.acc.id,email:S.acc.email});
+  if(!d.ok){flash('bad',d.error||'cPanel refused to open it.');return;}
+  window.open(d.url,'_blank','noopener');
+  flash('good','cPanel webmail opened signed in.');
 }
 function reply(all,forward){
   const m=S.msg;
