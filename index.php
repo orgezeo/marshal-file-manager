@@ -24980,19 +24980,21 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 .pie-pane{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 .pie-pane[hidden]{display:none}
-.pie-bar{display:flex;align-items:center;gap:10px;padding:12px 16px;flex:none;flex-wrap:wrap}
-.pie-search{position:relative;flex:1 1 240px;min-width:200px}
+.pie-bar{display:flex;align-items:center;gap:10px;padding:12px 16px;flex:none;flex-wrap:wrap;
+  background:var(--panel);border-bottom:1px solid var(--border)}
+.pie-search{position:relative;flex:1 1 240px;min-width:200px;max-width:420px}
 .pie-search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:14px;height:14px;
   fill:none;stroke:var(--t3);stroke-width:2;stroke-linecap:round;pointer-events:none}
 .pie-search .pie-inp{width:100%;padding-left:31px}
-.pie-browses{display:flex;gap:5px;flex-wrap:wrap}
+.pie-browses{display:flex;gap:5px;flex-wrap:wrap;margin-left:auto}
 .pie-chip{background:var(--raised);border:1px solid var(--border2);color:var(--t2);
-  font:inherit;font-size:11.5px;padding:5px 11px;border-radius:99px;cursor:pointer;transition:.15s;white-space:nowrap}
+  font:inherit;font-size:11.5px;padding:6px 12px;border-radius:99px;cursor:pointer;transition:.15s;white-space:nowrap}
 .pie-chip:hover{color:var(--t1);border-color:var(--fieldb-h)}
 .pie-chip.is-on{background:var(--t1);border-color:var(--t1);color:var(--bg);font-weight:var(--fw-medium)}
 .pie-jed{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--t2);
   text-decoration:none;border:1px dashed var(--border2);border-radius:99px;padding:5px 11px;transition:.15s}
 .pie-jed:hover{color:var(--t1);border-color:var(--fieldb-h)}
+.pie-browses:empty,.pie-jed:empty{margin-left:0}
 .pie-jed svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 
 .pie-note{padding:0 16px 9px;font-size:11.5px;color:var(--t3);flex:none}
@@ -25107,8 +25109,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .pie-bars{display:flex;flex-direction:column;gap:4px;margin-bottom:14px}
 .pie-bar-row{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--t3)}
 .pie-bar-row span:first-child{width:34px;flex:none}
-.pie-bar{flex:1 1 auto;height:6px;border-radius:99px;background:var(--raised);overflow:hidden}
-.pie-bar i{display:block;height:100%;background:var(--amber);border-radius:99px}
+.pie-track{flex:1 1 auto;height:6px;border-radius:99px;background:var(--raised);overflow:hidden}
+.pie-track i{display:block;height:100%;background:var(--amber);border-radius:99px}
 .pie-bar-row em{font-style:normal;width:52px;text-align:right;flex:none}
 
 @media (max-width:760px){
@@ -38911,7 +38913,7 @@ function renderDetailBody(){
     let out='<div class="pie-bars">';
     [5,4,3,2,1].forEach(k=>{
       const v=Number(r[k])||0;
-      out+='<div class="pie-bar-row"><span>'+k+' ★</span><span class="pie-bar"><i style="width:'+(total?(v/total*100):0).toFixed(1)+'%"></i></span><em>'+num(v)+'</em></div>';
+      out+='<div class="pie-bar-row"><span>'+k+' ★</span><span class="pie-track"><i style="width:'+(total?(v/total*100):0).toFixed(1)+'%"></i></span><em>'+num(v)+'</em></div>';
     });
     return out+'</div>';
   })();
