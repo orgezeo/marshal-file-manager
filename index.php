@@ -39413,7 +39413,7 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
   const rawRoot='https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/mfmss';
   const dataUrl=rawRoot+'/alldata/all.json';
   const songsIndexUrl='https://api.github.com/repos/orgezeo/marshal-file-manager/contents/mfmss/songs?ref=main';
-  const state={active:false,loading:false,firstLoadPending:false,activationRequest:0,items:new Map(),signature:'',timer:0,currentVideoTrack:'',lastAudioTime:null,fired:new Set(),videoActive:false,artRequests:new Map(),artObjects:new Map(),artQueue:[],artQueueRunning:false,artObserver:null,artHydration:null,tagLoaded:new Set(),videoBlobs:new Map(),videoRequests:new Map(),videoObjectUrl:'',videoObjectKey:'',videoLoadRequest:0,nextPlan:null};
+  const state={active:false,loading:false,firstLoadPending:false,activationRequest:0,items:new Map(),signature:'',timer:0,currentVideoTrack:'',lastAudioTime:null,fired:new Set(),videoActive:false,artRequests:new Map(),artObjects:new Map(),artQueue:[],artKnownMissing:new Set(),lastCheck:0,artQueueRunning:false,artObserver:null,artHydration:null,tagLoaded:new Set(),videoBlobs:new Map(),videoRequests:new Map(),videoObjectUrl:'',videoObjectKey:'',videoLoadRequest:0,nextPlan:null};
   const playlistCacheKey=FM_AUDIO_CACHE_SCOPE+'|selected-playlist';
   const playlistCacheVersion='selected-playlist-v1';
   const selectedClientStorageKey='mfm-selected-songs-client-'+FM_AUDIO_CACHE_SCOPE;
@@ -40205,6 +40205,7 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
       const tracks=buildTracks(rows,availableFiles,videoFileMap);
       if(!tracks.length)throw new Error('The repository playlist is empty');
       await writeSelectedPlaylistCache(tracks);
+      state.lastCheck=Date.now();
       await requestPlaylistRefreshWindow('complete').catch(()=>null);
       if(!applyPlaylistTracks(tracks,activate,activationRequest,missingCount))return false;
       if(state.active)fmMusicSetCacheStatus('Playlist saved in this browser · next GitHub check in 10 min.');
