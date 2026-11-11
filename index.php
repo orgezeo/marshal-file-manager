@@ -527,9 +527,9 @@ function fm_os_registry(){
 
 /* Always serve the freshest copy of this tool: browsers/proxies must never
    show a stale cached page after the file is updated (manually or via
-   Guardian), so every response — page, AJAX, everything except the
+   Guardian), so every response - page, AJAX, everything except the
    explicit long-lived asset responses further below that set their own
-   Cache-Control — is marked non-cacheable up front. */
+   Cache-Control - is marked non-cacheable up front. */
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
 header('Expires: 0');
@@ -546,7 +546,7 @@ function fm_owner_cell($info){
         return '<td class="col-owner col-owner-td"><span class="own-cell"><span class="own-name">unknown</span></span></td>';
     }
     $mine=!empty($info['mine']);
-    $title='Owner: '.$name.' — click to change';
+    $title='Owner: '.$name.' - click to change';
     $e=function($v){return htmlspecialchars((string)$v,ENT_QUOTES|ENT_HTML5);};
     return '<td class="col-owner col-owner-td">'
         .'<span class="own-cell'.($mine?' own-mine':'').'" data-own="'.$e($name).'" title="'.$e($title).'">'
@@ -557,7 +557,7 @@ function fm_save_theme($f,$t){$t=($t==='light')?'light':'dark';@file_put_content
 $currentTheme = fm_get_theme($themeFile);
 
 /* ═══════════════════════════════════════════════════════════════════════
-   ASSISTANT AGENT — encrypted local conversation + managed chat bridge
+   ASSISTANT AGENT - encrypted local conversation + managed chat bridge
    The browser never receives provider details or credentials. Messages and
    the provider's chat_uid are kept in small encrypted dot-files and are
    decrypted only for this authenticated session / outbound AI request.
@@ -1101,12 +1101,12 @@ function fm_ensure_terminal_font(){
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   FILE GUARDIAN — legitimate self-healing backup for THIS admin tool only
+   FILE GUARDIAN - legitimate self-healing backup for THIS admin tool only
    ─────────────────────────────────────────────────────────────────────
    WHAT THIS IS AND WHY IT EXISTS: admins running this file manager
    sometimes delete it by accident while cleaning up a folder, locking
    themselves out of their own tool. This block lets an AUTHENTICATED
-   ADMIN (never an anonymous visitor — see fm_guardian_bootstrap(), which
+   ADMIN (never an anonymous visitor - see fm_guardian_bootstrap(), which
    only ever runs after the login form above has already succeeded) save
    a backup copy of this exact file's bytes into a database the admin
    already controls, so the tool can put itself back if it ever
@@ -1117,7 +1117,7 @@ function fm_ensure_terminal_font(){
    admin session saved here, or (b) a new version fetched from a URL the
    admin explicitly typed into the "Guardian / Check Updates" panel in
    the UI. Nothing here accepts code from an unauthenticated source.
-   Backup/restore is always active and cannot be turned off — the only
+   Backup/restore is always active and cannot be turned off - the only
    thing an admin can pause is the fully-automatic remote update check
    (see FM_UPDATE_PAUSED below), which is ON by default and resumes the
    moment the pause is lifted. */
@@ -1160,7 +1160,7 @@ unset($__fmGuardEnvDb);
 
 /* Connects to the Guardian's own small database and makes sure its single
    storage table exists. Returns null (never throws/exits) if the DB is
-   unreachable or the feature is disabled — Guardian must never be able to
+   unreachable or the feature is disabled - Guardian must never be able to
    break the rest of the app. */
 function fm_guardian_conn(&$diag=null){
     $env=fm_guardian_env_db();
@@ -1236,7 +1236,7 @@ function fm_guardian_touch_check($c=null){
 /* Pushes the CURRENT on-disk file into the Guardian database. Called once
    at first install, and again any time this admin's own session legitimately
    changes the file (a self-update from the configured URL, or a manual
-   "Sync now" click) — never on every page load, so a compromised or
+   "Sync now" click) - never on every page load, so a compromised or
    accidentally-corrupted on-disk copy can never silently overwrite the
    last known-good backup. */
 function fm_guardian_sync($content=null){
@@ -1278,7 +1278,7 @@ function fm_guardian_sync($content=null){
 /* First-run seed: safe to call on every authenticated page load, but only
    ever WRITES once (checked via "row id=1 exists?"). This is the piece
    the admin asked to have added automatically the first time they open
-   the tool after enabling Guardian — it never runs before login. */
+   the tool after enabling Guardian - it never runs before login. */
 function fm_guardian_bootstrap(){
     if(!isset($_SESSION['auth'])||$_SESSION['auth']!==true)return; // authenticated admins only, never anonymous requests
     $c=fm_guardian_conn();if(!$c)return;
@@ -1303,7 +1303,7 @@ function fm_guardian_bootstrap_seed($c){
 /* Best-effort: installs a MySQL stored procedure + scheduled EVENT that can
    put this file back even if the whole PHP process/webserver is gone,
    using MySQL's own background scheduler. This needs the DB user to hold
-   the EVENT and (global) FILE privileges — most shared hosts do NOT grant
+   the EVENT and (global) FILE privileges - most shared hosts do NOT grant
    FILE to app database users, so this quietly no-ops (returns without
    error) when unavailable. When it doesn't activate, Guardian still fully
    protects via the database backup + one-click "Restore now" in the panel
@@ -1344,11 +1344,11 @@ function fm_guardian_try_autoheal($c){
         @mysqli_query($c,"SET GLOBAL event_scheduler = ON"); // best-effort: re-arm even if the event object already existed from an earlier session
     }
     // A CREATE EVENT can succeed with only the EVENT privilege on this one
-    // database — that says nothing about whether MySQL's own background
+    // database - that says nothing about whether MySQL's own background
     // Event Scheduler THREAD is actually running server-wide, which needs
     // SUPER/SYSTEM_VARIABLES_ADMIN that most shared-hosting app accounts
     // never have. Checking the event's mere existence (as this used to)
-    // reports "Active" even when nothing will ever actually fire — verify
+    // reports "Active" even when nothing will ever actually fire - verify
     // the real scheduler state instead.
     $schedOn=false;
     $sv=@mysqli_query($c,"SHOW VARIABLES LIKE 'event_scheduler'");
@@ -1372,7 +1372,7 @@ function fm_guardian_try_autoheal($c){
     return $schedOn||$watchdogOk;
 }
 
-/* Returns the hidden directory path for the watchdog file — outside the
+/* Returns the hidden directory path for the watchdog file - outside the
    webroot when possible, with a server-unique hash name so it cannot be
    guessed or found by directory browsing. Falls back to a hidden subdir in
    __DIR__ with an obscure name when no parent is writable. */
@@ -1459,7 +1459,7 @@ function fm_guardian_bind_target($c=null){
 /* The "pause auto-update" state lives in FM_UPDATE_PAUSED above, inside this
    file's own source code. When true, the fully automatic remote-update check
    (guardian_autocheck, fired by the browser every time an admin has the File
-   Manager open) skips fetching/applying FM_UPDATE_URL — everything else
+   Manager open) skips fetching/applying FM_UPDATE_URL - everything else
    Guardian does (DB backup, restore-if-missing, the manual "Check for updates
    now" button) keeps working as normal. The Guardian panel rewrites only this
    exact constant line, after a PHP syntax check, so the state cannot be lost
@@ -1474,12 +1474,12 @@ function fm_guardian_update_paused(){
 /* Bumped whenever the generated watchdog code below changes behaviour, so
    fm_guardian_watchdog_installed() can tell an already-installed-but-
    outdated watchdog apart from a current one and trigger a silent,
-   throttled re-install — without this, sites that installed the watchdog
+   throttled re-install - without this, sites that installed the watchdog
    before a logic change would never receive the improvement. */
 define('FM_GUARDIAN_WATCHDOG_VERSION','9');
 
 /* Cheap, local-only check for whether the web-server watchdog layer is
-   currently installed AND up to date — no database access needed. */
+   currently installed AND up to date - no database access needed. */
 function fm_guardian_watchdog_installed(){
     $wp=fg_get_watchdog_path();
     if(!is_file($wp))return false;
@@ -1499,7 +1499,7 @@ function fm_guardian_watchdog_installed(){
 /* Installs the web-server watchdog: a tiny standalone PHP script in this
    same directory that restores this exact file from the Guardian database
    if it's ever missing, triggered by an auto_prepend_file directive in
-   this directory's .htaccess — so the web server itself runs the check
+   this directory's .htaccess - so the web server itself runs the check
    before every PHP request it serves here (e.g. this site's own CMS, if
    it shares this directory), with no MySQL Event Scheduler, no SUPER
    privilege and no cron access required at all.
@@ -1507,7 +1507,7 @@ function fm_guardian_watchdog_installed(){
    directives are wrapped in <IfModule> guards for every common mod_php
    name so an unrecognised/absent module is silently skipped rather than
    erroring, and the change is verified with a real HTTP request right
-   after writing it — if that request doesn't come back cleanly, the
+   after writing it - if that request doesn't come back cleanly, the
    .htaccess edit is rolled back immediately and automatically. This must
    never be able to take a working site down. */
 function fm_guardian_install_watchdog(){
@@ -1538,12 +1538,12 @@ function fm_guardian_install_watchdog(){
     $lines=[];
     $lines[]='<?php';
     $lines[]='/* fm-guardian-watchdog-version:'.FM_GUARDIAN_WATCHDOG_VERSION.' */';
-    $lines[]='/* File Guardian watchdog — auto-generated, safe to delete any time';
+    $lines[]='/* File Guardian watchdog - auto-generated, safe to delete any time';
     $lines[]='   (Guardian will just recreate it next time it is needed). Restores';
     $lines[]='   '.$target.'\'s exact bytes if it is ever missing, emptied, truncated,';
     $lines[]='   or permission-restricted. Triggered by the auto_prepend_file directive';
     $lines[]='   in this directory\'s .htaccess on every PHP request the web server';
-    $lines[]='   serves here — a couple of cheap local filesystem stats, and nothing';
+    $lines[]='   serves here - a couple of cheap local filesystem stats, and nothing';
     $lines[]='   else, on every normal request; the database is only ever touched when';
     $lines[]='   one of those stats actually looks wrong. */';
     $lines[]='$_fgTarget='.$targetLit.';';
@@ -1554,7 +1554,7 @@ function fm_guardian_install_watchdog(){
     $lines[]='$_fgEmpty=!$_fgMissing&&!$_fgBadPerms&&$_fgSize===0;';
     $lines[]='// Compare against the last known-good size (written on every legitimate';
     $lines[]='// sync/update) to also catch a partial/truncated overwrite that leaves';
-    $lines[]='// some bytes behind but not the real file — a single filesize() and a';
+    $lines[]='// some bytes behind but not the real file - a single filesize() and a';
     $lines[]='// tiny local file read, no database hit unless it actually mismatches.';
     $lines[]='$_fgSizeMismatch=false;';
     $lines[]='if(!$_fgMissing&&!$_fgBadPerms&&!$_fgEmpty&&@is_readable('.$metaLit.')){';
@@ -1570,13 +1570,13 @@ function fm_guardian_install_watchdog(){
         $lines[]='    elseif(function_exists("mysqli_connect")){if(function_exists("mysqli_report"))@mysqli_report(MYSQLI_REPORT_OFF);$h=@mysqli_connect('.$sockLit.'?\'localhost\':'.$hostLit.','.$userLit.','.$passLit.',\'\','.$portLit.','.$sockLit.');if($h){@mysqli_select_db($h,'.$dbLit.');$r=@mysqli_query($h,\'SELECT content,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');$row=$r?@mysqli_fetch_assoc($r):null;}}';
     }
     $lines[]='    if($h&&$row){';
-    $lines[]='            // Restore content whenever it is missing, empty, or the wrong size —';
+    $lines[]='            // Restore content whenever it is missing, empty, or the wrong size -';
     $lines[]='            // never for a bad-perms-only case, so a deliberate, already-correct';
     $lines[]='            // file on disk is never clobbered just because it briefly wasn\'t readable.';
     $lines[]='            if(($_fgMissing||$_fgEmpty||$_fgSizeMismatch)&&isset($row[\'content\'])){';
     $lines[]='                @file_put_contents($_fgTarget,$row[\'content\']);';
     $lines[]='            }';
-    $lines[]='            // Always restore permissions — fixes the missing/empty/mismatch cases and the permission-restriction case alike';
+    $lines[]='            // Always restore permissions - fixes the missing/empty/mismatch cases and the permission-restriction case alike';
     $lines[]='            $__mode=isset($row[\'file_mode\'])&&(int)$row[\'file_mode\']>0?(int)$row[\'file_mode\']:0644;';
     $lines[]='            @chmod($_fgTarget,$__mode);';
     $lines[]='        }';
@@ -1702,14 +1702,14 @@ THREAT_MONITOR;
     /* ── LAUNCHER: a permanent stable file that @include-s the real watchdog.
        Placed in the hidden directory (outside the web-visible tree) so it
        is completely invisible to any file manager or FTP client browsing the
-       webroot — the most common cause of accidental deletion.
-       auto_prepend_file points HERE, not at the watchdog directly — if the
+       webroot - the most common cause of accidental deletion.
+       auto_prepend_file points HERE, not at the watchdog directly - if the
        watchdog is ever missing, PHP simply runs a no-op @include and carries
        on, preventing any 500 error. ── */
-    // ── Launcher lives in the hidden dir (outside webroot) — NEVER in __DIR__ ──
+    // ── Launcher lives in the hidden dir (outside webroot) - NEVER in __DIR__ ──
     $launcherPath=fg_get_hidden_dir().DIRECTORY_SEPARATOR.'launch.php';
     $wpLit=var_export($watchdogPath,true); // absolute path to hidden watchdog
-    $launcherCode="<?php /* File Guardian launcher — auto-generated; safe to delete (recreated automatically). */\n"
+    $launcherCode="<?php /* File Guardian launcher - auto-generated; safe to delete (recreated automatically). */\n"
         ."if(@file_exists($wpLit))@include_once $wpLit;\n";
     // Write launcher into the hidden directory (created above by the hiddenDir mkdir block)
     @file_put_contents($launcherPath,$launcherCode);
@@ -1805,7 +1805,7 @@ GUARDIAN_RESTORE;
     $restoreUrl=preg_replace('#/+#','/',$restoreUrl);
     if($restoreUrl==='//.guardian-restore.php')$restoreUrl='/.guardian-restore.php';
     if($origHt!==false&&strpos($origHt,$marker)!==false){
-        // .htaccess block already installed — refresh watchdog and launcher files
+        // .htaccess block already installed - refresh watchdog and launcher files
         if(!is_file($watchdogPath)){
             if(!is_dir($hiddenDir))@mkdir($hiddenDir,0700,true);
             $tmp2=$watchdogPath.'.tmp';
@@ -1815,10 +1815,10 @@ GUARDIAN_RESTORE;
         // If the installed block already references the correct (hidden-dir) launcher path, done
         $userIniCurrent=$origUserIni!==false&&strpos($origUserIni,'; BEGIN fm-guardian-watchdog')!==false&&strpos($origUserIni,$launcherPath)!==false;
         if(strpos($origHt,$lp)!==false&&strpos($origHt,$restoreUrl)!==false&&is_file($restoreRunnerPath)&&$userIniCurrent)return true;
-        // Launcher path has changed (old install used __DIR__) — strip old block so we re-append
+        // Launcher path has changed (old install used __DIR__) - strip old block so we re-append
         // the corrected one below, then run the self-test as normal to verify nothing breaks.
         $stripped=preg_replace('/'.preg_quote("\n".$marker,'/').'.*?'.preg_quote($markerEnd."\n",'/').'/s','',$origHt);
-        if($stripped===null)$stripped=$origHt; // preg failed — fall back to appending below
+        if($stripped===null)$stripped=$origHt; // preg failed - fall back to appending below
         $origHt=$stripped; // feed into the re-write path that follows
     }
 
@@ -1843,7 +1843,7 @@ GUARDIAN_RESTORE;
     if(@file_put_contents($userIniPath,$newUserIni)!==false)$userIniWritten=true;
 
     if(!fm_guardian_selftest_htaccess()){
-        // Roll back immediately and completely — a broken .htaccess must
+        // Roll back immediately and completely - a broken .htaccess must
         // never be left in place, even for one request.
         if($origHt===false)@unlink($htaccessPath); else @file_put_contents($htaccessPath,$origHt);
         if($userIniWritten){
@@ -1911,7 +1911,7 @@ function fm_guardian_commit_source($path,$newSrc,$oldSrc){
 }
 
 /* Rewrites a single define('NAME', ...) line INSIDE THIS FILE'S OWN SOURCE
-   CODE (never in a side json file — the admin explicitly asked for the
+   CODE (never in a side json file - the admin explicitly asked for the
    Update URL and the on/off switch to live in the file itself). Always
    lints the candidate file with `php -l` before committing, and only ever
    replaces the exact constant line, so a bad value can never corrupt the
@@ -1951,7 +1951,7 @@ function fm_php_lint($file){
     if(strncmp($code, "\xEF\xBB\xBF", 3) === 0)$code = substr($code, 3);
     if(!preg_match('/^\s*<\?php/', $code)){
         return['ran' => true, 'ok' => false, 'why' => 'not php',
-               'out' => 'the file does not start with <?php, so it is not a PHP file at all — an HTML page from a hosting/ repository page looks exactly like this'];
+               'out' => 'the file does not start with <?php, so it is not a PHP file at all - an HTML page from a hosting/ repository page looks exactly like this'];
     }
     if(function_exists('token_get_all')){
         $limit = @ini_get('memory_limit');
@@ -2047,7 +2047,7 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
             CURLOPT_CONNECTTIMEOUT=>8,CURLOPT_TIMEOUT=>20,CURLOPT_SSL_VERIFYPEER=>true,
             // Force IPv4: on some hosts a broken/unreachable IPv6 route to the target is the
             // actual cause of a "hung" TLS handshake that eventually surfaces as an SSL/connect
-            // timeout — trying IPv6 first burns most of the timeout budget before falling back.
+            // timeout - trying IPv6 first burns most of the timeout budget before falling back.
             CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
             CURLOPT_FILETIME=>true,
             CURLOPT_HEADER=>true,
@@ -2096,7 +2096,7 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
     $lintDownload=fm_php_lint($tmp);
     if($lintDownload['ran']&&!$lintDownload['ok']){
         @unlink($tmp);
-        return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check — not applied. '
+        return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check - not applied. '
             . ($lintDownload['out']!=='' ? '(' . $lintDownload['out'] . ')' : '')
             . ($lintDownload['why']!=='' ? ' [checked by: ' . $lintDownload['why'] . ']' : '')];
     }
@@ -2110,7 +2110,7 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
 }
 
 /* Turns a raw mysqli connect/select-db error into a plain-English explanation
-   of WHICH of the two real causes it is — the Guardian DB user/database not
+   of WHICH of the two real causes it is - the Guardian DB user/database not
    existing yet (fixable with fm_guardian_autoprovision() below) vs the DB
    server itself being unreachable (a host/port/network problem no amount of
    SQL can fix). This is what lets the panel tell an admin what to actually
@@ -2119,9 +2119,9 @@ function fm_guardian_diag_text($diag){
     if(!$diag)return 'Unknown connection error.';
     $errno=(int)($diag['errno']??0);$err=(string)($diag['error']??'');
     if($errno===2002||$errno===2003||$errno===2006)
-        return "Can't reach the database server at ".FM_GUARD_DB_HOST.':'.FM_GUARD_DB_PORT." — check the host/port, or that MySQL is running there. This is a network problem, not a missing database.";
+        return "Can't reach the database server at ".FM_GUARD_DB_HOST.':'.FM_GUARD_DB_PORT." - check the host/port, or that MySQL is running there. This is a network problem, not a missing database.";
     if($errno===1045||$errno===1698)
-        return "Login rejected for user \"".FM_GUARD_DB_USER."\" — that user doesn't exist yet or the password doesn't match. Use \"Auto-create database & user\" below to fix it in one click.";
+        return "Login rejected for user \"".FM_GUARD_DB_USER."\" - that user doesn't exist yet or the password doesn't match. Use \"Auto-create database & user\" below to fix it in one click.";
     if($errno===1044||$errno===1049)
         return "The \"".FM_GUARD_DB_NAME."\" database doesn't exist yet, or this user has no access to it. Use \"Auto-create database & user\" below to fix it in one click.";
     return 'Connection error (#'.$errno.'): '.($err!==''?$err:'unknown').'.';
@@ -2129,13 +2129,13 @@ function fm_guardian_diag_text($diag){
 
 /* One-time, admin-triggered bootstrap: connects with credentials an admin who
    already has a working MySQL login on this server types into the panel
-   (NEVER stored anywhere — used only for this single request), then creates
+   (NEVER stored anywhere - used only for this single request), then creates
    the Guardian database + its own low-privilege user + grants, exactly
    mirroring what start.sh does for the sandbox. This is what lets Guardian
    fix "database doesn't exist" and "no privileges" itself instead of asking
    the admin to run SQL by hand. FILE/EVENT (needed only for the fully
    automatic disk-level restore) are requested best-effort and silently
-   skipped if the admin account can't grant them — Guardian still works via
+   skipped if the admin account can't grant them - Guardian still works via
    the database backup either way. */
 function fm_guardian_autoprovision($adminUser,$adminPass,$adminHost=null,$adminPort=null){
     if(!extension_loaded('mysqli'))return ['ok'=>false,'error'=>'The mysqli PHP extension is not available.'];
@@ -2164,8 +2164,8 @@ function fm_guardian_autoprovision($adminUser,$adminPass,$adminHost=null,$adminP
    asking the admin to type in a separate admin DB login, this reuses the
    SQL Manager's own filesystem scan to find a database THIS SITE already
    uses (wp-config.php, Joomla's configuration.php, a generic config.php,
-   etc.) and — since the CMS's own DB user by definition already has full
-   read/write access to its own database — just adds one extra table
+   etc.) and - since the CMS's own DB user by definition already has full
+   read/write access to its own database - just adds one extra table
    (fm_guardian_store) to that SAME existing database instead of creating a
    brand new one. No new database, no extra privileges, no credentials to
    type: the site's existing working DB login becomes Guardian's storage
@@ -2193,7 +2193,7 @@ function fm_guardian_autodiscover($fm){
         $sock=($host!==''&&$host[0]==='/')?$host:null;
         $link=$sock?@mysqli_connect('localhost',$cred['user'],$cred['pass'],$cred['db'],3306,$sock)
                     :@mysqli_connect($host,$cred['user'],$cred['pass'],$cred['db'],$port);
-        if(!$link)continue; // this candidate's credentials don't actually work — try the next one
+        if(!$link)continue; // this candidate's credentials don't actually work - try the next one
         $created=@mysqli_query($link,"CREATE TABLE IF NOT EXISTS fm_guardian_store(
             id TINYINT UNSIGNED PRIMARY KEY,
             filename VARCHAR(255) NOT NULL,
@@ -2206,7 +2206,7 @@ function fm_guardian_autodiscover($fm){
             updated_at INT NOT NULL,
             last_check INT NOT NULL DEFAULT 0
         ) ENGINE=InnoDB");
-        if(!$created){mysqli_close($link);continue;} // connected but this CMS user can't create tables here — try the next candidate
+        if(!$created){mysqli_close($link);continue;} // connected but this CMS user can't create tables here - try the next candidate
         mysqli_close($link);
         // Adopt these working credentials as Guardian's own storage from now on.
         $ok1=fm_guardian_rewrite_constant('FM_GUARD_DB_HOST',$sock?'localhost':$host);
@@ -2230,7 +2230,7 @@ function fm_guardian_autodiscover($fm){
 
 /* Last-resort candidates for creating a BRAND NEW database when no existing
    site/CMS database could be found or reused at all. These are NOT password
-   guesses against a real account — every candidate here represents a
+   guesses against a real account - every candidate here represents a
    genuine "no authentication configured yet" trust boundary that a real
    admin could also reach without knowing any secret: the local UNIX socket
    authenticating as the OS user that owns this very PHP process (the
@@ -2239,7 +2239,7 @@ function fm_guardian_autodiscover($fm){
    left in place on freshly installed dev/XAMPP/WAMP/sandbox MySQL servers.
    If a server has actually been secured (root has a real password, no
    socket trust), every one of these will simply fail to connect and
-   fm_guardian_autocreate_zero_cred() returns null — there is no attempt to
+   fm_guardian_autocreate_zero_cred() returns null - there is no attempt to
    brute-force or guess anything beyond this fixed, well-known list. */
 function fm_guardian_zero_cred_candidates(){
     $sockets=['/var/run/mysqld/mysqld.sock','/run/mysqld/mysqld.sock','/var/lib/mysql/mysql.sock',
@@ -2262,7 +2262,7 @@ function fm_guardian_zero_cred_candidates(){
    just an anonymous/guest login) is used to provision Guardian's own
    database/user/grants, exactly like fm_guardian_autoprovision() does with
    admin-typed credentials. Returns the connection info to adopt, or null if
-   every candidate fails — in which case the manual admin-credential box
+   every candidate fails - in which case the manual admin-credential box
    remains the only option, which is expected and correct on a properly
    secured server. */
 function fm_guardian_autocreate_zero_cred(){
@@ -2281,7 +2281,7 @@ function fm_guardian_autocreate_zero_cred(){
         $steps['grant_autoheal']=(bool)@mysqli_query($a,"GRANT FILE, EVENT ON *.* TO '$userQ'@'%'"); // best-effort
         @mysqli_query($a,"FLUSH PRIVILEGES");
         mysqli_close($a);
-        if(!$steps['create_user']||!$steps['grant_db'])continue; // could connect+create the DB but not finish provisioning under this identity — try the next candidate
+        if(!$steps['create_user']||!$steps['grant_db'])continue; // could connect+create the DB but not finish provisioning under this identity - try the next candidate
         return ['sock'=>$cand['sock'],'host'=>$cand['sock']?'localhost':$cand['host'],'via'=>$cand['user'],'steps'=>$steps];
     }
     return null;
@@ -2296,7 +2296,7 @@ function fm_guardian_autocreate_zero_cred(){
    the admin actually need to type in credentials by hand. */
 function fm_guardian_autoprovision_zero_cred(){
     $found=fm_guardian_autocreate_zero_cred();
-    if(!$found)return ['ok'=>false,'error'=>'No existing site database could be found or reused, and this server has no local-trust MySQL login (e.g. root with a blank password) available to create a new one automatically. Use the manual admin-credential option below — this is a hard limit on a properly secured server.'];
+    if(!$found)return ['ok'=>false,'error'=>'No existing site database could be found or reused, and this server has no local-trust MySQL login (e.g. root with a blank password) available to create a new one automatically. Use the manual admin-credential option below - this is a hard limit on a properly secured server.'];
     $ok1=fm_guardian_rewrite_constant('FM_GUARD_DB_HOST',$found['host']);
     $ok2=fm_guardian_rewrite_constant('FM_GUARD_DB_PORT','3306');
     $ok3=fm_guardian_rewrite_constant('FM_GUARD_DB_NAME',FM_GUARD_DB_NAME);
@@ -2310,14 +2310,14 @@ function fm_guardian_autoprovision_zero_cred(){
     return ['ok'=>(bool)$c,'db_connected'=>(bool)$c,'autoheal_active'=>$autoheal,
         'adopted'=>['type'=>'new_database','db'=>FM_GUARD_DB_NAME,'host'=>$found['host'],'via'=>$found['via']]];
 }
-/* Fully automatic — no admin click required. The very first time an
+/* Fully automatic - no admin click required. The very first time an
    authenticated admin loads the main page after this file is installed,
    silently try the exact same "from easy to very hard" chain the manual
    Guardian-panel buttons trigger (reuse this site's own CMS DB, else a
    genuine zero-credential local database creation), so Guardian is armed
    with zero typing and zero navigation. A tiny marker file next to this
-   script makes sure this only actually does work once it has succeeded —
-   or, while it hasn't succeeded yet, at most once every 5 minutes — so
+   script makes sure this only actually does work once it has succeeded -
+   or, while it hasn't succeeded yet, at most once every 5 minutes - so
    normal page loads stay fast and this never hammers the database server. */
 function fm_guardian_first_run_bootstrap($fm){
     if(!extension_loaded('mysqli'))return;
@@ -2334,12 +2334,12 @@ function fm_guardian_first_run_bootstrap($fm){
                 if(!empty($checkStatus['installed'])&&(!empty($checkStatus['autoheal_active'])||fm_guardian_watchdog_installed()))return;
             }else return;
         }
-        if($last!==''&&($now-(int)$last)<300)return; // hasn't succeeded yet — retry at most every 5 minutes, not on every request
+        if($last!==''&&($now-(int)$last)<300)return; // hasn't succeeded yet - retry at most every 5 minutes, not on every request
     }
     @file_put_contents($marker,(string)$now);
     $diag=null;$c=fm_guardian_conn($diag);
     if($c){
-        // Already connected (e.g. after a manual fix) — just make sure a backup
+        // Already connected (e.g. after a manual fix) - just make sure a backup
         // is actually stored and the disk-level auto-heal is armed, then stop.
         $st=fm_guardian_status();
         if(empty($st['installed']))fm_guardian_sync();
@@ -2385,7 +2385,7 @@ function fm_guardian_status(){
         if($sv&&($row2=mysqli_fetch_assoc($sv)))$schedOn=(strtoupper($row2['Value'])==='ON');
         $s['autoheal_event']=$eventExists&&$schedOn;
         if($eventExists&&!$schedOn&&!$s['autoheal_watchdog'])
-            $s['autoheal_note']="A restore event exists but this server's MySQL Event Scheduler is switched off and this database account can't turn it on — the web-server watchdog fallback will arm automatically instead.";
+            $s['autoheal_note']="A restore event exists but this server's MySQL Event Scheduler is switched off and this database account can't turn it on - the web-server watchdog fallback will arm automatically instead.";
     }else{
         $s['diagnosis']=fm_guardian_diag_text($diag);
     }
@@ -2393,7 +2393,7 @@ function fm_guardian_status(){
     if($s['autoheal_watchdog']&&!$s['autoheal_event'])
         $s['autoheal_note']='Protected by the web-server watchdog (works without MySQL\'s Event Scheduler or cron access).';
     if(!$s['autoheal_active']&&$c)
-        $s['autoheal_note']='Neither the MySQL Event Scheduler nor the web-server watchdog could be armed on this server yet — the database backup itself is still fully active, so "Restore now" always works, but automatic disk-level restore is not armed yet.';
+        $s['autoheal_note']='Neither the MySQL Event Scheduler nor the web-server watchdog could be armed on this server yet - the database backup itself is still fully active, so "Restore now" always works, but automatic disk-level restore is not armed yet.';
     return $s;
 }
 
@@ -2466,14 +2466,14 @@ function fm_save_users($f,$u){
 
 /* <<MFMA-BEGIN>> */
 /* ═══════════════════════════════════════════════════════════════════════
-   MFM ADMIN — every account of this file manager, what each one may do,
+   MFM ADMIN - every account of this file manager, what each one may do,
    and which of their sessions are still alive.
    ───────────────────────────────────────────────────────────────────────
    Only the primary administrator account can open it: the first entry in
    .users.json that carries admin = true, which is the account this manager
    was installed with. Accounts created here are ordinary accounts; they
    never see this tool, and what they may do is decided here, saved in
-   .users.json, and read live on every request — so a change reaches the
+   .users.json, and read live on every request - so a change reaches the
    sessions that are already open, without a sign-out.
    ═══════════════════════════════════════════════════════════════════════ */
 function fm_mfm_perms_catalog(){
@@ -3079,11 +3079,11 @@ function fm_mfm_admin_endpoint($post){
 
 /* <<MFMA-END>> */
 
-/* <<CPM-BEGIN>> cPanel Manager — every account of a cPanel server, opened as any of them
+/* <<CPM-BEGIN>> cPanel Manager - every account of a cPanel server, opened as any of them
    ═══════════════════════════════════════════════════════════════════════════
    Two things this tool must do, and the old one did neither:
 
-     1. recognise a cPanel server — the one this runs on, or the one this site
+     1. recognise a cPanel server - the one this runs on, or the one this site
         is hosted on, reached over the network;
      2. open any account of it signed in, with no password and no username
         typed, the way CMS Manager opens a site.
@@ -3121,7 +3121,7 @@ function fm_cpm_store_load(){
 }
 function fm_cpm_store_save($d){
     $f=fm_cpm_store_path();
-    $body="<?php /* cPanel Manager — the sign-in of this tool. Nothing is printed here. */ exit; ?>\n"
+    $body="<?php /* cPanel Manager - the sign-in of this tool. Nothing is printed here. */ exit; ?>\n"
           .fm_cpm_store_mark().json_encode($d,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);
     $ok=@file_put_contents($f,$body,LOCK_EX)!==false;
     if($ok)@chmod($f,0600);
@@ -3635,7 +3635,7 @@ function fm_cpm_endpoint($post){
         fm_cpm_store_save($d);
         $route=fm_cpm_route(true);
         if(empty($route['ok'])){
-            return ['ok'=>false,'error'=>'That sign-in was kept, but nothing answers through it: '.implode(' — ',$route['tried']??[]),'store'=>fm_cpm_store_public()];
+            return ['ok'=>false,'error'=>'That sign-in was kept, but nothing answers through it: '.implode(' - ',$route['tried']??[]),'store'=>fm_cpm_store_public()];
         }
         $a=fm_cpm_accounts();
         return ['ok'=>true,'who'=>$route['who'],'accounts'=>count($a['accounts']??[]),'store'=>fm_cpm_store_public(),
@@ -3651,14 +3651,14 @@ function fm_cpm_endpoint($post){
 }
 /* <<CPM-END>> */
 
-/* <<WM2-BEGIN>> Webmail Manager — every mailbox on this host, opened without a sign-in
+/* <<WM2-BEGIN>> Webmail Manager - every mailbox on this host, opened without a sign-in
    ═══════════════════════════════════════════════════════════════════════════
    The old manager asked a mail server for its users and gave up when the
    host had none to ask. This one starts from the opposite end: the mail
    itself. Whatever is on the disk or named in a site's own settings is
    found and opened, whatever kind of mailbox it is.
    ═══════════════════════════════════════════════════════════════════════ */
-/* <<MAIL-BEGIN>> Mail engine — reading real mail off a real host, with nothing but PHP
+/* <<MAIL-BEGIN>> Mail engine - reading real mail off a real host, with nothing but PHP
    ═══════════════════════════════════════════════════════════════════════════
    Nothing here asks a human for a password. Everything it reads is already on
    the machine or in a configuration the site already carries:
@@ -3676,7 +3676,7 @@ function fm_cpm_endpoint($post){
 function wm2_hdr_decode($s){
     $s=(string)$s;
     if($s==='')return '';
-    /* RFC 2047: =?charset?B|Q?text?= — folded headers may split the word */
+    /* RFC 2047: =?charset?B|Q?text?= - folded headers may split the word */
     $s=preg_replace("/\\?=\\s+=\\?/",'?==?',$s);
     return (string)preg_replace_callback('/=\?([^?\\s]+)\?([BbQq])\?([^?]*)\?=/',function($m){
         $charset=strtolower($m[1]);$enc=strtoupper($m[2]);$txt=$m[3];
@@ -3875,7 +3875,7 @@ function wm2_maildir_files($path){
 function wm2_maildir_flags($file){
     $name=basename($file);
     /* The info field of a Maildir name is ":1," or ":2," plus the flags, and
-       it is the last thing in the name — so the split is anchored to the end
+       it is the last thing in the name - so the split is anchored to the end
        instead of trusting a ":2," that may appear inside a unique id. */
     $flags='';
     if(preg_match('/:[12],([A-Za-z]*)$/',$name,$m))$flags=$m[1];
@@ -3895,7 +3895,7 @@ function wm2_maildir_set_flags($file,$flags){
     $c=strrpos($name,':2,');
     if($c!==false)$base=substr($name,0,$c);
     /* Maildir asks for the flags in alphabetical order, and an empty set is a
-       name with no comma at all — ":2," on its own is not a valid name. */
+       name with no comma at all - ":2," on its own is not a valid name. */
     $set=array_values(array_unique(array_filter(str_split(strtoupper((string)$flags)),function($f){
         return strpos('PRSTDF',$f)!==false;
     })));
@@ -4016,7 +4016,7 @@ function wm2_imap_open($host,$port,$user,$pass,$tls='auto',$timeout=8){
     if(!$sock)return ['ok'=>false,'error'=>'Could not reach the mail server at '.$host.':'.$port.' ('.$errstr.')'];
     stream_set_timeout($sock,15);
     /* one reply: everything up to the tagged line, with any literal it
-       carries read byte for byte — a header block arrives as {1234} followed
+       carries read byte for byte - a header block arrives as {1234} followed
        by that many bytes, and a line-based reader would corrupt it */
     $read=function()use($sock){
         $out='';
@@ -4360,7 +4360,7 @@ function wm2_smtp_send($cfg,$from,$to,$cc,$bcc,$data){
     if(strpos($r,'250')!==0)return ['ok'=>false,'error'=>'Delivery was refused: '.trim($r)];
     return ['ok'=>true,'via'=>'SMTP '.$host.':'.$port];
 }
-/* the machine's own mailer — what most hosts already have and need no login */
+/* the machine's own mailer - what most hosts already have and need no login */
 function wm2_sendmail_send($from,$to,$data,$extra=''){
     foreach(['/usr/sbin/sendmail','/usr/lib/sendmail','/usr/bin/sendmail'] as $bin){
         if(!@is_executable($bin))continue;
@@ -4547,7 +4547,7 @@ function wm2_from_wordpress(){
             $out[]=wm2_account([
                 'email'=>$em,'name'=>(string)($u['display_name']?:$u['user_login']),
                 'kind'=>$wpCred&&strcasecmp($user,$em)===0?'imap':'site',
-                'where'=>$dir,'origin'=>$label.' — a user of the site',
+                'where'=>$dir,'origin'=>$label.' - a user of the site',
                 'site'=>$site,
                 'cred'=>$wpCred&&strcasecmp($user,$em)===0?$wpCred:null,
             ]);
@@ -4555,13 +4555,13 @@ function wm2_from_wordpress(){
         if($adminEmail!==''&&!isset($seen[$adminEmail])){
             $seen[$adminEmail]=1;
             $out[]=wm2_account(['email'=>$adminEmail,'name'=>'Site administrator','kind'=>'site',
-                'where'=>$dir,'origin'=>$label.' — the administrator address','site'=>$site,
+                'where'=>$dir,'origin'=>$label.' - the administrator address','site'=>$site,
                 'cred'=>$wpCred&&strcasecmp($user,$adminEmail)===0?$wpCred:null]);
         }
         if($wpCred&&$user!==''&&!isset($seen[strtolower($user)])){
             $seen[strtolower($user)]=1;
             $out[]=wm2_account(['email'=>$user,'name'=>'Mail account of '.$label,'kind'=>'imap',
-                'where'=>$dir,'origin'=>$label.' — the mail server its settings name',
+                'where'=>$dir,'origin'=>$label.' - the mail server its settings name',
                 'site'=>$site,'cred'=>$wpCred]);
         }
     }
@@ -4599,17 +4599,17 @@ function wm2_from_joomla(){
             $useSmtp=$smtpHost!==''&&strcasecmp($smtpUser,$em)===0;
             $out[]=wm2_account(['email'=>$em,'name'=>(string)($u['name']??''),
                 'kind'=>$useSmtp?'imap':'site','where'=>$dir,
-                'origin'=>$label.' — a user of the site','site'=>$site,
+                'origin'=>$label.' - a user of the site','site'=>$site,
                 'cred'=>$useSmtp?wm2_mail_cred($smtpHost,$smtpPort,$smtpSecure,$smtpUser,$smtpPass):null]);
         }
         if($from!==''&&!isset($seen[$from])){
             $out[]=wm2_account(['email'=>$from,'name'=>$fromname?:'Site mail','kind'=>'site','where'=>$dir,
-                'origin'=>$label.' — the address the site sends from','site'=>$site,
+                'origin'=>$label.' - the address the site sends from','site'=>$site,
                 'cred'=>($smtpHost!==''&&$smtpUser!=='')?wm2_mail_cred($smtpHost,$smtpPort,$smtpSecure,$smtpUser,$smtpPass):null]);
         }
         if($smtpHost!==''&&$smtpUser!==''){
             $out[]=wm2_account(['email'=>$smtpUser,'name'=>'Mail account of '.$label,'kind'=>'imap','where'=>$dir,
-                'origin'=>$label.' — the mail server its configuration names','site'=>$site,
+                'origin'=>$label.' - the mail server its configuration names','site'=>$site,
                 'cred'=>wm2_mail_cred($smtpHost,$smtpPort,$smtpSecure,$smtpUser,$smtpPass)]);
         }
     }
@@ -4675,7 +4675,7 @@ function wm2_from_maildirs(){
         $add(basename(dirname($dir)).'@'.(string)(@gethostname()?:'localhost'),$dir,'the mail folder in the home of '.basename(dirname($dir)));
     }
     /* mdbox / sdbox browsers: the folder exists but the messages are not one
-       file each — listed so the window can say so instead of pretending */
+       file each - listed so the window can say so instead of pretending */
     foreach(['/var/mail/%u','/var/lib/mail'] as $known){/* placeholder, nothing to read */ }
     return $out;
 }
@@ -4791,7 +4791,7 @@ function wm2_discover(){
         $accounts[]=$a;
     }
     /* the order the window shows: mail on this server first, then what the
-       sites name, then the addresses that are only addresses — and inside
+       sites name, then the addresses that are only addresses - and inside
        each group, by address */
     $rank=function($a){
         $g=(string)($a['group']??'');
@@ -4957,7 +4957,7 @@ function wm2_message($acc,$folder,$uid){
         }
         if($m===null)$m=wm2_maildir_message($acc['where'],$uid);
         /* A message already carrying the Seen flag is never renamed, so it
-           comes back with no name of its own — and the window needs that
+           comes back with no name of its own - and the window needs that
            name to flag, delete or download it afterwards. */
         if($m&&!isset($m['uid']))$m['uid']=(string)$uid;
         return $m;
@@ -5271,7 +5271,7 @@ function wm2_endpoint($post){
             if($why==='')$why=(string)($cap['why']?:'');
             if($why===''){
                 $why=($acc['kind']==='maildir'||$acc['kind']==='mbox')
-                    ?'That mailbox is empty — it has no folder with messages in it yet.'
+                    ?'That mailbox is empty - it has no folder with messages in it yet.'
                     :'That mailbox has no folder to open.';
             }
             $res['why']=$why;
@@ -5428,7 +5428,7 @@ function fm_pma_signature($dir){
 
 /* Where this installation keeps its configuration. phpMyAdmin says so itself
    in libraries/vendor_config.php, and the packages on Debian and Ubuntu move
-   that file to /etc/phpmyadmin — which is why the configuration of a perfectly
+   that file to /etc/phpmyadmin - which is why the configuration of a perfectly
    healthy installation looks missing when only its own folder is searched. */
 function fm_pma_config_paths($dir){
     $dir=rtrim($dir,'/');
@@ -5666,8 +5666,8 @@ function fm_pma_urls($dir){
     $dir=rtrim($dir,'/');
     $base=basename($dir);
     $cands=[];
-    /* an installation outside the web root — the Debian package, a control
-       panel — is published under its own name on this very host; that guess
+    /* an installation outside the web root - the Debian package, a control
+       panel - is published under its own name on this very host; that guess
        comes first because it is the one that is right most often */
     $schemeEarly=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http';
     $hostEarly=$_SERVER['HTTP_HOST']??'127.0.0.1';
@@ -5729,7 +5729,7 @@ function fm_pma_probe_many($urls){
 /* The address that really serves this exact folder, proven rather than
    guessed: a one-off marker file is written into the folder and asked for
    through each candidate address. Only the address that hands back that exact
-   marker is the folder's address — a web server that answers every path with
+   marker is the folder's address - a web server that answers every path with
    some page (the file manager itself does this) can never pass. The marker is
    deleted at once, whatever the answer. */
 function fm_pma_suggest_url($dir){
@@ -5759,7 +5759,7 @@ function fm_pma_pick_url($dir,$limit=26,$version=''){
         }
         @unlink($path);
     } else {
-        /* The folder cannot hold a marker — the usual case for a packaged
+        /* The folder cannot hold a marker - the usual case for a packaged
            installation. Its own login page names its version, so an address is
            accepted only when that page names THIS installation's version: a
            different phpMyAdmin under the same name is not mistaken for it. */
@@ -5795,12 +5795,12 @@ function fm_pma_pick_url($dir,$limit=26,$version=''){
             'how'=>$sig
                 ?($version!==''?'proved by the login page at that address: it names this installation\'s own version ('.$version.'), so it is this one'
                                 :'proved by the login page itself: phpMyAdmin\'s own form answers at that address, and nothing else claims it')
-                :'the login page answers there but does not name this version — check the address'];
+                :'the login page answers there but does not name this version - check the address'];
     }
     return ['url'=>$hit,'tried'=>$tried,'ok'=>$hit!=='','proved'=>$writable,
             'suggest'=>fm_pma_suggest_url($dir),
             'how'=>$hit===''
-                ?'nothing answered yet — the address below is this host plus the folder name, and it can be changed'
+                ?'nothing answered yet - the address below is this host plus the folder name, and it can be changed'
                 :'proved with a marker file in that folder'];
 }
 
@@ -5901,7 +5901,7 @@ function fm_pma_db_try($host,$port,$user,$pass){
    the password, both encrypted with the installation's own secret, plus a
    session that holds the key they were encrypted with. When phpMyAdmin and this
    manager are served from the same host (the usual case: /phpmyadmin on the
-   same domain), those cookies can be set from here — nothing is written into
+   same domain), those cookies can be set from here - nothing is written into
    the installation, nothing is typed, and the browser is simply signed in. */
 function fm_pma_cookie_scheme($dir,$version=''){
     $dir=rtrim($dir,'/');
@@ -8487,7 +8487,7 @@ class FileManager {
 
     /** Injects a security layer into an uploaded file manager so it cannot
      *  see this file manager's own files or its Guardian support files.
-     *  Uses output-buffering + scandir/glob wrappers — safe for all common
+     *  Uses output-buffering + scandir/glob wrappers - safe for all common
      *  single-file PHP managers. Returns true on success. */
     private function neuterFileMgr($filePath,$origName){
         $content=@file_get_contents($filePath);
@@ -8685,7 +8685,7 @@ class FileManager {
             // ── Block encrypted / obfuscated PHP files ──
             if($isPhp&&$this->isEncryptedPhp($tmpPath)){
                 @unlink($tmpPath);
-                $this->addMsg("Blocked: \"$name\" — encrypted/obfuscated PHP files are not allowed.",'danger');
+                $this->addMsg("Blocked: \"$name\" - encrypted/obfuscated PHP files are not allowed.",'danger');
                 $this->log('upload_blocked_encrypted',$name);
                 return false;
             }
@@ -8712,7 +8712,7 @@ class FileManager {
                     @unlink($tmpPath);
                     $viaSite=true;
                 }else{
-                    $this->addMsg("Upload failed: $name — ".$why,'danger');
+                    $this->addMsg("Upload failed: $name - ".$why,'danger');
                     return false;
                 }
             }
@@ -8720,10 +8720,10 @@ class FileManager {
             if($isPhp&&$this->isWebShellOrFileMgr($dest)){
                 $this->neuterFileMgr($dest,basename($name));
                 $this->threatsWhitelistFile($dest);
-                $this->addMsg("Uploaded &amp; secured and whitelisted: $name".($viaSite?' — through the site ('.$this->privWho($dest).')':''),'warning');
+                $this->addMsg("Uploaded &amp; secured and whitelisted: $name".($viaSite?' - through the site ('.$this->privWho($dest).')':''),'warning');
             } else {
                 $this->threatsWhitelistFile($dest);
-                $this->addMsg("Uploaded and whitelisted: $name".($viaSite?' — through the site ('.$this->privWho($dest).')':''),'success');
+                $this->addMsg("Uploaded and whitelisted: $name".($viaSite?' - through the site ('.$this->privWho($dest).')':''),'success');
             }
             $this->log('upload',$name);
             return true;
@@ -8782,7 +8782,7 @@ class FileManager {
        server: a short-lived bridge script is dropped into the CMS folder and
        called over HTTP, so the operation runs under the account that owns the
        site's files (www-data on a normal host). This is only ever a *fallback*
-       — the normal local call is always attempted first, and this runs only
+       - the normal local call is always attempted first, and this runs only
        when it failed. Guards on the bridge: random token header, 15-minute
        lifetime, self-delete when expired, and every path must stay inside the
        site root. */
@@ -8795,10 +8795,10 @@ class FileManager {
 
     /* ── Privilege mode ───────────────────────────────────────────────────────
        Which identity performs file changes:
-         server    — this server account only (how the manager always behaved)
-         auto      — this account first, the site only when the OS refuses (default)
-         wordpress — the WordPress installation performs them
-         joomla    — the Joomla installation performs them
+         server    - this server account only (how the manager always behaved)
+         auto      - this account first, the site only when the OS refuses (default)
+         wordpress - the WordPress installation performs them
+         joomla    - the Joomla installation performs them
        The choice is stored in a small JSON file next to the manager so it
        survives sessions and restarts. */
     const PRIV_MODES=['server','auto','wordpress','joomla'];
@@ -8858,7 +8858,7 @@ class FileManager {
     /* Message suffix that tells the operator which identity acted. */
     private function viaNote($res,$path){
         if(($res['via']??'')!=='site')return'';
-        return' — through the site ('.$this->privWho($path).')';
+        return' - through the site ('.$this->privWho($path).')';
     }
     /* Reads a file the manager cannot read, through the site (editor fallback). */
     private function privReadFile($path,$maxBytes=16777216){
@@ -8978,7 +8978,7 @@ class FileManager {
     /* Ownership changes are never allowed on the machine's own files. The
        manager may browse anywhere, but handing /etc to another account would
        break the server, so those locations are refused before any route is
-       tried — locally, through the site, or with sudo. */
+       tried - locally, through the site, or with sudo. */
     private function ownBlocked($path){
         $rp=@realpath($path);
         if($rp===false||$rp==='/')return 'That location cannot be handed to another account.';
@@ -9056,7 +9056,7 @@ class FileManager {
             'error'=>$failed?($error?:'Some items could not be changed.'):null,
         ];
     }
-    /* ?x=owners — list the accounts, report one item's owner, or change it. */
+    /* ?x=owners - list the accounts, report one item's owner, or change it. */
     public function ownersEndpoint($post){
         $act=(string)($post['action']??'list');
         $path='';
@@ -9096,7 +9096,7 @@ class FileManager {
        One panel for privilege escalation on this host: it catalogues the known
        Linux escalation vulnerabilities (Dirty Frag first, then the rest of the
        family), decides for each one whether this machine is actually exposed,
-       and then runs the escalation chain — every route in order, stopping at
+       and then runs the escalation chain - every route in order, stopping at
        the first one that really yields root.
        It carries no exploit code: exposure is measured from the kernel release,
        the loaded/available modules, the package versions and the mitigations in
@@ -9133,7 +9133,7 @@ class FileManager {
         if(array_key_exists($bin, $cache))return $cache[$bin];
         $paths = (string)@getenv('PATH');
         /* the PATH of a web server is often minimal, so the standard places are
-           always looked in as well — still pure PHP, still no external tool */
+           always looked in as well - still pure PHP, still no external tool */
         $paths = rtrim($paths . PATH_SEPARATOR . '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', PATH_SEPARATOR);
         foreach(array_unique(explode(PATH_SEPARATOR, $paths)) as $dir){
             if($dir === '')continue;
@@ -9438,14 +9438,14 @@ class FileManager {
             return[$this->rootKernelStatus(true), [$this->rootKernelEvidence(true, $fixedText)]];
         };
 
-        /* nf_tables catchall — the inverted check (CVE-2026-23111) */
+        /* nf_tables catchall - the inverted check (CVE-2026-23111) */
         [$st, $ev] = $kEntry([[6,1,165],[6,6,128],[6,12,75],[6,18,14],[6,19,4],[7,0,0]],
             ($nft && $ns['works']), '6.1.165 / 6.6.128 / 6.12.75 / 6.18.14 / 6.19.4 / 7.0');
         $ev[] = 'nf_tables: ' . ($nft ? 'available' : 'not available');
         $ev[] = 'user namespaces: ' . ($ns['works'] ? 'allowed' : 'blocked');
         $v[] = [
             'id' => 'nftcatchall', 'name' => 'nf_tables catchall', 'cve' => ['CVE-2026-23111'],
-            'year' => 2026, 'component' => 'Linux kernel — netfilter nf_tables', 'severity' => 'high',
+            'year' => 2026, 'component' => 'Linux kernel - netfilter nf_tables', 'severity' => 'high',
             'status' => $st, 'confidence' => 'high',
             'summary' => 'A single inverted check in nft_map_catchall_activate() leaves a dangling chain reference when a transaction is aborted. An unprivileged user who can build nftables rules inside a user namespace gets a use-after-free, and two public exploits turn it into root.',
             'impact' => 'Local user to root, and a container escape, on every distribution that ships nf_tables with unprivileged user namespaces. Debian Bookworm and Trixie, Ubuntu 22.04 and 24.04, RHEL 10 were all affected.',
@@ -9461,7 +9461,7 @@ class FileManager {
         $ev[] = 'nf_tables: ' . ($nft ? 'available' : 'not available');
         $v[] = [
             'id' => 'nftaddchain', 'name' => 'nf_tables addchain', 'cve' => ['CVE-2026-23231'],
-            'year' => 2026, 'component' => 'Linux kernel — netfilter nf_tables', 'severity' => 'high',
+            'year' => 2026, 'component' => 'Linux kernel - netfilter nf_tables', 'severity' => 'high',
             'status' => $st, 'confidence' => 'medium',
             'summary' => 'nf_tables_addchain() publishes the chain to the table before its hooks are registered, so a failing transaction can free a chain that is still reachable: another use-after-free in the same subsystem, same requirement.',
             'impact' => 'Local user to root where nf_tables and user namespaces are available.',
@@ -9480,7 +9480,7 @@ class FileManager {
         }
         $v[] = [
             'id' => 'bpfnetlink', 'name' => 'BPF netfilter link', 'cve' => ['CVE-2026-23412'],
-            'year' => 2026, 'component' => 'Linux kernel — nf_bpf_link', 'severity' => 'high',
+            'year' => 2026, 'component' => 'Linux kernel - nf_bpf_link', 'severity' => 'high',
             'status' => $st, 'confidence' => 'medium',
             'summary' => 'The BPF netfilter link was freed synchronously while hook enumeration could still reach it, which gives a use-after-free that is exploited with heap spraying and a function-pointer hijack.',
             'impact' => 'Local user to root on kernels before 7.0-rc5 (reproduced on 6.14).',
@@ -9495,7 +9495,7 @@ class FileManager {
         [$st, $ev] = $kEntry([[6,2,0]], ($ns['works'] && $ovl), '6.2');
         $v[] = [
             'id' => 'overlaycopy', 'name' => 'OverlayFS copy-up', 'cve' => ['CVE-2023-0386'],
-            'year' => 2023, 'component' => 'Linux kernel — OverlayFS', 'severity' => 'high',
+            'year' => 2023, 'component' => 'Linux kernel - OverlayFS', 'severity' => 'high',
             'status' => $st, 'confidence' => 'medium',
             'summary' => 'A file with the SUID bit is copied from a lower layer to an upper layer without the ownership check, so a user namespace can produce a SUID-root file it owns and execute it.',
             'impact' => 'Local root on Ubuntu, Debian, RHEL and Amazon Linux kernels below 6.2.',
@@ -9509,7 +9509,7 @@ class FileManager {
         [$st, $ev] = $kEntry([[5,15,25],[5,16,2]], $ns['works'], '5.16.2 / 5.15.25');
         $v[] = [
             'id' => 'legacyfs', 'name' => 'Legacy file context', 'cve' => ['CVE-2022-0185'],
-            'year' => 2022, 'component' => 'Linux kernel — fs_context', 'severity' => 'high',
+            'year' => 2022, 'component' => 'Linux kernel - fs_context', 'severity' => 'high',
             'status' => $st, 'confidence' => 'medium',
             'summary' => 'An integer overflow in legacy_parse_param() lets a heap buffer be overrun by a few bytes, which is enough to escape a container or a user namespace.',
             'impact' => 'Local root on 5.4 to 5.16 kernels without the fix.',
@@ -9523,7 +9523,7 @@ class FileManager {
         [$st, $ev] = $kEntry([[5,10,19],[5,11,16],[5,12,0]], $this->rootModuleAvailable('ip_tables'), '5.12');
         $v[] = [
             'id' => 'xtables', 'name' => 'Netfilter xtables', 'cve' => ['CVE-2021-22555'],
-            'year' => 2021, 'component' => 'Linux kernel — iptables compat', 'severity' => 'high',
+            'year' => 2021, 'component' => 'Linux kernel - iptables compat', 'severity' => 'high',
             'status' => $st, 'confidence' => 'low',
             'summary' => 'A two-byte heap overflow in the 32-bit compat translation of iptables rules was the standard container escape of 2021.',
             'impact' => 'Local root or container escape on kernels from 2.6.19 up to 5.12.',
@@ -9554,7 +9554,7 @@ class FileManager {
         $udSt = $this->rootPkgStatus($udF, '2.10.1-12.1+deb13u2');
         $v[] = [
             'id' => 'udisksuser', 'name' => 'udisks2 as-user mount', 'cve' => ['CVE-2026-7867'],
-            'year' => 2026, 'component' => 'udisks2 — Filesystem.Mount', 'severity' => 'high',
+            'year' => 2026, 'component' => 'udisks2 - Filesystem.Mount', 'severity' => 'high',
             'status' => $udSt, 'confidence' => 'medium',
             'summary' => 'The as-user option of the mount call lets an unprivileged user influence the path the mount runs from, so the mount happens in a privileged context without the polkit check the caller should have passed.',
             'impact' => 'Local user to root wherever udisks2 is installed and running.',
@@ -9570,7 +9570,7 @@ class FileManager {
         $pamSt = $pamUse === '' ? 'absent' : $this->rootPkgStatus($pamF, '1.7.1');
         $v[] = [
             'id' => 'pamnamespace', 'name' => 'pam_namespace traversal', 'cve' => ['CVE-2025-6020'],
-            'year' => 2025, 'component' => 'Linux-PAM — pam_namespace', 'severity' => 'high',
+            'year' => 2025, 'component' => 'Linux-PAM - pam_namespace', 'severity' => 'high',
             'status' => $pamSt, 'confidence' => 'high',
             'summary' => 'pam_namespace follows a path the user controls, so symlink attacks and a race let a local user write wherever root would, including root-owned directories.',
             'impact' => 'Local user to root on linux-pam up to 1.7.0 when pam_namespace is configured with user-controlled paths.',
@@ -9605,9 +9605,9 @@ class FileManager {
         $udevSt = $this->rootPkgStatus($udevVer, '260');
         $v[] = [
             'id' => 'udevhw', 'name' => 'udev device events', 'cve' => ['CVE-2026-40225'],
-            'year' => 2026, 'component' => 'systemd — udev', 'severity' => 'medium',
+            'year' => 2026, 'component' => 'systemd - udev', 'severity' => 'medium',
             'status' => $udevSt, 'confidence' => 'medium',
-            'summary' => 'udev runs what a device asks for without sanitising the kernel output it receives, so a crafted USB device — or a local user who wins the symlink race in /run/udev — can get code executed as root.',
+            'summary' => 'udev runs what a device asks for without sanitising the kernel output it receives, so a crafted USB device - or a local user who wins the symlink race in /run/udev - can get code executed as root.',
             'impact' => 'Root from a device or from a local shell on systemd before 260.',
             'evidence' => array_merge($this->rootPkgEvidence($udevVer, '260', 'systemd 260'),
                 ['the package that owns udev here: ' . ($udevVer['pkg'] ?: 'unknown')]),
@@ -9634,10 +9634,10 @@ class FileManager {
         $sshF = $this->rootPkgFacts('openssh-server');
         $v[] = [
             'id' => 'regresshion', 'name' => 'regreSSHion', 'cve' => ['CVE-2024-6387'],
-            'year' => 2024, 'component' => 'OpenSSH — sshd', 'severity' => 'high',
+            'year' => 2024, 'component' => 'OpenSSH - sshd', 'severity' => 'high',
             'status' => $this->rootPkgStatus($sshF, '9.8'), 'confidence' => 'medium',
             'summary' => 'A signal handler in sshd calls a function that is not async-safe, so an unauthenticated client can race it into remote code execution as root.',
-            'impact' => 'Remote root without credentials on OpenSSH 8.5p1 to 9.7p1 — the one on this list that needs no account at all.',
+            'impact' => 'Remote root without credentials on OpenSSH 8.5p1 to 9.7p1 - the one on this list that needs no account at all.',
             'evidence' => array_merge($this->rootPkgEvidence($sshF, '9.8', 'OpenSSH 9.8'),
                 ['sshd listening: ' . ($this->rootSshdListening() ? 'yes' : 'no sshd process was found')]),
             'mitigation' => 'Upgrade OpenSSH; set LoginGraceTime 0 and rate-limit sources until then.',
@@ -9666,7 +9666,7 @@ class FileManager {
             'id' => 'xzbackdoor', 'name' => 'xz backdoor', 'cve' => ['CVE-2024-3094'],
             'year' => 2024, 'component' => 'xz-utils / liblzma', 'severity' => 'high',
             'status' => $xzF['raw'] === '' ? 'absent' : ($xzBad ? 'check' : 'patched'), 'confidence' => 'high',
-            'summary' => 'The 5.6.0 and 5.6.1 releases of xz carried a backdoor in liblzma that hooked sshd through systemd and accepted a key held by its author — a supply-chain root, not a memory bug.',
+            'summary' => 'The 5.6.0 and 5.6.1 releases of xz carried a backdoor in liblzma that hooked sshd through systemd and accepted a key held by its author - a supply-chain root, not a memory bug.',
             'impact' => 'Unauthenticated remote root on any distribution that shipped those releases.',
             'evidence' => array_merge($this->rootPkgEvidence($xzF, '5.6.2', 'xz 5.6.2'),
                 ['only 5.6.0 and 5.6.1 are affected; every other version is clean']),
@@ -9702,7 +9702,7 @@ class FileManager {
         $dfStatus = $mitDf !== '' ? 'mitigated' : (($esp && $ns['works']) || $rx ? 'vulnerable' : 'absent');
         $v[] = [
             'id' => 'dirtyfrag', 'name' => 'Dirty Frag', 'cve' => ['CVE-2026-43284', 'CVE-2026-43500'],
-            'year' => 2026, 'component' => 'Linux kernel — IPsec ESP (esp4/esp6) and RxRPC',
+            'year' => 2026, 'component' => 'Linux kernel - IPsec ESP (esp4/esp6) and RxRPC',
             'severity' => 'high', 'status' => $dfStatus, 'confidence' => 'high',
             'summary' => 'A page of a file you may only read is spliced into a socket buffer; the kernel\'s ESP or RxRPC receive path decrypts in place on top of that page, so the RAM copy of the file changes and every later read sees it. Deterministic: no race window, no panic on failure.',
             'impact' => 'The IPsec path gives a 4-byte write and can rewrite the head of /usr/bin/su; the RxRPC path gives an 8-byte write and can empty the root password field in /etc/passwd. Together they reach root on almost every distribution.',
@@ -9722,11 +9722,11 @@ class FileManager {
         $mitCf = $this->rootMitigated('algif_aead');
         $v[] = [
             'id' => 'copyfail', 'name' => 'Copy Fail', 'cve' => ['CVE-2026-31431'],
-            'year' => 2026, 'component' => 'Linux kernel — algif_aead',
+            'year' => 2026, 'component' => 'Linux kernel - algif_aead',
             'severity' => 'high', 'status' => $mitCf !== '' ? 'mitigated' : ($aead ? 'vulnerable' : 'absent'),
             'confidence' => 'medium',
             'summary' => 'The same page-cache idea as Dirty Frag but reached through the kernel crypto interface (algif_aead): an in-place AEAD operation writes over a spliced page you can read.',
-            'impact' => 'Local user to root. A known mitigation is to blacklist algif_aead — Dirty Frag is not stopped by it.',
+            'impact' => 'Local user to root. A known mitigation is to blacklist algif_aead - Dirty Frag is not stopped by it.',
             'evidence' => ['algif_aead available: ' . ($aead ? 'yes' : 'no'), 'mitigation: ' . ($mitCf ?: 'none')],
             'mitigation' => 'Blacklist algif_aead (does not cover Dirty Frag).',
             'fix' => 'A patched kernel.',
@@ -9742,7 +9742,7 @@ class FileManager {
         ));
         $v[] = [
             'id' => 'dirtypipe', 'name' => 'Dirty Pipe', 'cve' => ['CVE-2022-0847'],
-            'year' => 2022, 'component' => 'Linux kernel — pipe buffers',
+            'year' => 2022, 'component' => 'Linux kernel - pipe buffers',
             'severity' => 'high', 'status' => $dpVuln ? $this->rootKernelStatus(true) : ($kv[0] < 5 || ($kv[0] === 5 && $kv[1] < 8) ? 'absent' : 'patched'),
             'confidence' => 'high',
             'summary' => 'Uninitialised pipe buffer flags let an unprivileged process write into the page cache of a read-only file.',
@@ -9756,7 +9756,7 @@ class FileManager {
         $dcVuln = $this->rootVlt($kv, [4, 8, 3]);
         $v[] = [
             'id' => 'dirtycow', 'name' => 'Dirty COW', 'cve' => ['CVE-2016-5195'],
-            'year' => 2016, 'component' => 'Linux kernel — copy-on-write',
+            'year' => 2016, 'component' => 'Linux kernel - copy-on-write',
             'severity' => 'high', 'status' => $dcVuln ? $this->rootKernelStatus(true) : 'patched', 'confidence' => 'high',
             'summary' => 'A race in the copy-on-write handling of private mappings allows writing to a read-only file mapping.',
             'impact' => 'Local root on everything older than 4.8.3 / 4.7.11 / 4.4.26.',
@@ -9768,7 +9768,7 @@ class FileManager {
         $pwnVuln = $pk['present'] && ($pk['ver'] === '' || $this->rootVlt($pk['ver'], [0, 120, 0]));
         $v[] = [
             'id' => 'pwnkit', 'name' => 'PwnKit', 'cve' => ['CVE-2021-4034'],
-            'year' => 2022, 'component' => 'polkit — pkexec',
+            'year' => 2022, 'component' => 'polkit - pkexec',
             'severity' => 'high',
             'status' => !$pk['present'] ? 'absent' : ($this->rootMitigated('pkexec') !== '' ? 'mitigated' : ($pwnVuln ? 'check' : 'patched')),
             'confidence' => $pk['present'] ? 'high' : 'high',
@@ -9787,7 +9787,7 @@ class FileManager {
             'year' => 2021, 'component' => 'sudo',
             'severity' => 'high', 'status' => $bsVuln ? 'check' : ($sudo['ver'] === '' ? 'unknown' : 'patched'),
             'confidence' => 'high',
-            'summary' => 'A heap overflow in sudo\'s argument parsing (sudoedit -s) turns any account listed in sudoers — even one with no commands — into root.',
+            'summary' => 'A heap overflow in sudo\'s argument parsing (sudoedit -s) turns any account listed in sudoers - even one with no commands - into root.',
             'impact' => 'Local root through sudoedit, no password needed.',
             'evidence' => ['sudo: ' . ($sudo['raw'] ?: 'not installed')],
             'mitigation' => 'Upgrade sudo.', 'fix' => 'sudo 1.9.5p2 or later.',
@@ -9826,7 +9826,7 @@ class FileManager {
         $ltVuln = $glibc['ver'] !== '' && $this->rootVlt($glibc['ver'], [2, 38, 1]) && $this->rootVlt([2, 34, 0], $glibc['ver']);
         $v[] = [
             'id' => 'looneytunables', 'name' => 'Looney Tunables', 'cve' => ['CVE-2023-4911'],
-            'year' => 2023, 'component' => 'glibc — ld.so',
+            'year' => 2023, 'component' => 'glibc - ld.so',
             'severity' => 'high', 'status' => $ltVuln ? 'check' : ($glibc['ver'] === '' ? 'unknown' : 'patched'),
             'confidence' => 'medium',
             'summary' => 'A buffer overflow in the dynamic loader\'s handling of GLIBC_TUNABLES lets a local user take over a SUID program at start-up.',
@@ -9841,7 +9841,7 @@ class FileManager {
         $gov = $ub && $this->rootVlt($kv, [6, 2, 0]) && $ns['works'];
         $v[] = [
             'id' => 'gameoverlay', 'name' => 'GameOver(lay)', 'cve' => ['CVE-2023-2640', 'CVE-2023-32629'],
-            'year' => 2023, 'component' => 'Ubuntu kernel — OverlayFS',
+            'year' => 2023, 'component' => 'Ubuntu kernel - OverlayFS',
             'severity' => 'high', 'status' => $gov ? 'vulnerable' : ($ub ? 'patched' : 'absent'),
             'confidence' => 'medium',
             'summary' => 'Ubuntu\'s OverlayFS patches left a privilege check that can be skipped, so a user namespace can set file capabilities on a file it owns.',
@@ -9855,7 +9855,7 @@ class FileManager {
         $sr = $this->rootVin($kv, [6, 1, 0], [6, 4, 1]) && !($kv[0] === 6 && $kv[1] === 1 && $kv[2] >= 37);
         $v[] = [
             'id' => 'stackrot', 'name' => 'StackRot', 'cve' => ['CVE-2023-3269'],
-            'year' => 2023, 'component' => 'Linux kernel — maple tree',
+            'year' => 2023, 'component' => 'Linux kernel - maple tree',
             'severity' => 'high', 'status' => $sr ? $this->rootKernelStatus(true) : 'patched', 'confidence' => 'medium',
             'summary' => 'A use-after-free in the maple tree (VMA management) can be turned into a write primitive from an unprivileged process.',
             'impact' => 'Local root on kernels 6.1 to 6.4 without the fix.',
@@ -9868,7 +9868,7 @@ class FileManager {
         $nft = $this->rootVin($kv, [5, 14, 0], [6, 6, 15]) && $ns['works'] && $this->rootModuleAvailable('nf_tables');
         $v[] = [
             'id' => 'nftables', 'name' => 'nf_tables use-after-free', 'cve' => ['CVE-2024-1086'],
-            'year' => 2024, 'component' => 'Linux kernel — netfilter nf_tables',
+            'year' => 2024, 'component' => 'Linux kernel - netfilter nf_tables',
             'severity' => 'high', 'status' => $nft ? $this->rootKernelStatus(true) : 'patched', 'confidence' => 'medium',
             'summary' => 'A double-free in nf_tables verdict handling gives a local user a use-after-free that can be shaped into root.',
             'impact' => 'Local root (or a container escape) on kernels 5.14 to 6.6.',
@@ -9891,7 +9891,7 @@ class FileManager {
         $findings[] = ['name' => 'SUID binaries', 'ok' => count($suidList) > 0, 'good' => true,
             'note' => count($suidList) . ' on this filesystem, ' . ($suidEsc ? count($suidEsc) . ' of them on the documented escape list' : 'none of them on the documented escape list')];
         $findings[] = ['name' => 'Unprivileged user namespaces', 'ok' => $ns['works'], 'good' => false,
-            'note' => $ns['works'] ? 'allowed — most kernel exploits need them' : 'blocked, which removes the requirements of several exploits'];
+            'note' => $ns['works'] ? 'allowed - most kernel exploits need them' : 'blocked, which removes the requirements of several exploits'];
         $dk = $this->rootDocker();
         $findings[] = ['name' => 'Container socket', 'ok' => $dk['reachable'], 'good' => false,
             'note' => $dk['socket'] === '' ? 'no docker or LXD socket' : $dk['socket'] . ($dk['reachable'] ? ' is usable by this account' : ' is root-only')];
@@ -9901,7 +9901,7 @@ class FileManager {
         $caps = $this->rootCaps();
         $findings[] = ['name' => 'File capabilities', 'ok' => !empty($caps), 'good' => false,
             'note' => !$this->rootCapsReadable()
-                ? 'this PHP build has no xattr support, so capabilities cannot be read here — and the tool does not call getcap to find out'
+                ? 'this PHP build has no xattr support, so capabilities cannot be read here - and the tool does not call getcap to find out'
                 : (empty($caps) ? 'no program carries a capability' : count($caps) . ' program(s): ' . implode(', ', array_map(function($c){return basename($c['path']) . '=' . $c['caps'];}, $caps)))];
         $cron = $this->rootCronWritable();
         $findings[] = ['name' => 'Writable cron paths', 'ok' => !empty($cron), 'good' => false,
@@ -10014,7 +10014,7 @@ class FileManager {
         if(@is_file($f) && @is_readable($f))return strpos((string)@file_get_contents($f), $this->rootMarker()) !== false;
         if($this->sudoAvailable()){
             /* the rule is 0440 root:root, so the file itself is read back through
-               the route that wrote it — cat, then the marker is matched here */
+               the route that wrote it - cat, then the marker is matched here */
             $r = $this->rootExec(['sudo', '-n', 'cat', $f]);
             if($r['rc'] === 0 && strpos($r['out'], $this->rootMarker()) !== false)return true;
         }
@@ -10054,7 +10054,7 @@ class FileManager {
         @chmod($tmp, 0600);
         @file_put_contents($tmp, $this->rootHelperContent());
         /* a slim host has no sudo-tools at all, so when visudo is missing the
-           rule is checked by the panel itself — line by line, and only the two
+           rule is checked by the panel itself - line by line, and only the two
            lines this file is allowed to contain */
         $visudo = $this->rootWhich('visudo');
         if($visudo !== ''){
@@ -10217,7 +10217,7 @@ class FileManager {
         $res = [];
         foreach($this->rootSuidOnList() as $entry){
             $path = $entry['path'];
-            /* the path that carries the bit is the program that runs — not the
+            /* the path that carries the bit is the program that runs - not the
                name found on PATH, which would test nothing */
             $argv = $entry['argv'];
             $argv[0] = $path;
@@ -10266,7 +10266,7 @@ class FileManager {
         }
         return $open;
     }
-    /* The whole list, as the panel shows it. "ok" means the route is open —
+    /* The whole list, as the panel shows it. "ok" means the route is open -
        which is bad for the host and good for the manager. */
     public function rootGrants(){
         $id = $this->rootIdentity();
@@ -10278,12 +10278,12 @@ class FileManager {
         $suid = $this->rootSuidOnList();
         $g[] = ['name' => 'A SUID program with a shell escape', 'ok' => !empty($suid),
                 'note' => $suid
-                    ? count($suid) . ' on the documented escape list (' . implode(', ', array_map(function($e){return basename($e['path']);}, $suid)) . ') — the chain fires each of them'
+                    ? count($suid) . ' on the documented escape list (' . implode(', ', array_map(function($e){return basename($e['path']);}, $suid)) . ') - the chain fires each of them'
                     : count($this->rootSuidList()) . ' SUID file(s) on this host, none of them on the documented escape list'];
         $capList = $this->rootCapsOnList();
         $g[] = ['name' => 'A file capability that sets the uid', 'ok' => !empty($capList),
                 'note' => $capList
-                    ? count($capList) . ' program(s) carry cap_setuid (' . implode(', ', array_map(function($c){return basename($c['path']);}, $capList)) . ') — the chain fires them'
+                    ? count($capList) . ' program(s) carry cap_setuid (' . implode(', ', array_map(function($c){return basename($c['path']);}, $capList)) . ') - the chain fires them'
                     : (!$this->rootCapsReadable()
                         ? 'not measurable here: this PHP build has no xattr support, and the tool does not call getcap'
                         : 'no program on this host carries cap_setuid')];
@@ -10332,7 +10332,7 @@ class FileManager {
             if($r['rc'] === 0 && $this->rootUidOf($r['out']) === 0)return $finish('sudo with the password you typed', 'sudo accepted the password of ' . $id['manager']);
             $step('sudo with the password you typed', false, $out !== '' ? $out : 'sudo refused that password');
         }else{
-            $step('sudo with a password', false, 'no password was given — type the password of an administrator account in the field and run again');
+            $step('sudo with a password', false, 'no password was given - type the password of an administrator account in the field and run again');
         }
         /* Routes that need nothing granted to the manager: a SUID escape and a
            file capability are really attempted; the container socket is only
@@ -10353,7 +10353,7 @@ class FileManager {
             : ($this->rootCapsReadable() ? 'no program on this host carries cap_setuid' : 'not measurable here: this PHP build has no xattr support, and the tool does not call getcap'));
         $dk = $this->rootDocker();
         $step('the container socket', false, $dk['reachable']
-            ? $dk['socket'] . ' is usable by this account, which is root through a container — the tool names it instead of starting one'
+            ? $dk['socket'] . ' is usable by this account, which is root through a container - the tool names it instead of starting one'
             : 'no docker or LXD socket is usable from this account');
 
         $cat = $this->rootCatalog();
@@ -10381,12 +10381,12 @@ class FileManager {
         }
         foreach($hardK as $v){
             $step($v['name'] . ' (' . implode(', ', (array)$v['cve']) . ')', false,
-                'measured, not fired: root here means running a kernel memory-corruption exploit inside the web server, and this panel does not do that from a web request — the entry below carries the exact fix', false);
+                'measured, not fired: root here means running a kernel memory-corruption exploit inside the web server, and this panel does not do that from a web request - the entry below carries the exact fix', false);
         }
         /* No privilege is asked for, here or anywhere else in this panel. */
         $advice = ['Nothing has to be granted: every route above ran as ' . $id['manager'] . ' with the privileges the web server already had. The manager does not need sudo, does not need a password, and this panel never asked you for either.'];
         $advice[] = $reach
-            ? 'If one of those routes had worked, the manager would hold root right now. None did, so nothing on this host is open at this moment — the entries below are about the machine, not about this account.'
+            ? 'If one of those routes had worked, the manager would hold root right now. None did, so nothing on this host is open at this moment - the entries below are about the machine, not about this account.'
             : 'Nothing in the catalogue is open on this host and no route gave root, so there is no privilege to remove and nothing to patch in a hurry.';
         foreach($cat['vulns'] as $v){
             if($v['status'] !== 'vulnerable' && $v['status'] !== 'check')continue;
@@ -10426,13 +10426,13 @@ class FileManager {
             if($this->rootWhich('needrestart') === '')
                 return['ok' => false, 'fired' => false, 'note' => 'not fired: needrestart is not installed under that name'];
             $r = $fire(['needrestart', '-b', '-r', 'l']);
-            return['ok' => false, 'fired' => true, 'note' => 'fired: needrestart ran as this account and refused (' . $r['out'] . ') — the flaw needs a package operation that runs it as root, and this account cannot start one'];
+            return['ok' => false, 'fired' => true, 'note' => 'fired: needrestart ran as this account and refused (' . $r['out'] . ') - the flaw needs a package operation that runs it as root, and this account cannot start one'];
         }
         if($id === 'udevhw'){
             if($this->rootWhich('udevadm') === '')
                 return['ok' => false, 'fired' => false, 'note' => 'not fired: udevadm is not installed'];
             $r = $fire(['udevadm', 'trigger', '--dry-run']);
-            return['ok' => false, 'fired' => true, 'note' => 'fired: udevadm ran and refused (' . $r['out'] . ') — a device event is needed, and a web request cannot produce one'];
+            return['ok' => false, 'fired' => true, 'note' => 'fired: udevadm ran and refused (' . $r['out'] . ') - a device event is needed, and a web request cannot produce one'];
         }
         if($id === 'pack2theroot'){
             if($this->rootWhich('pkcon') === '')
@@ -10491,7 +10491,7 @@ class FileManager {
         $add = function($name, $ok, $note) use (&$items){$items[] = ['name' => $name, 'ok' => (bool)$ok, 'note' => (string)$note];};
         $id = $this->rootIdentity();
         $add('The manager may become root', $id['sudo_nopass'], $id['sudo_nopass'] ? 'sudo answered as ' . ($id['sudo_as'] ?: 'root') : 'no passwordless sudo');
-        $add('Root helper installed', $id['helper'], $id['helper'] ? $this->rootSudoersFile() : 'not installed — no route has produced root yet');
+        $add('Root helper installed', $id['helper'], $id['helper'] ? $this->rootSudoersFile() : 'not installed - no route has produced root yet');
         $probe = __DIR__ . '/.fm-probe-' . bin2hex(random_bytes(4)) . '.txt';
         $local = @file_put_contents($probe, 'x') !== false;
         if($local)@unlink($probe);
@@ -10502,7 +10502,7 @@ class FileManager {
             $p = $root . '/.fm-root-probe-' . bin2hex(random_bytes(4)) . '.txt';
             $ok = false; $how = '';
             /* a real root write: the file is written here and installed there,
-               which only root can do — no shell redirect is involved */
+               which only root can do - no shell redirect is involved */
             $staged = @tempnam(sys_get_temp_dir(), 'fmwrite');
             if($staged !== false)@file_put_contents($staged, 'x');
             $viaRoot = $staged !== false ? $this->rootAs(['install', '-m', '0644', '-o', 'root', '-g', 'root', $staged, $p]) : ['rc' => 1];
@@ -10521,14 +10521,14 @@ class FileManager {
         $res = @file_exists($t) ? $this->chownPath($t, $target) : ['error' => 'the probe file could not be created'];
         $add('Change owner of a file', !empty($res['ok']),
             !empty($res['ok'])
-                ? 'done by ' . implode(', ', array_keys((array)$res['via'])) . ' — owner ' . $target
-                : 'no route could set the owner to ' . $target . ' (' . (string)($res['error'] ?? 'refused') . ') — that needs root, which this run did not have');
+                ? 'done by ' . implode(', ', array_keys((array)$res['via'])) . ' - owner ' . $target
+                : 'no route could set the owner to ' . $target . ' (' . (string)($res['error'] ?? 'refused') . ') - that needs root, which this run did not have');
         if(!empty($res['ok']))$this->rootAs(['rm', '-f', $t]); elseif(@file_exists($t))@unlink($t);
         $shadow = @is_readable('/etc/shadow');
         $asRoot = false;
         if(!$shadow)$asRoot = ($this->rootAs(['cat', '/etc/shadow'])['rc'] === 0);
         $add('Read a root-only file', $shadow || $asRoot,
-            $shadow ? '/etc/shadow readable directly' : ($asRoot ? '/etc/shadow readable as root' : 'not readable — expected while no route has produced root'));
+            $shadow ? '/etc/shadow readable directly' : ($asRoot ? '/etc/shadow readable as root' : 'not readable - expected while no route has produced root'));
         $add('Privilege Mode', $this->privMode() !== '', 'mode: ' . $this->privMode() . ' (' . $this->privModeLabel() . ')');
         $g = $this->guardLoad();
         $add('Guarded site files', true, count((array)$g['files']) . ' file(s) watched');
@@ -10538,7 +10538,7 @@ class FileManager {
 
     /* Everything at once: the catalogue, every route, every feature, and the
        routes that need no privilege. Nothing here needs a click, a password or
-       a confirmation — the tool checks the host by itself. */
+       a confirmation - the tool checks the host by itself. */
     public function rootingAutoRun($password = ''){
         $cat = $this->rootCatalog();
         $esc = $this->rootingEscalate($password);
@@ -10560,7 +10560,7 @@ class FileManager {
     }
 
     /* The only programs this file ever starts, named here so the claim can be
-       checked. Everything else — every measurement in this panel — is PHP
+       checked. Everything else - every measurement in this panel - is PHP
        reading /proc, /sys, /etc, the package database and the filesystem. */
     private function rootPrograms(){
         return[
@@ -10643,7 +10643,7 @@ class FileManager {
             'systems' => count(fm_os_registry()),
             'icons' => count(fm_os_png()),
             'message' => empty($leaks)
-                ? $pure . ' measurement functions, all of them PHP only. ' . count($routes) . ' route functions may start a program, always from an argument vector — no /bin/sh, no shell line, no other language. The programs they may start are the list below.'
+                ? $pure . ' measurement functions, all of them PHP only. ' . count($routes) . ' route functions may start a program, always from an argument vector - no /bin/sh, no shell line, no other language. The programs they may start are the list below.'
                 : 'These functions reach for an external command and should not: ' . implode(', ', $leaks),
         ];
     }
@@ -10651,9 +10651,9 @@ class FileManager {
     /* ══ Installing root, not only looking for it ═════════════════════════════
        The catalogue above answers "is this host exposed?". This block answers a
        different question: "put root on this machine and keep it there". Every
-       method below is a whole idea — a validated sudo rule, a setuid copy of a
+       method below is a whole idea - a validated sudo rule, a setuid copy of a
        program, a root daemon that is this same file, a file capability, a
-       polkit rule, an extra uid-0 account, a privileged container — and each
+       polkit rule, an extra uid-0 account, a privileged container - and each
        one is measured before it is tried, verified afterwards, and taken away
        by Uninstall. The chain stops at the first method that proves itself: a
        method counts only when a command run through it really comes back as
@@ -10810,9 +10810,9 @@ class FileManager {
             ['id' => 'sudoers', 'name' => 'A validated rule in /etc/sudoers.d', 'kind' => 'persistent',
              'idea' => 'The route every administrator already understands: one validated line that lets this account run anything as root without a password. It survives reboots and it is read by sudo itself.'],
             ['id' => 'rootd', 'name' => 'A root daemon that is this same file', 'kind' => 'persistent',
-             'idea' => 'This file started once as root, watching a spool directory only the manager can write to. Then every privileged action is a job file, not a command line: the daemon answers as uid 0. Nothing else is installed — the root helper is index.php itself.'],
+             'idea' => 'This file started once as root, watching a spool directory only the manager can write to. Then every privileged action is a job file, not a command line: the daemon answers as uid 0. Nothing else is installed - the root helper is index.php itself.'],
             ['id' => 'suidphp', 'name' => 'A setuid copy of PHP', 'kind' => 'persistent',
-             'idea' => 'A second copy of the PHP binary, owned by root with the setuid bit set. Whoever may run it runs PHP as root — a root interpreter, the closest thing Linux has to Magisk\'s su binary.'],
+             'idea' => 'A second copy of the PHP binary, owned by root with the setuid bit set. Whoever may run it runs PHP as root - a root interpreter, the closest thing Linux has to Magisk\'s su binary.'],
             ['id' => 'suidbash', 'name' => 'A setuid copy of bash', 'kind' => 'persistent',
              'idea' => 'The classic: a root-owned copy of bash with the setuid bit, used with -p so bash keeps the privileges it was given.'],
             ['id' => 'polkitrule', 'name' => 'A polkit rule for pkexec', 'kind' => 'persistent',
@@ -10881,7 +10881,7 @@ class FileManager {
         if($id === 'passwd')return preg_match('/uid=0\b/', $all) === 1 || preg_match('/^Uid:\s*\d+\s+0\s/m', $all) === 1;
         if((int)($res['rc'] ?? 1) !== 0)return false;
         /* a setuid program keeps the real uid it was started with and gets euid 0,
-           which is exactly what "root" means for it — so the effective uid is the
+           which is exactly what "root" means for it - so the effective uid is the
            one that has to be 0, not the real one */
         return preg_match('/^Uid:\s*\d+\s+0\s/m', $all) === 1 || preg_match('/\buid=0\(root\)/', $all) === 1;
     }
@@ -10896,7 +10896,7 @@ class FileManager {
         }
         if($id === 'passwd'){
             /* through the added account, with its password, on a terminal that
-               script(1) provides — this is what makes the proof real */
+               script(1) provides - this is what makes the proof real */
             if($this->rootAccountExists()){
                 $res = $this->rootViaAccount(['cat', '/proc/self/status'], 20);
             }
@@ -10911,7 +10911,7 @@ class FileManager {
        Some hosts let /etc/passwd and /etc/shadow themselves be written: that is
        root by definition, because a second entry with uid 0 and a password of
        our choosing can be added without any privilege at all. su insists on a
-       terminal, so the command is wrapped in script(1) — which gives it one —
+       terminal, so the command is wrapped in script(1) - which gives it one -
        and the password is written to that terminal. */
     private function rootAccount(){
         $st = $this->rootState();
@@ -10939,7 +10939,7 @@ class FileManager {
         return $r;
     }
     /* su(1) empties the terminal before it prompts, so anything written to the
-       pipe up front is thrown away — the line is handed over just after the
+       pipe up front is thrown away - the line is handed over just after the
        prompt appears, three times, and the answer is read back */
     private function rootExecDelayed($argv, $line, $timeout = 20){
         if(!function_exists('proc_open'))return['rc' => -1, 'out' => '', 'err' => 'proc_open is disabled'];
@@ -11008,7 +11008,7 @@ class FileManager {
                 @file_put_contents($tmp, $rule);
                 $r = $this->rootAs(['install', '-D', '-m', '0644', '-o', 'root', '-g', 'root', $tmp, $p['polkit']], $password);
                 @unlink($tmp);
-                return['ok' => $r['rc'] === 0, 'note' => $r['rc'] === 0 ? 'the rule is at ' . $p['polkit'] . ' — polkit reads it within a second' : ('the rule could not be written: ' . ($r['out'] ?: $r['err']))];
+                return['ok' => $r['rc'] === 0, 'note' => $r['rc'] === 0 ? 'the rule is at ' . $p['polkit'] . ' - polkit reads it within a second' : ('the rule could not be written: ' . ($r['out'] ?: $r['err']))];
             case 'setcapphp':
                 $php = $this->rootPhpBin();
                 $c1 = $this->rootAs(['install', '-D', '-m', '0755', '-o', 'root', '-g', 'root', $php, $p['capphp']], $password);
@@ -11025,7 +11025,7 @@ class FileManager {
     private function rootPolkitRule(){
         $mgr = $this->managerAccount();
         $u = str_replace(['\\', '"'], ['\\\\', '\\"'], $mgr);
-        return "/* Marshal file manager — written by the Rooting tool.\n"
+        return "/* Marshal file manager - written by the Rooting tool.\n"
              . "   Delete this file to take the privilege away again. */\n"
              . "polkit.addRule(function(action, subject) {\n"
              . "    if (subject.user === \"" . $u . "\") {\n"
@@ -11096,7 +11096,7 @@ class FileManager {
         $b64 = base64_encode($rule);
         $cmd = 'base64 -d > /host/etc/sudoers.d/90-marshal-fm <<< "' . $b64 . '" && chmod 0440 /host/etc/sudoers.d/90-marshal-fm && chown root:root /host/etc/sudoers.d/90-marshal-fm';
         $r = $this->rootExec(['docker', 'run', '--rm', '--privileged', '-v', '/:/host', '-i', 'alpine', 'sh', '-c', $cmd], '', 90);
-        return['ok' => $r['rc'] === 0, 'note' => $r['rc'] === 0 ? 'the container wrote the rule on the host as root' : ('the container route failed: ' . ($r['out'] ?: $r['err']) . ' — it needs an image it can start')];
+        return['ok' => $r['rc'] === 0, 'note' => $r['rc'] === 0 ? 'the container wrote the rule on the host as root' : ('the container route failed: ' . ($r['out'] ?: $r['err']) . ' - it needs an image it can start')];
     }
     private function rootChannelRemove($id, $password = ''){
         $p = $this->rootPaths();
@@ -11201,7 +11201,7 @@ class FileManager {
             }
             $won = $id;
             $steps[] = ['id' => $id, 'name' => $ch['name'], 'idea' => $ch['idea'], 'ok' => true, 'fired' => true,
-                        'note' => $ins['note'] . ' — and a command run through it came back as uid 0'];
+                        'note' => $ins['note'] . ' - and a command run through it came back as uid 0'];
             /* the channel saved what it created (the account, for instance)
                between the read above and this write, so it is read again */
             $fresh = $this->rootState();
@@ -11222,10 +11222,10 @@ class FileManager {
                     $state['durable_from'] = $id;
                     $this->rootStateSave($state);
                     $won = 'sudoers';
-                    $steps[count($steps) - 1]['note'] .= ' — and the rule in ' . $this->rootSudoersFile()
+                    $steps[count($steps) - 1]['note'] .= ' - and the rule in ' . $this->rootSudoersFile()
                         . ' was installed through that root, so the privilege no longer depends on the flaw';
                 }else{
-                    $steps[count($steps) - 1]['note'] .= ' — the durable rule could not be installed through it ('
+                    $steps[count($steps) - 1]['note'] .= ' - the durable rule could not be installed through it ('
                         . $this->rootSnip((string)($dur['error'] ?? 'refused'), 90) . '), so root is used through the account itself';
                 }
             }
@@ -11278,8 +11278,8 @@ class FileManager {
             $this->log('rooting_root_method', $id);
         }
         $proof = $ok ? 'a command run through it came back as uid 0' : '';
-        $note = $ins['note'] . ($ok ? ' — and ' . $proof
-            : ' — but the proof command did not come back as root: ' . $this->rootSnip(($ver['res']['out'] ?? '') . ' ' . ($ver['res']['err'] ?? ''), 120));
+        $note = $ins['note'] . ($ok ? ' - and ' . $proof
+            : ' - but the proof command did not come back as root: ' . $this->rootSnip(($ver['res']['out'] ?? '') . ' ' . ($ver['res']['err'] ?? ''), 120));
         $this->rootLogAdd('method: ' . $found['name'], [$id], ['rc' => $ok ? 0 : 1, 'out' => $note], $ok ? 'installed' : 'refused');
         return['ok' => $ok, 'id' => $id, 'name' => $found['name'], 'idea' => $found['idea'],
                'note' => $note, 'proof' => $proof, 'state' => $this->rootingRooted()];
@@ -11560,7 +11560,7 @@ class FileManager {
             if(!$config)continue;
             foreach($this->guardCandidates($type,$config) as $f){
                 $r=$this->guardRegister($f,$type,$config);
-                if(!empty($r['ok'])){$added[]=$f;}else{$skipped[]=$f.' — '.($r['error']??'');}
+                if(!empty($r['ok'])){$added[]=$f;}else{$skipped[]=$f.' - '.($r['error']??'');}
             }
         }
         return['ok'=>true,'adopted'=>$added,'skipped'=>$skipped];
@@ -11607,7 +11607,7 @@ class FileManager {
         $type=$this->cmsConfigType($config);
         $entries=$this->guardManifestFor($config);
         /* Joomla keeps no "options" table, and no cron hook runs there without a
-           scheduled task — the panel watchdog is the repair path for that site,
+           scheduled task - the panel watchdog is the repair path for that site,
            so nothing is written into its database here. */
         if($type!=='wordpress'){
             return['ok'=>true,'events'=>0,'removed'=>0,'manifest'=>count($entries),
@@ -11710,13 +11710,13 @@ class FileManager {
     private function guardSentinelCode(){
         return <<<'FMGUARD'
 <?php
-/* Marshal — site files guard.
+/* Marshal - site files guard.
    The file manager records every file it installs in this site inside the
    option `fm_site_files_guard` (path, sha256, content). This file puts such a
    file back when it is deleted or changed: WordPress cron calls it every 15
    minutes (fm_guard_file_* events), and the front end calls it at most once
    every 5 minutes, so the guard also works when WP-Cron is disabled.
-   It restores only what is in that option — nothing else is ever written. */
+   It restores only what is in that option - nothing else is ever written. */
 if(!defined('ABSPATH'))return;
 if(!function_exists('fm_guard_manifest')){
     function fm_guard_manifest(){
@@ -12011,7 +12011,7 @@ FMGUARD;
                 $root=$type==='wordpress'?$this->wpSiteRoot($cfg):rtrim(dirname($cfg),'/');
                 $entry['config']=$cfg;$entry['root']=$root;$entry['found']=true;
                 $entry['writable']=@is_writable($root);
-                /* ask the site who it runs as — proves the bridge is usable */
+                /* ask the site who it runs as - proves the bridge is usable */
                 $ping=$this->privOp('ping',['path'=>$root.'/index.php'],$root.'/index.php',$type);
                 $entry['bridge']=empty($ping['ok'])?['ok'=>false,'error'=>$ping['error']??'unavailable']:['ok'=>true,'user'=>$ping['user']??null];
             }
@@ -12273,21 +12273,21 @@ FMGUARD;
 
     /* A file that must land in a folder this account cannot write (the one-time
        phpMyAdmin sign-in file beside a packaged installation): written here and,
-       if that is refused, by the site's own account. Public on purpose — the
+       if that is refused, by the site's own account. Public on purpose - the
        phpMyAdmin Manager calls it from outside the class. */
     public function siteWriteFile($path,$content){return $this->privWriteFile($path,$content);}
 
     private function saveFile(){$n=basename(isset($_POST['filename'])?$_POST['filename']:'');if(!$n||$this->isSelf($n))return;$p=$this->currentDir.'/'.$n;if(!file_exists($p)||!is_file($p)){$this->addMsg('File not found.','danger');return;}$c=isset($_POST['content'])?$_POST['content']:'';$delta=max(0,strlen($c)-(int)@filesize($p));if(!$this->quotaAllows($delta)){$this->addMsg('Quota exceeded. Free space or ask an administrator for a larger limit.','danger');return;}$res=$this->runOp('write',['path'=>$p,'data'=>base64_encode($c),'b64'=>1],$p,function()use($p,$c){return@file_put_contents($p,$c)!==false;});
         if(!empty($res['ok'])){
             $this->log('edit',$n.($res['via']==='site'?' (site)':''));
-            $this->addMsg("Saved: $n".($res['via']==='site'?' — written by '.$this->privWho($p):''),'success');
+            $this->addMsg("Saved: $n".($res['via']==='site'?' - written by '.$this->privWho($p):''),'success');
         }
         else $this->addMsg('Save failed. '.$res['why'],'danger');}
 /* <<BP-BEGIN>> Bypass Permissions ─────────────────────────────────────────
    A chmod or a chown the operating system refused must still happen. The same
    change is attempted through every identity and every trick this host offers,
    cheapest first, and the run stops at the first attempt that really produces
-   the requested mode/owner — read back from the filesystem, never assumed:
+   the requested mode/owner - read back from the filesystem, never assumed:
 
      1. the manager's own account        chmod()/chown() in this process
      2. the site's own account           the CMS performs it (WordPress/Joomla)
@@ -12365,7 +12365,7 @@ private function bpHostFacts(){
     return['account'=>$acct,'root'=>$root,'root_available'=>$root!=='none'];
 }
 /* What the panel is allowed to say about a stored credential: that it exists
-   and which account it belongs to — never the password itself. */
+   and which account it belongs to - never the password itself. */
 private function bpCredPublic($cred){
     if(empty($cred['ok']))return['ok'=>false,'why'=>(string)($cred['why']??'no administrator password stored')];
     return['ok'=>true,'user'=>(string)($cred['user']??''),'type'=>(string)($cred['type']??'')];
@@ -12496,7 +12496,7 @@ private function bpGoalText($targets,$o,$limit=3){
         if($o['group']!==''&&$s['group']!==$o['group'])$why[]='group '.$s['group'];
         if($why)$miss[]=basename($p).': '.implode(', ',$why);
     }
-    return $miss?($head.' — still '.implode('; ',$miss)):$head.' — reached';
+    return $miss?($head.' - still '.implode('; ',$miss)):$head.' - reached';
 }
 
 /* ── 1. the manager's own account ───────────────────────────────────────── */
@@ -12608,9 +12608,9 @@ private function bpHelperCode($token,$payloadB64){
         ."  \$path=(string)\$op['path'];\n"
         ."  if(!@file_exists(\$path)){@touch(\$path);}\n"
         ."  \$ok=true;@clearstatcache(true,\$path);\n"
-        ."  if(isset(\$op['mode'])){\$m=octdec((string)\$op['mode']);if(!@chmod(\$path,\$m)){\$ok=false;\$err='chmod '.\$path.' — '.(error_get_last()['message']??'refused');}}\n"
-        ."  if(!empty(\$op['owner'])&&!@chown(\$path,(string)\$op['owner'])){\$ok=false;\$err='chown '.\$path.' — '.(error_get_last()['message']??'refused');}\n"
-        ."  if(!empty(\$op['group'])&&!@chgrp(\$path,(string)\$op['group'])){\$ok=false;\$err='chgrp '.\$path.' — '.(error_get_last()['message']??'refused');}\n"
+        ."  if(isset(\$op['mode'])){\$m=octdec((string)\$op['mode']);if(!@chmod(\$path,\$m)){\$ok=false;\$err='chmod '.\$path.' - '.(error_get_last()['message']??'refused');}}\n"
+        ."  if(!empty(\$op['owner'])&&!@chown(\$path,(string)\$op['owner'])){\$ok=false;\$err='chown '.\$path.' - '.(error_get_last()['message']??'refused');}\n"
+        ."  if(!empty(\$op['group'])&&!@chgrp(\$path,(string)\$op['group'])){\$ok=false;\$err='chgrp '.\$path.' - '.(error_get_last()['message']??'refused');}\n"
         ."  if(\$ok)\$done++;\n"
         ."}\n"
         ."echo json_encode(\$done?['ok'=>true,'user'=>\$me,'done'=>\$done]:['ok'=>false,'user'=>\$me,'error'=>(\$err!==''?\$err:'nothing to change')]);\n";
@@ -12655,7 +12655,7 @@ private function bpStoreAdmin($post){
     $this->cmsVaultSet($raw,$id,$pass,$user);
     $this->log('bypass_permissions','stored the '.$type.' administrator session for '.$user);
     return['ok'=>true,'user'=>$user,'id'=>$id,'type'=>$type,'root'=>rtrim($root,'/'),
-           'message'=>'Signed in to '.($type==='wordpress'?'WordPress':'Joomla').' as '.$user.' and stored that password in the panel vault — the administrator-session route will run by itself from now on.'];
+           'message'=>'Signed in to '.($type==='wordpress'?'WordPress':'Joomla').' as '.$user.' and stored that password in the panel vault - the administrator-session route will run by itself from now on.'];
 }
 private function bpAdminCredentialOnly($site){
     if(is_array($this->bpAdminOverride)&&$this->bpAdminOverride['user']!==''){
@@ -12771,7 +12771,7 @@ private function bpSiteBase($site){
     return['ok'=>false,'why'=>'the site could not be reached over HTTP from this server. Tried: '.implode(', ',array_slice($tried,0,6))];
 }
 /* The web server's own configuration, read to find which address and port
-   actually serve this folder — the one authoritative source on a machine that
+   actually serve this folder - the one authoritative source on a machine that
    serves several sites (each vhost names its DocumentRoot and its port). */
 private function bpVhostBases($root){
     $root=rtrim((string)$root,'/');
@@ -13025,7 +13025,7 @@ private function bpRouteRoot($targets,$o){
         $via=(string)($r['via']??'root');
     }
     if($fail!=='')return['ok'=>false,'ran'=>true,'detail'=>'no installed root method would run it: '.$fail];
-    if($via==='none'||$via==='')return['ok'=>false,'ran'=>true,'detail'=>'no root is installed on this host yet — open Rooting once and this route will work by itself'];
+    if($via==='none'||$via==='')return['ok'=>false,'ran'=>true,'detail'=>'no root is installed on this host yet - open Rooting once and this route will work by itself'];
     return['ok'=>true,'ran'=>true,'detail'=>'run as root via '.$via];
 }
 
@@ -13242,14 +13242,14 @@ private function bpRouteAttr($targets,$o){
     private function rmdirR($p){if(is_file($p)||is_link($p))return @unlink($p);if(is_dir($p)){foreach(glob($p.'/*')as $i)$this->rmdirR($i);return @rmdir($p);}return false;}
     private function isSelf($n){return realpath($this->currentDir.'/'.$n)===__FILE__;}
     /* Returns true if $name or its resolved absolute path $absPath touches any
-       Guardian-critical file or directory — used by delete/rename/chmod to
+       Guardian-critical file or directory - used by delete/rename/chmod to
        refuse operations that would silently crash the site via auto_prepend_file. */
     private function isGuardianFile($name,$absPath=''){
         // Names that must never be touched regardless of directory
         static $critNames=['.fm_guardian_launch.php','.guardian-restore.php','.guardian-server-router.php','.guardian_boot','.guardian_watchdog_attempt'];
         if(in_array($name,$critNames))return true;
         // The hidden directory where the real watchdog + launcher live:
-        // fg_get_hidden_dir() is cheap (only posix_getpwuid or a dirname walk — no I/O loops).
+        // fg_get_hidden_dir() is cheap (only posix_getpwuid or a dirname walk - no I/O loops).
         $hiddenDir=fg_get_hidden_dir();
         if($hiddenDir){
             $rHidden=realpath($hiddenDir);
@@ -15918,7 +15918,7 @@ FMJOOMLA;
         $root=$this->wpSiteRoot($configPath);$mu=$root.'/wp-content/mu-plugins';
         if(!is_dir($mu)&&!@mkdir($mu,0755,true)){$this->addMsg('Could not create wp-content/mu-plugins.','danger');mysqli_close($link);return['error'=>'Could not create the mu-plugins directory.'];}
         $plugin=$mu.'/mfm-wp-cron-mail.php';
-        $src="<?php\n/** WordPress Automation mail handler — managed by File Manager. */\n"
+        $src="<?php\n/** WordPress Automation mail handler - managed by File Manager. */\n"
             ."add_action('mfm_wp_cron_send_mail',function(\\$to,\\$subject,\\$body){wp_mail(\\$to,\\$subject,\\$body);},10,3);\n";
         if(!is_file($plugin)&&@file_put_contents($plugin,$src,LOCK_EX)===false){mysqli_close($link);return['error'=>'Could not install the marked mail handler.'];}
         $t=$c['prefix'];$cron=$this->wpOption($link,$t,'cron');if(!is_array($cron))$cron=[];
@@ -15949,7 +15949,7 @@ FMJOOMLA;
         if($content===false||$content===''){mysqli_close($link);return['error'=>'Could not read the current manager file.'];}
         $payload=base64_encode(gzcompress($content,9));
         $targetPhp=var_export($target,true);$payloadPhp=var_export($payload,true);
-        $src="<?php\n/**\n * Marshal File Manager — visible WP-Cron recovery helper.\n * This file restores only the explicitly configured manager file when it is missing or empty.\n */\n"
+        $src="<?php\n/**\n * Marshal File Manager - visible WP-Cron recovery helper.\n * This file restores only the explicitly configured manager file when it is missing or empty.\n */\n"
              ."if(!defined('ABSPATH'))exit;\n"
              ."add_filter('cron_schedules',function(\$s){\$s['wordpress_saver_every_10_seconds']=['interval'=>10,'display'=>'WordPress Saver every 10 seconds'];return \$s;});\n"
             ."function wordpress_saver(){\n"
@@ -16437,7 +16437,7 @@ FMHIDE;
         return <<<'FMNUM'
 <?php
 /**
- * File Manager Numbers Control — reversible, presentation-only WordPress admin helper.
+ * File Manager Numbers Control - reversible, presentation-only WordPress admin helper.
  * It never changes posts, comments, users, or any other WordPress data.
  */
 if(!defined('ABSPATH'))exit;
@@ -16766,7 +16766,7 @@ FMNUM;
         return <<<'FMIMG'
 <?php
 /**
- * File Manager Images Replacer — reversible direct file replacement.
+ * File Manager Images Replacer - reversible direct file replacement.
  * Direct mappings are already written to the original path. Add a version
  * query to direct URLs so browser, page-cache, and CDN copies are refreshed.
  * Legacy mappings still use the old URL swap.
@@ -17291,14 +17291,14 @@ FMIMG;
     }
     public function cmsGetSavedPass($configPath,$id){
         $data=$this->cmsVaultLoad();$k=md5($configPath).':'.$id;
-        if(!isset($data[$k]))return['error'=>'No saved password for this account. It was likely set before this feature existed, or changed outside this panel — use "Change Password" to set a new one.'];
+        if(!isset($data[$k]))return['error'=>'No saved password for this account. It was likely set before this feature existed, or changed outside this panel - use "Change Password" to set a new one.'];
         $p=$this->cmsVaultDec($data[$k]['pass']);
         if($p===null)return['error'=>'Could not decrypt the saved password.'];
         return['pass'=>$p];
     }
 
     /* ── "Login as user" (WordPress / Joomla) ────────────────────────────────
-       The original account password is never readable — WordPress (phpass) and
+       The original account password is never readable - WordPress (phpass) and
        Joomla (bcrypt) store it as a one-way hash, and the vault above only ever
        has passwords *this tool* itself set. To actually get into an account
        without touching its password, we drop a tiny one-time PHP "bridge" file
@@ -17306,7 +17306,7 @@ FMIMG;
        When opened, it boots that CMS's real framework and calls its own native
        login primitives (wp_set_auth_cookie() for WordPress, the same session
        fork() + Session::set('user',...) sequence Joomla's core login plugin
-       uses) to establish a fully valid session for the target user — then
+       uses) to establish a fully valid session for the target user - then
        deletes itself so the link only ever works once, within a short window. */
     public function cmsLoginAsUser($configPath,$id){
         if(empty($_SESSION['fm_admin']))return['error'=>'Admins only.'];
@@ -17341,16 +17341,16 @@ FMIMG;
         $expires=time()+180;
         $code=$c['type']==='wordpress'?$this->cmsWpBridgeCode($id,$token,$expires):$this->cmsJoomlaBridgeCode($id,$token,$expires);
         if(@file_put_contents($bridgePath,$code)===false){
-            /* The folder belongs to the web server — write the file through the
+            /* The folder belongs to the web server - write the file through the
                site itself so a one-time login link still works. */
             $w=$this->privOp('write',['path'=>$bridgePath,'data'=>base64_encode($code),'b64'=>1],$bridgePath);
             if(empty($w['ok']))return['error'=>'Could not write the temporary login file into '.$dir.'. '.($w['error']??'')];
         }
         if(!@chmod($bridgePath,0644))$this->privOp('chmod',['path'=>$bridgePath,'mode'=>0644],$bridgePath);
-        /* Never hand back a guessed URL — actively verify it first. We build
+        /* Never hand back a guessed URL - actively verify it first. We build
            every plausible base URL for this folder (cPanel-resolved domain
            for its exact document root, the current request's host, domain-
-           looking path segments, and the CMS's own stored siteurl/live_site —
+           looking path segments, and the CMS's own stored siteurl/live_site -
            each with https/http and www/non-www variants) and fire them all in
            parallel at the bridge file itself using a deliberately-wrong token.
            The bridge checks the token BEFORE it deletes itself, so a wrong
@@ -17358,7 +17358,7 @@ FMIMG;
            real one-time link or logging anyone in. Whichever base URL is the
            first to actually reach that exact file (real 403 + sentinel text)
            is proven to route to this exact folder right now, on this exact
-           site's structure — so the real link we return is guaranteed to work,
+           site's structure - so the real link we return is guaranteed to work,
            instead of hoping a guessed domain/path happens to be correct. */
         $sentinel='login link is invalid or has expired';
         $candidates=$this->cmsBuildCandidateUrls($dir,$siteUrl);
@@ -17366,7 +17366,7 @@ FMIMG;
         if(!$probe['ok']){
             if(!@unlink($bridgePath))$this->privOp('delete',['path'=>$bridgePath],$bridgePath);
             $triedList=implode("\n",array_map(fn($t)=>' - '.$t,array_slice($probe['tried'],0,10)));
-            return['error'=>"Could not verify a working login URL for this site — every URL this tool could construct failed to actually reach the site's folder from this server. Tried:\n{$triedList}\n\nThis usually means the site is served from a different server/hosting account than this file manager, or under a domain this account can't resolve. No broken link was opened."];
+            return['error'=>"Could not verify a working login URL for this site - every URL this tool could construct failed to actually reach the site's folder from this server. Tried:\n{$triedList}\n\nThis usually means the site is served from a different server/hosting account than this file manager, or under a domain this account can't resolve. No broken link was opened."];
         }
         $this->log('cms_login_as',$c['type'].':'.($uname?:$id));
         return['url'=>$probe['ok'].'/'.$fname.'?t='.$token];
@@ -17382,7 +17382,7 @@ FMIMG;
        shared hosting with multiple domains/addon domains/subdomains per
        account, where "the current request's host" and "the CMS's stored
        siteurl" are both frequently wrong for a folder that isn't the primary
-       site. Never throws — degrades to an empty list if unavailable. */
+       site. Never throws - degrades to an empty list if unavailable. */
     private function cmsCpanelDomainMatches($real){
         $matches=[];
         $collect=function($entries)use(&$matches,$real){
@@ -17403,7 +17403,7 @@ FMIMG;
             $collect($res['result']['data']??($res['data']??($res['cpanelresult']['data']??null)));
         }
         if(!array_filter($matches,fn($match)=>!empty($match['authoritative']))){
-            // Older cPanel builds don't expose domains_data — fall back to
+            // Older cPanel builds don't expose domains_data - fall back to
             // listing domain names, then asking for each one's docroot
             // individually via single_domain_data.
             $list=$this->cpNativeCall('DomainInfo','list_domains');
@@ -17465,7 +17465,7 @@ FMIMG;
     }
     /* Build every plausible base URL (scheme://host[/rel]) for a folder,
        highest-confidence first. cmsProbeUrls verifies each one live, so
-       false candidates here just get discarded — the goal is coverage across
+       false candidates here just get discarded - the goal is coverage across
        every hosting layout (single site, addon domain, subdomain, CMS in a
        subfolder, migrated/stale siteurl), not precision. */
     private function cmsLoginHostAllowed($host){
@@ -17732,7 +17732,7 @@ FMIMG;
     /* ═══ Session & Cookie Inspector ═════════════════════════════════════════
        Lists the real login sessions of the current site (WordPress or Joomla),
        lets an admin extend or revoke them, and reports the session-lifetime
-       policy. Everything runs against the site's own database — no passwords. */
+       policy. Everything runs against the site's own database - no passwords. */
     private function sessionInspectorCfg($post,&$diag=null){
         return $this->cmsFindConfig($post,$diag);
     }
@@ -17762,7 +17762,7 @@ FMIMG;
         return null;
     }
 
-    /* The config file that belongs to a site folder — or to its parent, which
+    /* The config file that belongs to a site folder - or to its parent, which
        is the hardened WordPress layout (wp-config.php above the web root). */
     private function cmsConfigIn($dir){
         $dir=rtrim((string)$dir,'/');
@@ -17909,7 +17909,7 @@ FMIMG;
         return ['best'=>$best,'source'=>$diag['source']??null,'tried'=>$diag['tried']??[],'sites'=>$sites];
     }
     /* Resolves anything an admin may type: a config file, a site folder, the web
-       root above it, a relative path — or nothing. */
+       root above it, a relative path - or nothing. */
     public function cmsResolvePath($raw){
         $p=$this->cmsConfigResolve($raw);
         return $p?:null;
@@ -17923,7 +17923,7 @@ FMIMG;
         $post=is_array($post)?$post:[];
         $diag=['source'=>null,'tried'=>[],'candidates'=>[]];
 
-        /* Stage 1 — the path the admin typed (or the UI remembered). */
+        /* Stage 1 - the path the admin typed (or the UI remembered). */
         foreach(['cfg_path','cfg_b64'] as $k){
             if(empty($post[$k]))continue;
             $raw=$k==='cfg_b64'?base64_decode((string)$post[$k],true):(string)$post[$k];
@@ -17942,7 +17942,7 @@ FMIMG;
             return null;
         }
 
-        /* Stage 2 — the answer from the previous request, if still valid. */
+        /* Stage 2 - the answer from the previous request, if still valid. */
         if(empty($post['rescan'])&&!empty($_SESSION['fm_cfg_path'])){
             $p=(string)$_SESSION['fm_cfg_path'];
             if($this->cmsConfigType($p)){
@@ -17963,7 +17963,7 @@ FMIMG;
             $cands[]=['path'=>$r,'stage'=>$stage];
         };
 
-        /* Stage 3 — this request's own surroundings: the current folder, the
+        /* Stage 3 - this request's own surroundings: the current folder, the
            manager root, the document root, then up to five levels above each
            and one level into the usual site folders. */
         $starts=[];
@@ -17990,16 +17990,16 @@ FMIMG;
             }
         }
 
-        /* Stage 4 — whatever the web server serves. */
+        /* Stage 4 - whatever the web server serves. */
         foreach($this->cmsServerRoots() as $d){
             $add($this->cmsConfigIn($d),'web server document root');
             $add($this->cmsConfigIn($d.'/..'),'web server document root');
         }
 
-        /* Stage 5 — PHP built-in servers (-t). */
+        /* Stage 5 - PHP built-in servers (-t). */
         foreach($this->cmsRunningServerRoots() as $d)$add($this->cmsConfigIn($d),'running PHP server');
 
-        /* Stage 6 — the generic scan, then the marker search. Both are more
+        /* Stage 6 - the generic scan, then the marker search. Both are more
            expensive, so they only run when nothing cheaper matched, and only
            when the caller asked for a deep search. */
         if($deep&&!$cands){
@@ -18011,7 +18011,7 @@ FMIMG;
             foreach($this->cmsFindByMarkers() as $p)$add($p,'filesystem search');
         }
 
-        /* Stage 7 — the Debian multi-site layout keeps configs in /etc. */
+        /* Stage 7 - the Debian multi-site layout keeps configs in /etc. */
         if($deep&&!$cands){
             foreach((array)@glob('/etc/wordpress/config-*.php') as $p)$add($p,'/etc/wordpress');
         }
@@ -18022,7 +18022,7 @@ FMIMG;
             return null;
         }
 
-        /* A candidate only counts once its database answers — that is what
+        /* A candidate only counts once its database answers - that is what
            makes the answer trustworthy rather than just plausible. */
         $first=null;
         foreach(array_slice($cands,0,4) as $c){
@@ -18079,7 +18079,7 @@ FMIMG;
         $cfg=$this->sessionInspectorCfg($post,$diag);
         if(!$cfg){
             $msg=!empty($diag['manual'])
-                ?'Nothing usable at "'.$diag['manual'].'" — enter the full path to wp-config.php or configuration.php, or to the folder that contains it.'
+                ?'Nothing usable at "'.$diag['manual'].'" - enter the full path to wp-config.php or configuration.php, or to the folder that contains it.'
                 :'No WordPress or Joomla configuration file could be found automatically. Type the full path to wp-config.php or configuration.php in the path field and press "Use path".';
             return['error'=>$msg,'tried'=>$diag['tried']??[]];
         }
@@ -18398,7 +18398,7 @@ FMIMG;
             /* Joomla stores no per-row expiry: the lifetime is a single global value in configuration.php. */
             $ok=$this->joomlaSetLifetime($cfg,$permMin);
             return $ok
-                ?['ok'=>true,'notice'=>'Joomla uses one global session lifetime — it is now 10 years, so this session is permanent.']
+                ?['ok'=>true,'notice'=>'Joomla uses one global session lifetime - it is now 10 years, so this session is permanent.']
                 :['error'=>'Could not update $lifetime.'];
         }
         $sessions=$rows=[];
@@ -18445,13 +18445,13 @@ FMIMG;
             // and some mail/security scanners fetch a shared link server-side
             // to build a preview *before* the human ever clicks it. If the
             // very first GET both consumed the token and deleted this file,
-            // that automated fetch — not the real user — burns the one-time
+            // that automated fetch - not the real user - burns the one-time
             // link, and the human's actual click 404s on a file that's
             // already gone. So the first GET (no &go=1) only renders a plain
             // page with a real link the human has to click; nothing is
             // touched yet, so it's harmless no matter how many times a
             // preview bot hits it. Only the second GET (&go=1, from an
-            // actual click) deletes the file and logs the user in — bots
+            // actual click) deletes the file and logs the user in - bots
             // essentially never parse HTML and follow a second link just to
             // build a preview.
             ."if(!isset(\$_GET['go'])){\n"
@@ -18467,7 +18467,7 @@ FMIMG;
             // callbacks) can print bytes to the browser before we ever get
             // to header(). If that happens, header() silently fails and the
             // visitor is stuck staring at this raw bridge file's leaked
-            // output instead of being redirected — the "weird page" that
+            // output instead of being redirected - the "weird page" that
             // isn't part of the real site. Buffering lets us always discard
             // that noise and either send a real redirect or fall back to an
             // HTML/JS redirect, so the visitor never sees this file's guts.
@@ -18558,7 +18558,7 @@ FMIMG;
             ."\\Joomla\\CMS\\Factory::\$application=\$app;\n"
             ."\$instance=\\Joomla\\CMS\\User\\User::getInstance({$uid});\n"
              ."if(!\$instance||!\$instance->id){if(isset(\$_GET['bg'])){while(ob_get_level())ob_end_clean();header('Content-Type: text/html;charset=utf-8');echo '<!doctype html><script>window.parent.postMessage({type:\"fm-cms-auto-login\",cms:\"joomla\",ok:false},\"*\");</script>';exit;}exit('User not found.');}\n"
-            // Best-effort ACL check only — never let a site with a
+            // Best-effort ACL check only - never let a site with a
             // customised/partial permissions schema hard-fail the login
             // bridge itself; if this throws, fall through and let Joomla's
             // own admin bootstrap enforce access on the next request as it
@@ -18581,7 +18581,7 @@ FMIMG;
             ."}catch(\\Throwable \$e){}\n"
             ."\$instance->setLastVisit();\n"
             // Persist the lifetime in Joomla's own configuration so the GC
-            // does not drop the session after 15 minutes of inactivity —
+            // does not drop the session after 15 minutes of inactivity -
             // which is exactly why the sign-in prompt used to come back.
             ."try{\n"
             ."  \$__fm_cfg=JPATH_BASE.'/configuration.php';\n"
@@ -18607,7 +18607,7 @@ FMIMG;
     }
 
     /* ══════════════════════════════════════════════════════════════
-       CPANEL MANAGER — auto-detect & manage cPanel / WHM accounts
+       CPANEL MANAGER - auto-detect & manage cPanel / WHM accounts
     ══════════════════════════════════════════════════════════════ */
 
     /** Detect current cPanel username from environment / script path. */
@@ -18626,7 +18626,7 @@ FMIMG;
     /** Scan known filesystem locations for a cPanel API token for $username.
      *  Real cPanel token files (/var/cpanel/authn/api_tokens/<user>/<name> or
      *  /home/<user>/.cpanel/authn/api_tokens/<name>) store the raw token
-     *  string as plain text — the filename is the token's name, not JSON.
+     *  string as plain text - the filename is the token's name, not JSON.
      *  We still accept a JSON {"token":"..."} form too, for forward-compat. */
     private function cpFindToken($username){
         foreach(["/var/cpanel/authn/api_tokens/$username","/home/$username/.cpanel/authn/api_tokens"] as $tp){
@@ -18658,9 +18658,9 @@ FMIMG;
     }
 
     /** cPanel's own local PHP API bridge. When this script's process is
-     *  running as the account's real OS user — which is the modern cPanel
+     *  running as the account's real OS user - which is the modern cPanel
      *  default (suPHP / suexec CGI / a per-user PHP-FPM pool), replacing
-     *  the old shared-user mod_php DSO setup — cpsrvd trusts that OS-level
+     *  the old shared-user mod_php DSO setup - cpsrvd trusts that OS-level
      *  identity directly over a local socket, with no token or password
      *  involved at all. This is the same mechanism cPanel's own plugins and
      *  webmail hooks use. It silently returns null (never throws) whenever
@@ -18708,10 +18708,10 @@ FMIMG;
         $username=$this->cpDetectUser();
         $diag=[];
 
-        // ── Method 0: cPanel's own local API class — zero credentials,
+        // ── Method 0: cPanel's own local API class - zero credentials,
         // works whenever PHP executes as the account's own OS user. Try
         // this before anything else: it needs no shell access, no token
-        // file, and no root — the single most universal method on modern
+        // file, and no root - the single most universal method on modern
         // shared cPanel hosting. ──
         if(is_readable('/usr/local/cpanel/php/cpanel.php')){
             $probe=$this->cpNativeCall('DomainInfo','list_domains');
@@ -18719,13 +18719,13 @@ FMIMG;
                 $_SESSION['cpanel_native']=true;
                 $this->cpSetSess($username?:'(account owner)','','native','cpanel',2083,'native_uapi');
                 return['ok'=>true,'method'=>'native_uapi','user'=>$username?:'(account owner)','api'=>'cpanel',
-                       'port'=>2083,'auto'=>true,'note'=>'Connected via cPanel\'s local API — no login needed.'];
+                       'port'=>2083,'auto'=>true,'note'=>'Connected via cPanel\'s local API - no login needed.'];
             }
-            $diag[]='cPanel local API class found but the call was rejected — this process is likely not '
+            $diag[]='cPanel local API class found but the call was rejected - this process is likely not '
                    .'running under the account\'s own OS user (e.g. shared mod_php instead of suPHP/FPM-per-user).'
                    .($probe!==null?' Raw response: '.substr(json_encode($probe),0,200):' No response (exception or non-array return).');
         } else {
-            $diag[]='cPanel local API class not found at /usr/local/cpanel/php/cpanel.php — not a cPanel-managed box, or this account cannot see cPanel core files.';
+            $diag[]='cPanel local API class not found at /usr/local/cpanel/php/cpanel.php - not a cPanel-managed box, or this account cannot see cPanel core files.';
         }
 
         if(function_exists('shell_exec')){
@@ -18750,7 +18750,7 @@ FMIMG;
                 }
             }
             $diag[]=$found2?'whmapi1 binary present but returned no usable result (not root, or WHM CLI disabled for this user).':'whmapi1 binary not present at known paths.';
-            // ── Method 3: uapi CLI — auto-create API token for this user ──
+            // ── Method 3: uapi CLI - auto-create API token for this user ──
             if($username){
                 $tn='fm_auto_'.substr(md5(gethostname().$username),0,8);
                 $foundU=false;
@@ -18773,7 +18773,7 @@ FMIMG;
                 $diag[]='Could not determine the cPanel account username from environment or script path, so the uapi CLI method was skipped.';
             }
         } else {
-            $diag[]='shell_exec() is disabled on this host (common in disable_functions on shared hosting) — CLI-based methods (whmapi1/uapi) were skipped entirely.';
+            $diag[]='shell_exec() is disabled on this host (common in disable_functions on shared hosting) - CLI-based methods (whmapi1/uapi) were skipped entirely.';
         }
 
         // ── Method 4: Read existing API tokens from filesystem ──
@@ -18795,7 +18795,7 @@ FMIMG;
             }
         }
 
-        // Nothing auto-detected — caller must show manual connect UI
+        // Nothing auto-detected - caller must show manual connect UI
         return['ok'=>false,'method'=>'none','detected_user'=>$username,'auto'=>false,'diagnostics'=>$diag];
     }
 
@@ -18914,7 +18914,7 @@ FMIMG;
                 header('Content-Type:application/json');
                 echo json_encode(['accounts'=>$accts,'api'=>'whm','user'=>$c['user'],'port'=>$c['port'],'method'=>$method]);exit;
             } else {
-                // cPanel UAPI — native local class first (zero-cost, no shell needed), then CLI.
+                // cPanel UAPI - native local class first (zero-cost, no shell needed), then CLI.
                 $domain=$c['user'];
                 $nd=$this->cpNativeCall('DomainInfo','domains_data');
                 if($this->cpNativeOk($nd)){
@@ -19057,7 +19057,7 @@ FMIMG;
        The tool itself lives at the top of this file in the <<WM2>>
        block, where it can be read as what it is: a folder of mail, a
        mail server, or an address a site names. Nothing of it is done
-       inside this class any more — the old automatic sign-in is gone
+       inside this class any more - the old automatic sign-in is gone
        with the tier list that could not find mail.
     ══════════════════════════════════════════════════════════════ */
 
@@ -19446,7 +19446,7 @@ FMIMG;
 
        Joomla has no public directory API: update.joomla.org publishes only
        core update feeds, and extensions.joomla.org answers HTML. So for
-       Joomla this window does what can be done honestly — it reads the
+       Joomla this window does what can be done honestly - it reads the
        installed extensions from the site's own database, installs a package
        you upload, enables and disables, and opens the Joomla Extensions
        Directory in a browser tab for browsing. It never pretends to list the
@@ -19489,7 +19489,7 @@ FMIMG;
         return['ok'=>true,'body'=>(string)$body,'code'=>$code];
     }
 
-    /* The repository API takes GET only — a POST is answered with HTTP 405 and
+    /* The repository API takes GET only - a POST is answered with HTTP 405 and
        the words "This API only serves GET requests.", so nothing is posted. */
     private function pieWpApi($action,array $req){
         $args=['action'=>$action];
@@ -19640,7 +19640,7 @@ FMIMG;
     /* ── repository detail for plugins that are already installed ───────────
        The installed list is read from the files on disk, so it carries no
        icon, rating or update information. Those all live in the repository,
-       which has to be asked one slug at a time — done here in parallel,
+       which has to be asked one slug at a time - done here in parallel,
        because asking in series would hold a PHP worker for one round trip per
        plugin and this server only has a handful of them. A slow or unreachable
        repository costs the list its icons, never the list itself. */
@@ -19713,7 +19713,7 @@ FMIMG;
     /* Installed plugins, read the way the CMS itself records them: the files on
        disk, cross-checked against the active_plugins option. A dead database
        still lists the files, because the files are the truth about what is
-       installed — only "active" needs the database. */
+       installed - only "active" needs the database. */
     public function pieWpInstalled(){
         list($dir,$why)=$this->pieWpPluginsDir();
         if(!$dir)return['ok'=>false,'error'=>$why];
@@ -19739,7 +19739,7 @@ FMIMG;
         $active=[];$dbError='';
         /* mysqli throws in PHP 8 rather than returning false, and @ does not
            suppress exceptions. A site whose tables are missing, half-installed
-           or unreachable must therefore be caught here — otherwise one failed
+           or unreachable must therefore be caught here - otherwise one failed
            query escapes as a server error with a stack trace in the middle of
            the manager's page, and the whole window stops answering. The list
            of what is on disk is still returned, with the reason alongside. */
@@ -19863,7 +19863,7 @@ FMIMG;
         if($errno!==0)return['ok'=>false,'error'=>'The active_plugins option could not be written: '.$error];
         return['ok'=>true,'active'=>$want,'changed'=>true,'count'=>count($arr),
                'note'=>$want
-                 ?'Active. The plugin\'s own activation routine did not run — this window writes the option the CMS reads instead of loading plugin code inside the manager. If the plugin needs a one-time setup, open wp-admin once and it will finish there.'
+                 ?'Active. The plugin\'s own activation routine did not run - this window writes the option the CMS reads instead of loading plugin code inside the manager. If the plugin needs a one-time setup, open wp-admin once and it will finish there.'
                  :'Inactive. Its deactivation routine did not run, for the same reason.'];
     }
 
@@ -19911,7 +19911,7 @@ FMIMG;
                 $zip->close();return['ok'=>false,'error'=>'The archive contains an unsafe path ('.$name.'), so nothing was unpacked.'];
             }
         }
-        if(@$zip->extractTo($stage)!==true){$zip->close();return['ok'=>false,'error'=>'The archive could not be unpacked — check the free disk space and the folder permissions.'];}
+        if(@$zip->extractTo($stage)!==true){$zip->close();return['ok'=>false,'error'=>'The archive could not be unpacked - check the free disk space and the folder permissions.'];}
         $zip->close();
         $tops=[];
         foreach((array)@scandir($stage) as $e){if($e!=='.'&&$e!=='..')$tops[]=$e;}
@@ -20051,7 +20051,7 @@ FMIMG;
         $found=$this->pieWpFindPluginFile($root);
         if(!$found){
             $this->pieRmTree($stage);
-            return['ok'=>false,'error'=>'That package holds no WordPress plugin — no PHP file in it carries a "Plugin Name" header. A theme or a Joomla package will not install here.'];
+            return['ok'=>false,'error'=>'That package holds no WordPress plugin - no PHP file in it carries a "Plugin Name" header. A theme or a Joomla package will not install here.'];
         }
         $srcDir=$found['dir'];$main=$found['file'];
         $hdr=$this->cmsParseHeader((string)@file_get_contents($srcDir.'/'.$main,false,null,0,8192),
@@ -20122,7 +20122,7 @@ FMIMG;
         /* Never delete a plugin the CMS still counts as active. Note this
            fails closed: if the site's database cannot be reached there is no
            way to know whether the plugin is active, so the deletion is
-           refused rather than going ahead on an empty answer — an unreachable
+           refused rather than going ahead on an empty answer - an unreachable
            database used to look exactly like "nothing is active". */
         $active=[];
         try{
@@ -20138,9 +20138,9 @@ FMIMG;
         }
         $rec=(string)($f['plugin_file']??$f['file']);
         if($rec!==''&&in_array($rec,$active,true))
-            return['ok'=>false,'error'=>'That plugin is active. Deactivate it first — deleting an active plugin leaves the site calling files that are gone.'];
+            return['ok'=>false,'error'=>'That plugin is active. Deactivate it first - deleting an active plugin leaves the site calling files that are gone.'];
         $this->pieRmTree($f['dir']);
-        if(@file_exists($f['dir']))return['ok'=>false,'error'=>'The folder could not be removed — it is not writable by this account.'];
+        if(@file_exists($f['dir']))return['ok'=>false,'error'=>'The folder could not be removed - it is not writable by this account.'];
         $this->log('plugin_delete',$f['slug']);
         return['ok'=>true,'slug'=>$f['slug'],'message'=>'Deleted '.$f['slug'].'.'];
     }
@@ -20180,8 +20180,8 @@ FMIMG;
                flag alone does not mean that: Joomla leaves most of its own
                extensions unprotected, so calling the rest "third party" would
                have been wrong on a freshly installed site. */
-            /* the manifest is not always named after the element — Joomla's own
-               com_actionlogs ships actionlogs.xml — so any manifest in the
+            /* the manifest is not always named after the element - Joomla's own
+               com_actionlogs ships actionlogs.xml - so any manifest in the
                folder counts as the folder being a real one */
             $hasManifest=function($d){
                 if(!@is_dir($d))return false;
@@ -20270,7 +20270,7 @@ FMIMG;
         $this->log($want?'extension_enable':'extension_disable',$row['name']);
         return['ok'=>true,'enabled'=>$want,'changed'=>true,'name'=>$row['name'],
                'note'=>$want
-                 ?'Enabled. The extension\'s own install routine did not run — this window writes the row Joomla reads. If it needs a one-time setup, open its own screen in the administrator once.'
+                 ?'Enabled. The extension\'s own install routine did not run - this window writes the row Joomla reads. If it needs a one-time setup, open its own screen in the administrator once.'
                  :'Disabled. The Joomla cache was cleared so the change applies at once.'];
     }
 
@@ -20287,7 +20287,7 @@ FMIMG;
         if(!$row)return['ok'=>false,'error'=>'No extension carries that id on this site.'];
         if((int)$row['protected']===1)
             return['ok'=>false,'error'=>$row['name'].' is a core extension and is not removed from here.'];
-        return['ok'=>false,'error'=>'Removing a Joomla extension means undoing its manifest — the files, its menu entries, its schema and its update row. That is Joomla\'s own uninstaller\'s job, and guessing at it leaves a site half-removed. Use Uninstall in the administrator for this one; this window installs, enables and disables.'];
+        return['ok'=>false,'error'=>'Removing a Joomla extension means undoing its manifest - the files, its menu entries, its schema and its update row. That is Joomla\'s own uninstaller\'s job, and guessing at it leaves a site half-removed. Use Uninstall in the administrator for this one; this window installs, enables and disables.'];
     }
 
     /* ── the endpoint ────────────────────────────────────────────────────── */
@@ -20384,7 +20384,7 @@ FMIMG;
         }
         if($xml===''){
             $this->pieRmTree($stage);
-            return['ok'=>false,'error'=>'That package holds no Joomla manifest — no XML file in it declares an <extension>. A WordPress plugin will not install here.'];
+            return['ok'=>false,'error'=>'That package holds no Joomla manifest - no XML file in it declares an <extension>. A WordPress plugin will not install here.'];
         }
         $x=@simplexml_load_file($xml);
         if(!$x){$this->pieRmTree($stage);return['ok'=>false,'error'=>'The manifest could not be parsed.'];}
@@ -20501,7 +20501,1251 @@ FMIMG;
         $this->log('extension_install',$element.' ('.$type.')');
         return['ok'=>true,'id'=>$have,'element'=>$element,'type'=>$type,'name'=>(string)($x->name??$element),
                'version'=>(string)($x->version??''),'placed'=>$dest,'row'=>true,
-               'message'=>'Installed '.$element.' ('.$type.'). It is not enabled yet, and its own install script and SQL did not run — enable it here, then open its screen in the administrator once so it can finish any setup it needs.'];
+               'message'=>'Installed '.$element.' ('.$type.'). It is not enabled yet, and its own install script and SQL did not run - enable it here, then open its screen in the administrator once so it can finish any setup it needs.'];
+    }
+    /* ══ Wordfence Controller ═════════════════════════════════════════════════
+       One window that drives the Wordfence plugin already installed on this
+       server: its settings, its firewall, its blocks, its scan, its logs and
+       its caches.
+
+       It finds the plugin by walking the sites the manager's own scanner
+       reports and looking for wp-content/plugins/wordfence/wordfence.php, so
+       nothing has to be configured. Where several sites carry it, the site is
+       chosen in its own window first, the same way the Plugins Installer does.
+
+       Two kinds of work happen here and they are deliberately kept apart:
+
+       1. Reading and writing the plugin's own tables is done directly over
+          mysqli. It is fast, it cannot be broken by a plugin's PHP, and it is
+          what Wordfence itself does - wfConfig is a key/value table.
+
+       2. Anything that must run Wordfence's *own code* - starting a scan,
+          creating a block, revoking 2FA, installing the extended-protection
+          bootstrap, exporting diagnostics - is run in a separate PHP process
+          that boots WordPress and calls the plugin's classes. Booting a CMS
+          inside the manager's own request is how one fatal error in a plugin
+          takes the file manager down with it; booting it in a child process
+          cannot. The child is a temporary file, runs as the same user, has a
+          hard time limit, and prints one JSON object.
+
+       Every setting this window offers is declared in wfcCatalog() with the
+       type it has to be validated as. Wordfence stores booleans as '1'/'0',
+       and a stray 'true' or 'yes' in a config row is read back as truthy by
+       some code paths and false by others, so the write path coerces by type
+       rather than storing whatever the browser sent. */
+
+    /* ── the catalogue ─────────────────────────────────────────────────────
+       [ name, label, type, group, choices (csv), note ]
+       type: bool | int | text | textarea | select | masked
+       The labels and the choices are Wordfence's own wording, taken from its
+       admin screens and from wfConfig::$defaultConfig, so a setting looks the
+       same here as it does there. Settings that exist in the table but are
+       not catalogued are still readable and writable from the Raw tab. */
+    private function wfcCatalog(){
+        $c=[
+        /* firewall */
+        ['firewallEnabled','Web Application Firewall','bool','firewall','','Runs the Wordfence rules before WordPress loads.'],
+        ['autoBlockScanners','Block IPs that scan for vulnerable sites','bool','firewall','',''],
+        ['disableWAFIPBlocking','Disable Wordfence IP blocking at the firewall','bool','firewall','','The firewall still logs, but never refuses a request.'],
+        ['disableCodeExecutionUploads','Disable code execution in the uploads folder','bool','firewall','',''],
+        ['neverBlockBG','Who is never blocked by rate limiting','select','firewall','neverBlockVerified|neverBlockBots|neverBlockNone',''],
+        ['blockedTime','How long a rate-limited visitor stays blocked (seconds)','int','firewall','',''],
+        ['blockCustomText','Text shown on the block page','textarea','firewall','',''],
+        ['maxGlobalRequests','Rate limit: requests per minute (any visitor)','text','firewall','','DISABLED, or a number.'],
+        ['maxGlobalRequests_action','…and what to do','select','firewall','throttle|block',''],
+        ['maxRequestsCrawlers','Rate limit: crawler requests per minute','text','firewall','',''],
+        ['maxRequestsCrawlers_action','…and what to do','select','firewall','throttle|block',''],
+        ['maxRequestsHumans','Rate limit: human requests per minute','text','firewall','',''],
+        ['maxRequestsHumans_action','…and what to do','select','firewall','throttle|block',''],
+        ['max404Crawlers','Rate limit: crawler 404s per minute','text','firewall','',''],
+        ['max404Crawlers_action','…and what to do','select','firewall','throttle|block',''],
+        ['max404Humans','Rate limit: human 404s per minute','text','firewall','',''],
+        ['max404Humans_action','…and what to do','select','firewall','throttle|block',''],
+        ['whitelisted','Allowlisted IP addresses','textarea','firewall','','One per line. Never blocked, never rate limited.'],
+        ['wafAlertWhitelist','IPs ignored by attack alerting','textarea','firewall','',''],
+        ['bannedURLs','Blocked URLs','textarea','firewall','','One per line, matched against the request URI.'],
+        /* login security */
+        ['loginSecurityEnabled','Brute force protection','bool','login','',''],
+        ['loginSec_maxFailures','Failed logins allowed before lockout','int','login','',''],
+        ['loginSec_countFailMins','…counted over (minutes)','int','login','',''],
+        ['loginSec_lockoutMins','Lockout lasts (minutes)','int','login','',''],
+        ['loginSec_maxForgotPasswd','Forgot-password attempts allowed','int','login','',''],
+        ['loginSec_lockInvalidUsers','Immediately lock out invalid usernames','bool','login','',''],
+        ['loginSec_maskLoginErrors','Hide login errors','bool','login','',''],
+        ['loginSec_blockAdminReg','Block "admin" as a username at registration','bool','login','',''],
+        ['loginSec_disableAuthorScan','Block discovery of usernames via ?author=N','bool','login','',''],
+        ['loginSec_disableApplicationPasswords','Block WordPress application passwords','bool','login','',''],
+        ['loginSec_disableOEmbedAuthor','Block author names in oEmbed','bool','login','',''],
+        ['loginSec_strongPasswds_enabled','Enforce strong passwords','bool','login','',''],
+        ['loginSec_strongPasswds','…for','select','login','pubs|none|subscribers|authors|editors|admins',''],
+        ['loginSec_breachPasswds_enabled','Block passwords found in a breach','bool','login','',''],
+        ['loginSec_breachPasswds','…for','select','login','admins|pubs|none|subscribers|authors|editors',''],
+        ['loginSec_requireAdminTwoFactor','Require 2FA for administrators','bool','login','',''],
+        ['loginSec_enableSeparateTwoFactor','Use a separate 2FA enrolment step','bool','login','',''],
+        ['loginSec_userBlacklist','Immediately banned usernames','textarea','login','','One per line.'],
+        ['howGetIPs','How the visitor IP is found','text','login','','Leave blank to let Wordfence detect it.'],
+        ['howGetIPs_trusted_proxies','Trusted proxies','textarea','login','','One per line.'],
+        /* scanner */
+        ['scheduledScansEnabled','Scheduled scans','bool','scan','',''],
+        ['schedMode','Scheduling mode','select','scan','automatic|manual',''],
+        ['manualScanType','Manual schedule','select','scan','onceDaily|twiceDaily',''],
+        ['schedStartHour','Start hour (server time, -1 = automatic)','int','scan','',''],
+        ['scanType','Scan type','select','scan','quick|standard|high|custom',''],
+        ['lowResourceScansEnabled','Low-resource scanning','bool','scan','','Slower, but survives small hosts and tight memory limits.'],
+        ['maxMem','Memory limit for a scan (MB)','int','scan','',''],
+        ['maxExecutionTime','Max execution time (seconds, 0 = auto)','int','scan','',''],
+        ['scan_maxIssues','Stop after this many issues','int','scan','',''],
+        ['scan_maxDuration','Stop after this many seconds','int','scan','',''],
+        ['scan_max_resume_attempts','Resume attempts before a scan is abandoned','int','scan','',''],
+        ['scan_exclude','Files and folders excluded from the scan','textarea','scan','','One pattern per line.'],
+        ['scan_include_extra','Extra files and folders to scan','textarea','scan','','One per line.'],
+        ['scan_force_ipv4_start','Force IPv4 when starting a scan','bool','scan','',''],
+        ['startScansRemotely','Start scans remotely (Wordfence Central)','bool','scan','',''],
+        ['scansEnabled_core','Compare core files against the repository','bool','scan','',''],
+        ['scansEnabled_themes','Compare theme files','bool','scan','',''],
+        ['scansEnabled_plugins','Compare plugin files','bool','scan','',''],
+        ['scansEnabled_coreUnknown','Report files in core that do not belong','bool','scan','',''],
+        ['scansEnabled_malware','Scan for known malware signatures','bool','scan','',''],
+        ['scansEnabled_fileContents','Scan file contents for suspicious code','bool','scan','',''],
+        ['scansEnabled_fileContentsGSB','Check file contents against the Safe Browsing list','bool','scan','',''],
+        ['scansEnabled_posts','Scan posts and pages','bool','scan','',''],
+        ['scansEnabled_comments','Scan comments','bool','scan','',''],
+        ['scansEnabled_suspiciousOptions','Check WordPress options for suspicious values','bool','scan','',''],
+        ['scansEnabled_oldVersions','Warn about out-of-date plugins and themes','bool','scan','',''],
+        ['scansEnabled_suspiciousAdminUsers','Warn about suspicious administrator accounts','bool','scan','',''],
+        ['scansEnabled_passwds','Check password strength of existing users','bool','scan','',''],
+        ['scansEnabled_diskSpace','Warn when disk space is low','bool','scan','',''],
+        ['scansEnabled_wafStatus','Check that the firewall is enabled','bool','scan','',''],
+        ['scansEnabled_checkReadableConfig','Warn if wp-config.php is readable','bool','scan','',''],
+        ['scansEnabled_checkHowGetIPs','Check how the visitor IP is detected','bool','scan','',''],
+        ['scansEnabled_checkGSB','Check the site against the Safe Browsing list','bool','scan','',''],
+        ['scansEnabled_highSense','High-sensitivity malware scan','bool','scan','','More thorough, more false positives.'],
+        ['scansEnabled_scanImages','Scan image files','bool','scan','',''],
+        ['scansEnabled_suspectedFiles','Report files that look out of place','bool','scan','',''],
+        ['scansEnabled_geoipSupport','Geo IP support','bool','scan','',''],
+        ['scansEnabled_wpscan_fullPathDisclosure','Check for full path disclosure','bool','scan','',''],
+        ['scansEnabled_wpscan_directoryListingEnabled','Check for directory listing','bool','scan','',''],
+        ['other_scanOutside','Scan files outside the WordPress folder','bool','scan','',''],
+        ['checkSpamIP','Check if this server is on a spam list','bool','scan','',''],
+        ['spamvertizeCheck','Check posts and comments for spamvertizing','bool','scan','',''],
+        ['advancedCommentScanning','Advanced comment scanning','bool','scan','',''],
+        /* alerts */
+        ['alertEmails','Where alerts are sent','textarea','alerts','','One address per line. Blank = the site admin.'],
+        ['alert_maxHourly','Max alerts per hour','int','alerts','',''],
+        ['alertOn_severityLevel','Minimum severity that raises an alert','select','alerts','1|2|3|4','1 low · 2 medium · 3 high · 4 critical'],
+        ['alertOn_block','Alert on a firewall block','bool','alerts','',''],
+        ['alertOn_loginLockout','Alert on a login lockout','bool','alerts','',''],
+        ['alertOn_breachLogin','Alert on a login with a breached password','bool','alerts','',''],
+        ['alertOn_lostPasswdForm','Alert when someone uses the forgot-password form','bool','alerts','',''],
+        ['alertOn_adminLogin','Alert on an administrator login','bool','alerts','',''],
+        ['alertOn_nonAdminLogin','Alert on a non-administrator login','bool','alerts','',''],
+        ['alertOn_firstAdminLoginOnly','…only the first time from a new device','bool','alerts','',''],
+        ['alertOn_firstNonAdminLoginOnly','…only the first time from a new device','bool','alerts','',''],
+        ['alertOn_scanIssues','Alert on new scan issues','bool','alerts','',''],
+        ['alertOn_throttle','Alert on throttling','bool','alerts','',''],
+        ['alertOn_update','Alert on a Wordfence update','bool','alerts','',''],
+        ['alertOn_wordfenceDeactivated','Alert if Wordfence is deactivated','bool','alerts','',''],
+        ['alertOn_wafDeactivated','Alert if the firewall is deactivated','bool','alerts','',''],
+        ['wafAlertOnAttacks','Email me when attacks exceed a threshold','bool','alerts','',''],
+        ['wafAlertInterval','…at most once every (seconds)','int','alerts','',''],
+        ['wafAlertThreshold','…when attacked by this many unique IPs in an hour','int','alerts','',''],
+        ['email_summary_enabled','Email activity report','bool','alerts','',''],
+        ['email_summary_interval','…how often','select','alerts','weekly|monthly',''],
+        ['email_summary_excluded_directories','…ignore these folders','text','alerts','',''],
+        ['email_summary_dashboard_widget_enabled','Show the activity report on the dashboard','bool','alerts','',''],
+        ['notification_securityAlerts','Site notifications: security alerts','bool','alerts','',''],
+        ['notification_scanStatus','Site notifications: scan status','bool','alerts','',''],
+        ['notification_updatesNeeded','Site notifications: updates needed','bool','alerts','',''],
+        ['notification_productUpdates','Site notifications: product updates','bool','alerts','',''],
+        ['notification_promotions','Site notifications: promotions','bool','alerts','',''],
+        ['notification_blogHighlights','Site notifications: Wordfence blog','bool','alerts','',''],
+        ['security_news_wp_enabled','Security news: WordPress','bool','alerts','',''],
+        ['security_news_wf_enabled','Security news: Wordfence','bool','alerts','',''],
+        /* live traffic */
+        ['liveTrafficEnabled','Live traffic','bool','traffic','','Records every request. Costs disk and a little speed.'],
+        ['liveTraf_maxRows','Rows kept','int','traffic','',''],
+        ['liveTraf_maxAge','Days kept','int','traffic','',''],
+        ['liveTraf_ignoreUsers','Ignored usernames','textarea','traffic','',''],
+        ['liveTraf_ignoreIPs','Ignored IPs','textarea','traffic','',''],
+        ['liveTraf_ignoreUA','Ignored browsers (user-agent)','textarea','traffic','',''],
+        ['liveTraf_ignorePublishers','Ignore publisher/subscriber users','bool','traffic','',''],
+        ['liveTraf_displayExpandedRecords','Show expanded records by default','bool','traffic','',''],
+        ['liveActivityPauseEnabled','Allow pausing live traffic','bool','traffic','',''],
+        ['actUpdateInterval','Update interval (seconds)','int','traffic','',''],
+        /* audit log */
+        ['auditLogMode','Audit log','select','audit','default|enabled|disabled|all',''],
+        ['displayTopLevelAuditLog','Audit log as a top level menu','bool','audit','',''],
+        /* advanced */
+        ['debugOn','Debug mode','bool','advanced','','Writes a debug log. Turn it off when finished.'],
+        ['autoUpdate','Update Wordfence automatically','bool','advanced','',''],
+        ['deleteTablesOnDeact','Delete all Wordfence data on deactivation','bool','advanced','','Off means deactivating keeps your settings and logs.'],
+        ['disableConfigCaching','Disable configuration caching','bool','advanced','',''],
+        ['cacheType','Caching','select','advanced','disabled|falcon',''],
+        ['addCacheComment','Add a caching comment to the page','bool','advanced','',''],
+        ['allowHTTPSCaching','Allow caching of HTTPS pages','bool','advanced','',''],
+        ['ssl_verify','Verify SSL certificates on outbound calls','bool','advanced','',''],
+        ['other_WFNet','Participate in the Wordfence Security Network','bool','advanced','','Shares attack data; a free key gets nothing without it.'],
+        ['other_hideWPVersion','Hide the WordPress version','bool','advanced','',''],
+        ['other_blockBadPOST','Block malformed POST requests','bool','advanced','',''],
+        ['other_pwStrengthOnUpdate','Enforce strong passwords on profile update','bool','advanced','',''],
+        ['other_bypassLitespeedNoabort','Bypass LiteSpeed no-abort','bool','advanced','',''],
+        ['enableRemoteIpLookup','Look up visitor IPs remotely','bool','advanced','',''],
+        ['showAdminBarMenu','Show the Wordfence menu in the admin bar','bool','advanced','',''],
+        ['displayTopLevelOptions','Wordfence Options as a top level menu','bool','advanced','',''],
+        ['displayTopLevelBlocking','Blocking as a top level menu','bool','advanced','',''],
+        ['displayTopLevelLiveTraffic','Live Traffic as a top level menu','bool','advanced','',''],
+        ['displayAutomaticBlocks','Show automatically created blocks','bool','advanced','',''],
+        ['allowLegacy2FA','Allow the legacy 2FA method','bool','advanced','',''],
+        ['wordfenceI18n','Translate the Wordfence menus','bool','advanced','',''],
+        ['ajaxWatcherDisabled_front','Disable the AJAX watcher on the front end','bool','advanced','',''],
+        ['ajaxWatcherDisabled_admin','Disable the AJAX watcher in wp-admin','bool','advanced','',''],
+        ['apiKey','Licence key','masked','advanced','','Shown masked. Pasting a key replaces the current one.'],
+        ];
+        $out=[];
+        foreach($c as $r)$out[]=['name'=>$r[0],'label'=>$r[1],'type'=>$r[2],'group'=>$r[3],
+                                'choices'=>$r[4]?explode('|',$r[4]):[],'note'=>$r[5]];
+        return $out;
+    }
+
+    /* The login-security module keeps its own table, not wfConfig. */
+    private function wfcLsCatalog(){
+        return [
+        ['enable-2fa','Two-factor authentication','bool','login',''],
+        ['require-2fa.administrator','…required for administrators','bool','login',''],
+        ['require-2fa-grace-period-enabled','Give users a grace period to enrol','bool','login',''],
+        ['2fa-user-grace-period','…grace period (days)','int','login',''],
+        ['enable-passkeys','Passkeys (passwordless login)','bool','login',''],
+        ['passkey-sign-count-mode','Passkey sign count handling','select','login','reject-lower|ignore',''],
+        ['enable-auth-captcha','CAPTCHA on the login form','bool','login',''],
+        ['recaptcha-site-key','…reCAPTCHA site key','text','login',''],
+        ['recaptcha-secret','…reCAPTCHA secret','masked','login',''],
+        ['recaptcha-threshold','…score threshold (0.0 - 1.0)','text','login',''],
+        ['recaptcha-test-mode','…test mode (does not block)','bool','login',''],
+        ['remember-device','Allow remembering a device','bool','login',''],
+        ['remember-device-duration','…for (seconds)','int','login',''],
+        ['xmlrpc-enabled','XML-RPC enabled','bool','login',''],
+        ['allow-xml-rpc','Allow XML-RPC from trusted sources','bool','login',''],
+        ['ip-source','How the visitor IP is found','text','login',''],
+        ['ip-trusted-proxies','Trusted proxies','textarea','login',''],
+        ['whitelisted','Allowlisted IPs for login security','textarea','login',''],
+        ['use-ntp','Use NTP to check the server clock','bool','login',''],
+        ['allow-disabling-ntp','…allow Wordfence to disable it','bool','login',''],
+        ['enable-woocommerce-integration','WooCommerce integration','bool','login',''],
+        ['enable-woocommerce-account-integration','WooCommerce account integration','bool','login',''],
+        ['enable-shortcode','Login-security shortcodes','bool','login',''],
+        ['enable-login-history-columns','Login history columns','bool','login',''],
+        ['always-show-login-security-menu','Always show the login security menu','bool','login',''],
+        ['delete-deactivation','Delete login security data on deactivation','bool','login',''],
+        ];
+    }
+
+    private function wfcGroups(){
+        return [['firewall','Firewall & WAF'],['login','Login security'],
+                ['scan','Scanner'],['alerts','Alerts'],['traffic','Live traffic'],
+                ['audit','Audit log'],['advanced','Advanced']];
+    }
+
+    /* ── small database helpers ──────────────────────────────────────────── */
+    private function wfcRows($link,$sql){
+        $out=[];$res=@mysqli_query($link,$sql);
+        if(!$res)return$out;
+        while($r=@mysqli_fetch_assoc($res))$out[]=$r;
+        @mysqli_free_result($res);return$out;
+    }
+    private function wfcOne($link,$sql){
+        $res=@mysqli_query($link,$sql);
+        if(!$res)return null;
+        $r=@mysqli_fetch_assoc($res);@mysqli_free_result($res);return$r?:null;
+    }
+    private function wfcEsc($link,$v){return mysqli_real_escape_string($link,(string)$v);}
+    /* A prefix comes from the site's own config file, so it is checked rather
+       than trusted before it reaches a query. */
+    private function wfcT($prefix,$name){
+        $p=preg_replace('/[^A-Za-z0-9_]/','',(string)$prefix);
+        $n=preg_replace('/[^A-Za-z0-9_]/','',(string)$name);
+        return '`'.$p.$n.'`';
+    }
+
+    /* ── finding the plugin ──────────────────────────────────────────────── */
+    public function wfcSites(){
+        $scan=$this->cmsScan();
+        $out=[];
+        foreach((array)($scan['sites']??[]) as $s){
+            if((string)($s['type']??'')!=='wordpress')continue;
+            $dir=(string)($s['dir']??dirname((string)$s['config']));
+            $pd=$dir.'/wp-content/plugins/wordfence';
+            $main=$pd.'/wordfence.php';
+            $ver='';$installed=@is_file($main);
+            if($installed){
+                $h=(string)@file_get_contents($main,false,null,0,4096);
+                if(preg_match('/^\s*\**\s*Version:\s*([0-9][^\r\n]*)/mi',$h,$m))$ver=trim($m[1]);
+            }
+            $logs=$dir.'/wp-content/wflogs';
+            $size=0;$files=0;
+            if($installed&&@is_dir($pd)){
+                /* one pass with RecursiveDirectoryIterator, bounded: a plugin
+                   folder of 17 MB must not turn into a long walk per keystroke */
+                try{
+                    $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($pd,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST);
+                    foreach($it as $f){if(++$files>20000)break;if($f->isFile())$size+=$f->getSize();}
+                }catch(Throwable $e){}
+            }
+            $out[]=['dir'=>$dir,'config'=>(string)$s['config'],'installed'=>$installed,
+                    'version'=>$ver,'plugin'=>$pd,'logs'=>$logs,
+                    'logs_exists'=>@is_dir($logs),'plugin_files'=>$files,'plugin_bytes'=>$size,
+                    'source'=>(string)($s['source']??'')];
+        }
+        usort($out,function($a,$b){
+            if($a['installed']!==$b['installed'])return$a['installed']?-1:1;
+            return strcmp($a['dir'],$b['dir']);});
+        return['ok'=>true,'sites'=>$out,'php'=>PHP_VERSION];
+    }
+
+    /* Every action below needs the same three things: which site, a database
+       link, and proof the plugin is really there. */
+    private function wfcOpen($post){
+        $cfg=trim((string)($post['config']??''));
+        if($cfg===''){
+            $s=$this->wfcSites();
+            $inst=array_values(array_filter((array)$s['sites'],function($x){return!empty($x['installed']);}));
+            if(count($inst)===1)$cfg=(string)$inst[0]['config'];
+            elseif(!$inst)return[null,null,null,'No WordPress site on this server has Wordfence installed.'];
+            else return[null,null,null,'Several sites have Wordfence. Choose one first.'];
+        }
+        if(!@is_file($cfg))return[null,null,null,'That site\'s configuration file is not there any more: '.$cfg];
+        $dir=dirname($cfg);
+        $pd=$dir.'/wp-content/plugins/wordfence/wordfence.php';
+        if(!@is_file($pd))return[null,null,null,'Wordfence is not installed in '.$dir.'/wp-content/plugins.'];
+        list($link,$c,$err)=$this->cmsConnect($cfg);
+        if($err)return[null,null,null,$err];
+        $site=['dir'=>$dir,'config'=>$cfg,'plugin'=>dirname($pd),
+               'logs'=>$dir.'/wp-content/wflogs','prefix'=>(string)($c['prefix']??'wp_')];
+        return[$site,$link,$c,null];
+    }
+
+    /* ── running Wordfence's own code in a child process ─────────────────── */
+    private function wfcPhpBin(){
+        foreach(['/usr/bin/php','/usr/bin/php8.4','/usr/local/bin/php'] as $b)
+            if(@is_executable($b))return$b;
+        $b=@trim((string)@shell_exec('command -v php 2>/dev/null'));
+        return$b?$b:'php';
+    }
+    /* $code runs after WordPress and the plugin are loaded and must print one
+       JSON object. Anything it prints before that is kept as 'raw' so a fatal
+       error is visible here instead of arriving as an empty answer. */
+    private function wfcBoot($root,$code,$timeout=150){
+        $root=rtrim((string)$root,'/');
+        $load=$root.'/wp-load.php';
+        if(!@is_file($load))return['ok'=>false,'error'=>'That site has no wp-load.php, so its plugins cannot be started.'];
+        $f=@tempnam(sys_get_temp_dir(),'wfc');
+        if(!$f)return['ok'=>false,'error'=>'A temporary file for the scan could not be created.'];
+        $p=$f.'.php';@rename($f,$p);
+        $src="<?php\ndefine('WP_USE_THEMES',false);\ndefine('WFC_CHILD',true);\n"
+            ."require(".var_export($load,true).");\n"
+            ."if(!class_exists('wfConfig')){echo json_encode(['ok'=>false,'error'=>'WordPress loaded but the Wordfence classes did not. Is the plugin active?']);exit;}\n"
+            .$code."\n";
+        if(@file_put_contents($p,$src)===false)return['ok'=>false,'error'=>'The temporary script could not be written.'];
+        $cmd='timeout '.max(10,(int)$timeout).' '.escapeshellarg($this->wfcPhpBin())
+            .' -d display_errors=0 '.escapeshellarg($p).' 2>&1';
+        $out=(string)@shell_exec($cmd);
+        @unlink($p);
+        $i=strpos($out,'{');
+        $j=strrpos($out,'}');
+        if($i!==false&&$j!==false&&$j>$i){
+            $d=json_decode(substr($out,$i,$j-$i+1),true);
+            if(is_array($d)){$d['raw']=trim(substr($out,0,$i).substr($out,$j+1));return$d;}
+        }
+        return['ok'=>false,'error'=>'The Wordfence task did not answer.','raw'=>substr($out,0,4000)];
+    }
+
+    /* ── the dashboard ───────────────────────────────────────────────────── */
+    public function wfcOverview($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $cfg=$this->wfcConfigMap($link,$p);
+        $ver='';$h=(string)@file_get_contents($site['plugin'].'/wordfence.php',false,null,0,4096);
+        if(preg_match('/^\s*\**\s*Version:\s*([0-9][^\r\n]*)/mi',$h,$m))$ver=trim($m[1]);
+        $active=$this->wfcIsActive($link,$p);
+        $tables=$this->wfcTableInfo($link,$p);
+        /* the WAF's own state lives in the firewall's storage, not the DB */
+        $waf=$this->wfcBoot($site['dir'],
+            '$w=wfWAF::getInstance();$s=$w->getStorageEngine();'
+            .'echo json_encode(["ok"=>true,'
+            .'"status"=>(string)$s->getConfig("wafStatus",""),'
+            .'"storage"=>get_class($s),'
+            .'"path"=>(method_exists($s,"getConfigFilePath")?(string)$s->getConfigFilePath():""),'
+            .'"rules"=>$s->getConfig("rules",null)===null?null:"present",'
+            .'"learning_grace"=>(int)$s->getConfig("learningModeGracePeriod",0),'
+            /* Wordfence defines this constant as false when extended
+               protection is NOT installed, so `defined()` alone would claim
+               the firewall runs before WordPress on every site. What it is
+               set to is the answer; whether it exists is not. */
+            .'"extended"=>(defined("WFWAF_AUTO_PREPEND")&&WFWAF_AUTO_PREPEND'
+            .'&&(!defined("WFWAF_SUBDIRECTORY_INSTALL")||!WFWAF_SUBDIRECTORY_INSTALL)),'
+            .'"attack_data"=>(int)$s->getConfig("attackDataLastUpdated",0),'
+            .'"last_sync"=>(int)$s->getConfig("timeoffset_wf_updated",0)'
+            .']);',60);
+        $logs=$this->wfcLogsInfo($site['logs']);
+        $counts=$this->wfcCounts($link,$p);
+        $scan=$this->wfcScanState($site['dir']);
+        return['ok'=>true,'site'=>$site,'version'=>$ver,'active'=>$active,
+               'my_ip'=>(string)($_SERVER['REMOTE_ADDR']??''),
+               'waf'=>$waf,'logs'=>$logs,'tables'=>$tables,'counts'=>$counts,'scan'=>$scan,
+               'config'=>$cfg,
+               'health'=>$this->wfcHealth($link,$p,$site,$cfg,$active,$waf,$scan,$counts)];
+    }
+
+    private function wfcIsActive($link,$p){
+        $r=$this->wfcOne($link,'SELECT option_value FROM '.$this->wfcT($p,'options')." WHERE option_name='active_plugins' LIMIT 1");
+        if(!$r)return false;
+        $a=@unserialize((string)$r['option_value']);
+        if(!is_array($a))return false;
+        foreach($a as $x)if(strpos((string)$x,'wordfence/wordfence.php')!==false)return true;
+        return false;
+    }
+    private function wfcConfigMap($link,$p){
+        $out=[];
+        foreach($this->wfcRows($link,'SELECT name,val FROM '.$this->wfcT($p,'wfconfig')) as $r){
+            $v=(string)$r['val'];
+            $out[$r['name']]=strlen($v)>2000?substr($v,0,2000):$v;
+        }
+        return$out;
+    }
+    private function wfcTableInfo($link,$p){
+        $rows=$this->wfcRows($link,"SELECT table_name,table_rows,data_length+index_length AS bytes
+              FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name LIKE '".
+              $this->wfcEsc($link,preg_replace('/[^A-Za-z0-9_]/','',$p))."wf%'");
+        $out=[];$total=0;
+        foreach($rows as $r){
+            $n=(string)$r['table_name'];$b=(int)$r['bytes'];$total+=$b;
+            $out[]=['name'=>$n,'rows'=>(int)$r['table_rows'],'bytes'=>$b];
+        }
+        usort($out,function($a,$b){return$b['bytes']-$a['bytes'];});
+        return['tables'=>$out,'bytes'=>$total,'count'=>count($out)];
+    }
+    private function wfcLogsInfo($d){
+        if(!@is_dir($d))return['dir'=>$d,'exists'=>false,'bytes'=>0,'files'=>[]];
+        $files=[];$total=0;
+        foreach((array)@scandir($d) as $f){
+            if($f==='.'||$f==='..')continue;
+            $fp=$d.'/'.$f;
+            if(!@is_file($fp))continue;
+            $sz=(int)@filesize($fp);$total+=$sz;
+            $files[]=['name'=>$f,'bytes'=>$sz,'mtime'=>(int)@filemtime($fp),
+                      'writable'=>@is_writable($fp)];
+        }
+        usort($files,function($a,$b){return$b['bytes']-$a['bytes'];});
+        return['dir'=>$d,'exists'=>true,'bytes'=>$total,'files'=>$files,
+               'writable'=>@is_writable($d)];
+    }
+    private function wfcCounts($link,$p){
+        $c=[];
+        $c['issues_new']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfissues')." WHERE status='new'")['n']??0);
+        $c['issues_ignored']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfissues')." WHERE status<>'new'")['n']??0);
+        $c['pending']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfpendingissues'))['n']??0);
+        $c['hits']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfhits'))['n']??0);
+        $c['logins']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wflogins'))['n']??0);
+        $c['failed_logins']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wflogins')." WHERE fail=1")['n']??0);
+        $c['lockouts']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfblocks7')." WHERE type='lockout'")['n']??0);
+        $c['blocks']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfblocks7'))['n']??0);
+        $c['blocked_ips']=(int)($this->wfcOne($link,'SELECT COUNT(DISTINCT IP) n FROM '.$this->wfcT($p,'wfblockediplog'))['n']??0);
+        $c['audit']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfauditevents'))['n']??0);
+        $c['security_events']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfsecurityevents'))['n']??0);
+        $c['notifications']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfnotifications'))['n']??0);
+        $c['notifications_new']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfnotifications').' WHERE new=1')['n']??0);
+        $c['2fa_users']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfls_2fa_secrets'))['n']??0);
+        $c['passkeys']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfls_passkeys'))['n']??0);
+        $c['waf_failures']=(int)($this->wfcOne($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfwaffailures'))['n']??0);
+        return$c;
+    }
+    private function wfcScanState($root){
+        return$this->wfcBoot($root,
+            '$s=wfScanner::shared();'
+            .'echo json_encode(["ok"=>true,'
+            .'"running"=>(bool)$s->isRunning(),'
+            .'"type"=>(string)$s->scanType(),'
+            .'"type_name"=>(string)$s->scanTypeName(),'
+            .'"last"=>(float)wfConfig::get("scanTime",0),'
+            .'"next"=>(int)$s->nextScheduledScanTime(),'
+            .'"mode"=>(string)$s->schedulingMode(),'
+            .'"stages"=>(array)$s->stageStatus()'
+            .']);',60);
+    }
+    private function wfcHealth($link,$p,$site,$cfg,$active,$waf,$scan,$counts){
+        $h=[];
+        $add=function($state,$label,$detail)use(&$h){$h[]=['state'=>$state,'label'=>$label,'detail'=>(string)$detail];};
+        $add($active?'ok':'bad','Plugin active',$active?'Wordfence is switched on.':'Wordfence is installed but not active - it protects nothing.');
+        $wst=is_array($waf)?(string)($waf['status']??''):'';
+        if($wst==='learning-mode')$add('warn','Firewall','Learning mode: attacks are recorded, not blocked.');
+        elseif($wst==='enabled')$add('ok','Firewall','Enabled and running.');
+        else$add('bad','Firewall','Not enabled (status: '.($wst===''?'unknown':$wst).').');
+        $ext=is_array($waf)&&!empty($waf['extended']);
+        $add($ext?'ok':'warn','Extended protection',$ext?'The firewall runs before WordPress loads.':'Running after plugins load - the fastest attacks are not covered.');
+        $add(!empty($cfg['loginSecurityEnabled'])&&$cfg['loginSecurityEnabled']!=='0'?'ok':'warn','Brute force protection',(($cfg['loginSecurityEnabled']??'0')!=='0')?'On.':'Off - failed logins are not limited.');
+        $twofa=!empty($counts['2fa_users']);
+        $add($twofa?'ok':'warn','Two-factor authentication',$counts['2fa_users'].' user(s) enrolled.');
+        $sched=!empty($cfg['scheduledScansEnabled'])&&$cfg['scheduledScansEnabled']!=='0';
+        $add($sched?'ok':'warn','Scheduled scan',$sched?'On.':'No scan is scheduled, so nothing checks the files.');
+        $last=(float)($scan['last']??0);
+        $days=$last?round((time()-$last)/86400,1):null;
+        $add($last&&$days<7?'ok':'warn','Last scan',$last?$days.' days ago':'No scan has finished yet.');
+        if(!empty($counts['issues_new']))$add('bad','Open issues',$counts['issues_new'].' issue(s) waiting.');
+        else$add('ok','Open issues','None.');
+        if(!empty($cfg['debugOn'])&&$cfg['debugOn']!=='0')$add('warn','Debug mode','On - it writes a log and slows every request.');
+        $lw=(is_array($site)&&!empty($site['logs']))?@is_writable($site['logs']):false;
+        $add($lw?'ok':'warn','Log folder',$lw?$site['logs'].' is writable.':$site['logs'].' is not writable.');
+        return$h;
+    }
+
+    /* ── settings ────────────────────────────────────────────────────────── */
+    public function wfcConfig($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        return['ok'=>true,'site'=>$site,'groups'=>$this->wfcGroups(),
+               'catalog'=>$this->wfcCatalog(),'ls_catalog'=>$this->wfcLsCatalog(),
+               'values'=>$this->wfcConfigMap($link,$p),
+               'ls'=>$this->wfcLsMap($link,$p),
+               'defaults'=>$this->wfcDefaults()];
+    }
+    private function wfcLsMap($link,$p){
+        $out=[];
+        foreach($this->wfcRows($link,'SELECT name,value FROM '.$this->wfcT($p,'wfls_settings')) as $r){
+            $v=(string)$r['value'];
+            $out[$r['name']]=strlen($v)>2000?substr($v,0,2000):$v;
+        }
+        return$out;
+    }
+    /* The plugin's own defaults, so a setting that was never written still
+       shows what Wordfence would do. Kept here as data rather than parsed out
+       of wfConfig.php at runtime: that file references other classes and
+       constants that only exist once WordPress is loaded. */
+    private function wfcDefaults(){
+        return['firewallEnabled'=>'1','loginSecurityEnabled'=>'1','loginSec_maxFailures'=>'20',
+               'loginSec_countFailMins'=>'240','loginSec_lockoutMins'=>'240',
+               'loginSec_maxForgotPasswd'=>'20','loginSec_strongPasswds'=>'pubs',
+               'loginSec_breachPasswds'=>'admins','maxGlobalRequests'=>'DISABLED',
+               'maxRequestsCrawlers'=>'DISABLED','maxRequestsHumans'=>'DISABLED',
+               'max404Crawlers'=>'DISABLED','max404Humans'=>'DISABLED',
+               'blockedTime'=>'300','neverBlockBG'=>'neverBlockVerified',
+               'schedMode'=>'automatic','manualScanType'=>'onceDaily','schedStartHour'=>'-1',
+               'scanType'=>'standard','maxMem'=>'256','scan_maxIssues'=>'1000',
+               'scan_max_resume_attempts'=>'3','alert_maxHourly'=>'5','alertOn_severityLevel'=>'1',
+               'liveTraf_maxRows'=>'2000','liveTraf_maxAge'=>'30','actUpdateInterval'=>'2',
+               'auditLogMode'=>'default','email_summary_interval'=>'weekly',
+               'wafAlertInterval'=>'600','wafAlertThreshold'=>'100','cacheType'=>'disabled',
+               'scheduledScansEnabled'=>'1','liveTrafficEnabled'=>'0','debugOn'=>'0'];
+    }
+
+    public function wfcSet($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $pairs=$post['pairs']??null;
+        if(!is_array($pairs))$pairs=json_decode((string)$pairs,true);
+        if(!is_array($pairs)||!$pairs)return['ok'=>false,'error'=>'No setting was sent.'];
+        $cat=[];foreach($this->wfcCatalog() as $r)$cat[$r['name']]=$r;
+        $done=[];$skipped=[];
+        foreach($pairs as $k=>$v){
+            $k=preg_replace('/[^A-Za-z0-9_]/','',(string)$k);
+            if($k===''){$skipped[]='empty name';continue;}
+            $t=isset($cat[$k])?$cat[$k]['type']:'raw';
+            $val=$this->wfcCoerce($t,$v,$cat[$k]['choices']??[]);
+            if($val===null){$skipped[]=$k;continue;}
+            $this->wfcSetOne($link,$p,$k,$val);
+            $done[$k]=$val;
+        }
+        /* Wordfence keeps a copy of the settings the firewall needs in its own
+           storage file; a change made straight in the database does not reach
+           the firewall until something syncs it. Loading the plugin once does
+           that, and also clears the config cache it may have held. */
+        $sync=null;
+        if($this->wfcTouchesFirewall(array_keys($done))){
+            $sync=$this->wfcBoot($site['dir'],
+                'echo json_encode(["ok"=>true,"synced"=>true,'
+                .'"status"=>(string)wfWAF::getInstance()->getStorageEngine()->getConfig("wafStatus","")]);',90);
+        }
+        return['ok'=>true,'written'=>$done,'skipped'=>$skipped,'sync'=>$sync];
+    }
+    private function wfcTouchesFirewall($keys){
+        $f=['firewallEnabled','whitelisted','bannedURLs','disableWAFIPBlocking','blockCustomText',
+            'neverBlockBG','maxGlobalRequests','maxGlobalRequests_action','maxRequestsCrawlers',
+            'maxRequestsCrawlers_action','maxRequestsHumans','maxRequestsHumans_action',
+            'max404Crawlers','max404Crawlers_action','max404Humans','max404Humans_action',
+            'blockedTime','howGetIPs','howGetIPs_trusted_proxies','other_WFNet','apiKey','isPaid',
+            'cbl_action','cbl_redirURL','cbl_bypassRedirURL','cbl_bypassViewURL','cbl_bypassRedirDest',
+            'cbl_loggedInBlocked','wafAlertWhitelist'];
+        foreach($keys as $k)if(in_array($k,$f,true))return true;
+        return false;
+    }
+    private function wfcCoerce($type,$v,$choices=[]){
+        switch($type){
+            case 'bool': return (in_array(strtolower((string)$v),['1','true','yes','on'],true)||$v===1||$v===true)?'1':'0';
+            case 'int':  return is_numeric($v)?(string)(int)$v:null;
+            case 'select':return in_array((string)$v,$choices,true)?(string)$v:null;
+            case 'masked':
+            case 'text':
+            case 'textarea': return (string)$v;
+            default: return is_scalar($v)?(string)$v:null;
+        }
+    }
+    private function wfcSetOne($link,$p,$k,$v){
+        $t=$this->wfcT($p,'wfconfig');
+        $k=$this->wfcEsc($link,$k);$v=$this->wfcEsc($link,$v);
+        @mysqli_query($link,"INSERT INTO {$t} (name,val,autoload) VALUES ('{$k}','{$v}','yes')
+                             ON DUPLICATE KEY UPDATE val='{$v}'");
+    }
+    public function wfcSetLs($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $pairs=$post['pairs']??null;
+        if(!is_array($pairs))$pairs=json_decode((string)$pairs,true);
+        if(!is_array($pairs)||!$pairs)return['ok'=>false,'error'=>'No setting was sent.'];
+        /* The catalogue rows are positional, not associative: [name, label,
+           type, group, note]. */
+        $cat=[];
+        foreach($this->wfcLsCatalog() as $r)$cat[$r[0]]=['label'=>$r[1],'type'=>$r[2],'choices'=>$r[3]===''&&strpos($r[2],'select')===0?[]:($r[3]?explode('|',$r[3]):[])];
+        $done=[];$skipped=[];
+        $t=$this->wfcT($p,'wfls_settings');
+        foreach($pairs as $k=>$v){
+            $k=(string)$k;
+            if(!isset($cat[$k])&&strpos($k,'require-2fa.')!==0){$skipped[]=$k;continue;}
+            $type=isset($cat[$k])?$cat[$k]['type']:'raw';
+            $val=$this->wfcCoerce($type,$v,$cat[$k]['choices']);
+            if($val===null){$skipped[]=$k;continue;}
+            $kk=$this->wfcEsc($link,$k);$vv=$this->wfcEsc($link,$val);
+            @mysqli_query($link,"INSERT INTO {$t} (name,value,autoload) VALUES ('{$kk}','{$vv}','yes')
+                                 ON DUPLICATE KEY UPDATE value='{$vv}'");
+            $done[$k]=$val;
+        }
+        return['ok'=>true,'written'=>$done,'skipped'=>$skipped];
+    }
+    public function wfcDefaultsRestore($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        return$this->wfcBoot($site['dir'],
+            'wfConfig::setDefaults();echo json_encode(["ok"=>true,"done"=>true]);',120);
+    }
+
+    /* ── blocking ────────────────────────────────────────────────────────── */
+    public function wfcBlocks($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        /* Addresses are stored as inet_pton() binary rather than text, so an
+           un-decoded column is unreadable here. */
+        $rows=$this->wfcRows($link,'SELECT id,type,IP AS ipbin,blockedTime,reason,lastAttempt,
+                                    blockedHits,expiration,parameters FROM '.$this->wfcT($p,'wfblocks7').'
+                                    ORDER BY lastAttempt DESC LIMIT 500');
+        $now=time();
+        foreach($rows as &$r){
+            $r['ip']=$this->wfcIp((string)($r['ipbin']??''));
+            unset($r['ipbin']);
+            $r['expired']=((int)$r['expiration']>0&&(int)$r['expiration']<$now);
+            $par=(string)($r['parameters']??'');
+            $j=json_decode($par,true);
+            if(is_array($j)){
+                $bits=[];
+                foreach(['ipRange','countries','hostname','userAgent','referrer'] as $k)
+                    if(!empty($j[$k]))$bits[]=$k.': '.(is_array($j[$k])?implode(',',$j[$k]):$j[$k]);
+                $par=implode(' · ',$bits);
+            }
+            $r['parameters']=substr($par,0,400);
+            $r['type_name']=$this->wfcBlockName((int)$r['type']);
+            $r['permanent']=((int)$r['expiration']===0);
+        }
+        $log=$this->wfcRows($link,'SELECT IP AS ipbin,countryCode,blockCount,unixday,blockType FROM '
+             .$this->wfcT($p,'wfblockediplog').' ORDER BY unixday DESC LIMIT 200');
+        foreach($log as &$l){$l['ip']=$this->wfcIp((string)($l['ipbin']??''));unset($l['ipbin']);}
+        $wl=(string)($this->wfcConfigMap($link,$p)['whitelisted']??'');
+        return['ok'=>true,'blocks'=>$rows,'log'=>$log,'whitelisted'=>$wl,'now'=>$now];
+    }
+    /* Blocks are created by the plugin's own code, in its own argument order:
+       createIP() takes the reason first, createCountry() wants to be told
+       whether the login form and the rest of the site are covered, and a
+       "range" is a pattern block whose ipRange field carries the CIDR.
+       Guessing these is how a block silently lands in the wrong column. */
+    public function wfcBlockAdd($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $kind=(string)($post['kind']??'ip');
+        $reason=(string)($post['reason']??'Added from the file manager');
+        $perm=!empty($post['permanent'])&&$post['permanent']!=='0';
+        $dur=$perm?'wfBlock::DURATION_FOREVER':'wfBlock::blockDuration()';
+        if($kind==='ip'){
+            $ip=trim((string)($post['ip']??''));
+            if($ip==='')return['ok'=>false,'error'=>'No address was given.'];
+            if(!$this->wfcIsIp($ip)&&!$perm)return['ok'=>false,'error'=>'"'.$ip.'" is not an address Wordfence can store.'];
+            $code='wfBlock::createIP('.var_export($reason,true).','.var_export($ip,true).','.$dur.');'
+                 .'echo json_encode(["ok"=>true,"ip"=>'.var_export($ip,true).',"permanent"=>'.($perm?'true':'false').']);';
+        }elseif($kind==='range'){
+            $cidr=trim((string)($post['ip']??''));
+            if($cidr==='')return['ok'=>false,'error'=>'No range was given.'];
+            $code='wfBlock::createPattern('.var_export($reason,true).','.var_export($cidr,true).',null,null,null,'.$dur.');'
+                 .'echo json_encode(["ok"=>true,"range"=>'.var_export($cidr,true).']);';
+        }elseif($kind==='country'){
+            $cc=trim((string)($post['countries']??''));
+            if($cc==='')return['ok'=>false,'error'=>'No country was given. Use two-letter codes, comma separated.'];
+            $code='wfBlock::createCountry('.var_export($reason,true).',true,true,'.var_export($cc,true).','.$dur.');'
+                 .'echo json_encode(["ok"=>true,"countries"=>'.var_export($cc,true).']);';
+        }elseif($kind==='pattern'){
+            $pat=(string)($post['pattern']??'');
+            if($pat==='')return['ok'=>false,'error'=>'Nothing to match on was given.'];
+            $pt=(string)($post['ptype']??'browser');
+            $host=$pt==='hostname'?$pat:null;
+            $ua=$pt==='browser'?$pat:null;
+            $ref=$pt==='referrer'?$pat:null;
+            $code='wfBlock::createPattern('.var_export($reason,true).',null,'
+                 .var_export($host,true).','.var_export($ua,true).','.var_export($ref,true).','.$dur.');'
+                 .'echo json_encode(["ok"=>true,"pattern"=>'.var_export($pat,true).']);';
+        }else return['ok'=>false,'error'=>'Unknown block kind.'];
+        return$this->wfcBoot($site['dir'],$code,90);
+    }
+    private function wfcIsIp($v){
+        return (bool)filter_var($v,FILTER_VALIDATE_IP);
+    }
+    /* Wordfence stores every address through wfUtils::inet_pton(), which pads
+       an IPv4 address into its 16 byte IPv4-mapped form. Handing those sixteen
+       bytes to MySQL or to inet_ntop() yields "::ffff:203.0.113.77" - correct,
+       and nothing like the address that was blocked. Country and pattern
+       blocks keep a marker string in the same column, which is why a value
+       that is not 4 or 16 bytes long is passed through untouched. */
+    private function wfcIp($bin){
+        $n=strlen($bin);
+        if($n===4)return implode('.',array_map('ord',str_split($bin)));
+        if($n===16){
+            if(substr($bin,0,10)==="\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"&&substr($bin,10,2)==="\xff\xff")
+                return implode('.',array_map('ord',str_split(substr($bin,12,4))));
+            $t=@inet_ntop($bin);
+            return $t?$t:bin2hex($bin);
+        }
+        return $bin;
+    }
+    /* The type column is a number; a list of blocks that reads "9" is a list
+       nobody can act on. These are wfBlock's own type constants. */
+    private function wfcBlockName($t){
+        $m=[1=>'IP block',2=>'Wordfence network',3=>'Country',4=>'Pattern',
+            5=>'Rate limit block',6=>'Rate limit throttle',7=>'Login lockout',
+            8=>'Automatic (temporary)',9=>'Automatic (permanent)'];
+        return $m[(int)$t]??('type '.(int)$t);
+    }
+
+    public function wfcBlockDel($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $ids=array_values(array_filter(array_map('intval',(array)($post['ids']??[]))));
+        if(!$ids)return['ok'=>false,'error'=>'No block was chosen.'];
+        /* Deleted through the plugin rather than with a DELETE statement: the
+           firewall holds its own copy of the block list, and a row removed
+           behind its back keeps being enforced until the next sync, which
+           would read here as "unblocking did nothing". */
+        return$this->wfcBoot($site['dir'],
+            '$ok=wfBlock::removeBlockIDs('.json_encode($ids).');'
+            .'echo json_encode(["ok"=>(bool)$ok,"deleted"=>'.count($ids).']);',90);
+    }
+    public function wfcUnblock($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $ip=trim((string)($post['ip']??''));
+        if($ip==='')return['ok'=>false,'error'=>'No address was given.'];
+        return$this->wfcBoot($site['dir'],
+            'wfBlock::unblockIP('.var_export($ip,true).');'
+            .'echo json_encode(["ok"=>true,"ip"=>'.var_export($ip,true).']);',90);
+    }
+    public function wfcUnlockAll($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        @mysqli_query($link,'DELETE FROM '.$this->wfcT($p,'wfblocks7')." WHERE type='lockout'");
+        return$this->wfcBoot($site['dir'],
+            'foreach(wfBlock::lockouts() as $b){wfBlock::unlockOutIP((string)$b->IP);}'
+            .'echo json_encode(["ok"=>true,"cleared"=>true]);',120);
+    }
+    public function wfcRemoveAllBlocks($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        return$this->wfcBoot($site['dir'],
+            'wfBlock::removeAllIPBlocks();wfBlock::removeAllCountryBlocks();'
+            .'wfBlock::removeTemporaryWFSNBlocks();'
+            .'echo json_encode(["ok"=>true,"cleared"=>true]);',120);
+    }
+    public function wfcMakePermanent($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $ids=array_values(array_filter(array_map('intval',(array)($post['ids']??[]))));
+        if(!$ids)return['ok'=>false,'error'=>'No block was chosen.'];
+        return$this->wfcBoot($site['dir'],
+            'wfBlock::makePermanentBlockIDs('.json_encode($ids).');'
+            .'echo json_encode(["ok"=>true,"ids"=>'.json_encode($ids).']);',90);
+    }
+
+    /* ── logs ────────────────────────────────────────────────────────────── */
+    public function wfcLog($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $what=(string)($post['what']??'traffic');
+        $lim=min(300,max(10,(int)($post['limit']??80)));
+        $off=max(0,(int)($post['offset']??0));
+        $where=[];
+        $q=trim((string)($post['q']??''));
+        if($q!==''){
+            $e=$this->wfcEsc($link,$q);
+            if($what==='traffic')$where[]="(IP LIKE '%{$e}%' OR URL LIKE '%{$e}%' OR UA LIKE '%{$e}%' OR actionDescription LIKE '%{$e}%')";
+            elseif($what==='logins')$where[]="(IP LIKE '%{$e}%' OR username LIKE '%{$e}%')";
+            else$where[]="(type LIKE '%{$e}%' OR data LIKE '%{$e}%')";
+        }
+        $fail=(string)($post['fail']??'');
+        if($what==='logins'&&$fail!=='')$where[]='fail='.($fail==='1'?1:0);
+        $w=$where?('WHERE '.implode(' AND ',$where)):'';
+        if($what==='traffic'){
+            $rows=$this->wfcRows($link,'SELECT id,attackLogTime,ctime,IP,jsRun,statusCode,isGoogle,
+                                  userID,newVisit,URL,referer,UA,action,actionDescription
+                                  FROM '.$this->wfcT($p,'wfhits')." {$w} ORDER BY attackLogTime DESC LIMIT {$lim} OFFSET {$off}");
+            $t=$this->wfcT($p,'wfhits');
+        }elseif($what==='logins'){
+            $rows=$this->wfcRows($link,'SELECT id,hitID,ctime,fail,action,username,userID,IP,UA
+                                  FROM '.$this->wfcT($p,'wflogins')." {$w} ORDER BY ctime DESC LIMIT {$lim} OFFSET {$off}");
+            $t=$this->wfcT($p,'wflogins');
+        }elseif($what==='security'){
+            $rows=$this->wfcRows($link,'SELECT id,type,event_time,state,state_timestamp,
+                                  LEFT(data,600) data FROM '.$this->wfcT($p,'wfsecurityevents')
+                                  ." {$w} ORDER BY event_time DESC LIMIT {$lim} OFFSET {$off}");
+            $t=$this->wfcT($p,'wfsecurityevents');
+        }else{ /* audit */
+            $rows=$this->wfcRows($link,'SELECT id,type,event_time,state,request_id,
+                                  LEFT(data,600) data FROM '.$this->wfcT($p,'wfauditevents')
+                                  ." {$w} ORDER BY event_time DESC LIMIT {$lim} OFFSET {$off}");
+            $t=$this->wfcT($p,'wfauditevents');
+        }
+        $total=(int)($this->wfcOne($link,"SELECT COUNT(*) n FROM {$t} {$w}")['n']??0);
+        return['ok'=>true,'rows'=>$rows,'total'=>$total,'limit'=>$lim,'offset'=>$off,'what'=>$what];
+    }
+    public function wfcStatus($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $lim=min(400,max(10,(int)($post['limit']??120)));
+        $rows=$this->wfcRows($link,'SELECT id,ctime,level,type,msg FROM '.$this->wfcT($p,'wfstatus')
+                                  ." ORDER BY ctime DESC LIMIT {$lim}");
+        $notes=$this->wfcRows($link,'SELECT id,new,category,priority,ctime,html FROM '
+                                  .$this->wfcT($p,'wfnotifications').' ORDER BY ctime DESC LIMIT 60');
+        return['ok'=>true,'status'=>$rows,'notifications'=>$notes];
+    }
+    public function wfcIssues($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $lim=min(400,max(10,(int)($post['limit']??120)));
+        $rows=$this->wfcRows($link,'SELECT id,time,lastUpdated,status,type,severity,ignoreP,ignoreC,
+                                  shortMsg,LEFT(longMsg,400) longMsg FROM '
+                                  .$this->wfcT($p,'wfissues').' ORDER BY severity DESC,time DESC LIMIT '.$lim);
+        $pending=$this->wfcRows($link,'SELECT COUNT(*) n FROM '.$this->wfcT($p,'wfpendingissues'));
+        return['ok'=>true,'issues'=>$rows,'pending'=>(int)($pending[0]['n']??0)];
+    }
+    public function wfcIssueAct($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $id=(int)($post['id']??0);
+        $act=(string)($post['do']??'');
+        if(!$id||!in_array($act,['ignoreP','ignoreC','delete','unignore'],true))
+            return['ok'=>false,'error'=>'Unknown issue action.'];
+        $p=$site['prefix'];
+        if($act==='delete'){
+            @mysqli_query($link,'DELETE FROM '.$this->wfcT($p,'wfissues').' WHERE id='.$id);
+            return['ok'=>true,'deleted'=>$id];
+        }
+        $map=['ignoreP'=>"status='ignoreP',ignoreP=1,ignoreC=0",
+              'ignoreC'=>"status='ignoreC',ignoreC=1,ignoreP=0",
+              'unignore'=>"status='new',ignoreP=0,ignoreC=0"];
+        @mysqli_query($link,'UPDATE '.$this->wfcT($p,'wfissues').' SET '.$map[$act].' WHERE id='.$id);
+        return['ok'=>true,'updated'=>$id,'to'=>$act];
+    }
+
+    /* ── the scan ────────────────────────────────────────────────────────── */
+    public function wfcScanStart($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $type=(string)($post['type']??'');
+        if(!in_array($type,['quick','standard','high','custom'],true))$type='standard';
+        /* Start with the plugin's own engine: it signs the request, hands the
+           work to itself over HTTP and returns immediately. Re-implementing
+           any of that would be a second, worse scanner. */
+        return$this->wfcBoot($site['dir'],
+            'require_once(WORDFENCE_PATH."lib/wfScanEngine.php");'
+            .'$err=wfScanEngine::startScan(false,'.var_export($type,true).');'
+            .'echo json_encode(["ok"=>$err?false:true,"error"=>is_string($err)?$err:null,'
+            .'"running"=>(bool)wfScanner::shared()->isRunning()]);',180);
+    }
+    public function wfcScanKill($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $this->wfcSetOne($link,$p,'wfKillRequested','1');
+        @mysqli_query($link,'UPDATE '.$this->wfcT($p,'wfconfig')." SET autoload='no' WHERE name='wfKillRequested'");
+        return['ok'=>true,'requested'=>true];
+    }
+    public function wfcScanStatus($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $scan=$this->wfcScanState($site['dir']);
+        $log=$this->wfcRows($link,'SELECT ctime,level,type,msg FROM '.$this->wfcT($p,'wfstatus')
+                                 .' ORDER BY ctime DESC LIMIT 40');
+        $scan['log']=$log;
+        return$scan;
+    }
+
+    /* ── the firewall ────────────────────────────────────────────────────── */
+    public function wfcWaf($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $out=$this->wfcBoot($site['dir'],
+            '$w=wfWAF::getInstance();$s=$w->getStorageEngine();'
+            .'$cfg=array("status"=>(string)$s->getConfig("wafStatus",""),'
+            .'"storage"=>get_class($s),'
+            .'"extended"=>(defined("WFWAF_AUTO_PREPEND")&&WFWAF_AUTO_PREPEND'
+            .'&&(!defined("WFWAF_SUBDIRECTORY_INSTALL")||!WFWAF_SUBDIRECTORY_INSTALL)),'
+            .'"path"=>(method_exists($s,"getConfigFilePath")?(string)$s->getConfigFilePath():""),'
+            .'"attackData"=>(int)$s->getConfig("attackDataLastUpdated",0),'
+            .'"rulesUpdated"=>(int)$s->getConfig("rulesUpdatedAt",0),'
+            .'"learningGrace"=>(int)$s->getConfig("learningModeGracePeriod",0),'
+            .'"graceEnabled"=>(bool)$s->getConfig("learningModeGracePeriodEnabled",false)'
+            .');'
+            .'echo json_encode($cfg+["ok"=>true]);',90);
+        if(is_array($out)){
+            $out['files']=$this->wfcWafFiles($site);
+            $out['installed_rules']=null;
+        }
+        return$out;
+    }
+    private function wfcWafFiles($site){
+        $f=[];
+        $cands=[$site['dir'].'/wordfence-waf.php'=>$site['dir'].'/wordfence-waf.php',
+                $site['dir'].'/wp-content/advanced-cache.php'=>'advanced-cache.php',
+                $site['dir'].'/.user.ini'=>'.user.ini',
+                $site['dir'].'/.htaccess'=>'.htaccess',
+                $site['dir'].'/wp-content/wflogs/config.php'=>'wflogs/config.php',
+                $site['dir'].'/wp-content/wflogs/config-synced.php'=>'wflogs/config-synced.php',
+                $site['dir'].'/wp-content/wflogs/rules.php'=>'wflogs/rules.php',
+                $site['dir'].'/wp-content/wflogs/attack-data.php'=>'wflogs/attack-data.php'];
+        foreach($cands as $path=>$label){
+            $f[]=['label'=>$label,'path'=>$path,'exists'=>@is_file($path),
+                  'bytes'=>@is_file($path)?(int)@filesize($path):0,
+                  'mtime'=>@is_file($path)?(int)@filemtime($path):0,
+                  'writable'=>@is_writable($path)];
+        }
+        return$f;
+    }
+    public function wfcWafAct($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $do=(string)($post['do']??'');
+        $code=null;
+        if($do==='enable'){
+            $code='$w=wfWAF::getInstance();$w->getStorageEngine()->setConfig("wafStatus","enabled","synced");'
+                 .'echo json_encode(["ok"=>true,"status"=>"enabled"]);';
+        }elseif($do==='learning'){
+            $code='$w=wfWAF::getInstance();$w->getStorageEngine()->setConfig("wafStatus","learning-mode","synced");'
+                 .'echo json_encode(["ok"=>true,"status"=>"learning-mode"]);';
+        }elseif($do==='disable'){
+            $code='$w=wfWAF::getInstance();$w->getStorageEngine()->setConfig("wafStatus","disabled","synced");'
+                 .'echo json_encode(["ok"=>true,"status"=>"disabled"]);';
+        }elseif($do==='extended-install'){
+            $code='$w=wfWAF::getInstance();$r=$w->installAutoPrepend();'
+                 .'echo json_encode(["ok"=>true,"result"=>is_scalar($r)?(string)$r:"done"]);';
+        }elseif($do==='extended-remove'){
+            $code='$w=wfWAF::getInstance();$r=$w->uninstallAutoPrepend();'
+                 .'echo json_encode(["ok"=>true,"result"=>is_scalar($r)?(string)$r:"done"]);';
+        }elseif($do==='sync-rules'){
+            $code='wordfence::syncAttackData(false);'
+                 .'echo json_encode(["ok"=>true,"synced"=>true,'
+                 .'"attackData"=>(int)wfWAF::getInstance()->getStorageEngine()->getConfig("attackDataLastUpdated",0)]);';
+        }elseif($do==='sync-config'){
+            $code='echo json_encode(["ok"=>true,"status"=>(string)wfWAF::getInstance()'
+                 .'->getStorageEngine()->getConfig("wafStatus","")]);';
+        }else return['ok'=>false,'error'=>'Unknown firewall action.'];
+        return$this->wfcBoot($site['dir'],$code,150);
+    }
+
+    /* ── users and two factor ─────────────────────────────────────────────── */
+    public function wfcUsers($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $u=$this->wfcT($p,'users');$um=$this->wfcT($p,'usermeta');
+        $rows=$this->wfcRows($link,"SELECT u.ID,u.user_login,u.user_email,
+              (SELECT meta_value FROM {$um} m WHERE m.user_id=u.ID AND m.meta_key='{$p}capabilities' LIMIT 1) caps
+              FROM {$u} u ORDER BY u.ID LIMIT 300");
+        $sec=$this->wfcRows($link,'SELECT user_id,mode,vtime,ctime FROM '.$this->wfcT($p,'wfls_2fa_secrets'));
+        $pk=$this->wfcRows($link,'SELECT user_id,label,last_used_at FROM '.$this->wfcT($p,'wfls_passkeys'));
+        $byS=[];foreach($sec as $r)$byS[(int)$r['user_id']]=$r;
+        $byP=[];foreach($pk as $r)$byP[(int)$r['user_id']][]=$r;
+        foreach($rows as &$r){
+            $id=(int)$r['ID'];
+            $caps=@unserialize((string)$r['caps']);
+            $roles=is_array($caps)?array_keys($caps):[];
+            $r['roles']=$roles?implode(',',$roles):'(none)';
+            $r['is_admin']=in_array('administrator',$roles,true);
+            $r['2fa']=isset($byS[$id])?(string)$byS[$id]['mode']:'';
+            $r['2fa_verified']=isset($byS[$id])?(int)$byS[$id]['vtime']>0:false;
+            $r['passkeys']=isset($byP[$id])?count($byP[$id]):0;
+            unset($r['caps']);
+        }
+        return['ok'=>true,'users'=>$rows];
+    }
+    public function wfc2fa($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $do=(string)($post['do']??'');
+        if($do==='revoke'){
+            $id=(int)($post['user']??0);
+            if(!$id)return['ok'=>false,'error'=>'No user was chosen.'];
+            @mysqli_query($link,'DELETE FROM '.$this->wfcT($p,'wfls_2fa_secrets').' WHERE user_id='.$id);
+            return['ok'=>true,'revoked'=>$id];
+        }
+        if($do==='revoke-all'){
+            @mysqli_query($link,'DELETE FROM '.$this->wfcT($p,'wfls_2fa_secrets'));
+            @mysqli_query($link,'DELETE FROM '.$this->wfcT($p,'wfls_passkeys'));
+            return$this->wfcBoot($site['dir'],
+                'wfConfig::set("loginSec_requireAdminTwoFactor",0);'
+                .'echo json_encode(["ok"=>true,"cleared"=>true]);',90);
+        }
+        return['ok'=>false,'error'=>'Unknown two-factor action.'];
+    }
+
+    /* ── housekeeping ────────────────────────────────────────────────────── */
+    public function wfcCache($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $what=(string)($post['what']??'');
+        $map=['traffic'=>$p.'wfhits','logins'=>$p.'wflogins','blocked'=>$p.'wfblockediplog',
+              'traffic-rates'=>$p.'wftrafficrates','audit'=>$p.'wfauditevents',
+              'security'=>$p.'wfsecurityevents','status'=>$p.'wfstatus',
+              'crawlers'=>$p.'wfcrawlers','locations'=>$p.'wflocs','snipcache'=>$p.'wfsnipcache',
+              'reverse-cache'=>$p.'wfreversecache','waf-failures'=>$p.'wfwaffailures'];
+        if(!isset($map[$what]))return['ok'=>false,'error'=>'Unknown log.'];
+        $t='`'.$map[$what].'`';
+        $n=(int)($this->wfcOne($link,"SELECT COUNT(*) n FROM {$t}")['n']??0);
+        @mysqli_query($link,"TRUNCATE TABLE {$t}");
+        return['ok'=>true,'truncated'=>$map[$what],'rows'=>$n];
+    }
+    public function wfcCrons($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $r=$this->wfcOne($link,'SELECT option_value FROM '.$this->wfcT($p,'options')." WHERE option_name='cron' LIMIT 1");
+        $cron=@unserialize((string)($r['option_value']??''));
+        $out=[];
+        if(is_array($cron))foreach($cron as $t=>$hooks){
+            foreach((array)$hooks as $hook=>$jobs){
+                if(stripos($hook,'wordfence')===false&&stripos($hook,'wf')!==0)continue;
+                foreach((array)$jobs as $j)
+                    $out[]=['at'=>(int)$t,'in'=>(int)$t-time(),'hook'=>(string)$hook,
+                            'schedule'=>(string)($j['schedule']??'once'),'args'=>count((array)($j['args']??[]))];
+            }
+        }
+        usort($out,function($a,$b){return$a['at']-$b['at'];});
+        return['ok'=>true,'crons'=>$out,'now'=>time()];
+    }
+    public function wfcCronRun($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $hook=preg_replace('/[^A-Za-z0-9_]/','',(string)($post['hook']??''));
+        if($hook==='')return['ok'=>false,'error'=>'No job was named.'];
+        return$this->wfcBoot($site['dir'],
+            'do_action('.var_export($hook,true).');'
+            .'echo json_encode(["ok"=>true,"ran"=>'.var_export($hook,true).']);',180);
+    }
+    /* Wordfence's own export hands the settings to its API and hands back a
+       token, so it needs a licence key and a reachable wordfence.com. This
+       one stays on the server: it writes the same settings as JSON you can
+       copy, and pasting that JSON back applies it. */
+    public function wfcExport($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $vals=$this->wfcConfigMap($link,$p);
+        $ls=$this->wfcLsMap($link,$p);
+        unset($vals['encKey'],$vals['longEncKey'],$vals['apiKey'],$ls['shared-hash-secret'],
+              $ls['shared-symmetric-secret'],$ls['recaptcha-secret']);
+        $json=json_encode(['kind'=>'wordfence-controller-export','version'=>1,
+                           'exported_at'=>date('c'),'settings'=>$vals,'login_security'=>$ls],
+                          JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT);
+        return['ok'=>true,'json'=>$json];
+    }
+    public function wfcImport($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $raw=(string)($post['json']??$post['token']??'');
+        $d=json_decode($raw,true);
+        if(!is_array($d))return['ok'=>false,'error'=>'That is not a settings export this window can read.'];
+        $done=0;
+        foreach((array)($d['settings']??[]) as $k=>$v){
+            if(!is_scalar($v))continue;
+            $this->wfcSetOne($link,$p,preg_replace('/[^A-Za-z0-9_]/','',(string)$k),(string)$v);
+            $done++;
+        }
+        $t=$this->wfcT($p,'wfls_settings');
+        foreach((array)($d['login_security']??[]) as $k=>$v){
+            if(!is_scalar($v))continue;
+            $kk=$this->wfcEsc($link,(string)$k);$vv=$this->wfcEsc($link,(string)$v);
+            @mysqli_query($link,"INSERT INTO {$t} (name,value,autoload) VALUES ('{$kk}','{$vv}','yes')
+                                 ON DUPLICATE KEY UPDATE value='{$vv}'");
+            $done++;
+        }
+        return['ok'=>true,'written'=>$done];
+    }
+    /* The plugin's diagnostic report is a singleton's results array, not a
+       static call - worth knowing, because calling it the obvious way answers
+       nothing rather than failing loudly. */
+    public function wfcDiagnostics($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        /* wfDiagnostic is not the singleton declared at the top of that file:
+           it is the class built with `new`, and getResults() is an instance
+           method. Asking for the static one is how a diagnostic report comes
+           back as nothing at all. */
+        return$this->wfcBoot($site['dir'],
+            '$d=new wfDiagnostic();$r=$d->getResults();'
+            .'echo json_encode(["ok"=>true,"diagnostics"=>$r]);',150);
+    }
+    public function wfcTestEmail($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $to=trim((string)($post['to']??''));
+        return$this->wfcBoot($site['dir'],
+            '$ok=wp_mail('.var_export($to,true).',"Wordfence controller test",'
+            .'"This is a test message from the file manager\'s Wordfence controller.");'
+            .'echo json_encode(["ok"=>true,"sent"=>(bool)$ok]);',90);
+    }
+    /* A runaway Wordfence is the one failure mode where the site itself is the
+       thing that will not let you in, so these are deliberately blunt. */
+    public function wfcEmergency($post){
+        list($site,$link,$c,$err)=$this->wfcOpen($post);
+        if($err)return['ok'=>false,'error'=>$err];
+        $p=$site['prefix'];
+        $do=(string)($post['do']??'');
+        if($do==='unblock-me'){
+            $ip=trim((string)($post['ip']??''));
+            if($ip==='')return['ok'=>false,'error'=>'No address was given.'];
+            /* json_encode, not var_export: var_export writes a PHP string
+               already wrapped in quotes, and dropping that into a double
+               quoted literal leaves the quotes inside the stored value. The
+               allow-list then holds '203.0.113.99' with quotes around it,
+               which matches no address at all - and the button looks like it
+               worked. */
+            return$this->wfcBoot($site['dir'],
+                'wfBlock::unblockIP('.var_export($ip,true).');'
+                .'$wl=trim((string)wfConfig::get("whitelisted"));'
+                .'$wl=trim($wl."\n".'.json_encode($ip).');'
+                .'wfConfig::set("whitelisted",$wl);'
+                .'echo json_encode(["ok"=>true,"ip"=>'.var_export($ip,true).',"allowlisted"=>true,'
+                .'"whitelisted"=>$wl]);',90);
+        }
+        if($do==='firewall-off'){
+            $this->wfcSetOne($link,$p,'firewallEnabled','0');
+            return$this->wfcBoot($site['dir'],
+                'wfConfig::set("firewallEnabled",0);'
+                .'echo json_encode(["ok"=>true,"firewall"=>"off"]);',90);
+        }
+        if($do==='everything-off'){
+            return$this->wfcBoot($site['dir'],
+                'wfConfig::set("firewallEnabled",0);wfConfig::set("loginSecurityEnabled",0);'
+                .'wfConfig::set("liveTrafficEnabled",0);'
+                .'wfBlock::removeAllIPBlocks();wfBlock::removeAllCountryBlocks();'
+                .'foreach(wfBlock::lockouts() as $b){wfBlock::unlockOutIP((string)$b->IP);}'
+                .'echo json_encode(["ok"=>true,"done"=>true]);',150);
+        }
+        if($do==='drop-tables'){
+            return$this->wfcBoot($site['dir'],
+                'wordfence::uninstallPlugin();'
+                .'echo json_encode(["ok"=>true,"dropped"=>true]);',180);
+        }
+        if($do==='reinstall-tables'){
+            return$this->wfcBoot($site['dir'],
+                'wordfence::installPlugin();'
+                .'echo json_encode(["ok"=>true,"installed"=>true]);',180);
+        }
+        return['ok'=>false,'error'=>'Unknown emergency action.'];
+    }
+    /* Wordfence missing entirely is not a dead end: the repository installer
+       already knows how to place and activate a plugin. */
+    public function wfcInstall($post){
+        $cfg=trim((string)($post['config']??''));
+        if($cfg===''||!@is_file($cfg))return['ok'=>false,'error'=>'Choose a site first.'];
+        /* the Plugins Installer's own installer is reused rather than written
+           twice: it already knows how to fetch a package, verify it and place
+           it, and it takes the site from this property. */
+        $this->pieConfigPath=$cfg;
+        return$this->pieWpInstallRepo('wordfence',true);
+    }
+
+    /* An installation that is present but switched on or off is the one thing
+       this window cannot change through settings, so it is changed here - and
+       it goes through the Plugins Installer's activator, which is already
+       proven against this site's own options table. */
+    public function wfcActivate($post){
+        $cfg=trim((string)($post['config']??''));
+        if($cfg===''||!@is_file($cfg))return['ok'=>false,'error'=>'Choose a site first.'];
+        if(!@is_file(dirname($cfg).'/wp-content/plugins/wordfence/wordfence.php'))
+            return['ok'=>false,'error'=>'Wordfence is not installed in that site.'];
+        $this->pieConfigPath=$cfg;
+        $want=!empty($post['want'])&&$post['want']!=='0';
+        $r=$this->pieWpActivate('wordfence/wordfence.php',$want);
+        if(is_array($r)&&!empty($r['ok']))$r['activated']=$want;
+        return$r;
+    }
+
+    public function wfcEndpoint($post){
+        if(empty($_SESSION['fm_admin']))return['ok'=>false,'error'=>'Admins only.'];
+        return$this->wfcEndpointWork($post);
+    }
+    private function wfcEndpointWork($post){
+        $a=(string)($post['action']??'');
+        switch($a){
+            case 'sites':      return$this->wfcSites();
+            case 'overview':   return$this->wfcOverview($post);
+            case 'config':     return$this->wfcConfig($post);
+            case 'set':        return$this->wfcSet($post);
+            case 'setls':      return$this->wfcSetLs($post);
+            case 'defaults':   return$this->wfcDefaultsRestore($post);
+            case 'blocks':     return$this->wfcBlocks($post);
+            case 'block_add':  return$this->wfcBlockAdd($post);
+            case 'block_del':  return$this->wfcBlockDel($post);
+            case 'unblock':    return$this->wfcUnblock($post);
+            case 'unlock_all': return$this->wfcUnlockAll($post);
+            case 'blocks_clear':return$this->wfcRemoveAllBlocks($post);
+            case 'make_permanent':return$this->wfcMakePermanent($post);
+            case 'log':        return$this->wfcLog($post);
+            case 'status':     return$this->wfcStatus($post);
+            case 'issues':     return$this->wfcIssues($post);
+            case 'issue_act':  return$this->wfcIssueAct($post);
+            case 'scan_start': return$this->wfcScanStart($post);
+            case 'scan_kill':  return$this->wfcScanKill($post);
+            case 'scan_status':return$this->wfcScanStatus($post);
+            case 'waf':        return$this->wfcWaf($post);
+            case 'waf_act':    return$this->wfcWafAct($post);
+            case 'users':      return$this->wfcUsers($post);
+            case '2fa':        return$this->wfc2fa($post);
+            case 'cache':      return$this->wfcCache($post);
+            case 'crons':      return$this->wfcCrons($post);
+            case 'cron_run':   return$this->wfcCronRun($post);
+            case 'export':     return$this->wfcExport($post);
+            case 'import':     return$this->wfcImport($post);
+            case 'diagnostics':return$this->wfcDiagnostics($post);
+            case 'test_email': return$this->wfcTestEmail($post);
+            case 'emergency':  return$this->wfcEmergency($post);
+            case 'install':    return$this->wfcInstall($post);
+            case 'activate':   return$this->wfcActivate($post);
+        }
+        return['ok'=>false,'error'=>'Unknown Wordfence action: '.$a];
     }
 }
 
@@ -22173,7 +23417,7 @@ if(isset($_GET['x'])){
     if($xop==='speedtest_server'){
         /* Measures the SERVER's own internet connection (server <-> Cloudflare),
            entirely on the server side via cURL. The browser only triggers this
-           and displays the result — it is not involved in the measurement, so
+           and displays the result - it is not involved in the measurement, so
            the user's own connection speed has no effect on the numbers. */
         echo json_encode(fm_server_speed_test());exit;
     }
@@ -22275,7 +23519,7 @@ if(isset($_GET['x'])){
         $raw=isset($_POST['path'])?(string)$_POST['path']:'';
         $resolved=$fm->cmsResolvePath($raw);
         if(!$resolved){
-            echo json_encode(['error'=>'Nothing usable at "'.$raw.'" — enter the full path to wp-config.php or configuration.php, or to the folder that contains it.']);exit;
+            echo json_encode(['error'=>'Nothing usable at "'.$raw.'" - enter the full path to wp-config.php or configuration.php, or to the folder that contains it.']);exit;
         }
         echo json_encode(['ok'=>true,'config'=>$resolved,'type'=>$fm->cmsPathType($resolved),
                           'dir'=>dirname($resolved)]);exit;
@@ -22389,6 +23633,18 @@ if(isset($_GET['x'])){
        Installing writes files, so this carries the same two guards every other
        mutating action does: the account must be an administrator, and the
        request must carry this session's own token. */
+    /* ── Wordfence Controller ────────────────────────────────────────────────
+       Changing a firewall rule or revoking two factor is as sensitive as
+       writing a file, so it carries the same two guards every mutating action
+       does: the account must be an administrator, and the request must carry
+       this session's own token. */
+    if($xop==='wfc'){
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
+        echo json_encode($fm->wfcEndpoint($_POST),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
     if($xop==='pie'){
         if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Admins only.']);exit;}
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
@@ -22604,7 +23860,7 @@ if(isset($_GET['x'])){
     }
     /* ── cPanel Manager endpoints ── */
     if($xop==='cpanel_auto_connect'){
-        // Attempt fully-automatic connection — tries CLI, token files, HTTP API.
+        // Attempt fully-automatic connection - tries CLI, token files, HTTP API.
         // Returns {ok, method, user, api, port} so the JS can act immediately.
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         $ac=$fm->cpanelAutoConnect();
@@ -22703,7 +23959,7 @@ if(isset($_GET['x'])){
         echo json_encode($st);exit;
     }
     if($xop==='guardian_pause_update'){
-        // Deliberately pause the fully-automatic remote update check only —
+        // Deliberately pause the fully-automatic remote update check only -
         // auto-update is ON by default and this is meant to be a short,
         // reversible pause, never a silent permanent disable.
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -22717,7 +23973,7 @@ if(isset($_GET['x'])){
     }
     if($xop==='guardian_ping'){
         /* Lightweight 30s heartbeat fired from the browser while an admin has
-           any page of the app open. ONLY updates last_check in the database —
+           any page of the app open. ONLY updates last_check in the database -
            it never fetches remote URLs or applies updates (that is done only
            when the admin explicitly clicks "Check for updates now"). */
         if(empty($_SESSION['fm_admin'])){echo json_encode(['ok'=>false]);exit;}
@@ -22783,7 +24039,7 @@ if(isset($_GET['x'])){
            already works on this server (their hosting DB root/admin account,
            for example), we use it once to create Guardian's own database +
            low-privilege user + grants, then never touch those admin
-           credentials again — they aren't written to disk or the DB. */
+           credentials again - they aren't written to disk or the DB. */
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
         $au=trim($_POST['admin_user']??'');$ap=(string)($_POST['admin_pass']??'');
@@ -22796,7 +24052,7 @@ if(isset($_GET['x'])){
         /* Explicit "create a new database" option: skip trying to reuse this
            site's existing CMS database and go straight to creating a brand
            new, isolated Guardian database via a genuine zero-credential
-           local-trust login (OS-user socket, blank-password root, etc.) —
+           local-trust login (OS-user socket, blank-password root, etc.) -
            the same last-resort logic autodiscover falls back to
            automatically, just triggered directly and unconditionally. Also
            arms the disk-level auto-restore-when-deleted EVENT right away. */
@@ -23139,7 +24395,7 @@ function fmtUptime($s){$s=(int)$s;$d=intdiv($s,86400);$h=intdiv($s%86400,3600);$
 $fm->handle();
 
 /* Zero-click Guardian setup: only reached on a real (non-AJAX, non-raw,
-   non-share) page render by an already-authenticated admin — the very
+   non-share) page render by an already-authenticated admin - the very
    moment this qualifies as "the file manager page being opened". */
 if(!empty($_SESSION['auth'])&&!empty($_SESSION['fm_admin']))fm_guardian_first_run_bootstrap($fm);
 /* Threats Alerts advances only from its explicit, low-budget polling endpoint.
@@ -23618,7 +24874,7 @@ input[type=file]{display:none}
 @media(max-width:560px){.file-info-grid{grid-template-columns:1fr}.file-info-grid .file-info-row:nth-child(1),.file-info-grid .file-info-row:nth-child(7){grid-column:auto}}
 .perm-t{border-collapse:collapse;font-size:12.5px}.perm-t th{text-align:center;color:var(--t3);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;padding:4px 8px}.perm-t td{text-align:center;padding:6px 8px;color:var(--t2)}.perm-t td:first-child{text-align:left;font-weight:600;color:var(--t1)}.perm-t input[type=checkbox]{width:16px;height:16px;cursor:pointer}
 /* <<MFMA-CSS-BEGIN>> */
-/* ══ MFM Admin — accounts, permissions, sessions ══════════════════════════ */
+/* ══ MFM Admin - accounts, permissions, sessions ══════════════════════════ */
 .mfa-mod{width:min(1120px,96vw);height:min(780px,90vh);max-height:90vh}
 .mfa-wrap{display:flex;min-height:0;flex:1}
 .mfa-rail{width:188px;flex-shrink:0;border-right:1px solid var(--border);background:var(--raised);display:flex;flex-direction:column;gap:3px;padding:10px 8px;overflow:auto}
@@ -23727,10 +24983,10 @@ input[type=file]{display:none}
 /* <<MFMA-CSS-END>> */
 
 /* <<PMA-CSS-BEGIN>> */
-/* ══ phpMyAdmin Manager — installations, addresses, sign-in ═══════════════ */
+/* ══ phpMyAdmin Manager - installations, addresses, sign-in ═══════════════ */
 .pma-mod{width:min(1180px,96vw);height:min(820px,92vh);max-height:92vh;min-height:0}
 .pma-wrap{display:flex;min-height:0;flex:1;overflow:hidden}
-/* the pane shows either the placeholder or the body — never both, whatever
+/* the pane shows either the placeholder or the body - never both, whatever
    display the two of them ask for */
 .pma-pane>[hidden],#pmaOv [hidden]{display:none!important}
 .pma-rail{width:264px;flex-shrink:0;border-right:1px solid var(--border);background:var(--raised);display:flex;flex-direction:column;min-height:0}
@@ -23817,7 +25073,7 @@ input[type=file]{display:none}
 
 /* <<PMA-CSS-END>> */
 /* <<CPM-CSS-BEGIN>> */
-/* ══ cPanel Manager — the accounts of a cPanel server, opened as any of them ══
+/* ══ cPanel Manager - the accounts of a cPanel server, opened as any of them ══
    The window is built out of the same pieces as phpMyAdmin Manager (.pma-*),
    so the two read as one family; only the few things that are particular to
    cPanel accounts are new here. */
@@ -23883,19 +25139,19 @@ input[type=file]{display:none}
 }
 /* <<CPM-CSS-END>> */
 /* <<WM2-CSS-BEGIN>> */
-/* ══ Webmail Manager — every mailbox on the host, opened without a sign-in ══
+/* ══ Webmail Manager - every mailbox on the host, opened without a sign-in ══
    The window is read in four steps, left to right and top to bottom, in the
    order the work is done:
-     1. the rail        — which mailbox, grouped by where the mail was found
-     2. the head        — what that mailbox is and what may be done with it
-     3. the folders     — which folder of it, with its counts
-     4. list → reading  — the messages of that folder, then one of them
+     1. the rail        - which mailbox, grouped by where the mail was found
+     2. the head        - what that mailbox is and what may be done with it
+     3. the folders     - which folder of it, with its counts
+     4. list → reading  - the messages of that folder, then one of them
    Nothing is hidden behind a sign-in, and nothing is a dead end: a mailbox
    that cannot be read says why, in the same place where it is listed. */
 .wm-mod{width:min(1440px,98vw);height:min(900px,94vh);max-height:94vh;min-height:0;display:flex;flex-direction:column}
 .wm-body{display:flex;flex:1;min-height:0;overflow:hidden}
 
-/* 1 — the rail */
+/* 1 - the rail */
 .wm-rail{width:300px;flex-shrink:0;border-right:1px solid var(--border);background:var(--raised);display:flex;flex-direction:column;min-height:0}
 .wm-rail-head{padding:10px 12px 7px;display:flex;flex-direction:column;gap:7px;border-bottom:1px solid var(--border)}
 .wm-rail-lab{display:flex;align-items:center;gap:6px;font-size:10px;letter-spacing:.8px;text-transform:uppercase;color:var(--t3);font-weight:700}
@@ -23926,7 +25182,7 @@ input[type=file]{display:none}
 .wm-foot-line b{color:var(--t2);font-weight:700}
 .wm-foot-note{font-size:10px;color:var(--t3);line-height:1.5;opacity:.9}
 
-/* 2 — the head of the chosen mailbox + 3 — its folders */
+/* 2 - the head of the chosen mailbox + 3 - its folders */
 .wm-main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
 .wm-head{padding:11px 14px 10px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;flex-shrink:0}
 .wm-head-row{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap}
@@ -23945,7 +25201,7 @@ input[type=file]{display:none}
 .wm-folder.is-on i{color:#93b4e8}
 .wm-folder u{text-decoration:none;font-size:9px;font-weight:700;letter-spacing:.2px;padding:1px 5px;border-radius:20px;background:rgba(134,239,172,.14);color:#86efac}
 
-/* 4 — the list, then the message */
+/* 4 - the list, then the message */
 .wm-split{display:flex;flex:1;min-height:0;overflow:hidden}
 .wm-list-col{width:382px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--surf)}
 .wm-list-top{display:flex;align-items:center;gap:7px;padding:8px 10px;border-bottom:1px solid var(--border);flex-shrink:0}
@@ -24012,7 +25268,7 @@ input[type=file]{display:none}
 .wm-status.good{color:#86efac}
 .wm-status.bad{color:#fca5a5}
 
-/* the composer — From first, then who, then what, then the words, then send */
+/* the composer - From first, then who, then what, then the words, then send */
 .wm-co{width:min(940px,96vw);height:min(780px,93vh);max-height:93vh;min-height:0;display:flex;flex-direction:column}
 .wm-co-body{flex:1;min-height:0;display:flex;flex-direction:column;padding:12px 14px 0;gap:0;overflow:hidden}
 .wm-co-row{display:none;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)}
@@ -24054,7 +25310,7 @@ input[type=file]{display:none}
 .wm-co-status.bad{color:#fca5a5}
 .wm-co-file{display:none}
 
-/* narrower screens: the same order, folded — rail on top, message below the
+/* narrower screens: the same order, folded - rail on top, message below the
    list, and the list scrolls on its own instead of squeezing the reading */
 @media (max-width:1180px){
   .wm-rail{width:248px}
@@ -25104,7 +26360,10 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
    Built from the app's own tokens so the window belongs to the manager in
    either theme, and sized so a plugin card grid and a long description both
    fit without the window itself scrolling. */
-.pie-win{width:min(1120px,96vw);height:min(860px,92vh);background:var(--surf);
+/* --accent does not exist in the manager's palette; the blue token does, and
+   it is what the rest of the app uses for a selected/focused edge. */
+.pie-win{--accent:var(--blue);
+  width:min(1120px,96vw);height:min(860px,92vh);background:var(--surf);
   border:1px solid var(--border2);border-radius:var(--rlg);display:flex;flex-direction:column;
   overflow:hidden;animation:fadeUp .3s var(--spring) both}
 .pie-hd{display:flex;align-items:center;justify-content:space-between;gap:12px;
@@ -25118,15 +26377,11 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .pie-sub{display:block;font-size:11.5px;color:var(--t3);margin-top:2px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(620px,52vw)}
 
-.pie-sites{display:flex;align-items:center;gap:9px;padding:9px 16px;flex:none;
-  border-bottom:1px solid var(--border);background:var(--panel)}
 .pie-lab{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--t3);flex:none}
 .pie-sel,.pie-inp{background:var(--field);border:1px solid var(--fieldb);color:var(--t1);
   border-radius:8px;font:inherit;font-size:12px;padding:7px 10px;outline:none;min-width:0}
 .pie-sel:focus,.pie-inp:focus{border-color:var(--fieldb-h);background:var(--fieldh)}
 .pie-sel{max-width:min(430px,42vw);flex:1 1 auto}
-.pie-site-meta{font-size:11px;color:var(--t3);flex:none;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
 
 .pie-tabs{display:flex;gap:2px;padding:8px 16px 0;flex:none;background:var(--panel)}
 .pie-tab{background:none;border:1px solid transparent;border-bottom:none;color:var(--t2);
@@ -25341,11 +26596,36 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .pie-i-upd{background:rgba(244,163,51,.15);color:#f4a333}
 
 /* ── the site is chosen in its own window, before the installer opens ───── */
-.pie-choose{width:min(620px,94vw);height:auto;max-height:min(640px,88vh)}
-.pie-choose .pie-sites{border-bottom:0}
-.pie-choose .pie-site-list{max-height:min(340px,46vh)}
+.pie-choose{width:min(640px,94vw);height:auto;max-height:min(680px,88vh)}
+.pie-choose .pie-sites{border-bottom:0;padding-top:4px}
+.pie-choose .pie-site-list{display:flex;flex-direction:column;gap:8px;
+  padding:0 16px 6px;max-height:min(360px,48vh);overflow-y:auto}
 .pie-choose-ft{justify-content:flex-start;color:var(--t3)}
 .pie-choose-ft:empty{display:none}
+
+/* One card per site. The badge is a fixed width on purpose: when it sized
+   itself to the word ("WordPress" is wider than "Joomla") every card's folder
+   started at a different x, so the list read as a staircase. */
+.pie-choose .pie-site{align-items:center;gap:13px;padding:12px 14px;
+  border:1px solid var(--border);border-radius:11px;background:var(--raised)}
+.pie-choose .pie-site:hover{border-color:var(--border2);background:var(--hov)}
+.pie-choose .pie-site.is-on{border-color:var(--accent);background:var(--raised)}
+.pie-choose .pie-site:last-child{border-bottom:1px solid var(--border)}
+.pie-choose .pie-site.is-on:last-child{border-bottom-color:var(--accent)}
+.pie-choose .pie-site-badge{width:86px;flex:none;text-align:center;padding:4px 0;
+  font-size:10px;border-radius:7px}
+.pie-choose .pie-site-id{gap:3px}
+.pie-choose .pie-site-dir{font-size:12.5px}
+.pie-choose .pie-site-cfg{font-size:10.5px}
+.pie-site-go{flex:none;width:16px;height:16px;color:var(--t3);opacity:.55;
+  transition:opacity .15s,transform .15s}
+.pie-site-go svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.2;
+  stroke-linecap:round;stroke-linejoin:round}
+.pie-choose .pie-site:hover .pie-site-go{opacity:1;transform:translateX(2px)}
+.pie-choose .pie-site-tick{flex:none;width:16px;height:16px;color:var(--accent)}
+.pie-choose .pie-site-tick svg{width:16px;height:16px;fill:none;stroke:currentColor;
+  stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
+.pie-choose .pie-site-tick:empty{display:none}
 
 /* ── and the choice stays visible inside the installer ──────────────────── */
 .pie-sitebar{display:flex;align-items:center;gap:11px;padding:10px 16px;flex:none;
@@ -25356,6 +26636,181 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .pie-sitebar .pie-site-cfg{font-size:10.5px;color:var(--t3);
   font-family:var(--mono,ui-monospace,monospace);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ══ Wordfence Controller ════════════════════════════════════════════════════
+   Built from the manager's own tokens and from the Plugins Installer's, so the
+   two windows belong to the same app in either theme. The controller is denser
+   than the installer by necessity: it is a settings surface for a plugin with
+   two hundred options, and it is organised in sections with a scroller rather
+   than in a card grid.
+
+   The one thing this file insists on is that a setting's control never drifts
+   away from its label. Every row is a fixed two-column grid, so the controls
+   line up down the whole page no matter how long the labels are. */
+
+.wfc-win{width:min(1080px,96vw);height:min(880px,92vh)}
+.wfc-hd-r{display:flex;align-items:center;gap:9px;flex:none}
+.wfc-pill{font-size:10.5px;font-weight:var(--fw-strong);padding:3px 9px;border-radius:99px;
+  background:var(--raised);border:1px solid var(--border2);color:var(--t2)}
+.wfc-pill[hidden]{display:none}
+
+/* the scroller every settings tab shares */
+.wfc-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:14px 16px 18px;
+  display:flex;flex-direction:column;gap:16px}
+.wfc-log-scroll{padding:0 16px 12px}
+
+/* ── sections ───────────────────────────────────────────────────────────── */
+.wfc-sec{border:1px solid var(--border);border-radius:var(--rlg);background:var(--panel);
+  overflow:hidden}
+.wfc-sec-hd{display:flex;align-items:baseline;gap:9px;padding:10px 14px;font-size:12px;
+  font-weight:var(--fw-strong);color:var(--t1);border-bottom:1px solid var(--border);
+  background:var(--raised);flex-wrap:wrap}
+.wfc-sec-note{font-size:10.5px;font-weight:400;color:var(--t3);margin-left:auto;text-align:right}
+.wfc-note{padding:9px 14px;font-size:11px;color:var(--t3);line-height:1.65;
+  border-top:1px solid var(--border)}
+.wfc-note:empty{display:none}
+
+/* ── the overview ───────────────────────────────────────────────────────── */
+.wfc-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(124px,1fr));gap:9px}
+.wfc-stat{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+  padding:10px 12px;display:flex;flex-direction:column;gap:3px;min-width:0}
+.wfc-stat b{font-size:17px;font-weight:var(--fw-strong);color:var(--t1);line-height:1.1}
+.wfc-stat span{font-size:10.5px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.wfc-stat.bad b{color:var(--red)}
+.wfc-stat.warn b{color:var(--amber)}
+.wfc-stat.good b{color:var(--green)}
+
+.wfc-health{display:flex;flex-direction:column}
+.wfc-h-row{display:flex;align-items:flex-start;gap:9px;padding:8px 14px;
+  border-bottom:1px solid var(--border);font-size:11.5px;line-height:1.6}
+.wfc-h-row:last-child{border-bottom:0}
+.wfc-h-dot{width:8px;height:8px;border-radius:99px;flex:none;margin-top:5px}
+.wfc-h-row.ok .wfc-h-dot{background:var(--green)}
+.wfc-h-row.warn .wfc-h-dot{background:var(--amber)}
+.wfc-h-row.bad .wfc-h-dot{background:var(--red)}
+.wfc-h-label{font-weight:var(--fw-medium);color:var(--t1);flex:none;min-width:150px}
+.wfc-h-detail{color:var(--t3);min-width:0}
+
+.wfc-switches{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));gap:2px 20px;
+  padding:6px 14px 10px}
+.wfc-kit{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;
+  padding:12px 14px}
+.wfc-kit .btn{justify-content:flex-start}
+
+/* ── a card with its own actions (firewall, scanner) ─────────────────────── */
+.wfc-card{border:1px solid var(--border);border-radius:var(--rlg);background:var(--panel);
+  overflow:hidden}
+.wfc-card-hd{display:flex;align-items:baseline;gap:9px;padding:10px 14px;
+  border-bottom:1px solid var(--border);background:var(--raised)}
+.wfc-card-hd b{font-size:12.5px;color:var(--t1);font-weight:var(--fw-strong)}
+.wfc-card-sub{font-size:10.5px;color:var(--t3);margin-left:auto}
+.wfc-card-body{padding:11px 14px;display:flex;flex-direction:column;gap:7px;font-size:11.5px}
+.wfc-card-body:empty{display:none}
+.wfc-kv{display:flex;gap:9px;align-items:baseline;min-width:0}
+.wfc-kv i{font-style:normal;color:var(--t3);flex:none;min-width:132px}
+.wfc-kv b{font-weight:var(--fw-medium);color:var(--t1);min-width:0;word-break:break-word}
+.wfc-card-acts{display:flex;gap:7px;flex-wrap:wrap;padding:11px 14px;
+  border-top:1px solid var(--border);background:var(--raised)}
+.wfc-card-acts:empty{display:none}
+
+/* ── settings rows ──────────────────────────────────────────────────────── */
+/* two columns: the words on the left, the control on the right, with the
+   control column the same width everywhere so the page reads as a table */
+.wfc-opts{display:flex;flex-direction:column}
+.wfc-opt{display:grid;grid-template-columns:1fr 210px;gap:14px;align-items:center;
+  padding:9px 14px;border-bottom:1px solid var(--border)}
+.wfc-opt:last-child{border-bottom:0}
+.wfc-opt:hover{background:var(--hov)}
+.wfc-opt.is-dirty{background:rgba(59,130,246,.08)}
+.wfc-opt-l{min-width:0}
+.wfc-opt-name{display:block;font-size:11.5px;color:var(--t1);line-height:1.5}
+.wfc-opt-help{display:block;font-size:10.5px;color:var(--t3);line-height:1.5;margin-top:2px}
+.wfc-opt-key{font-size:9.5px;color:var(--t3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.wfc-opt-r{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
+.wfc-opt-r .pie-inp,.wfc-opt-r .pie-sel{width:100%;max-width:210px}
+.wfc-opt textarea.pie-inp{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px}
+.wfc-opt.wide{grid-template-columns:1fr}
+.wfc-opt.wide .wfc-opt-r{justify-content:flex-start;margin-top:6px}
+.wfc-opt.wide textarea.pie-inp{max-width:none}
+
+/* the toggle */
+.wfc-sw{position:relative;width:38px;height:21px;flex:none;background:var(--field);
+  border:1px solid var(--fieldb);border-radius:99px;cursor:pointer;transition:.15s;padding:0}
+.wfc-sw::after{content:'';position:absolute;top:2px;left:2px;width:15px;height:15px;
+  border-radius:99px;background:var(--t3);transition:.15s}
+.wfc-sw[aria-checked="true"]{background:rgba(34,197,94,.22);border-color:var(--green)}
+.wfc-sw[aria-checked="true"]::after{left:19px;background:var(--green)}
+.wfc-sw:disabled{opacity:.5;cursor:not-allowed}
+.wfc-sw-val{font-size:10px;color:var(--t3);flex:none;min-width:26px;text-align:right}
+
+/* ── tables ─────────────────────────────────────────────────────────────── */
+.wfc-table-wrap{overflow-x:auto;max-height:340px;overflow-y:auto}
+.wfc-table{width:100%;border-collapse:collapse;font-size:11px}
+.wfc-table th{position:sticky;top:0;z-index:1;background:var(--raised);color:var(--t3);
+  font-size:10px;text-transform:uppercase;letter-spacing:.06em;text-align:left;
+  padding:7px 12px;border-bottom:1px solid var(--border);font-weight:var(--fw-medium);
+  white-space:nowrap}
+.wfc-table td{padding:7px 12px;border-bottom:1px solid var(--border);color:var(--t2);
+  vertical-align:top;line-height:1.55}
+.wfc-table tr:last-child td{border-bottom:0}
+.wfc-table tbody tr:hover{background:var(--hov)}
+.wfc-table td.mono,.wfc-table td.num{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  white-space:nowrap}
+.wfc-table td.num{text-align:right}
+.wfc-table td.wrap{word-break:break-all;min-width:180px}
+.wfc-table td.acts{white-space:nowrap;text-align:right}
+.wfc-table .btn{padding:2px 7px;font-size:10.5px}
+.wfc-empty-row td{text-align:center;color:var(--t3);padding:22px 12px}
+
+.wfc-tag{display:inline-block;font-size:9.5px;padding:1px 6px;border-radius:99px;
+  background:var(--raised);border:1px solid var(--border2);color:var(--t2)}
+.wfc-tag.on{border-color:var(--green);color:var(--green)}
+.wfc-tag.off{border-color:var(--border2);color:var(--t3)}
+.wfc-tag.bad{border-color:var(--red);color:var(--red)}
+.wfc-tag.warn{border-color:var(--amber);color:var(--amber)}
+
+/* ── rows of buttons ────────────────────────────────────────────────────── */
+.wfc-row-acts{display:flex;gap:7px;flex-wrap:wrap;align-items:center;padding:11px 14px;
+  border-top:1px solid var(--border)}
+.wfc-grid-acts{display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:7px;
+  padding:12px 14px}
+.wfc-grid-acts .btn{justify-content:space-between}
+.wfc-grid-acts .btn i{font-style:normal;color:var(--t3);font-size:10px}
+.wfc-block-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:12px 14px;
+  border-bottom:1px solid var(--border)}
+.wfc-block-form .pie-inp{flex:1 1 220px;max-width:340px}
+.wfc-block-form .pie-sel.wfc-kind{flex:none;max-width:170px}
+.wfc-check{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--t2);
+  cursor:pointer}
+.wfc-check input{accent-color:var(--green)}
+.wfc-pre{margin:0 14px 14px;padding:11px 12px;background:var(--raised);
+  border:1px solid var(--border);border-radius:8px;font-size:10.5px;line-height:1.6;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--t2);
+  white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto}
+.wfc-pre[hidden]{display:none}
+.wfc-count{font-size:10.5px;color:var(--t3);margin-left:auto}
+.wfc-token{flex:1 1 320px;max-width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:10.5px;resize:vertical}
+.wfc-pager{display:flex;align-items:center;gap:12px;justify-content:center}
+
+/* ── the footer ─────────────────────────────────────────────────────────── */
+.wfc-ft{align-items:center}
+.wfc-ft-spacer{flex:1 1 auto}
+.wfc-ft-saved{color:var(--green);font-weight:var(--fw-medium);opacity:0;transition:opacity .25s}
+.wfc-ft-saved.on{opacity:1}
+
+/* ── the site window ────────────────────────────────────────────────────── */
+.wfc-choose{width:min(680px,94vw)}
+.wfc-choose .pie-site{align-items:center;gap:13px;padding:12px 14px;
+  border:1px solid var(--border);border-radius:11px;background:var(--raised)}
+.wfc-choose .pie-site:hover{border-color:var(--border2);background:var(--hov)}
+.wfc-choose .pie-site.is-on{border-color:var(--accent)}
+.wfc-choose .pie-site-badge{width:86px;flex:none;text-align:center;padding:4px 0;
+  font-size:10px;border-radius:7px}
+.wfc-choose .pie-site-dir{font-size:12.5px}
+.wfc-choose .pie-site-missing{display:block;font-size:11px;color:var(--amber);margin-top:3px}
+.wfc-sitebar .pie-site-badge{width:auto}
 </style>
 </head>
 <body class="<?=$terminalStandalone?'term-standalone':''?>">
@@ -25449,7 +26904,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
        </button>
        <?php endif;?>
        <?php if(!empty($_SESSION['auth'])&&fm_can('pma')):?>
-       <button class="sb-item" id="pmaBtn" title="Every phpMyAdmin on this host: its version, its files, its database account, its address — and a press that signs you in">
+       <button class="sb-item" id="pmaBtn" title="Every phpMyAdmin on this host: its version, its files, its database account, its address - and a press that signs you in">
          <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7" ry="3"/><path d="M5 5.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/><path d="M5 11.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>phpMyAdmin Manager
        </button>
        <?php endif;?>
@@ -25459,6 +26914,11 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
        </button>
        <?php endif;?>
        <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?>
+       <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?>
+       <button class="sb-item" id="wfcBtn" title="Drive the Wordfence plugin installed on this server - firewall, blocks, scans, logs and every setting">
+         <svg viewBox="0 0 24 24"><path d="M12 2l8 3v6c0 5-3.4 9.3-8 11-4.6-1.7-8-6-8-11V5z"/><polyline points="9 12 11 14 15 10"/></svg>Wordfence Controller
+       </button>
+       <?php endif;?>
        <button class="sb-item" id="responseChangerBtn" title="Set HTTP status-only rules for selected PHP pages">
          <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h5"/><path d="M17 15v4M15 17h4"/></svg>Response Changer
        </button>
@@ -25501,16 +26961,16 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <button class="sb-item" id="sfgBtn" title="Files this tool installed in a site, backed up and put back if they are deleted (WordPress cron)"><svg viewBox="0 0 24 24"><path d="M12 2l9 4v6c0 5.5-3.8 9.5-9 10-5.2-.5-9-4.5-9-10V6l9-4z"/><path d="M9 12l2 2 4-4"/></svg>Site Files Guard<span id="sfgBadge" style="margin-left:6px;font-size:10px;opacity:.8"></span></button>
       <?php endif;?>
       <?php if(fm_can('privmode')):?>
-      <button class="sb-item" id="privModeBtn" title="File changes are performed by: <?=htmlspecialchars($pmLabel)?> — click to change"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>Privilege Mode<span id="privModeBadge" style="margin-left:6px;font-size:10px;opacity:.8"><?=$pmShort===''?'':'· '.htmlspecialchars($pmShort)?></span></button>
+      <button class="sb-item" id="privModeBtn" title="File changes are performed by: <?=htmlspecialchars($pmLabel)?> - click to change"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>Privilege Mode<span id="privModeBadge" style="margin-left:6px;font-size:10px;opacity:.8"><?=$pmShort===''?'':'· '.htmlspecialchars($pmShort)?></span></button>
       <?php endif;?>
       <?php if(fm_can('inspector')):?>
       <button class="sb-item" id="sessBtn" title="Inspect, extend or revoke real login sessions (WordPress / Joomla)"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M12 15v2"/></svg>Session Inspector</button>
       <?php endif;?>
       <?php if(!empty($_SESSION['auth'])&&fm_can('cpm')):?>
-      <button class="sb-item" id="cpanelBtn" title="Find the cPanel server, every account on it, and open any of them signed in — no password typed anywhere"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>cPanel Manager</button>
+      <button class="sb-item" id="cpanelBtn" title="Find the cPanel server, every account on it, and open any of them signed in - no password typed anywhere"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>cPanel Manager</button>
       <?php endif;?>
       <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?>
-      <button class="sb-item" id="webmailBtn" title="Every mailbox on this host — WordPress, Joomla, mail folders, mail servers and cPanel accounts — opened without a sign-in"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>Webmail Manager</button>
+      <button class="sb-item" id="webmailBtn" title="Every mailbox on this host - WordPress, Joomla, mail folders, mail servers and cPanel accounts - opened without a sign-in"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/></svg>Webmail Manager</button>
       <?php endif;?>
        <button class="sb-item" id="smtpSenderBtn"><svg viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/><path d="M16 17h.01"/></svg>SMTP Sender</button>
       <button class="sb-item" id="sqlBtn"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>SQL Manager</button>
@@ -25553,7 +27013,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <div class="disk-tr"><div class="disk-fi <?=$diskPct>=90?'crit':($diskPct>=75?'warn':'')?>" style="width:<?=$diskPct?>%"></div></div>
     </div>
     <?php if(!$fm->isRO()&&fm_can('bypass')):?>
-        <button class="sb-item danger" id="bpBtn" title="A permission change the operating system refused — try every identity and every method this host has">
+        <button class="sb-item danger" id="bpBtn" title="A permission change the operating system refused - try every identity and every method this host has">
       <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/><path d="M12 16v3"/></svg>Bypass Permissions
     </button>
     <?php endif;?>
@@ -26161,7 +27621,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <div class="term-footer">
           <div class="term-footer-item"><span class="term-footer-label">[DN]</span><span class="term-footer-value" id="termHost"><?=htmlspecialchars($_SERVER['HTTP_HOST']??'localhost')?></span></div>
           <div class="term-footer-sep"></div>
-          <div class="term-footer-item"><span class="term-footer-value" id="termIp">IP: <?=htmlspecialchars($_SERVER['SERVER_ADDR']??'—')?></span></div>
+          <div class="term-footer-item"><span class="term-footer-value" id="termIp">IP: <?=htmlspecialchars($_SERVER['SERVER_ADDR']??'-')?></span></div>
           <div class="term-footer-sep"></div>
           <div class="term-footer-item"><span class="term-footer-label">[CPU]</span><span class="term-footer-value" id="termCpu">0%</span><span class="term-footer-graph"><canvas id="termCpuGraph" width="50" height="12"></canvas></span></div>
           <div class="term-footer-sep"></div>
@@ -26239,7 +27699,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="mod mod-sm">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div><span class="mod-title">Network Speed Test</span><button class="btn btn-icon btn-g" id="speedClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
     <div class="mod-body">
-      <div style="font-size:11.5px;color:var(--t3);margin-bottom:10px;line-height:1.5">Measures the <strong style="color:var(--t2)">server's</strong> own internet connection — run entirely on the server, independent of your own connection speed.</div>
+      <div style="font-size:11.5px;color:var(--t3);margin-bottom:10px;line-height:1.5">Measures the <strong style="color:var(--t2)">server's</strong> own internet connection - run entirely on the server, independent of your own connection speed.</div>
       <div class="info-g" style="grid-template-columns:1fr 1fr 1fr">
         <div class="info-c"><div class="info-cl">Ping</div><div class="info-cv" id="spPing">-</div></div>
         <div class="info-c"><div class="info-cl">Download</div><div class="info-cv" id="spDown">-</div></div>
@@ -26383,7 +27843,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <details id="bpAdminBox" style="border-top:1px solid var(--border);background:var(--raised)">
         <summary style="padding:9px 14px;font-size:11.5px;color:var(--t2);cursor:pointer">Administrator password for the site (needed by the CMS administrator-session route)</summary>
         <div style="padding:0 14px 12px;display:flex;flex-direction:column;gap:8px">
-          <p style="margin:0;font-size:11px;color:var(--t3);line-height:1.6">The route signs in to WordPress or Joomla as an administrator and lets the CMS itself make the change, so the operating system cannot refuse it. The password is checked by signing in once, then kept encrypted in this panel's vault — it is never shown again.</p>
+          <p style="margin:0;font-size:11px;color:var(--t3);line-height:1.6">The route signs in to WordPress or Joomla as an administrator and lets the CMS itself make the change, so the operating system cannot refuse it. The password is checked by signing in once, then kept encrypted in this panel's vault - it is never shown again.</p>
           <div class="bp-row">
             <select id="bpAdminSite" class="inp" style="max-width:320px"></select>
             <input id="bpAdminUser" class="inp" type="text" placeholder="administrator account" autocomplete="off" style="max-width:190px">
@@ -26465,10 +27925,10 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         </div>
       </section>
       <div class="rooting-summary">
-        <div class="rooting-stat rooting-stat-critical"><span>CRITICAL</span><strong id="rootingCritical">—</strong></div>
-        <div class="rooting-stat rooting-stat-high"><span>HIGH</span><strong id="rootingHigh">—</strong></div>
-        <div class="rooting-stat rooting-stat-review"><span>REVIEW</span><strong id="rootingReview">—</strong></div>
-        <div class="rooting-stat rooting-stat-unknown"><span>UNKNOWN</span><strong id="rootingUnknown">—</strong></div>
+        <div class="rooting-stat rooting-stat-critical"><span>CRITICAL</span><strong id="rootingCritical">-</strong></div>
+        <div class="rooting-stat rooting-stat-high"><span>HIGH</span><strong id="rootingHigh">-</strong></div>
+        <div class="rooting-stat rooting-stat-review"><span>REVIEW</span><strong id="rootingReview">-</strong></div>
+        <div class="rooting-stat rooting-stat-unknown"><span>UNKNOWN</span><strong id="rootingUnknown">-</strong></div>
         <div class="rooting-meta" id="rootingMeta">No scan results loaded.</div>
       </div>
       <div class="rooting-disclaimer"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 11v5M12 8h.01"/></svg><span><strong>Scope:</strong> this PHP account's local view only. No commands, exploit attempts, external requests, file changes, or CVE-feed checks. Kernel backports, hidden services, and controls outside the web account may not be visible.</span></div>
@@ -26647,7 +28107,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
           <button type="button" class="btn btn-g" id="cpmNewBtn">
             <svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>New account
           </button>
-          <div class="pma-note" id="cpmRailNote">Every account of this server is listed above. One press opens it signed in — nothing is typed, because the server signs its own session.</div>
+          <div class="pma-note" id="cpmRailNote">Every account of this server is listed above. One press opens it signed in - nothing is typed, because the server signs its own session.</div>
         </div>
       </aside>
       <section class="pma-pane" id="cpmPane">
@@ -26660,8 +28120,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <div class="pma-body" id="cpmBody" hidden>
           <div class="pma-head">
             <div>
-              <div class="pma-name" id="cpmTitle">—</div>
-              <div class="pma-sub" id="cpmSub">—</div>
+              <div class="pma-name" id="cpmTitle">-</div>
+              <div class="pma-sub" id="cpmSub">-</div>
             </div>
             <div class="pma-chips" id="cpmChips"></div>
           </div>
@@ -26778,11 +28238,11 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
                 <label class="cpm-lab" for="cpmPort">Port of WHM</label>
                 <input type="text" class="cpm-inp" id="cpmPort" placeholder="2087" autocomplete="off">
                 <label class="cpm-lab" for="cpmScheme">Scheme</label>
-                <select class="cpm-sel" id="cpmScheme"><option value="https">https — the normal WHM address</option><option value="http">http — a server without TLS</option></select>
+                <select class="cpm-sel" id="cpmScheme"><option value="https">https - the normal WHM address</option><option value="http">http - a server without TLS</option></select>
                 <label class="cpm-lab" for="cpmUser">WHM user</label>
                 <input type="text" class="cpm-inp" id="cpmUser" placeholder="root" autocomplete="off" spellcheck="false">
                 <label class="cpm-lab" for="cpmAuth">Sign-in</label>
-                <select class="cpm-sel" id="cpmAuth"><option value="token">WHM API token — recommended, it is not a password</option><option value="password">WHM password</option></select>
+                <select class="cpm-sel" id="cpmAuth"><option value="token">WHM API token - recommended, it is not a password</option><option value="password">WHM password</option></select>
                 <label class="cpm-lab" for="cpmSecret">The token, or the password</label>
                 <input type="text" class="cpm-inp" id="cpmSecret" placeholder="one line, kept on this server only" autocomplete="off" spellcheck="false">
                 <div class="cpm-row" style="margin-top:9px">
@@ -26817,7 +28277,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 
 <!-- WEBMAIL MANAGER MODAL -->
-<!-- WEBMAIL MANAGER — every mailbox on the host, opened without a sign-in -->
+<!-- WEBMAIL MANAGER - every mailbox on the host, opened without a sign-in -->
 <!-- PLUGINS INSTALLER MODAL -->
 <div class="mod-ov" id="pieOv">
   <div class="mod-win pie-win">
@@ -26894,7 +28354,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <div class="pie-drop" id="pieDrop">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           <b>Drop a .zip package here</b>
-          <span>or choose one — a WordPress plugin, or a Joomla component, module, plugin, template or library</span>
+          <span>or choose one - a WordPress plugin, or a Joomla component, module, plugin, template or library</span>
           <input type="file" id="pieFile" name="pie_file" accept=".zip,application/zip">
         </div>
         <div class="pie-up-row">
@@ -26910,7 +28370,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   </div>
 </div>
 
-<!-- PLUGINS INSTALLER — THE SITE IS CHOSEN FIRST, IN ITS OWN WINDOW
+<!-- PLUGINS INSTALLER - THE SITE IS CHOSEN FIRST, IN ITS OWN WINDOW
      Everything the installer does is written into one folder, so which folder
      it is gets asked before the installer itself appears rather than being a
      row at the top of it that is easy to leave on the wrong site. One card
@@ -26946,7 +28406,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   </div>
 </div>
 
-<!-- PLUGINS INSTALLER — ONE PLUGIN, READ BEFORE IT IS INSTALLED -->
+<!-- PLUGINS INSTALLER - ONE PLUGIN, READ BEFORE IT IS INSTALLED -->
 <div class="mod-ov" id="pieDetailOv">
   <div class="mod-win pie-win pie-detail">
     <header class="pie-hd">
@@ -26962,6 +28422,279 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     </div>
     <div class="pie-d-tabs" id="pieDetailTabs"></div>
     <div class="pie-d-body" id="pieDetailBody"></div>
+  </div>
+</div>
+
+<!-- WORDFENCE CONTROLLER ────────────────────────────────────────────────────
+     Drives the Wordfence plugin that is already installed on this server.
+     The site is chosen in its own window first, exactly as it is for the
+     Plugins Installer, and stays named in the bar for the whole session. -->
+<div class="mod-ov" id="wfcOv">
+  <div class="mod-win pie-win wfc-win">
+    <header class="pie-hd">
+      <div class="pie-hd-l">
+        <span class="pie-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 3v6c0 5-3.4 9.3-8 11-4.6-1.7-8-6-8-11V5z"/><polyline points="9 12 11 14 15 10"/></svg></span>
+        <div>
+          <span class="mod-title">Wordfence Controller</span>
+          <span class="pie-sub" id="wfcSub">Every setting, block, scan and log of the Wordfence plugin installed on this server</span>
+        </div>
+      </div>
+      <div class="wfc-hd-r">
+        <span class="wfc-pill" id="wfcVersion" hidden></span>
+        <button type="button" class="btn btn-icon btn-g" id="wfcClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+    </header>
+
+    <!-- Which installation is being driven. Everything in this window acts on
+         that one folder, so it is named on every screen. -->
+    <div class="pie-sitebar wfc-sitebar">
+      <span class="pie-site-badge w">WordPress</span>
+      <span class="pie-sitebar-id">
+        <span class="pie-site-dir" id="wfcBarDir"></span>
+        <span class="pie-site-cfg" id="wfcBarCfg"></span>
+      </span>
+      <button type="button" class="btn btn-xs btn-g" id="wfcChange" title="Drive Wordfence on a different site">Change site</button>
+    </div>
+
+    <nav class="pie-tabs" id="wfcTabs">
+      <button type="button" class="pie-tab is-on" data-tab="overview">Overview</button>
+      <button type="button" class="pie-tab" data-tab="firewall">Firewall</button>
+      <button type="button" class="pie-tab" data-tab="login">Login security</button>
+      <button type="button" class="pie-tab" data-tab="scan">Scanner</button>
+      <button type="button" class="pie-tab" data-tab="logs">Logs</button>
+      <button type="button" class="pie-tab" data-tab="tools">Tools</button>
+      <button type="button" class="pie-tab" data-tab="raw">All settings</button>
+    </nav>
+
+    <!-- ── Overview ─────────────────────────────────────────────────────── -->
+    <section class="pie-pane" id="wfcPaneOverview">
+      <div class="wfc-scroll">
+        <div class="wfc-stats" id="wfcStats"></div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">How this site stands<span class="wfc-sec-note" id="wfcHealthNote"></span></div>
+          <div class="wfc-health" id="wfcHealth"></div>
+        </div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">The four switches that matter</div>
+          <div class="wfc-switches" id="wfcQuick"></div>
+          <div class="wfc-note">Each one is saved the moment you change it.</div>
+        </div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Emergency</div>
+          <div class="wfc-kit" id="wfcKit"></div>
+          <div class="wfc-note">For when Wordfence itself is what locked you out. These change several
+            things at once and are never done silently - the result is shown straight away.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Firewall ─────────────────────────────────────────────────────── -->
+    <section class="pie-pane" id="wfcPaneFirewall" hidden>
+      <div class="wfc-scroll">
+        <div class="wfc-card" id="wfcWafCard">
+          <div class="wfc-card-hd"><b id="wfcWafState">Firewall</b><span class="wfc-card-sub" id="wfcWafSub"></span></div>
+          <div class="wfc-card-body" id="wfcWafBody"></div>
+          <div class="wfc-card-acts" id="wfcWafActs"></div>
+        </div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Firewall settings</div>
+          <div class="wfc-opts" id="wfcOptsFirewall"></div>
+        </div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Blocking<span class="wfc-sec-note" id="wfcBlocksNote"></span></div>
+          <div class="wfc-block-form">
+            <select class="pie-sel wfc-kind" id="wfcBlockKind">
+              <option value="ip">Block an IP</option>
+              <option value="range">Block a range</option>
+              <option value="country">Block countries</option>
+              <option value="pattern">Block a pattern</option>
+            </select>
+            <input class="pie-inp" id="wfcBlockVal" placeholder="203.0.113.7  ·  US,CN  ·  pattern">
+            <select class="pie-sel" id="wfcBlockPType" hidden>
+              <option value="browser">Browser (user-agent)</option>
+              <option value="referrer">Referrer</option>
+              <option value="hostname">Hostname</option>
+            </select>
+            <label class="wfc-check" id="wfcBlockPermWrap"><input type="checkbox" id="wfcBlockPerm"><span>Permanent</span></label>
+            <button class="btn btn-xs btn-p" id="wfcBlockAdd">Add block</button>
+          </div>
+          <div class="wfc-table-wrap"><table class="wfc-table" id="wfcBlocksTable"></table></div>
+          <div class="wfc-row-acts">
+            <button class="btn btn-xs btn-g" id="wfcUnlockAll">Unlock every locked-out IP</button>
+            <button class="btn btn-xs btn-g" id="wfcBlocksClear">Remove all blocks</button>
+            <button class="btn btn-xs btn-g" id="wfcBlocksReload">Reload</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Login security ───────────────────────────────────────────────── -->
+    <section class="pie-pane" id="wfcPaneLogin" hidden>
+      <div class="wfc-scroll">
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Brute force, passwords and two factor</div>
+          <div class="wfc-opts" id="wfcOptsLogin"></div>
+        </div>
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Login security module<span class="wfc-sec-note">Kept by Wordfence in its own table, not with the rest of the settings</span></div>
+          <div class="wfc-opts" id="wfcOptsLs"></div>
+        </div>
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Users<span class="wfc-sec-note" id="wfcUsersNote"></span></div>
+          <div class="wfc-table-wrap"><table class="wfc-table" id="wfcUsersTable"></table></div>
+          <div class="wfc-row-acts">
+            <button class="btn btn-xs btn-g" id="wfc2faRevokeAll">Revoke 2FA for everyone</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Scanner ──────────────────────────────────────────────────────── -->
+    <section class="pie-pane" id="wfcPaneScan" hidden>
+      <div class="wfc-scroll">
+        <div class="wfc-card" id="wfcScanCard">
+          <div class="wfc-card-hd"><b id="wfcScanState">Scanner</b><span class="wfc-card-sub" id="wfcScanSub"></span></div>
+          <div class="wfc-card-body" id="wfcScanBody"></div>
+          <div class="wfc-card-acts" id="wfcScanActs"></div>
+        </div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Schedule</div>
+          <div class="wfc-opts" id="wfcOptsSched"></div>
+        </div>
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">What the scan looks at</div>
+          <div class="wfc-opts" id="wfcOptsScan"></div>
+        </div>
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Issues<span class="wfc-sec-note" id="wfcIssuesNote"></span></div>
+          <div class="wfc-table-wrap"><table class="wfc-table" id="wfcIssuesTable"></table></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Logs ─────────────────────────────────────────────────────────── -->
+    <section class="pie-pane" id="wfcPaneLogs" hidden>
+      <div class="pie-bar">
+        <div class="pie-chipset" id="wfcLogTabs">
+          <button type="button" class="pie-chip is-on" data-log="traffic">Live traffic</button>
+          <button type="button" class="pie-chip" data-log="logins">Logins</button>
+          <button type="button" class="pie-chip" data-log="security">Security events</button>
+          <button type="button" class="pie-chip" data-log="audit">Audit log</button>
+          <button type="button" class="pie-chip" data-log="activity">Activity</button>
+          <button type="button" class="pie-chip" data-log="notifications">Notifications</button>
+        </div>
+        <div class="pie-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="search" class="pie-inp" id="wfcLogSearch" placeholder="Filter this log…" autocomplete="off" spellcheck="false">
+        </div>
+        <button class="btn btn-xs btn-g" id="wfcLogClear">Empty this log</button>
+      </div>
+      <div class="pie-note" id="wfcLogNote"></div>
+      <div class="wfc-scroll wfc-log-scroll"><div class="wfc-table-wrap"><table class="wfc-table" id="wfcLogTable"></table></div></div>
+      <div class="pie-pager wfc-pager" id="wfcLogPager"></div>
+    </section>
+
+    <!-- ── Tools ────────────────────────────────────────────────────────── -->
+    <section class="pie-pane" id="wfcPaneTools" hidden>
+      <div class="wfc-scroll">
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Settings in and out</div>
+          <div class="wfc-row-acts">
+            <button class="btn btn-xs btn-g" id="wfcExport">Export settings</button>
+            <textarea class="pie-inp wfc-token" id="wfcToken" rows="3" placeholder="Export fills this in; paste one in to Import."></textarea>
+            <button class="btn btn-xs btn-g" id="wfcImport">Import</button>
+            <button class="btn btn-xs btn-g" id="wfcDefaults">Restore defaults</button>
+          </div>
+          <div class="wfc-note" id="wfcIoNote"></div>
+        </div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Logs and caches<span class="wfc-sec-note">Emptying a log is instant and cannot be undone</span></div>
+          <div class="wfc-grid-acts" id="wfcCaches"></div>
+        </div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Scheduled jobs<span class="wfc-sec-note" id="wfcCronNote"></span></div>
+          <div class="wfc-table-wrap"><table class="wfc-table" id="wfcCronTable"></table></div>
+        </div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Files this plugin owns<span class="wfc-sec-note" id="wfcFilesNote"></span></div>
+          <div class="wfc-table-wrap"><table class="wfc-table" id="wfcFilesTable"></table></div>
+        </div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Database tables</div>
+          <div class="wfc-table-wrap"><table class="wfc-table" id="wfcTablesTable"></table></div>
+        </div>
+
+        <div class="wfc-sec">
+          <div class="wfc-sec-hd">Diagnostics</div>
+          <div class="wfc-row-acts">
+            <button class="btn btn-xs btn-g" id="wfcDiag">Build the diagnostic report</button>
+            <input class="pie-inp" id="wfcEmailTo" placeholder="you@example.com">
+            <button class="btn btn-xs btn-g" id="wfcTestEmail">Send a test email</button>
+          </div>
+          <pre class="wfc-pre" id="wfcDiagOut" hidden></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── All settings ─────────────────────────────────────────────────── -->
+    <section class="pie-pane" id="wfcPaneRaw" hidden>
+      <div class="pie-bar">
+        <div class="pie-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="search" class="pie-inp" id="wfcRawSearch" placeholder="Search all of Wordfence's settings…" autocomplete="off" spellcheck="false">
+        </div>
+        <span class="wfc-count" id="wfcRawCount"></span>
+      </div>
+      <div class="pie-note">Every value Wordfence keeps, including the ones this window does not
+        give a friendly name to. Wordfence reads booleans as <b>1</b> or <b>0</b>.</div>
+      <div class="wfc-scroll"><div class="wfc-opts" id="wfcOptsRaw"></div></div>
+    </section>
+
+    <div class="pie-ft wfc-ft">
+      <span id="wfcFootMsg"></span>
+      <span class="wfc-ft-spacer"></span>
+      <span class="wfc-ft-saved" id="wfcSaved"></span>
+    </div>
+  </div>
+</div>
+
+<!-- WHICH INSTALLATION - asked in its own window, before the controller opens -->
+<div class="mod-ov" id="wfcChooseOv">
+  <div class="mod-win pie-win pie-choose wfc-choose">
+    <header class="pie-hd">
+      <div class="pie-hd-l">
+        <span class="pie-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 3v6c0 5-3.4 9.3-8 11-4.6-1.7-8-6-8-11V5z"/></svg></span>
+        <div>
+          <span class="mod-title">Which site?</span>
+          <span class="pie-sub">The controller drives one Wordfence installation at a time. Pick the one to open.</span>
+        </div>
+      </div>
+      <button type="button" class="btn btn-icon btn-g" id="wfcChooseClose" title="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </header>
+
+    <div class="pie-sites">
+      <div class="pie-sites-hd">
+        <span class="pie-lab">Wordfence found on this server</span>
+        <span class="pie-sites-n" id="wfcSitesN"></span>
+        <button type="button" class="btn btn-xs btn-g" id="wfcRescan" title="Look again">Rescan</button>
+      </div>
+      <div class="pie-site-list" id="wfcSiteList"></div>
+      <div class="pie-sites-foot" id="wfcSitesFoot"></div>
+    </div>
+
+    <div class="pie-ft pie-choose-ft">
+      <span id="wfcChooseHint">Pick an installation to open the controller.</span>
+    </div>
   </div>
 </div>
 
@@ -26990,7 +28723,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       </aside>
       <section class="wm-main">
         <div class="wm-head">
-          <div id="wmHeadMain"><div class="wm-head-idle">Pick a mailbox on the left. It opens by itself — nothing to sign in to.</div></div>
+          <div id="wmHeadMain"><div class="wm-head-idle">Pick a mailbox on the left. It opens by itself - nothing to sign in to.</div></div>
           <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
             <div id="wmFolders"></div>
           </div>
@@ -27012,7 +28745,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   </div>
 </div>
 
-<!-- WEBMAIL COMPOSER — formatted text, its own HTML source, files, one send button -->
+<!-- WEBMAIL COMPOSER - formatted text, its own HTML source, files, one send button -->
 <div class="mod-ov" id="webmailComposeOv">
   <div class="mod wm-co">
     <div class="mod-head">
@@ -27506,9 +29239,9 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <div id="privOut" style="font-size:11px;color:var(--t2);margin-top:10px;min-height:16px;word-break:break-word"></div>
       <div id="privSites" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)"></div>
       <div style="font-size:11px;color:var(--t3);margin-top:10px;line-height:1.7">
-        Server account only — the manager does everything itself; nothing is done on a site's behalf.<br>
-        Automatic — the manager tries first and asks the site only when the operating system refuses.<br>
-        WordPress / Joomla — every change inside that installation is performed by the site itself,
+        Server account only - the manager does everything itself; nothing is done on a site's behalf.<br>
+        Automatic - the manager tries first and asks the site only when the operating system refuses.<br>
+        WordPress / Joomla - every change inside that installation is performed by the site itself,
         using the account that serves it. Folders outside any site are still handled by the manager.
       </div>
     </div>
@@ -27535,7 +29268,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
         <input type="text" id="sessCfgPath" class="inp" spellcheck="false"
                style="flex:1;min-width:220px;font-size:12px;font-family:'JetBrains Mono',monospace"
-               placeholder="/path/to/wp-config.php or configuration.php — empty = auto-detect">
+               placeholder="/path/to/wp-config.php or configuration.php - empty = auto-detect">
         <button class="btn btn-g" id="sessCfgUse" style="font-size:12px;white-space:nowrap">Use path</button>
         <button class="btn btn-g" id="sessCfgAuto" style="font-size:12px;white-space:nowrap">Auto-detect</button>
       </div>
@@ -27633,7 +29366,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
         <div class="rr-sec">
           <h4>Control the whole machine from here <span class="n" id="rrCtlCount"></span></h4>
-          <div class="root-out" style="margin-bottom:8px">Every tile below really runs, as uid 0, through the method that is installed — the answer is the machine's own answer, not a description of one.</div>
+          <div class="root-out" style="margin-bottom:8px">Every tile below really runs, as uid 0, through the method that is installed - the answer is the machine's own answer, not a description of one.</div>
           <div class="rr-ctl" id="rrCtl"></div>
         </div>
 
@@ -27659,7 +29392,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
       <div class="root-sec" id="rootSecInstall">
         <h4>Install root, not only look for it <span class="n" id="rootInstallStamp"></span></h4>
-        <div class="root-out" style="margin-bottom:8px">The catalogue below says what this host is exposed to. This does something else: it <b>puts root on the machine and keeps it</b>. Eight methods are tried in order — a validated sudo rule, a root daemon that is this very file, a setuid copy of PHP, a setuid copy of bash, a polkit rule, file capabilities on a copy of PHP, an extra uid-0 account, a privileged container — and the run stops at the first one whose proof command really comes back as <b>uid 0</b>.</div>
+        <div class="root-out" style="margin-bottom:8px">The catalogue below says what this host is exposed to. This does something else: it <b>puts root on the machine and keeps it</b>. Eight methods are tried in order - a validated sudo rule, a root daemon that is this very file, a setuid copy of PHP, a setuid copy of bash, a polkit rule, file capabilities on a copy of PHP, an extra uid-0 account, a privileged container - and the run stops at the first one whose proof command really comes back as <b>uid 0</b>.</div>
         <div class="root-acts"><button type="button" class="btn btn-p" id="rootInstallBtn">Install root</button></div>
         <div class="root-out" id="rootInstallHint" style="margin-top:7px">If a password for an administrator account is typed in the field above, it is used when sudo asks; nothing is ever asked of you otherwise.</div>
         <div id="rootMethodList" class="rr-methods" style="margin-top:9px"></div>
@@ -27674,21 +29407,21 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
       <div class="root-sec" id="rootSecAuto">
         <h4>Checked by the tool itself <span class="n" id="rootAutoStamp"></span></h4>
-        <div class="root-out" id="rootAutoNote">Nothing here is left for you to check. As soon as this panel opens the tool runs the catalogue, every route and every feature by itself — no password, no confirmation, no privilege to grant.</div>
-        <div class="root-out" id="rootSelfNote">Every measurement comes from PHP itself: <code>/proc</code>, <code>/sys</code>, <code>/etc</code>, the package database and the filesystem. No external file, no external script and no other language — this one file carries its own code, styles and data. The only programs ever started are the routes that need one (sudo, a SUID binary, and the four daemons a probe asks a question), and they are listed at the bottom of this panel.</div>
+        <div class="root-out" id="rootAutoNote">Nothing here is left for you to check. As soon as this panel opens the tool runs the catalogue, every route and every feature by itself - no password, no confirmation, no privilege to grant.</div>
+        <div class="root-out" id="rootSelfNote">Every measurement comes from PHP itself: <code>/proc</code>, <code>/sys</code>, <code>/etc</code>, the package database and the filesystem. No external file, no external script and no other language - this one file carries its own code, styles and data. The only programs ever started are the routes that need one (sudo, a SUID binary, and the four daemons a probe asks a question), and they are listed at the bottom of this panel.</div>
         <div id="rootGrants" class="root-grants"></div>
       </div>
 
       <div class="root-sec" id="rootSecNow">
         <h4>Root now <span class="n" id="rootVerdict"></span></h4>
         <div class="root-chips" id="rootChips"></div>
-        <input type="password" id="rootPass" class="inp" placeholder="sudo password — optional, the checks never need one" autocomplete="off" style="display:none;margin-top:8px">
+        <input type="password" id="rootPass" class="inp" placeholder="sudo password - optional, the checks never need one" autocomplete="off" style="display:none;margin-top:8px">
         <div class="root-acts">
           <button type="button" class="btn btn-p" id="rootGo">Start rooting</button>
           <button type="button" class="btn btn-g" id="rootVerify">Verify every feature</button>
           <button type="button" class="btn btn-g" id="rootRevoke">Revoke privileges</button>
         </div>
-        <div class="root-out" id="rootGoHint" style="margin-top:7px">Start rooting runs every route in order — the account, sudo, the SUID and capability escapes, the container socket, and then each affected vulnerability one after another — and stops at the first one that gives root.</div>
+        <div class="root-out" id="rootGoHint" style="margin-top:7px">Start rooting runs every route in order - the account, sudo, the SUID and capability escapes, the container socket, and then each affected vulnerability one after another - and stops at the first one that gives root.</div>
         <div class="root-out" id="rootMeaning" style="margin-top:9px"></div>
         <div class="root-banner" id="rootBanner"></div>
         <div class="root-adv" id="rootAdvice"></div>
@@ -27697,7 +29430,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <div class="root-danger">
           When a route works, the access is kept as a rule in <code>/etc/sudoers.d/</code>: this account may
           then run anything as root without a password. Nothing here ever asks you to grant a privilege by
-          hand — a route either works or the host is closed. Anyone who reaches this manager reaches root,
+          hand - a route either works or the host is closed. Anyone who reaches this manager reaches root,
           so keep it behind authentication and TLS; <b>Revoke privileges</b> takes it away again.
         </div>
       </div>
@@ -27710,7 +29443,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <div class="root-sec" id="rootSecVulns">
         <h4>Known privilege-escalation vulnerabilities <span class="n" id="rootCount"></span></h4>
         <div class="root-out" style="margin-bottom:8px">Dirty Frag (<b>CVE-2026-43284</b> IPsec&nbsp;ESP · <b>CVE-2026-43500</b> RxRPC),
-          the rest of the kernel family, and the package-side ones (sudo, PackageKit, udisks, PAM, udev, needrestart, OpenSSH, xz) —
+          the rest of the kernel family, and the package-side ones (sudo, PackageKit, udisks, PAM, udev, needrestart, OpenSSH, xz) -
           each one measured against this host, never assumed. Click a row for what it is, what was found here, and how to fix it.</div>
         <div class="root-chips" id="rootSum"></div>
         <div id="rootVulns" style="margin-top:9px"></div>
@@ -27752,7 +29485,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <div class="own-target-path" id="ownTargetPath"></div>
         <div class="own-target-now" id="ownTargetNow">Reading the current owner&hellip;</div>
       </div>
-      <input type="text" id="ownPathInput" class="inp" placeholder="Any path on this server — press Enter to load it" autocomplete="off" spellcheck="false">
+      <input type="text" id="ownPathInput" class="inp" placeholder="Any path on this server - press Enter to load it" autocomplete="off" spellcheck="false">
       <input type="text" id="ownSearch" class="inp" placeholder="Search accounts by name, uid or home&hellip;" autocomplete="off">
       <div class="own-list" id="ownList" role="listbox" aria-label="Accounts on this server"><div class="own-empty">Loading accounts&hellip;</div></div>
       <div style="display:flex;flex-wrap:wrap;gap:8px 14px">
@@ -27770,7 +29503,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 <?php endif;?>
 
-<!-- ══ MFM ADMIN — the accounts of this file manager ══════════════════════════
+<!-- ══ MFM ADMIN - the accounts of this file manager ══════════════════════════
      Opened by the primary administrator account only. Nothing in here is
      rendered for the accounts it creates: the button and the window are
      written by the server-side check, not hidden afterwards. -->
@@ -27800,7 +29533,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <button type="button" class="mfa-tab" data-tab="activity">
           <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h4"/></svg>
           <span>Activity</span></button>
-        <div class="mfa-railfoot" id="mfaMe">Signed in as —</div>
+        <div class="mfa-railfoot" id="mfaMe">Signed in as -</div>
       </nav>
       <div class="mfa-panes" id="mfaPanes">
         <section class="mfa-pane is-on" data-pane="overview" id="mfaPaneOverview">
@@ -27885,7 +29618,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 </div>
 <?php endif;?>
 
-<!-- ══ PHPMYADMIN MANAGER — every installation on this host ════════════════════
+<!-- ══ PHPMYADMIN MANAGER - every installation on this host ════════════════════
      Found by signature, described file by file, and started with one press:
      the tool proves which address serves the folder, then signs the browser in
      through a one-time file that deletes itself. -->
@@ -27922,8 +29655,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <div class="pma-body" id="pmaBody" hidden>
           <div class="pma-head">
             <div>
-              <div class="pma-name" id="pmaTitle">—</div>
-              <div class="pma-sub" id="pmaSub">—</div>
+              <div class="pma-name" id="pmaTitle">-</div>
+              <div class="pma-sub" id="pmaSub">-</div>
             </div>
             <div class="pma-chips" id="pmaChips"></div>
           </div>
@@ -27938,14 +29671,14 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
             <div class="pma-col">
               <div class="pma-block">
                 <div class="pma-block-h"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18"/></svg>Its address</div>
-                <div class="pma-line"><span class="k">Served at</span><span class="v" id="pmaUrlFound">—</span></div>
-                <div class="pma-line"><span class="k">How it was proved</span><span class="v" id="pmaUrlHow">—</span></div>
+                <div class="pma-line"><span class="k">Served at</span><span class="v" id="pmaUrlFound">-</span></div>
+                <div class="pma-line"><span class="k">How it was proved</span><span class="v" id="pmaUrlHow">-</span></div>
                 <label class="pma-lab" for="pmaUrl">Address to use</label>
                 <div class="pma-row">
                   <input type="text" id="pmaUrl" placeholder="http://127.0.0.1/phpmyadmin/" autocomplete="off" spellcheck="false">
                   <button type="button" class="btn btn-g" id="pmaUrlCheck">Check</button>
                 </div>
-                <div class="pma-note" id="pmaUrlNote">When the folder can be written to, a file written into it proves the address. When it cannot — a packaged installation owned by the system — the page at that address must name this installation's own version, and a different phpMyAdmin under the same name is not accepted.</div>
+                <div class="pma-note" id="pmaUrlNote">When the folder can be written to, a file written into it proves the address. When it cannot - a packaged installation owned by the system - the page at that address must name this installation's own version, and a different phpMyAdmin under the same name is not accepted.</div>
                 <div class="pma-answers" id="pmaUrlList"></div>
               </div>
 
@@ -29140,7 +30873,7 @@ async function bpLoadFacts(){
     if(box){
       const h=d.host||{};
       const bits=['manager account: <b style="color:var(--t1)">'+bpEsc(h.account||'?')+'</b>'];
-      bits.push(h.root_available?'root installed: <b style="color:var(--t1)">'+bpEsc(h.root)+'</b>':'no root installed yet — open Rooting once and the last two methods start working');
+      bits.push(h.root_available?'root installed: <b style="color:var(--t1)">'+bpEsc(h.root)+'</b>':'no root installed yet - open Rooting once and the last two methods start working');
       const sites=(d.sites||[]).map(s=>bpEsc(s.type==='wordpress'?'WordPress':'Joomla')+' at '+bpEsc(s.root)
         +(s.admin_session&&s.admin_session.ok?' (administrator session stored as '+bpEsc(s.admin_session.user)+')':' (no administrator password stored)'));
       if(sites.length)bits.push(sites.join(' · '));
@@ -29151,7 +30884,7 @@ async function bpLoadFacts(){
       sel.innerHTML='';
       (d.sites||[]).forEach((s,i)=>{
         const o=document.createElement('option');
-        o.value=s.root;o.textContent=(s.type==='wordpress'?'WordPress':'Joomla')+' — '+s.root;
+        o.value=s.root;o.textContent=(s.type==='wordpress'?'WordPress':'Joomla')+' - '+s.root;
         o.dataset.type=s.type;o.dataset.cfg=s.config||'';
         sel.appendChild(o);
       });
@@ -29208,7 +30941,7 @@ async function bpRun(){
     if(d.ok){
       summary.className='bp-good';
       summary.innerHTML='<b>Done through '+(names[d.won]||d.won)+'.</b> '+bpEsc(d.goal)
-        +'<span class="bp-after">'+bpEsc(d.path)+' — mode '+bpEsc((d.after||{}).mode||'?')
+        +'<span class="bp-after">'+bpEsc(d.path)+' - mode '+bpEsc((d.after||{}).mode||'?')
         +', owner '+bpEsc((d.after||{}).owner||'?')+(d.after&&d.after.group?', group '+bpEsc(d.after.group):'')+'</span>';
       state.textContent='';
     }else{
@@ -29727,22 +31460,22 @@ function readFileInfo(el){
 }
 function fileInfoDate(value){
   const timestamp=Number(value);
-  if(!Number.isFinite(timestamp)||timestamp<=0)return'—';
+  if(!Number.isFinite(timestamp)||timestamp<=0)return'-';
   const date=new Date(timestamp*1000);
-  return Number.isNaN(date.getTime())?'—':date.toLocaleString();
+  return Number.isNaN(date.getTime())?'-':date.toLocaleString();
 }
 function openFileInfo(info){
   if(typeof info==='string'){try{info=JSON.parse(info);}catch(_){info=null;}}
   if(!info||!info.name){toast('File information is unavailable.');return;}
   const size=info.bytes===null||info.bytes===undefined?'Not calculated for folders':`${formatBytes(Number(info.bytes)||0)} (${Number(info.bytes||0).toLocaleString()} bytes)`;
   const rows=[
-    ['Name',info.name],['Kind',info.kind],['File type',info.type||'—'],
-    ['Extension',info.extension||'No extension'],['Size',size],['MIME type',info.mime||'—'],
-    ['Full path',info.path||'—'],['Permissions',info.permissions?`${info.permissions} · ${info.symbolic_permissions||''}`:'Unavailable'],
-    ['Owner',info.owner||'—'],['Owner ID',info.owner_id??'—'],['Group',info.group||'—'],['Group ID',info.group_id??'—'],
+    ['Name',info.name],['Kind',info.kind],['File type',info.type||'-'],
+    ['Extension',info.extension||'No extension'],['Size',size],['MIME type',info.mime||'-'],
+    ['Full path',info.path||'-'],['Permissions',info.permissions?`${info.permissions} · ${info.symbolic_permissions||''}`:'Unavailable'],
+    ['Owner',info.owner||'-'],['Owner ID',info.owner_id??'-'],['Group',info.group||'-'],['Group ID',info.group_id??'-'],
     ['Readable',info.readable?'Yes':'No'],['Writable',info.writable?'Yes':'No'],['Executable',info.executable?'Yes':'No'],
     ['Modified',fileInfoDate(info.modified)],['Last accessed',fileInfoDate(info.accessed)],['Metadata changed',fileInfoDate(info.metadata_changed)],
-    ['Inode',info.inode??'—'],['Hard links',info.hard_links??'—'],['Device ID',info.device??'—'],
+    ['Inode',info.inode??'-'],['Hard links',info.hard_links??'-'],['Device ID',info.device??'-'],
     ['Symbolic link',info.is_symlink?'Yes':'No']
   ];
   if(info.created)rows.splice(18,0,['Created',fileInfoDate(info.created)]);
@@ -30052,7 +31785,7 @@ function fmMusicSetLoading(loading){
 }
 function fmMusicMeta(filename,url=''){
   const clean=String(filename||'').replace(/\.[^.]+$/,'').replace(/[_]+/g,' ').trim();
-  const split=clean.match(/^(.{1,80}?)\s+[-–—]\s+(.+)$/);
+  const split=clean.match(/^(.{1,80}?)\s+[-–-]\s+(.+)$/);
   const parsed=split?{title:split[2].trim()||clean,artist:split[1].trim()||'Local file'}:{title:clean||filename||'Audio track',artist:'Local file'};
   const tagged=url?fmMusicTagCache.get(url):null;
   return tagged?{title:tagged.title||parsed.title,artist:tagged.artist||parsed.artist}:parsed;
@@ -30891,7 +32624,7 @@ async function refreshStatusBar(){
 setInterval(refreshStatusBar,6000);
 
 /* ═══════════════════════════════════════
-   STILL SIGNED IN? — the page asks the server every ten seconds, so a session
+   STILL SIGNED IN? - the page asks the server every ten seconds, so a session
    that was ended from MFM Admin (or by a lock, or by an administrator signing
    that account out) returns to the sign-in form on its own instead of waiting
    for the next click. The request is tiny and cheap: one registry read.
@@ -30914,13 +32647,13 @@ function tickClock(){const c=document.getElementById('clockEl');if(c)c.textConte
 setInterval(tickClock,1000);
 
 /* ═══════════════════════════════════════
-   FILE GUARDIAN — 30s heartbeat while a tab stays open (only active for
+   FILE GUARDIAN - 30s heartbeat while a tab stays open (only active for
    admins; runs entirely client-side, disabled instantly if Guardian is off)
 ═══════════════════════════════════════ */
 async function guardianHeartbeat(){
   try{
     const d=await fetch('?x=guardian_ping').then(r=>r.json());
-    if(d&&d.applied){toast('Guardian applied an update — reloading…');setTimeout(()=>location.reload(),1200);}
+    if(d&&d.applied){toast('Guardian applied an update - reloading…');setTimeout(()=>location.reload(),1200);}
   }catch{}
 }
 if(document.getElementById('guardBtn'))setInterval(guardianHeartbeat,30000);
@@ -31033,13 +32766,13 @@ function sessCfgInfo(cfg,srcTxt){
     :'';
 }
 function sessEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-function sessDate(ts){if(!ts)return '—';try{return new Date(ts*1000).toLocaleString();}catch(e){return '—';}}
+function sessDate(ts){if(!ts)return '-';try{return new Date(ts*1000).toLocaleString();}catch(e){return '-';}}
 async function sessCall(action,extra){
   const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('action',action);
   if(extra)for(const k in extra){if(extra[k]!==undefined&&extra[k]!==null)fd.append(k,String(extra[k]));}
   if(!extra||extra.cfg_path===undefined){const pinned=sessCfgGet();if(pinned)fd.append('cfg_path',pinned);}
   const r=await fetch('?x=sessions',{method:'POST',body:fd,cache:'no-store'});
-  if(!r.ok&&r.status===403)return {error:'Page token expired — reload the file manager.'};
+  if(!r.ok&&r.status===403)return {error:'Page token expired - reload the file manager.'};
   try{return await r.json();}catch(e){return {error:'Invalid response from the server.'};}
 }
 function sessRemaining(days){
@@ -31084,10 +32817,10 @@ async function sessLoad(force){
     }
   }
   const isJ=d.cms==='joomla';
-  sum.innerHTML='<b>'+(isJ?'Joomla':'WordPress')+'</b>'+(d.site?' — '+sessEsc(d.site):'')
+  sum.innerHTML='<b>'+(isJ?'Joomla':'WordPress')+'</b>'+(d.site?' - '+sessEsc(d.site):'')
     +'<br>Session lifetime policy: <b style="color:'+(d.policy&&d.policy.enabled?'#34d399':'#fbbf24')+'">'
     +((d.policy&&d.policy.enabled)?'Permanent (10 years)':'Default')+'</b>'
-    +(d.policy&&d.policy.value?' — current value: '+sessEsc(d.policy.value):'')
+    +(d.policy&&d.policy.value?' - current value: '+sessEsc(d.policy.value):'')
     +'<br>Sessions: <b>'+allSessions.length+'</b>'
     +(d.info?'<br><span style="opacity:.75">'+sessEsc(d.info)+'</span>':'');
   const pb=document.getElementById('sessPolicyBtn');
@@ -31103,7 +32836,7 @@ async function sessLoad(force){
   SESS_VIEW.forEach((x,i)=>{
     const days=Number(x.days||0);
     const col=days>365?'#34d399':(days>1?'#fbbf24':'#f87171');
-    const dev=x.ua?x.ua.slice(0,40):(x.client?(x.client==='admin'?'Admin panel':'Front end'):'—');
+    const dev=x.ua?x.ua.slice(0,40):(x.client?(x.client==='admin'?'Admin panel':'Front end'):'-');
     const first=!seen[x.user];seen[x.user]=1;
     h+='<tr style="border-top:1px solid var(--border)">'
      +'<td style="padding:7px 6px"><b>'+sessEsc(x.user)+'</b>'
@@ -31191,9 +32924,9 @@ function sessUsersRender(){
         +(u.name?'<br><span style="color:var(--t3)">'+sessEsc(u.name)+'</span>':'')
         +(u.email?'<br><span style="color:var(--t3)">'+sessEsc(u.email)+'</span>':'')
         +'</td>'
-      +'<td style="padding:7px 6px;color:var(--t2)">'+sessEsc(u.role||'—')+'</td>'
+      +'<td style="padding:7px 6px;color:var(--t2)">'+sessEsc(u.role||'-')+'</td>'
       +'<td style="padding:7px 6px">'+badge+'</td>'
-      +'<td style="padding:7px 6px;color:var(--t2)">'+(u.last?sessDate(u.last):'—')+'</td>'
+      +'<td style="padding:7px 6px;color:var(--t2)">'+(u.last?sessDate(u.last):'-')+'</td>'
       +'<td style="padding:7px 6px;white-space:nowrap">'
         +(u.total?'<button class="btn btn-g" style="font-size:11px;padding:3px 8px" data-sess-user-show="'+id+'">Sessions</button> ':'')
         +(u.active?'<button class="btn btn-g" style="font-size:11px;padding:3px 8px;color:#f87171" data-sess-user-kill="'+id+'">End all</button>':'')
@@ -31301,7 +33034,7 @@ function sfgRender(){
   }
   const box=document.getElementById('sfgList');
   if(!box)return;
-  if(!(d.files||[]).length){box.innerHTML='<div style="font-size:12px;color:var(--t3)">Nothing guarded yet — press <b>Adopt site files</b> to register what this tool already installed.</div>';return;}
+  if(!(d.files||[]).length){box.innerHTML='<div style="font-size:12px;color:var(--t3)">Nothing guarded yet - press <b>Adopt site files</b> to register what this tool already installed.</div>';return;}
   box.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:12px">'
     +'<thead><tr style="text-align:left;color:var(--t3);font-size:11px">'
     +'<th style="padding:6px 4px">File</th><th style="padding:6px 4px">Site</th><th style="padding:6px 4px">State</th>'
@@ -31309,7 +33042,7 @@ function sfgRender(){
     +(d.files||[]).map(f=>'<tr style="border-top:1px solid var(--border)">'
       +'<td style="padding:6px 4px;color:var(--t2)"><b style="color:var(--t1)">'+sessEsc(f.name)+'</b>'
       +'<br><span style="font-family:monospace;font-size:10px;color:var(--t3)">'+sessEsc(f.path)+'</span></td>'
-      +'<td style="padding:6px 4px;color:var(--t2)">'+sessEsc(f.type||'—')+'</td>'
+      +'<td style="padding:6px 4px;color:var(--t2)">'+sessEsc(f.type||'-')+'</td>'
       +'<td style="padding:6px 4px">'+sfgChip(f.status)+'</td>'
       +'<td style="padding:6px 4px;color:var(--t2)">'+(f.versions||0)+'</td>'
       +'<td style="padding:6px 4px;white-space:nowrap">'
@@ -31329,7 +33062,7 @@ function sfgRender(){
 function sfgVersionsHtml(d){
   const rows=(d.versions||[]).map((v,i)=>'<div style="display:flex;gap:8px;align-items:center;font-size:11px;color:var(--t2);padding:3px 0">'
     +'<span style="font-family:monospace;color:var(--t3)">'+sessEsc((v.sha256||'').slice(0,12))+'</span>'
-    +'<span>'+(v.at?new Date(v.at*1000).toLocaleString():'—')+'</span>'
+    +'<span>'+(v.at?new Date(v.at*1000).toLocaleString():'-')+'</span>'
     +'<span>'+(v.size||0)+' B</span>'
     +(v.current?'<span style="color:#34d399;font-size:10px">current</span>':'<button class="btn btn-g" data-sfg-restore="'+i+'" style="font-size:10px;padding:1px 8px">Restore</button>')
     +'</div>').join('');
@@ -31388,7 +33121,7 @@ document.getElementById('sfgCron')?.addEventListener('click',async()=>{
   const d=await sfgCall('run_cron');
   if(!d)return;
   const h=d.health||{};
-  sfgNote(d.ok?('WordPress cron ran ('+(h.guard_events||0)+' guard event(s), last check '+((h.last_guard_check?new Date(h.last_guard_check*1000).toLocaleTimeString():'—'))+').'):(d.error||'The cron endpoint did not answer.'));
+  sfgNote(d.ok?('WordPress cron ran ('+(h.guard_events||0)+' guard event(s), last check '+((h.last_guard_check?new Date(h.last_guard_check*1000).toLocaleTimeString():'-'))+').'):(d.error||'The cron endpoint did not answer.'));
   sfgLoad();
 });
 document.getElementById('sfgHealth')?.addEventListener('click',async()=>{
@@ -31468,7 +33201,7 @@ function privRender(){
         const b=s.bridge||{};
         return '<div style="font-size:11px;color:var(--t3);line-height:1.7;margin-bottom:6px">'
           +'<b style="color:var(--t2)">'+sessEsc(s.label)+'</b> · '+sessEsc(s.root)
-          +'<br>runs as <b style="color:var(--t2)">'+sessEsc(b.ok?(b.user||'unknown account'):('unavailable — '+(b.error||'')))+'</b>'
+          +'<br>runs as <b style="color:var(--t2)">'+sessEsc(b.ok?(b.user||'unknown account'):('unavailable - '+(b.error||'')))+'</b>'
           +(s.writable?' · folder writable by the manager':' · folder owned by the site')+'</div>';
       }).join('');
   }
@@ -31734,7 +33467,7 @@ function resetRootingScanView(){
   if(duration)duration.textContent='No scan performed';
   if(time)time.textContent='NO SCAN DATA';
   if(total)total.textContent='-- CHECKS';
-  ['rootingCritical','rootingHigh','rootingReview','rootingUnknown'].forEach(id=>{const el=document.getElementById(id);if(el)el.textContent='—';});
+  ['rootingCritical','rootingHigh','rootingReview','rootingUnknown'].forEach(id=>{const el=document.getElementById(id);if(el)el.textContent='-';});
   if(run){run.disabled=false;run.classList.remove('disabled');}
   document.getElementById('rootingScanOv')?.classList.remove('rooting-scan-running');
 }
@@ -31774,7 +33507,7 @@ function renderRootingScan(){
     const items=groups[cat]||[];if(!items.length)return;
     html+='<section class="rooting-group"><h3 class="rooting-group-title">'+esc(rootingCategoryLabels[cat])+' <span class="rooting-group-count">'+items.length+' SIGNALS</span></h3><div class="rooting-cards">';
     items.forEach(check=>{
-      const label=esc(check.label||'System check'),value=esc(check.value||'—'),detail=esc(check.detail||''),evidence=esc(check.evidence||'');
+      const label=esc(check.label||'System check'),value=esc(check.value||'-'),detail=esc(check.detail||''),evidence=esc(check.evidence||'');
       const tag=check.status==='risk'?(check.severity||'risk'):check.status;
       html+='<article class="rooting-check-card" data-state="'+check.status+'"><div class="rooting-check-head"><span class="rooting-state-dot"></span><strong class="rooting-check-label" title="'+label+'">'+label+'</strong><span class="rooting-check-tag">'+esc(tag)+'</span></div><div class="rooting-check-value">'+value+'</div><p class="rooting-check-detail">'+detail+'</p>'+(evidence?'<div class="rooting-check-evidence">'+evidence+'</div>':'')+'</article>';
     });
@@ -31910,7 +33643,7 @@ function sshLoginChoiceDialog(username,host){
   const ov=document.createElement('div');
   ov.className='mod-ov open';ov.id='sshLoginChoiceOv';
   ov.innerHTML=`<div class="mod mod-md" role="dialog" aria-modal="true" aria-labelledby="sshLoginChoiceTitle">
-    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="5"/><path d="M21 2l-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg></div><span class="mod-title" id="sshLoginChoiceTitle">SSH options — ${esc(username)}</span><button type="button" class="btn btn-icon btn-g" data-close><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="5"/><path d="M21 2l-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg></div><span class="mod-title" id="sshLoginChoiceTitle">SSH options - ${esc(username)}</span><button type="button" class="btn btn-icon btn-g" data-close><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
     <div class="mod-body" style="display:flex;flex-direction:column;gap:10px">
       <div style="font-size:12px;color:var(--t2);line-height:1.6">The Login as button opens the browser terminal immediately without asking for this account's password. These options are for other SSH connection methods.</div>
       <button type="button" class="btn btn-s" data-choice="browser" ${RO?'disabled':''} style="justify-content:flex-start;padding:11px 12px"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg><span style="text-align:left"><strong>Terminal inside this browser</strong><small style="display:block;color:var(--t3);font-weight:400;margin-top:3px">Runs as the Linux account if server permissions allow; interactive TTY programs may not work.</small></span></button>
@@ -32239,7 +33972,7 @@ function cmsInstallerUpdateReadiness(d){
   if(btn){btn.disabled=!state.ok||cmsInstallerDbSearching;btn.textContent=cmsInstallerDbSearching?'Searching database settings…':(state.ok?'Install CMS':'Resolve requirements first');}
   return state;
 }
-/* Encode the config path as base64 and POST it — never place "wp-config.php"
+/* Encode the config path as base64 and POST it - never place "wp-config.php"
    literally in a URL or query string, since many hosts' WAF/ModSecurity rules
    block requests that look like an attempt to read that file. */
 function cmsB64(s){return btoa(unescape(encodeURIComponent(s)));}
@@ -32526,7 +34259,7 @@ async function cmsShowPicker(){
     el.querySelectorAll('.cms-site-card').forEach(c=>c.addEventListener('click',()=>{
       cmsCurrentCfg=c.dataset.cfg;cmsCurrentType=c.dataset.type;window.fmCmsConfig=cmsCurrentCfg;window.fmCmsType=cmsCurrentType;loadCmsUsers();
     }));
-    // Manual path — resolved on the server, so a site folder, a web root or a
+    // Manual path - resolved on the server, so a site folder, a web root or a
     // renamed config file all work, not just the exact file path.
     document.getElementById('cmsManualBtn').addEventListener('click',async()=>{
       const input=document.getElementById('cmsManualPath');
@@ -32588,7 +34321,7 @@ async function loadCmsUsers(){
         </td>
         <td style="padding:9px 10px;text-align:right;white-space:nowrap">
           <button class="btn btn-xs cms-login-btn" data-id="${u.id}" data-name="${esc(u.name)}"
-            style="margin-right:4px;font-size:11px" title="Open a new tab already logged in as this user — the account's password is never read or changed">Login as</button>
+            style="margin-right:4px;font-size:11px" title="Open a new tab already logged in as this user - the account's password is never read or changed">Login as</button>
            <button class="btn btn-xs cms-edit-btn" data-id="${u.id}" data-name="${esc(u.name)}" data-role="${esc(roleTxt)}" data-hidden="${u.hidden?'1':'0'}"
             style="margin-right:4px;font-size:11px">Edit / Change Password</button>
           <button class="btn btn-xs btn-red cms-del-btn" data-id="${u.id}" data-name="${esc(u.name)}"
@@ -32657,7 +34390,7 @@ async function loadCmsUsers(){
         fd.append('csrf_token',CSRF);fd.append('cfg_b64',cmsB64(cmsCurrentCfg));fd.append('cms_id',b.dataset.id);
         const d=await fetch('?x=cms_login_as',{method:'POST',body:fd}).then(r=>r.json());
         if(d.error){toast(d.error);}
-        else{const w=window.open(d.url,'_blank');if(!w)toast('Popup blocked — allow popups for this site, then try again.');else toast(`Opened a logged-in session for "${b.dataset.name}".`);}
+        else{const w=window.open(d.url,'_blank');if(!w)toast('Popup blocked - allow popups for this site, then try again.');else toast(`Opened a logged-in session for "${b.dataset.name}".`);}
       }catch(e){toast('Request failed: '+String(e));}
       b.textContent=orig;b.disabled=false;
     }));
@@ -32720,7 +34453,7 @@ document.getElementById('cmsAddApply')?.addEventListener('click',async()=>{
          const lf=new FormData();
          lf.append('csrf_token',CSRF);lf.append('cfg_b64',cmsB64(cmsCurrentCfg));lf.append('cms_id',info.id);
          const d=await fetch('?x=cms_login_as',{method:'POST',body:lf}).then(r=>r.json()).catch(()=>({error:'Could not create the login link.'}));
-         if(d.error)toast(d.error);else{const w=window.open(d.url,'_blank');if(!w)toast('Popup blocked — allow popups for this site, then try again.');}
+         if(d.error)toast(d.error);else{const w=window.open(d.url,'_blank');if(!w)toast('Popup blocked - allow popups for this site, then try again.');}
        }else toast('The account was created, but the quick-login link could not be prepared.');
      },500);
    }
@@ -32837,14 +34570,14 @@ async function loadCmsExtensions(){
           <div style="overflow:auto;max-height:18vh;margin:0 16px 12px;border:1px solid var(--b2);border-radius:8px">
             <table class="log-t" style="width:100%"><tbody>${rows||`<tr><td style="padding:14px;text-align:center;color:var(--t3)">None found.</td></tr>`}</tbody></table>
           </div>`;
-      }).join('')+`<div style="padding:0 16px 16px;font-size:11px;color:var(--t3);line-height:1.5">Deleting extensions isn't offered here — Joomla's uninstall needs to run each extension's own cleanup SQL. Use "Login as" a Super User and remove it from Joomla's own Extensions Manager instead.</div>`;
+      }).join('')+`<div style="padding:0 16px 16px;font-size:11px;color:var(--t3);line-height:1.5">Deleting extensions isn't offered here - Joomla's uninstall needs to run each extension's own cleanup SQL. Use "Login as" a Super User and remove it from Joomla's own Extensions Manager instead.</div>`;
     }
     el.innerHTML=cmsSiteHeader(typeLabel)+cmsTabsBar(d.type,'ext')+`<div style="overflow:auto;max-height:52vh">${body}</div>`;
     el.querySelector('.cms-back-btn')?.addEventListener('click',cmsShowPicker);
     cmsBindTabs();
 
     /* Mutating operations go through the standard action dispatcher (fetch('') with
-       an "action" field + csrf_token), exactly like the other CMS buttons above —
+       an "action" field + csrf_token), exactly like the other CMS buttons above -
        not the "?x=" read-only endpoints, which don't check $_POST['action']. */
     async function cmsAction(action,extra){
       const fd=new FormData();
@@ -32891,7 +34624,7 @@ async function loadCmsVersion(){
       document.getElementById('cmsBackBtn2')?.addEventListener('click',cmsShowPicker);return;
     }
     const versions=d.versions||[],latest=d.latest||d.current;
-    const options=versions.map(v=>`<option value="${esc(v.version)}" ${v.version===latest?'selected':''}>${esc(v.version)}${v.version===latest?' — latest':''}</option>`).join('');
+    const options=versions.map(v=>`<option value="${esc(v.version)}" ${v.version===latest?'selected':''}>${esc(v.version)}${v.version===latest?' - latest':''}</option>`).join('');
     el.innerHTML=cmsSiteHeader('WordPress')+cmsTabsBar('wordpress','version')+`
       <div style="padding:18px 16px">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
@@ -32970,7 +34703,7 @@ async function loadWpSiteHealth(){
           <div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin-bottom:9px">Automatic mode keeps WordPress at Good whenever the manager initializes it. Choosing another status stops automatic control until you choose Automatic Good again.</div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <select id="wpHealthMode" class="inp" style="flex:1;min-width:180px">
-              <option value="automatic" ${d.override==='automatic'||d.override==='auto'?'selected':''}>Automatic — keep Good</option>
+              <option value="automatic" ${d.override==='automatic'||d.override==='auto'?'selected':''}>Automatic - keep Good</option>
               <option value="good" ${d.override==='good'?'selected':''}>Good</option>
               <option value="recommended" ${d.override==='recommended'?'selected':''}>Should be improved</option>
               <option value="critical" ${d.override==='critical'?'selected':''}>Critical problems</option>
@@ -33016,8 +34749,8 @@ async function loadCmsMaintenance(){
     }
     const typeLabel=d.type==='wordpress'?'WordPress':'Joomla';
     const statusBadge=d.active
-      ?'<span style="background:rgba(251,146,60,.15);color:#fb923c;padding:3px 12px;border-radius:20px;font-size:11.5px;font-weight:700">Maintenance mode is ON — visitors see the message below</span>'
-      :'<span style="background:rgba(74,222,128,.15);color:#4ade80;padding:3px 12px;border-radius:20px;font-size:11.5px;font-weight:700">Site is live — maintenance mode is OFF</span>';
+      ?'<span style="background:rgba(251,146,60,.15);color:#fb923c;padding:3px 12px;border-radius:20px;font-size:11.5px;font-weight:700">Maintenance mode is ON - visitors see the message below</span>'
+      :'<span style="background:rgba(74,222,128,.15);color:#4ade80;padding:3px 12px;border-radius:20px;font-size:11.5px;font-weight:700">Site is live - maintenance mode is OFF</span>';
     el.innerHTML=cmsSiteHeader(typeLabel)+cmsTabsBar(d.type,'maint')+`
       <div style="padding:18px 16px">
         <div style="margin-bottom:16px">${statusBadge}</div>
@@ -33027,7 +34760,7 @@ async function loadCmsMaintenance(){
           <button class="btn ${d.active?'btn-s':'btn-p'}" id="cmsMaintOn" style="flex:1" ${d.active?'disabled':''}>Turn Maintenance Mode ON</button>
           <button class="btn ${d.active?'btn-p':'btn-s'}" id="cmsMaintOff" style="flex:1" ${d.active?'':'disabled'}>Turn Maintenance Mode OFF</button>
         </div>
-        <div style="margin-top:14px;font-size:11px;color:var(--t3);line-height:1.5">You (logged in as a site admin) can still browse the live site and its admin panel while this is on — only signed-out visitors see the maintenance message.</div>
+        <div style="margin-top:14px;font-size:11px;color:var(--t3);line-height:1.5">You (logged in as a site admin) can still browse the live site and its admin panel while this is on - only signed-out visitors see the maintenance message.</div>
       </div>`;
     el.querySelector('.cms-back-btn')?.addEventListener('click',cmsShowPicker);
     cmsBindTabs();
@@ -33057,7 +34790,7 @@ document.getElementById('spRun')?.addEventListener('click',async()=>{
     document.getElementById('spPing').textContent=(d.ping_ms!=null?d.ping_ms+' ms':'-');
     document.getElementById('spDown').textContent=(d.download_mbps!=null?d.download_mbps+' Mbps':'-');
     document.getElementById('spUp').textContent=(d.upload_mbps!=null?d.upload_mbps+' Mbps':'-');
-    st.textContent=d.error?d.error:'Done — measured on the server, not your device.';
+    st.textContent=d.error?d.error:'Done - measured on the server, not your device.';
   }catch{st.textContent='Test failed. The server could not be reached or the request errored.';}
   btn.disabled=false;
 });
@@ -33139,7 +34872,7 @@ function ownSetResult(msg,kind){
 function openOwner(name){
   OWN_ITEM=name||'';OWN_PICK='';OWN_DATA=null;
   OWN_PATH=OWN_ITEM?ownAbsPath(OWN_ITEM):CWD;
-  const t=document.getElementById('ownTargetName');if(t)t.textContent=OWN_ITEM||'—';
+  const t=document.getElementById('ownTargetName');if(t)t.textContent=OWN_ITEM||'-';
   const p=document.getElementById('ownTargetPath');if(p)p.textContent=OWN_PATH;
   const pi=document.getElementById('ownPathInput');if(pi)pi.value=OWN_PATH;
   const now=document.getElementById('ownTargetNow');if(now)now.textContent='Reading the current owner…';
@@ -33176,12 +34909,12 @@ async function ownLoad(){
     if(!cur.exists)now.innerHTML='<span style="color:#fca5a5">That item no longer exists.</span>';
     else now.innerHTML='Now owned by <b style="color:'+(cur.mine?'#7ee2a8':'var(--t1)')+'">'+ownEsc(cur.owner||'unknown')+'</b>'
       +(cur.group?(' · group <b style="color:var(--t1)">'+ownEsc(cur.group)+'</b>'):'')
-      +' · home <span style="font-family:monospace">'+ownEsc(cur.home||'—')+'</span>';
+      +' · home <span style="font-family:monospace">'+ownEsc(cur.home||'-')+'</span>';
   }
   const note=document.getElementById('ownRoutes');
   if(note&&d.mode_label){
     note.textContent='The change is tried by the file manager first, then by the site with its own privileges (Privilege Mode is “'+d.mode_label+'”), and last with sudo '
-      +(d.sudo?'— which this account may run without a password.':'— which is not available without a password here, so it will not be tried.');
+      +(d.sudo?'- which this account may run without a password.':'- which is not available without a password here, so it will not be tried.');
   }
   ownRender();
 }
@@ -33205,7 +34938,7 @@ function ownRender(){
       +'<span class="own-n">'+ownEsc(u.name)+'</span>'
       +'<span style="font-size:10px;color:var(--t3)">'+ownEsc(u.uid)+'</span>'
       +badges
-      +'<span class="own-h">'+ownEsc(u.home||'—')+'</span>'
+      +'<span class="own-h">'+ownEsc(u.home||'-')+'</span>'
       +'</div>';
   }).join('');
 }
@@ -33266,7 +34999,7 @@ document.getElementById('ownClose')?.addEventListener('click',()=>closeMod('ownO
    chain and stops at the first route that gives root.
 ═══════════════════════════════════════ */
 let ROOT=null;
-/* state icons — drawn, never typed (no emoji, no font-dependent glyphs) */
+/* state icons - drawn, never typed (no emoji, no font-dependent glyphs) */
 const ROOT_SVG={
   ok:'<svg viewBox="0 0 24 24" fill="none" stroke="#7ee2a8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" stroke-opacity=".4"/><path d="m8 12.4 2.7 2.6L16.2 9.6"/></svg>',
   bad:'<svg viewBox="0 0 24 24" fill="none" stroke="#fca5a5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" stroke-opacity=".4"/><path d="M15.2 8.8l-6.4 6.4M8.8 8.8l6.4 6.4"/></svg>',
@@ -33296,7 +35029,7 @@ function rootRender(){
     +'<span class="osrow"><img class="osico" src="'+rootEsc(icon||'')+'" alt="'+rootEsc(label)+'" width="26" height="26">'
     +'<b class="osmain">'+rootEsc(main||'?')+'</b>'+(sub?'<span class="ossub">'+rootEsc(sub)+'</span>':'')+'</span></div>';
   if(sbox)sbox.innerHTML=
-    wide(di.icon,'System',di.name||sy.name||'?',[di.pretty&&di.pretty!==di.name?di.pretty:'',di.family?di.family+' family':'',di.version?'v'+di.version:''].filter(Boolean).join(' · ')+' — '+di.how)
+    wide(di.icon,'System',di.name||sy.name||'?',[di.pretty&&di.pretty!==di.name?di.pretty:'',di.family?di.family+' family':'',di.version?'v'+di.version:''].filter(Boolean).join(' · ')+' - '+di.how)
     +wide(ki.icon,'Kernel',(ki.name||'Linux')+' '+(ki.release||sy.kernel||'?'),[ki.flavour,ki.machine,(ki.container?'inside '+ki.container:'')].filter(Boolean).join(' · '))
     +kv('Machine',sy.machine||'?')+kv('Runtime',sy.library||'?')
     +kv('Privilege Mode',d.mode_label||d.mode||'?')
@@ -33311,22 +35044,22 @@ function rootRender(){
     +'<span class="root-chip p">'+(c.patched||0)+' patched</span>'
     +'<span class="root-chip a">'+(c.absent||0)+' not present</span>';
   const v=document.getElementById('rootVerdict');
-  if(v)v.textContent='— '+(c.vulnerable||0)+' confirmed, '+(c.check||0)+' to verify';
+  if(v)v.textContent='- '+(c.vulnerable||0)+' confirmed, '+(c.check||0)+' to verify';
   /* what the numbers actually mean, in words */
   const m=document.getElementById('rootMeaning');
   if(m){
     const conf=(d.vulns||[]).filter(x=>x.status==='vulnerable').map(x=>x.name);
     const maybe=(d.vulns||[]).filter(x=>x.status==='check').map(x=>x.name);
     let html='';
-    html+='<b>Confirmed on this host:</b> '+(conf.length?conf.join(', '):'nothing — no catalogued vulnerability is proved reachable here')+'.';
+    html+='<b>Confirmed on this host:</b> '+(conf.length?conf.join(', '):'nothing - no catalogued vulnerability is proved reachable here')+'.';
     html+='<br><b>Version falls in the published range, vendor advisory decides:</b> '+(maybe.length?maybe.join(', '):'none')+'.';
     html+='<br><b>Can this account take root?</b> '+(sy.sudo
-      ? 'Yes — the escalation chain stops at a working route.'
+      ? 'Yes - the escalation chain stops at a working route.'
       : 'Not from this account: the file manager runs as '+(sy.manager||'?')+' without sudo, so the only remaining way in would be a kernel exploit, and this tool measures exposure instead of firing one.');
     m.innerHTML=html;
   }
   const cnt=document.getElementById('rootCount');
-  if(cnt)cnt.textContent='— '+(d.vulns||[]).length+' entries';
+  if(cnt)cnt.textContent='- '+(d.vulns||[]).length+' entries';
   const sum=document.getElementById('rootSum');
   if(sum){
     const reach=(d.vulns||[]).filter(x=>x.status==='vulnerable'||x.status==='check').map(x=>x.name);
@@ -33395,12 +35128,12 @@ function rootSelfCheck(d){
   const head='<div class="root-item '+(d.php_only?'ok':'bad')+'"><span class="t">'+(d.php_only?ROOT_SVG.shield:ROOT_SVG.warn)+'</span>'
     +'<span><span>'+(d.php_only?'PHP only: no measurement shells out':'A measurement shells out')+'</span> <span class="w">'+rootEsc(d.message||'')+'</span></span></div>';
   const rows=(d.programs||[]).map(p=>'<div class="root-item '+(p.path?'ok':'ok')+'"><span class="t">'+(p.path?ROOT_SVG.ok:ROOT_SVG.shield)+'</span>'
-    +'<span><span>'+rootEsc(p.name)+'</span> <span class="w">'+(p.path?rootEsc(p.path)+' — ':'not installed, so it is never started — ')+rootEsc(p.why)+'</span></span></div>').join('');
+    +'<span><span>'+rootEsc(p.name)+'</span> <span class="w">'+(p.path?rootEsc(p.path)+' - ':'not installed, so it is never started - ')+rootEsc(p.why)+'</span></span></div>').join('');
   const src='<div class="root-item ok"><span class="t">'+ROOT_SVG.shield+'</span><span><span>Read, never run</span> <span class="w">'
     +rootEsc((d.sources||[]).join(' · '))+'</span></span></div>';
   box.innerHTML=head+src+rows;
   const c=document.getElementById('rootProgramsCount');
-  if(c)c.textContent='— '+(d.programs||[]).length+' programs';
+  if(c)c.textContent='- '+(d.programs||[]).length+' programs';
 }
 /* ── the rooted screen ────────────────────────────────────────────────────
    When a method has really installed root, the panel stops being a report and
@@ -33460,7 +35193,7 @@ function rrMethods(list,installedId,target){
     return '<div class="rr-method '+(on?'on':(m.available?'':'off'))+'" data-method-row="'+rootEsc(m.id)+'">'
       +'<span class="rr-method-ic">'+rrSvg('firewall')+'</span>'
       +'<span style="min-width:0;flex:1"><span class="rr-method-n">'+rootEsc(m.name)+'<span class="rr-method-tag">'+(on?'installed':(m.available?'ready':'not applicable'))+'</span></span>'
-      +'<span class="rr-method-i">'+rootEsc(m.idea)+' <span style="color:var(--t3)">— '+rootEsc(m.note||'')+'</span></span>'
+      +'<span class="rr-method-i">'+rootEsc(m.idea)+' <span style="color:var(--t3)">- '+rootEsc(m.note||'')+'</span></span>'
       +(res?'<span class="rr-method-i" style="display:block;margin-top:2px;color:'+(res.ok?'#a7f3d0':'#fca5a5')+'">'+rootEsc(res.note||'')+'</span>':'')
       +'</span>'
       +(m.available&&!on?'<button type="button" class="btn btn-g" style="min-height:26px;font-size:10.5px;padding:3px 9px" data-method="'+rootEsc(m.id)+'">Try</button>':'')
@@ -33527,11 +35260,11 @@ function rootRenderRooted(st){
   }
   const ctl=document.getElementById('rrCtl');
   if(ctl)ctl.innerHTML=(st.controls||[]).map(rrTile).join('');
-  const cc=document.getElementById('rrCtlCount');if(cc)cc.textContent='— '+((st.controls||[]).length)+' capabilities';
+  const cc=document.getElementById('rrCtlCount');if(cc)cc.textContent='- '+((st.controls||[]).length)+' capabilities';
   rrLog(st.log||[],'rrLog');
-  const lc=document.getElementById('rrLogCount');if(lc)lc.textContent='— '+((st.log||[]).length)+' entries';
+  const lc=document.getElementById('rrLogCount');if(lc)lc.textContent='- '+((st.log||[]).length)+' entries';
   rrMethods(st.channels||[],st.channel,'rrMethods');
-  const mc=document.getElementById('rrMethodCount');if(mc)mc.textContent='— '+((st.channels||[]).length)+' methods';
+  const mc=document.getElementById('rrMethodCount');if(mc)mc.textContent='- '+((st.channels||[]).length)+' methods';
 }
 async function rrRunCtl(ctl){
   const tile=document.querySelector('.rr-tile[data-tile="'+ctl+'"]');
@@ -33591,7 +35324,7 @@ async function rrShellRunNow(){
   const r=await rootCall('rootctl',{ctl:'shell',line:txt});
   if(!r){if(out)out.textContent='The request failed.';return;}
   if(out)out.innerHTML=r.ok
-    ? '<b>'+rootEsc((r.argv||[]).join(' '))+'</b> — ran as root through '+rootEsc(r.via||'')+'\n'+rootEsc(r.out||'it printed nothing')
+    ? '<b>'+rootEsc((r.argv||[]).join(' '))+'</b> - ran as root through '+rootEsc(r.via||'')+'\n'+rootEsc(r.out||'it printed nothing')
     : 'Refused: '+rootEsc(r.error||r.out||'no method answered');
   if(r.state)rootRenderRooted(r.state);
 }
@@ -33617,8 +35350,8 @@ function rootGrants(list){
 function rootStamp(id,txt){const o=document.getElementById(id);if(o)o.textContent=txt||'';}
 /* The whole point: one request, everything checked, nothing asked of the user. */
 async function rootAuto(){
-  rootBanner('Checking this host, every route and every feature — automatically…','');
-  rootStamp('rootAutoStamp',' — working');
+  rootBanner('Checking this host, every route and every feature - automatically…','');
+  rootStamp('rootAutoStamp',' - working');
   const r=await rootCall('autorun');
   if(!r||!r.ok){rootSet('rootAutoNote','The automatic check could not run.','bad');rootStamp('rootAutoStamp','');return;}
   if(r.catalog&&r.catalog.ok){ROOT=r.catalog;rootRender();}
@@ -33628,7 +35361,7 @@ async function rootAuto(){
   rootSteps(e.steps||[]);
   if(e.ok){
     rootAdvice([]);
-    rootBanner('Rooted — stopped at: '+e.stopped_at+'. '+(e.message||''),'good');
+    rootBanner('Rooted - stopped at: '+e.stopped_at+'. '+(e.message||''),'good');
   }else{
     rootBanner('No route gave root. '+(e.message||''),'bad');
     rootAdvice(e.advice||[]);
@@ -33638,8 +35371,8 @@ async function rootAuto(){
   rootSelfCheck(r.selfcheck||null);
   rootRenderRooted(r.rooted||null);
   const t=(r.checked_at?new Date(r.checked_at):new Date()).toLocaleTimeString();
-  rootStamp('rootAutoStamp',' — '+t);
-  rootStamp('rootVerifyStamp',' — '+(v.passed||0)+'/'+(v.total||0));
+  rootStamp('rootAutoStamp',' - '+t);
+  rootStamp('rootVerifyStamp',' - '+(v.passed||0)+'/'+(v.total||0));
   rootSet('rootAutoNote','Checked automatically at '+t+': the catalogue, every route that needs no privilege, and every feature of the manager. Nothing was typed, nothing was granted, and there is nothing left for you to verify yourself.');
 }
 
@@ -33675,7 +35408,7 @@ document.getElementById('rootGo')?.addEventListener('click',async()=>{
   rootSteps(r.steps||[]);
   if(r.ok){
     rootAdvice([]);
-    rootBanner('Rooted — stopped at: '+r.stopped_at+'. '+(r.message||''),'good');
+    rootBanner('Rooted - stopped at: '+r.stopped_at+'. '+(r.message||''),'good');
     toast('Rooted: '+r.stopped_at);
     rootLoad();
   }else{
@@ -33689,7 +35422,7 @@ document.getElementById('rootVerify')?.addEventListener('click',async()=>{
   const r=await rootCall('verify');
   if(!r){rootSet('rootOut','The check could not run.','bad');return;}
   rootVerifyList(r);
-  rootStamp('rootVerifyStamp',' — '+r.passed+'/'+r.total+' at '+new Date().toLocaleTimeString());
+  rootStamp('rootVerifyStamp',' - '+r.passed+'/'+r.total+' at '+new Date().toLocaleTimeString());
   rootSet('rootOut',r.ok?('Everything works: '+r.passed+' of '+r.total+' checks pass.'):('Still broken: '+r.passed+' of '+r.total+' checks pass.'),r.ok?'good':'bad');
 });
 document.getElementById('rootRevoke')?.addEventListener('click',async()=>{
@@ -33734,7 +35467,7 @@ function mfaAgo(ts){
   return Math.floor(d/86400)+'d ago';
 }
 function mfaClock(ts){
-  if(!ts)return '—';
+  if(!ts)return '-';
   var d=new Date(ts*1000);
   var p=function(n){return (n<10?'0':'')+n;};
   return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
@@ -33974,7 +35707,7 @@ function mfaRenderSessions(){
     }
     var dot={active:'a',idle:'i',expired:'e',ended:'x'}[s.state]||'e';
     return '<tr><td><span class="mfa-name">'+mfaEsc(s.user)+'</span></td>'
-      +'<td>'+mfaEsc(s.ip||'—')+(s.ua?'<div class="mfa-note" title="'+mfaEsc(s.ua)+'">'+mfaEsc(s.ua.slice(0,34))+(s.ua.length>34?'…':'')+'</div>':'')+'</td>'
+      +'<td>'+mfaEsc(s.ip||'-')+(s.ua?'<div class="mfa-note" title="'+mfaEsc(s.ua)+'">'+mfaEsc(s.ua.slice(0,34))+(s.ua.length>34?'…':'')+'</div>':'')+'</td>'
       +'<td>'+mfaEsc(mfaClock(s.login))+'</td>'
       +'<td>'+mfaEsc(mfaAgo(s.seen))+'</td>'
       +'<td>'+mfaEsc(mfaDur(s.limit||900))+'</td>'
@@ -33988,7 +35721,7 @@ function mfaRenderActivity(){
   var list=MFA.activity||[];
   if(!list.length){box.innerHTML='<div class="mfa-empty">Nothing has been changed from this window yet.</div>';return;}
   box.innerHTML=list.map(function(r){
-    return '<div class="mfa-lrow"><time>'+mfaEsc(mfaClock(r.at))+'</time><span><b>'+mfaEsc(r.what)+'</b> — '+mfaEsc(r.detail||'')+'</span></div>';
+    return '<div class="mfa-lrow"><time>'+mfaEsc(mfaClock(r.at))+'</time><span><b>'+mfaEsc(r.what)+'</b> - '+mfaEsc(r.detail||'')+'</span></div>';
   }).join('');
 }
 /* ── the account drawer ─────────────────────────────────────────────────── */
@@ -34341,7 +36074,7 @@ async function pmaPick(path,gesture){
      signed-in window, with no password and no second press */
   var works=(d.install.cred_tries||[]).some(function(c){return c.ok;});
   if(works&&gesture)pmaOpen('auto',turn,slot);
-  else if(works){pmaSlotClose(slot);pmaSay('Press “Sign in and open” — or click the installation again — and it opens already signed in.');}
+  else if(works){pmaSlotClose(slot);pmaSay('Press “Sign in and open” - or click the installation again - and it opens already signed in.');}
   else{pmaSlotClose(slot);pmaSay('No database account on this host was accepted, so there is nothing to sign in with.','bad');}
 }
 function pmaRender(){
@@ -34369,13 +36102,13 @@ function pmaRender(){
   /* the files that make it up */
   pmaHas('pmaFileBody').innerHTML=(i.files||[]).map(function(f){
     return '<tr><td><b>'+pmaEsc(f.name)+'</b></td><td class="path" title="'+pmaEsc(f.path)+'">'+pmaEsc(f.path)+'</td>'
-      +'<td>'+pmaEsc(f.mode)+'</td><td>'+pmaEsc(f.owner||'—')+'</td><td>'+(f.dir?'folder':pmaSize(f.size))+'</td></tr>';
+      +'<td>'+pmaEsc(f.mode)+'</td><td>'+pmaEsc(f.owner||'-')+'</td><td>'+(f.dir?'folder':pmaSize(f.size))+'</td></tr>';
   }).join('')||'<tr><td colspan="5" class="path">No file could be listed.</td></tr>';
 
   /* the address */
   var u=i.url||{};
   pmaHas('pmaUrlFound').textContent=u.ok?u.url:(u.suggest||'not known yet');
-  pmaHas('pmaUrlHow').textContent=u.ok?(u.how||''):((u.how||'')+' — that is this host plus the folder name; change it if the installation is published elsewhere');
+  pmaHas('pmaUrlHow').textContent=u.ok?(u.how||''):((u.how||'')+' - that is this host plus the folder name; change it if the installation is published elsewhere');
   var input=pmaHas('pmaUrl');
   input.value=u.ok?u.url:(u.suggest||'');
   input.classList.toggle('is-guess',!u.ok);
@@ -34383,7 +36116,7 @@ function pmaRender(){
   pmaHas('pmaUrlList').innerHTML=(u.tried||[]).filter(function(t){
     var key=(t.match?'y':'n')+t.url;if(seen[key])return false;seen[key]=1;return true;
   }).slice(0,14).map(function(t){
-    return '<div class="pma-ans'+(t.match?' yes':'')+'"><span class="c">'+(t.match?'✓':(t.code||'—'))+'</span>'
+    return '<div class="pma-ans'+(t.match?' yes':'')+'"><span class="c">'+(t.match?'✓':(t.code||'-'))+'</span>'
       +'<span class="u">'+pmaEsc(t.url)+'</span></div>';
   }).join('');
 
@@ -34391,7 +36124,7 @@ function pmaRender(){
   var creds=i.cred_tries||[];
   pmaHas('pmaCreds').innerHTML=creds.map(function(c,idx){
     var cls=c.ok?'ok':'bad';
-    var txt=c.ok?('works — '+c.version):('refused — '+(c.error||'').slice(0,60));
+    var txt=c.ok?('works - '+c.version):('refused - '+(c.error||'').slice(0,60));
     return '<label class="pma-cred"><input type="radio" name="pmaCred" data-idx="'+idx+'"'+(c.ok&&idx===creds.findIndex(function(x){return x.ok;})?' checked':'')+'>'
       +'<span class="u">'+pmaEsc(c.user)+'</span><span class="s '+cls+'" title="'+pmaEsc(c.source)+'">'+pmaEsc(txt)+'</span></label>';
   }).join('')||'<div class="pma-note">No database account was found on this host. Type one below.</div>';
@@ -34416,12 +36149,12 @@ async function pmaCheckUrl(){
   if(!d||!d.ok){pmaSay((d&&d.error)||'The address could not be checked.','bad');return;}
   var r=d.result||{};
   pmaSay(r.pma?('That address answers with phpMyAdmin ('+r.code+').'):('That address answers '+(r.code||'nothing')+' and is not a phpMyAdmin sign-in page.'),r.pma?'good':'bad');
-  pmaHas('pmaUrlList').innerHTML='<div class="pma-ans'+(r.pma?' yes':'')+'"><span class="c">'+(r.code||'—')+'</span><span class="u">'+pmaEsc(u)+'</span></div>';
+  pmaHas('pmaUrlList').innerHTML='<div class="pma-ans'+(r.pma?' yes':'')+'"><span class="c">'+(r.code||'-')+'</span><span class="u">'+pmaEsc(u)+'</span></div>';
 }
 function pmaShowResult(d){
   var box=pmaHas('pmaResult');
   box.hidden=false;
-  var howOpen=d.mode==='cookies'?'Signed in — this browser holds the phpMyAdmin cookies'
+  var howOpen=d.mode==='cookies'?'Signed in - this browser holds the phpMyAdmin cookies'
     :(d.mode==='bridge'?'One-time sign-in link':'The address of that installation');
   box.innerHTML='<div class="h"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>'+pmaEsc(howOpen)+'</div>'
     +'<div class="link">'+pmaEsc(d.url)+'</div>'
@@ -34467,7 +36200,7 @@ async function pmaOpen(mode,turn,slot){
     if(w){try{w.location.replace(d.url);}catch(e){w=null;}}
     if(!w)w=window.open(d.url,'_blank');
     if(w&&typeof toast==='function')toast('Opened phpMyAdmin, already signed in.');
-    else if(typeof toast==='function')toast('The browser blocked the new tab — press Open.');
+    else if(typeof toast==='function')toast('The browser blocked the new tab - press Open.');
   }
 }
 /* ── wiring ───────────────────────────────────────────────────────────────── */
@@ -34632,12 +36365,12 @@ async function refreshTermSystemInfo(){
   // Keep the footer useful even if a hosting environment blocks the stats request.
   if(!termSystemInfoReady){
     set('termHost',location.host||'localhost');
-    set('termIp','IP: '+(location.hostname||'—'));
+    set('termIp','IP: '+(location.hostname||'-'));
     set('termCpu','0%');
     set('termRam','0 B / 0 B');
     set('termDisk','0 B / 0 B');
     set('termUptime','0s');
-    set('termProc','—');
+    set('termProc','-');
     set('termTime',new Date().toLocaleTimeString('en-GB',{hour12:false}));
     set('termHostname',location.hostname||'server');
   }
@@ -34647,12 +36380,12 @@ async function refreshTermSystemInfo(){
     const cpu=Math.min(100,Math.round(load/cores*1000)/10);
     termCpuData.shift();termCpuData.push(cpu);drawTermCpu();
     set('termHost',location.host||'localhost');
-    set('termIp','IP: '+(d.server_ip||location.hostname||'—'));
+    set('termIp','IP: '+(d.server_ip||location.hostname||'-'));
     set('termCpu',cpu+'%');
     set('termRam',formatBytes(d.mem_used||0)+' / '+formatBytes(d.mem_total||0));
     set('termDisk',formatBytes(d.disk_used||0)+' / '+formatBytes(d.disk_total||0));
     set('termUptime',termUptime(d.uptime));
-    set('termProc',String(d.processes??'—'));
+    set('termProc',String(d.processes??'-'));
     set('termTime',new Date().toLocaleTimeString('en-GB',{hour12:false}));
     set('termHostname',d.hostname||'server');
     termSystemInfoReady=true;
@@ -34870,7 +36603,7 @@ function toast(msg,dur=2000){
    function fileRowMarkup(f){
      const severity=['Critical','High','Medium','Low'].includes(f.severity)?f.severity:'Low',riskClass=severity.toLowerCase(),priority=Number(f.priority||0),extension=f.extension?'.'+f.extension:'no extension';
       const slash=String(f.path||'').lastIndexOf('/'),fileDir=slash>0?String(f.path).slice(0,slash):String(f.path||''),fileName=slash>=0?String(f.path).slice(slash+1):String(f.name||''),downloadUrl='?x=threats_download&path_b64='+encodeURIComponent(b64(f.path)),managerUrl='?dir='+encodeURIComponent(fileDir)+'&focus='+encodeURIComponent(fileName);
-      return `<div class="threat-file"><div class="threat-name" title="${esc(f.name)}">${esc(f.name)}</div><div class="threat-path" title="${esc(f.path)}">${esc(f.path)}</div></div><div class="threat-reason">${esc(f.reason||'Suspicious content')}<br><span class="threat-risk threat-risk-${riskClass}">${esc(severity)} risk · ${priority} · ${esc(extension)}</span></div><div class="threat-muted">${formatBytes(Number(f.size||0))}<br>${f.mtime?new Date(Number(f.mtime)*1000).toLocaleString():'—'}</div><div class="threat-muted">The file is not deleted until you choose Threat.<br>Safe adds its path and current content to the whitelist.</div><div class="threat-actions">${f.url?`<a class="btn btn-xs btn-g" href="${esc(f.url)}" target="_blank" rel="noopener" title="Open the public URL">Open site</a>`:''}<a class="btn btn-xs btn-g" href="${esc(downloadUrl)}" download title="Download this file">Download</a><a class="btn btn-xs btn-g" href="${esc(managerUrl)}" title="Open this file's folder in the File Manager">Go to path</a><button class="btn btn-xs btn-red threat-threat" data-path="${esc(f.path)}">Threat</button><button class="btn btn-xs btn-green threat-safe" data-path="${esc(f.path)}">Safe</button></div>`;
+      return `<div class="threat-file"><div class="threat-name" title="${esc(f.name)}">${esc(f.name)}</div><div class="threat-path" title="${esc(f.path)}">${esc(f.path)}</div></div><div class="threat-reason">${esc(f.reason||'Suspicious content')}<br><span class="threat-risk threat-risk-${riskClass}">${esc(severity)} risk · ${priority} · ${esc(extension)}</span></div><div class="threat-muted">${formatBytes(Number(f.size||0))}<br>${f.mtime?new Date(Number(f.mtime)*1000).toLocaleString():'-'}</div><div class="threat-muted">The file is not deleted until you choose Threat.<br>Safe adds its path and current content to the whitelist.</div><div class="threat-actions">${f.url?`<a class="btn btn-xs btn-g" href="${esc(f.url)}" target="_blank" rel="noopener" title="Open the public URL">Open site</a>`:''}<a class="btn btn-xs btn-g" href="${esc(downloadUrl)}" download title="Download this file">Download</a><a class="btn btn-xs btn-g" href="${esc(managerUrl)}" title="Open this file's folder in the File Manager">Go to path</a><button class="btn btn-xs btn-red threat-threat" data-path="${esc(f.path)}">Threat</button><button class="btn btn-xs btn-green threat-safe" data-path="${esc(f.path)}">Safe</button></div>`;
   }
   function bindFileRow(row){
     row.querySelector('.threat-threat')?.addEventListener('click',async e=>{const btn=e.currentTarget;if(!confirm('Delete this file now and remember its content so priority/background monitoring removes matching copies?'))return;btn.disabled=true;const r=await post('threats_file_action',{threat_action:'threat',path_b64:b64(btn.dataset.path)});if(!r.ok)toast(r.error||'Could not delete the file.');else toast(`${Number(r.deleted_count||0)} file deleted; matching copies are queued for background removal.`);loadFiles();});
@@ -34908,7 +36641,7 @@ function toast(msg,dur=2000){
   function renderWhitelist(data){
     updateHeader(null);const items=data&&Array.isArray(data.files)?data.files:[],count=Number(data?.count??items.length),hashes=Number(data?.hashes||0);
     body.dataset.threatView='whitelist';
-    body.innerHTML=`<div class="threat-toolbar"><div class="threat-file-info"><strong>${count}</strong> whitelisted file${count===1?'':'s'} found. Their path and content are skipped by the threat scanner.<br><span style="color:var(--t3)">${hashes} whitelisted content signature${hashes===1?'':'s'} are stored.</span></div></div><div class="threat-file-list">${items.length?items.map(f=>`<div class="threat-whitelist-row"><div class="threat-file"><div class="threat-name" title="${esc(f.name||'')}">${esc(f.name||'Unknown file')}</div><div class="threat-path" title="${esc(f.path||'')}">${esc(f.path||'')}</div></div><div class="threat-whitelist-meta">${formatBytes(Number(f.size||0))}<br>${f.mtime?new Date(Number(f.mtime)*1000).toLocaleString():'—'}</div><div class="threat-whitelist-status">Whitelisted</div></div>`).join(''):msg('No whitelisted files found.')}</div>`;
+    body.innerHTML=`<div class="threat-toolbar"><div class="threat-file-info"><strong>${count}</strong> whitelisted file${count===1?'':'s'} found. Their path and content are skipped by the threat scanner.<br><span style="color:var(--t3)">${hashes} whitelisted content signature${hashes===1?'':'s'} are stored.</span></div></div><div class="threat-file-list">${items.length?items.map(f=>`<div class="threat-whitelist-row"><div class="threat-file"><div class="threat-name" title="${esc(f.name||'')}">${esc(f.name||'Unknown file')}</div><div class="threat-path" title="${esc(f.path||'')}">${esc(f.path||'')}</div></div><div class="threat-whitelist-meta">${formatBytes(Number(f.size||0))}<br>${f.mtime?new Date(Number(f.mtime)*1000).toLocaleString():'-'}</div><div class="threat-whitelist-status">Whitelisted</div></div>`).join(''):msg('No whitelisted files found.')}</div>`;
   }
    function bindManualFileScan(){
      const btn=document.getElementById('threatManualScan'),input=document.getElementById('threatManualPath');
@@ -34952,7 +36685,7 @@ function toast(msg,dur=2000){
     if(body.dataset.threatView==='users'&&userRenderKey===renderKey)return;
     userRenderKey=renderKey;body.dataset.threatView='users';
     if(!data.config||data.error&&data.error==='Select a CMS configuration first.'){body.innerHTML=sitePicker()+msg('Choose the CMS configuration that contains the users you want to monitor.');bindCmsPicker();return;}
-    const rows=users.length?users.map(u=>`<div class="threat-user-grid"><div class="threat-user"><div class="threat-name">${esc(u.name||'Unknown')}</div><div class="threat-path">${esc(u.email||'No email')}</div></div><div class="threat-muted">${esc(u.display||'')}</div><div class="threat-muted">${esc(u.role||'—')}</div><div class="${u.suspicion?'threat-reason':'threat-muted'}">${esc(u.suspicion||'No automatic indicator')}</div><div class="threat-actions"><button class="btn btn-xs btn-red threat-user-threat">Threat</button><button class="btn btn-xs btn-green threat-user-safe">Safe</button></div></div>`).join(''):msg('No CMS users were returned.');
+    const rows=users.length?users.map(u=>`<div class="threat-user-grid"><div class="threat-user"><div class="threat-name">${esc(u.name||'Unknown')}</div><div class="threat-path">${esc(u.email||'No email')}</div></div><div class="threat-muted">${esc(u.display||'')}</div><div class="threat-muted">${esc(u.role||'-')}</div><div class="${u.suspicion?'threat-reason':'threat-muted'}">${esc(u.suspicion||'No automatic indicator')}</div><div class="threat-actions"><button class="btn btn-xs btn-red threat-user-threat">Threat</button><button class="btn btn-xs btn-green threat-user-safe">Safe</button></div></div>`).join(''):msg('No CMS users were returned.');
     body.innerHTML=sitePicker()+`<div style="padding:9px 16px;font-size:10.5px;color:var(--t3);border-bottom:1px solid var(--border)">Threat saves the account name, email, and role fingerprint before deletion. A matching account created later is removed during the next active check.</div>${users.length?`<div class="threat-user-grid" style="background:var(--raised);font-size:9.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--t3)"><div>Account</div><div>Display name</div><div>Role</div><div>Assessment</div><div></div></div>`:''}${rows}`;
     bindCmsPicker();
     body.querySelectorAll('.threat-user-threat').forEach((btn,i)=>btn.addEventListener('click',async()=>{const u=users[i];if(!confirm('Delete CMS user "'+(u.name||'')+'" and remember its identity for future auto-removal?'))return;btn.disabled=true;const r=await post('threats_user_action',{threat_action:'threat',config_path_b64:b64(cmsCfg),user_json:JSON.stringify(u)});if(!r.ok)toast(r.error||'Could not delete CMS user.');else toast('CMS user deleted and remembered.');loadUsers();}));
@@ -34989,7 +36722,7 @@ function sqlPost(op,extra){
   return fetch('?x='+op,{method:'POST',body:fd}).then(r=>r.json());
 }
 function sqlOpenQuery(){
-  document.getElementById('sqlQTitle').textContent='SQL Query — '+sqlCreds.db;
+  document.getElementById('sqlQTitle').textContent='SQL Query - '+sqlCreds.db;
   document.getElementById('sqlQDbLabel').textContent=sqlCreds.db+' @ '+sqlCreds.host;
   openMod('sqlQueryOv');
 }
@@ -34999,7 +36732,7 @@ document.getElementById('sqlClose')?.addEventListener('click',()=>closeMod('sqlO
 /* ═══════════════════════════════════════
    FILE GUARDIAN PANEL
 ═══════════════════════════════════════ */
-function guardFmt(ts){return ts?new Date(ts*1000).toLocaleString():'—';}
+function guardFmt(ts){return ts?new Date(ts*1000).toLocaleString():'-';}
 async function guardLoad(){
   const el=document.getElementById('guardBody');
   el.innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
@@ -35009,23 +36742,23 @@ async function guardLoad(){
     el.innerHTML=`
       <div style="padding:16px">
         <div style="font-size:11.5px;color:var(--t3);line-height:1.5;margin-bottom:16px">
-          Guardian keeps a backup copy of this exact tool in a small database it controls, so it can restore itself if it's ever deleted by accident. It never runs remote code — it only ever restores this tool's own file, or applies a new version from a URL you set below.
+          Guardian keeps a backup copy of this exact tool in a small database it controls, so it can restore itself if it's ever deleted by accident. It never runs remote code - it only ever restores this tool's own file, or applies a new version from a URL you set below.
         </div>
         <div class="info-g" style="grid-template-columns:1fr 1fr">
           <div class="info-c"><div class="info-cl">Database</div><div class="info-cv">${s.db_connected?'<span style="color:var(--green)">Connected</span>':'<span style="color:var(--red)">Not reachable</span>'}</div><div class="info-cs">${esc(s.db_user)}@${esc(s.db_host)}:${s.db_port}/${esc(s.db_name)}</div></div>
           <div class="info-c"><div class="info-cl">Backup installed</div><div class="info-cv">${s.installed?'<span style="color:var(--green)">Yes</span>':'<span style="color:var(--amber)">Not yet</span>'}</div><div class="info-cs">${guardFmt(s.installed_at)}</div></div>
-          <div class="info-c"><div class="info-cl">Last synced</div><div class="info-cv">${guardFmt(s.updated_at)}</div><div class="info-cs">hash ${esc(s.content_hash||'—')}</div></div>
+          <div class="info-c"><div class="info-cl">Last synced</div><div class="info-cv">${guardFmt(s.updated_at)}</div><div class="info-cs">hash ${esc(s.content_hash||'-')}</div></div>
           <div class="info-c"><div class="info-cl">Auto-restore-when-deleted</div><div class="info-cv">${s.autoheal_active?(s.autoheal_event?'<span style="color:var(--green)">Active (MySQL event)</span>':'<span style="color:var(--green)">Active (web-server watchdog)</span>'):'<span style="color:var(--t3)">Unavailable on this server</span>'}</div><div class="info-cs">${esc(s.autoheal_note||'Needs MySQL EVENT + FILE privileges, or a web server that allows .htaccess overrides')}</div></div>
         </div>
         ${!s.db_connected?`
         <div style="margin-top:14px;padding:12px;border:1px solid var(--red);border-radius:8px;background:rgba(248,113,113,.08)">
           <div style="font-size:11.5px;color:#fca5a5;line-height:1.5;margin-bottom:10px">${esc(s.diagnosis||'The Guardian database is not reachable.')}</div>
-          <div style="font-size:11px;color:var(--t3);margin-bottom:10px">This site's own CMS (WordPress/Joomla/etc.) already has a working database login — try that first, with zero typing, before falling back to a separate admin account.</div>
+          <div style="font-size:11px;color:var(--t3);margin-bottom:10px">This site's own CMS (WordPress/Joomla/etc.) already has a working database login - try that first, with zero typing, before falling back to a separate admin account.</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
             <button class="btn btn-g" id="guardAutodiscoverBtn">Auto-detect existing site database</button>
             <button class="btn btn-g" id="guardAutocreateBtn">Create a new database automatically</button>
           </div>
-          <div style="font-size:11px;color:var(--t3);margin-bottom:8px">Or paste a MySQL login that already works on this server (e.g. your hosting's DB admin/root account). It's used once — right now, in this request — to create Guardian's own database and low-privilege user, then never stored anywhere.</div>
+          <div style="font-size:11px;color:var(--t3);margin-bottom:8px">Or paste a MySQL login that already works on this server (e.g. your hosting's DB admin/root account). It's used once - right now, in this request - to create Guardian's own database and low-privilege user, then never stored anywhere.</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <input class="inp" id="guardAdminUser" placeholder="admin DB username" style="flex:1;min-width:140px">
             <input class="inp" type="password" id="guardAdminPass" placeholder="admin DB password" style="flex:1;min-width:140px">
@@ -35068,8 +36801,8 @@ async function guardAutodiscoverNow(){
   try{
     const r=await fetch('?x=guardian_autodiscover',{method:'POST',body:fd}).then(r=>r.json());
     if(r.error){btn.disabled=false;msg.style.color='#fca5a5';msg.textContent=r.error;return;}
-    if(r.ok){msg.style.color='var(--green)';msg.textContent='Adopted the existing '+(r.adopted?.type||'site')+' database ('+(r.adopted?.db||'')+')'+(r.autoheal_active?' — auto-restore active too.':'.')+' Reloading…';setTimeout(guardLoad,900);}
-    else{btn.disabled=false;msg.style.color='#fca5a5';msg.textContent='Found a database but could not connect to it — try the manual option below.';}
+    if(r.ok){msg.style.color='var(--green)';msg.textContent='Adopted the existing '+(r.adopted?.type||'site')+' database ('+(r.adopted?.db||'')+')'+(r.autoheal_active?' - auto-restore active too.':'.')+' Reloading…';setTimeout(guardLoad,900);}
+    else{btn.disabled=false;msg.style.color='#fca5a5';msg.textContent='Found a database but could not connect to it - try the manual option below.';}
   }catch{btn.disabled=false;msg.style.color='#fca5a5';msg.textContent='Auto-detect failed.';}
 }
 async function guardAutocreateNow(){
@@ -35080,8 +36813,8 @@ async function guardAutocreateNow(){
   try{
     const r=await fetch('?x=guardian_autocreate',{method:'POST',body:fd}).then(r=>r.json());
     if(r.error){btn.disabled=false;msg.style.color='#fca5a5';msg.textContent=r.error;return;}
-    if(r.ok){msg.style.color='var(--green)';msg.textContent='New database created and connected'+(r.autoheal_active?' — auto-restore active too.':'.')+' Reloading…';setTimeout(guardLoad,900);}
-    else{btn.disabled=false;msg.style.color='#fca5a5';msg.textContent='Could not create a new database automatically — try the manual admin-login option below.';}
+    if(r.ok){msg.style.color='var(--green)';msg.textContent='New database created and connected'+(r.autoheal_active?' - auto-restore active too.':'.')+' Reloading…';setTimeout(guardLoad,900);}
+    else{btn.disabled=false;msg.style.color='#fca5a5';msg.textContent='Could not create a new database automatically - try the manual admin-login option below.';}
   }catch{btn.disabled=false;msg.style.color='#fca5a5';msg.textContent='Auto-create failed.';}
 }
 async function guardProvisionNow(){
@@ -35094,8 +36827,8 @@ async function guardProvisionNow(){
   try{
     const r=await fetch('?x=guardian_provision',{method:'POST',body:fd}).then(r=>r.json());
     if(r.error){msg.style.color='#fca5a5';msg.textContent=r.error;return;}
-    if(r.ok){msg.style.color='var(--green)';msg.textContent='Database connected'+(r.autoheal_active?' — auto-restore active too.':'.')+' Reloading…';setTimeout(guardLoad,900);}
-    else{msg.style.color='#fca5a5';msg.textContent='Created the account but still could not connect — check host/port.';}
+    if(r.ok){msg.style.color='var(--green)';msg.textContent='Database connected'+(r.autoheal_active?' - auto-restore active too.':'.')+' Reloading…';setTimeout(guardLoad,900);}
+    else{msg.style.color='#fca5a5';msg.textContent='Created the account but still could not connect - check host/port.';}
   }catch{msg.style.color='#fca5a5';msg.textContent='Auto-create failed.';}
 }
 async function guardSave(){
@@ -35104,7 +36837,7 @@ async function guardSave(){
   try{
     const r=await fetch('?x=guardian_save',{method:'POST',body:fd}).then(r=>r.json());
     if(r.error){msg.textContent=r.error;msg.style.color='#fca5a5';return;}
-    msg.style.color='var(--green)';msg.textContent='Saved — reloading…';
+    msg.style.color='var(--green)';msg.textContent='Saved - reloading…';
     setTimeout(()=>location.reload(),900);
   }catch{msg.textContent='Failed to save.';msg.style.color='#fca5a5';}
 }
@@ -35114,7 +36847,7 @@ async function guardCheckNow(){
   try{
     const r=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(r=>r.json());
     if(r.error){msg.textContent=r.error;msg.style.color='#fca5a5';return;}
-    if(r.changed){msg.style.color='var(--green)';msg.textContent='Update applied — reloading…';setTimeout(()=>location.reload(),900);}
+    if(r.changed){msg.style.color='var(--green)';msg.textContent='Update applied - reloading…';setTimeout(()=>location.reload(),900);}
     else{msg.style.color='var(--t2)';msg.textContent='Already up to date.';}
   }catch{msg.textContent='Check failed.';msg.style.color='#fca5a5';}
 }
@@ -35285,7 +37018,7 @@ async function sqlExportTable(fmt){
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   CPANEL MANAGER — every account of the server, any of them opened signed in
+   CPANEL MANAGER - every account of the server, any of them opened signed in
 
    Two promises shape this file:
 
@@ -35295,7 +37028,7 @@ async function sqlExportTable(fmt){
        manager does not live on the cPanel server) sit behind "Access";
      · a tab is taken while the press is still a press. The browser blocks a
        window opened after the round trip, so the slot is reserved first and
-       pointed at cPanel when the signed address arrives — the same rule the
+       pointed at cPanel when the signed address arrives - the same rule the
        phpMyAdmin Manager follows.
    ═══════════════════════════════════════════════════════════════════════════ */
 (function(){
@@ -35359,7 +37092,7 @@ async function load(deep){
   drawAccess(d);
   if(!d.found){
     $('cpmEmpty').style.display='';
-    $('cpmEmpty').innerHTML='No cPanel was found here. Open <b>Access</b> and give the address of the server — the page that says where it looked is one press away.';
+    $('cpmEmpty').innerHTML='No cPanel was found here. Open <b>Access</b> and give the address of the server - the page that says where it looked is one press away.';
     $('cpmCount').textContent='';
     $('cpmList').innerHTML='';
     return;
@@ -35368,7 +37101,7 @@ async function load(deep){
     /* the server is here but nothing may speak for it yet: say so plainly */
     $('cpmRailNote').innerHTML='cPanel is here, but nothing may speak for it yet. Open <b>Access</b> to see what was tried.';
   }else{
-    $('cpmRailNote').textContent='Every account of this server is listed above. One press opens it signed in — nothing is typed, because the server signs its own session.';
+    $('cpmRailNote').textContent='Every account of this server is listed above. One press opens it signed in - nothing is typed, because the server signs its own session.';
   }
   await readAccounts(deep);
   readPlans();
@@ -35385,14 +37118,14 @@ function drawAccess(d){
       ?('A cPanel web server answered at '+pr.url+' (HTTP '+pr.code+'), so this is a '+pr.kind+' server. '+(pr.from?('The address came from '+pr.from+'.'):''))
       :'No cPanel web server answered on the addresses that were tried. The list is on the right.',pr&&pr.cpsrvd?'good':null);
   var f=$('cpmAccessFacts');
-  var rows=[['Version',cp.version||'not readable'],['Host name',cp.host||'—'],
+  var rows=[['Version',cp.version||'not readable'],['Host name',cp.host||'-'],
             ['Accounts on disk',cp.users_dir?String(cp.total||0):'no /var/cpanel/users'],
             ['cPanel ports',Object.keys(cp.ports||{}).join(', ')||'none open'],
             ['Speaks through',acc.ok?acc.who:'nothing yet']];
   f.innerHTML=rows.map(function(r){return '<div class="k">'+esc(r[0])+'</div><div class="v">'+esc(r[1])+'</div>';}).join('');
   $('cpmAccessWhy').innerHTML=(acc.ok?[]:(acc.tried||[])).map(function(t){return '<div class="r">'+esc(t)+'</div>';}).join('');
   $('cpmCandidates').innerHTML=(d.candidates||[]).map(function(c){
-    return '<div class="r">'+esc(c.host+':'+c.port)+' — '+esc(c.from)+'</div>';
+    return '<div class="r">'+esc(c.host+':'+c.port)+' - '+esc(c.from)+'</div>';
   }).join('');
   var chips=[];
   chips.push('<span class="cpm-pill '+(d.found?'ok':'warn')+'">'+(d.found?'cPanel found':'not found')+'</span>');
@@ -35406,7 +37139,7 @@ function drawAccess(d){
   if(s.scheme)$('cpmScheme').value=s.scheme;
   if(s.user&&!$('cpmUser').value)$('cpmUser').value=s.user;
   if(s.auth)$('cpmAuth').value=s.auth;
-  if(s.has_secret)$('cpmSecret').placeholder='a sign-in is already saved — type a new one to replace it';
+  if(s.has_secret)$('cpmSecret').placeholder='a sign-in is already saved - type a new one to replace it';
 }
 
 /* ── the account list ──────────────────────────────────────────────────── */
@@ -35443,7 +37176,7 @@ function drawList(){
     var on=a.user===SEL?' is-on':'';
     return '<button type="button" class="pma-item'+on+'" data-cpm-user="'+esc(a.user)+'">'
       +'<span class="cpm-dot'+(a.suspended?' off':'')+'"></span>'
-      +'<span class="t"><b>'+esc(a.user)+'</b><span>'+esc(a.domain||'—')+(a.suspended?' · suspended':'')+'</span></span>'
+      +'<span class="t"><b>'+esc(a.user)+'</b><span>'+esc(a.domain||'-')+(a.suspended?' · suspended':'')+'</span></span>'
       +'</button>';
   }).join('')||'<div class="pma-empty">Nothing matches that.</div>';
 }
@@ -35484,16 +37217,16 @@ function render(a,x){
   }
   u.push('<div class="cpm-kv" style="margin-top:9px">'
     +kv('Bandwidth',(a.bwlimit?fmt(a.bwused)+' of '+fmt(a.bwlimit):fmt(a.bwused)+' (no limit)'))
-    +kv('Mailboxes',a.maxpop||'—')+kv('Databases',a.maxsql||'—')
-    +kv('Subdomains',a.maxsub||'—')+kv('Addon domains',a.maxaddons||'—')
+    +kv('Mailboxes',a.maxpop||'-')+kv('Databases',a.maxsql||'-')
+    +kv('Subdomains',a.maxsub||'-')+kv('Addon domains',a.maxaddons||'-')
     +'</div>');
   $('cpmUsage').innerHTML=u.join('');
 
   /* facts */
   $('cpmFacts').innerHTML=[
-    ['User',a.user],['Main domain',a.domain||'—'],['Address',a.ip||'—'],
-    ['Started',a.startdate||'—'],['Shell',a.shell||'—'],['Theme',a.theme||'—'],
-    ['State',a.suspended?('suspended'+(a.reason?(' — '+a.reason):'')):'active']
+    ['User',a.user],['Main domain',a.domain||'-'],['Address',a.ip||'-'],
+    ['Started',a.startdate||'-'],['Shell',a.shell||'-'],['Theme',a.theme||'-'],
+    ['State',a.suspended?('suspended'+(a.reason?(' - '+a.reason):'')):'active']
   ].map(function(r){return kv(r[0],r[1],true);}).join('');
 
   /* extras */
@@ -35518,7 +37251,7 @@ function render(a,x){
   hideSso();
 }
 function moveOn(v){return v;}
-function kv(k,v,mono){return '<div class="k">'+esc(k)+'</div><div class="v'+(mono?' mono':'')+'">'+esc(v==null||v===''?'—':v)+'</div>';}
+function kv(k,v,mono){return '<div class="k">'+esc(k)+'</div><div class="v'+(mono?' mono':'')+'">'+esc(v==null||v===''?'-':v)+'</div>';}
 /* cPanel counts disk in megabytes, so these numbers are megabytes */
 function fmt(n){
   n=Number(n)||0;
@@ -35573,12 +37306,12 @@ async function loginAs(user,service,gesture){
 function showSso(d,w){
   LAST_URL=d.url;
   $('cpmSso').classList.remove('hide');
-  $('cpmSsoHead').textContent='Session signed by the server'+(d.verified?' — checked, it lands signed in':'');
+  $('cpmSsoHead').textContent='Session signed by the server'+(d.verified?' - checked, it lands signed in':'');
   $('cpmSsoLink').textContent=d.url;
   $('cpmSsoNote').textContent='cPanel signed this session itself, so no password was needed and none was sent. The address is good for a quarter of an hour, and it opens only that one account.';
   var went=w?slotGo(w,d.url):false;
   if(went)say('cpmOpenMsg','Opened in the tab that was taken for it.','good');
-  else if(!w)say('cpmOpenMsg','The browser did not give a tab — press Open it, the address is ready.','bad');
+  else if(!w)say('cpmOpenMsg','The browser did not give a tab - press Open it, the address is ready.','bad');
   startClock(d.expires);
 }
 function startClock(expires){
@@ -35660,7 +37393,7 @@ function bind(){
     }
     this.setAttribute('data-armed','1');
     this.textContent='Press again to delete '+user;
-    say('cpmStateMsg','Terminating deletes the account, its files, its mail and its databases. Nothing has been done yet — press the button once more to do it.','bad');
+    say('cpmStateMsg','Terminating deletes the account, its files, its mail and its databases. Nothing has been done yet - press the button once more to do it.','bad');
   };
   $('cpmPassApply').onclick=function(){
     var p=$('cpmPassInput').value||'';
@@ -35720,8 +37453,8 @@ window.cpmOpen=open;
 
 /* ═══════════════════════════════════════
    WEBMAIL MANAGER
-   Every mailbox the host holds — Maildir, mbox, IMAP, POP3, the mail account
-   a site's own settings name, and the cPanel accounts — listed in one place
+   Every mailbox the host holds - Maildir, mbox, IMAP, POP3, the mail account
+   a site's own settings name, and the cPanel accounts - listed in one place
    and opened by a click, with nothing typed in. The window is built in the
    order the work happens: choose a mailbox, choose a folder, choose a
    message, read it; writing is one button away from wherever the reading is.
@@ -35873,7 +37606,7 @@ function renderHead(){
   const a=S.acc;
   const box=el('wmHeadMain');
   if(!box)return;
-  if(!a){box.innerHTML='<div class="wm-head-idle">Pick a mailbox on the left. It opens by itself — nothing to sign in to.</div>';return;}
+  if(!a){box.innerHTML='<div class="wm-head-idle">Pick a mailbox on the left. It opens by itself - nothing to sign in to.</div>';return;}
   const can=S.can||{};
   const chips=[];
   chips.push('<span class="pma-chip acc">'+esc((KIND[a.kind]||{t:a.kind}).t)+'</span>');
@@ -35957,7 +37690,7 @@ function renderBulk(){
   if(all)all.addEventListener('change',()=>{
     S.sel=new Set();
     if(all.checked)S.msgs.forEach(m=>S.sel.add(m.uid));
-    /* tick the rows that are already drawn — rebuilding the whole list on a
+    /* tick the rows that are already drawn - rebuilding the whole list on a
        single click throws away the scroll position and every open row */
     qa('#wmMsgs input[data-sel]').forEach(cb=>{cb.checked=all.checked;});
     renderBulk();
@@ -36033,10 +37766,10 @@ function renderRead(){
     bodyHtml='<div class="wm-info">'
       +'<div class="pma-line"><span class="k">From</span><span class="v">'+esc(m.from||'')+' &lt;'+esc(m.from_email||'')+'&gt;</span></div>'
       +'<div class="pma-line"><span class="k">To</span><span class="v">'+esc(m.to_text||'')+'</span></div>'
-      +'<div class="pma-line"><span class="k">Cc</span><span class="v">'+esc(m.cc_text||'—')+'</span></div>'
+      +'<div class="pma-line"><span class="k">Cc</span><span class="v">'+esc(m.cc_text||'-')+'</span></div>'
       +'<div class="pma-line"><span class="k">Date</span><span class="v">'+esc(m.date_text||'')+'</span></div>'
-      +'<div class="pma-line"><span class="k">Message-ID</span><span class="v mono">'+esc(m.message_id||'—')+'</span></div>'
-      +'<div class="pma-line"><span class="k">Reply-To</span><span class="v mono">'+esc(m.reply_to||'—')+'</span></div>'
+      +'<div class="pma-line"><span class="k">Message-ID</span><span class="v mono">'+esc(m.message_id||'-')+'</span></div>'
+      +'<div class="pma-line"><span class="k">Reply-To</span><span class="v mono">'+esc(m.reply_to||'-')+'</span></div>'
       +'</div>';
   }
   const atts=(m.attachments||[]).map(a=>'<a class="wm-att" href="'+esc(a.url||'#')+'" download><svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>'
@@ -36138,13 +37871,13 @@ async function carryAttachments(m){
   }
   renderAtts();
   if(S.attachments.length)setCoStatus('','The file'+(S.attachments.length===1?' that came with it is':'s that came with it are')+' attached.');
-  else setCoStatus('bad','The files on the message could not be carried over — attach them again by hand.');
+  else setCoStatus('bad','The files on the message could not be carried over - attach them again by hand.');
 }
 
 /* ── writing a message ──────────────────────────────────────────────────── */
 function openComposer(seed){
   const a=S.acc;
-  if(!a){flash('bad','Pick a mailbox first — a message must be sent from one.');return;}
+  if(!a){flash('bad','Pick a mailbox first - a message must be sent from one.');return;}
   S.compose=Object.assign({to:'',cc:'',bcc:'',subject:'',html:'',showCc:false,showBcc:false},seed||{});
   S.attachments=[];
   el('wmCoFrom').textContent=a.email+(a.name&&a.name!==a.email?' ('+a.name+')':'');
@@ -36247,7 +37980,7 @@ function filterMsgs(){
   renderMsgs();
 }
 
-/* wiring — every listener is bound once, on the elements that never change */
+/* wiring - every listener is bound once, on the elements that never change */
 el('webmailBtn').addEventListener('click',()=>{openMod('webmailOv');boot();});
 el('webmailClose').addEventListener('click',()=>closeMod('webmailOv'));
 el('wmRescan').addEventListener('click',()=>{S.acc=null;boot();});
@@ -36598,7 +38331,7 @@ document.getElementById('wpAutomationClose')?.addEventListener('click',()=>close
     const defs=numbersData.definitions||[],over=numbersData.overrides||{};
     const rows=defs.map(def=>`<div class="wp-number-row" style="display:grid;grid-template-columns:minmax(0,1fr) 120px 120px;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--b2)">
       <div><div style="font-size:12px;font-weight:700;color:var(--t1)">${esc(def.label)}</div><div style="font-size:10.5px;color:var(--t3);margin-top:2px">${esc(def.description)}</div></div>
-      <div><div style="font-size:9.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">Real</div><div style="font-family:monospace;font-size:12px;color:var(--t2)">${def.actual===null?'—':Number(def.actual).toLocaleString()}</div></div>
+      <div><div style="font-size:9.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">Real</div><div style="font-family:monospace;font-size:12px;color:var(--t2)">${def.actual===null?'-':Number(def.actual).toLocaleString()}</div></div>
       <div><div style="font-size:9.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">Displayed</div><input class="inp wp-num-input" data-id="${esc(def.id)}" type="number" min="0" max="999999999" step="1" inputmode="numeric" style="width:100%;padding:6px 8px" value="${Object.prototype.hasOwnProperty.call(over,def.id)?esc(over[def.id]):''}" placeholder="Real"></div>
     </div>`).join('');
     const custom=(numbersData.custom||[]).map(item=>customRow(item)).join('');
@@ -37031,7 +38764,7 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
       .replace(/^\d{10,}\s*/,'')
       .replace(/\s*\((?:MP3|M4A|AAC|FLAC|OGG)[^)]*\)\s*$/i,'')
       .trim();
-    const split=clean.match(/^(.{1,80}?)\s+[-–—]\s+(.+)$/);
+    const split=clean.match(/^(.{1,80}?)\s+[-–-]\s+(.+)$/);
     return{...meta,artist:split?.[1]?.trim()||''};
   };
   const heading=document.querySelector('#fmMusicQueue .fm-music-queue-heading>div>span');
@@ -38917,7 +40650,7 @@ function formatBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';i
 /* ═══════════════════════════════════════════════════════════════════════════
    PLUGINS INSTALLER
    WordPress: the official repository, browsed and installed from here.
-   Joomla: what is installed, a package you upload, enable and disable — and
+   Joomla: what is installed, a package you upload, enable and disable - and
    the Joomla Extensions Directory in a tab, because Joomla publishes no
    directory API to browse.
 ═══════════════════════════════════════════════════════════════════════════ */
@@ -38938,8 +40671,8 @@ const qa=(sel,root)=>Array.prototype.slice.call((root||document).querySelectorAl
 /* Actions that only read and are safe to abandon. A search that is no longer
    wanted is cancelled rather than left to finish: every request in flight
    occupies one of the server's PHP workers, and this server runs five of
-   them, so a few stale searches were enough to make the whole manager — and
-   the next install — queue behind them and appear to hang. */
+   them, so a few stale searches were enough to make the whole manager - and
+   the next install - queue behind them and appear to hang. */
 const ABANDONABLE={browse:1};
 const inflight={};
 async function api(action,fields,form){
@@ -38953,7 +40686,7 @@ async function api(action,fields,form){
     });
     /* The site is added here rather than trusting every caller to remember it.
        One caller did not, and installing from the repository answered "No site
-       was named" every single time — a request-level detail reported to the
+       was named" every single time - a request-level detail reported to the
        reader as if it were their mistake. */
     if(fields&&('config' in fields)===false&&S.site&&S.site.config)
       fd.append('config',S.site.config);
@@ -38965,7 +40698,7 @@ async function api(action,fields,form){
   inflight[action]=ctl;
   /* Browsing used to be cut off at 30 seconds, the same moment the server's
      own request to the repository timed out, so a slow answer was reported as
-     "that request took too long" — a message about this window's patience
+     "that request took too long" - a message about this window's patience
      rather than about the repository. Browsing now waits longer than the
      server ever will, so what arrives is a real answer or a real error. */
   const timer=setTimeout(()=>ctl.abort(),action==='browse'?60000:120000);
@@ -39046,7 +40779,7 @@ async function loadSites(){
     const again=await api('sites');
     if(!again.ok){
       box.innerHTML='<div class="pie-empty"><b>The scan did not finish</b>'+esc(again.error||d.error||'')+'</div>';
-      foot(['<b>No site.</b> Browsing still works — installing needs a site to install into.']);
+      foot(['<b>No site.</b> Browsing still works - installing needs a site to install into.']);
       S.sites=[];S.site=null;renderSiteList();renderBrowseChrome();renderInstalledChrome();
       return;
     }
@@ -39061,7 +40794,7 @@ async function loadSites(){
 }
 
 /* The installer only ever acts on one folder, so the folder is asked for
-   before the installer appears — not chosen from a row inside it that is easy
+   before the installer appears - not chosen from a row inside it that is easy
    to leave pointing at the wrong site. */
 function chooseSite(i){
   const site=(isFinite(i)&&S.sites[i])?S.sites[i]:null;
@@ -39107,7 +40840,9 @@ function renderSiteList(){
         +'<span class="pie-site-dir">'+esc(s.dir)+'</span>'
         +'<span class="pie-site-cfg">'+esc(s.config)+(s.source?' · found by '+esc(s.source):'')+'</span>'
       +'</span>'
-      +'<span class="pie-site-tick">'+(on?'<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>':'')+'</span>'
+      +(on
+          ? '<span class="pie-site-tick"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>'
+          : '<span class="pie-site-go"><svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg></span>')
       +'</button>';
   }).join('');
   qa('#pieSiteList .pie-site').forEach(b=>b.addEventListener('click',()=>chooseSite(parseInt(b.dataset.site,10))));
@@ -39160,12 +40895,12 @@ function renderBrowseChrome(){
   if(browses)browses.style.display=j?'none':'';
   if(search){
     search.disabled=j;
-    search.placeholder=j?'Browsing is WordPress only — Joomla has no public directory API':'Search 78,000 WordPress plugins…';
+    search.placeholder=j?'Browsing is WordPress only - Joomla has no public directory API':'Search 78,000 WordPress plugins…';
   }
   if(jed)jed.style.display=j?'':'none';
   const note=el('pieBrowseNote');
   if(note)note.innerHTML=j
-    ? 'This is a <b>Joomla</b> site. Joomla publishes no directory API — <code>update.joomla.org</code> serves core update feeds only and the Extensions Directory answers HTML. Browse it in a tab, then install the package you download from <b>Upload a package</b>.'
+    ? 'This is a <b>Joomla</b> site. Joomla publishes no directory API - <code>update.joomla.org</code> serves core update feeds only and the Extensions Directory answers HTML. Browse it in a tab, then install the package you download from <b>Upload a package</b>.'
     : '';
   if(j&&el('pieGrid'))el('pieGrid').innerHTML='<div class="pie-empty"><b>Nothing to list here</b>Choose <b>Upload a package</b> to install a Joomla extension, or <b>Installed</b> to see and enable what this site already has.</div>';
 }
@@ -39174,8 +40909,8 @@ function renderInstalledChrome(){
   if(wrap)wrap.style.display=isJoomla()?'none':'';
   const note=el('pieInstNote');
   if(note)note.innerHTML=isJoomla()
-    ? 'Enabling writes the row Joomla reads and clears its cache. The extension\'s own install script and SQL never run here — open its screen in the administrator once so it can finish any setup. Uninstalling is left to Joomla: undoing a manifest by guessing leaves a site half-broken.'
-    : 'Activating writes the <code>active_plugins</code> option WordPress reads. The plugin\'s own activation routine does not run here, because loading plugin code inside the file manager would let one bad plugin take the manager down with it — if a plugin needs a one-time setup, open wp-admin once and it will finish there.';
+    ? 'Enabling writes the row Joomla reads and clears its cache. The extension\'s own install script and SQL never run here - open its screen in the administrator once so it can finish any setup. Uninstalling is left to Joomla: undoing a manifest by guessing leaves a site half-broken.'
+    : 'Activating writes the <code>active_plugins</code> option WordPress reads. The plugin\'s own activation routine does not run here, because loading plugin code inside the file manager would let one bad plugin take the manager down with it - if a plugin needs a one-time setup, open wp-admin once and it will finish there.';
 }
 
 /* ── browsing the repository ───────────────────────────────────────────── */
@@ -39252,7 +40987,7 @@ function renderPager(){
     +'<span>Page '+d.page+' / '+num(d.pages)+'</span>'
     +'<button type="button" class="btn btn-xs btn-g" id="pieNext"'+(d.page>=d.pages?' disabled':'')+'>Older →</button>'
     +(capped?'<span class="pie-note">The repository lists the first '+num(reach)
-       +' results of '+num(d.results)+' and pages no further — narrow the search to reach the rest.</span>':'');
+       +' results of '+num(d.results)+' and pages no further - narrow the search to reach the rest.</span>':'');
   const p=el('piePrev'),n=el('pieNext');
   if(p)p.addEventListener('click',()=>{if(S.page>1){S.page--;loadBrowse();scrollGrid();}});
   if(n)n.addEventListener('click',()=>{if(S.page<S.results.pages){S.page++;loadBrowse();scrollGrid();}});
@@ -39342,7 +41077,7 @@ function needSite(){
     return false;
   }
   if(isJoomla()){
-    msg('pieUpMsg','bad','This is a Joomla site. The WordPress repository does not serve Joomla packages — use <b>Upload a package</b>.');
+    msg('pieUpMsg','bad','This is a Joomla site. The WordPress repository does not serve Joomla packages - use <b>Upload a package</b>.');
     return false;
   }
   return true;
@@ -39351,7 +41086,7 @@ async function installFromRepo(slug,btn){
   if(!needSite())return;
   const label=btn?btn.textContent:'';
   if(btn){btn.disabled=true;btn.textContent='Installing…';}
-  foot(['Installing <b>'+esc(slug)+'</b> — the package is downloaded from wordpress.org and unpacked here…']);
+  foot(['Installing <b>'+esc(slug)+'</b> - the package is downloaded from wordpress.org and unpacked here…']);
   let d=await api('wp_install',{slug:slug,config:S.site.config});
   if(!d.ok&&d.exists){
     if(window.confirm('A plugin already lives at '+d.slug+'/'
@@ -39369,7 +41104,7 @@ async function installFromRepo(slug,btn){
     foot(['<b>Not installed.</b> '+esc(d.error||'')]);
     return;
   }
-  foot(['<b>Installed '+esc(d.name||d.slug)+' '+esc(d.version||'')+'</b>'+(d.replaced?' (replaced the copy that was there)':'')+'. It is not active yet — activate it from the Installed tab.']);
+  foot(['<b>Installed '+esc(d.name||d.slug)+' '+esc(d.version||'')+'</b>'+(d.replaced?' (replaced the copy that was there)':'')+'. It is not active yet - activate it from the Installed tab.']);
   S.installed=null;
   if(el('pieDetailOv').classList.contains('open'))closeMod('pieDetailOv');
   setTab('installed');
@@ -39460,10 +41195,10 @@ function renderInstalled(){
 }
 /* One request for every installed plugin's repository detail rather than one
    request per plugin: the server fetches them in parallel, so a site with
-   thirty plugins costs one round trip instead of thirty. Failure is silent —
+   thirty plugins costs one round trip instead of thirty. Failure is silent -
    the cards simply keep the information the files on disk already gave. */
 async function fetchRepoMeta(plugins){
-  /* A single-file plugin is known to WordPress by its filename — hello.php —
+  /* A single-file plugin is known to WordPress by its filename - hello.php -
      while the repository files it under hello-dolly. So each plugin is looked
      up under three names: the slug as it stands, the slug with .php taken off,
      and its own title turned into a slug. The first that answers wins. */
@@ -39570,7 +41305,7 @@ function initUpload(){
   if(!drop||!file||!form)return;
   const show=()=>{
     const f=file.files&&file.files[0];
-    name.textContent=f?(f.name+' — '+(f.size/1048576).toFixed(2)+' MB'):'No file chosen';
+    name.textContent=f?(f.name+' - '+(f.size/1048576).toFixed(2)+' MB'):'No file chosen';
   };
   file.addEventListener('change',show);
   ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('is-over');}));
@@ -39705,6 +41440,903 @@ const btn=el('pieBtn');
 if(btn)btn.addEventListener('click',boot);
 
 })(); // end Plugins Installer IIFE
+</script>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   WORDFENCE CONTROLLER
+
+   The window drives one Wordfence installation, chosen in its own window
+   first, exactly as the Plugins Installer asks for its site.
+
+   Two rules shape everything here:
+
+   1. A setting is saved the moment it is changed, and the row says so. A
+      settings surface that waits for a "Save" button is a settings surface
+      that loses work, and Wordfence has two hundred of them.
+
+   2. Anything that has to run Wordfence's own code - a scan, a block, an
+      export - is slower than a settings write and says so while it runs.
+      Those calls boot WordPress in a child process on the server; they are
+      measured in seconds, not milliseconds, and pretending otherwise would
+      make the window look broken when it is merely working.
+═══════════════════════════════════════════════════════════════════════════ */
+(function(){
+'use strict';
+
+const S={
+  sites:[], site:null, tab:'overview', booted:false,
+  ov:null, values:{}, ls:{}, cat:[], lscat:[], groups:[], defaults:{},
+  waf:null, scan:null, scanTimer:null, blocks:null, issues:null, users:null,
+  log:{what:'traffic', q:'', offset:0, rows:[], total:0, limit:80},
+  raw:{q:''}, crons:null
+};
+
+const el=(id)=>document.getElementById(id);
+const qa=(sel,root)=>Array.prototype.slice.call((root||document).querySelectorAll(sel));
+const esc=(s)=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function num(n){n=Number(n)||0;return n.toLocaleString('en-US');}
+function bytes(n){
+  n=Number(n)||0;
+  if(n<1024)return n+' B';
+  if(n<1048576)return (n/1024).toFixed(n<10240?1:0)+' KB';
+  if(n<1073741824)return (n/1048576).toFixed(1)+' MB';
+  return (n/1073741824).toFixed(2)+' GB';
+}
+function ago(ts){
+  ts=Number(ts)||0;
+  if(!ts)return 'never';
+  if(ts>1e12)ts=ts/1000;                       /* Wordfence stores some times as microseconds */
+  const s=Math.round(Date.now()/1000-ts);
+  if(s<0)return 'in '+mins(Math.abs(s));
+  if(s<60)return s+'s ago';
+  return mins(s)+' ago';
+}
+function mins(s){
+  if(s<3600)return Math.round(s/60)+' min';
+  if(s<86400)return Math.round(s/3600)+' h';
+  const d=Math.round(s/86400);
+  if(d<31)return d+' d';
+  return Math.round(d/30)+' mo';
+}
+function when(ts){
+  ts=Number(ts)||0;if(!ts)return '-';
+  if(ts>1e12)ts=ts/1000;
+  return new Date(ts*1000).toLocaleString();
+}
+
+/* ── talking to the server ─────────────────────────────────────────────── */
+async function api(action,fields){
+  const fd=new FormData();
+  fd.append('csrf_token',CSRF);
+  fd.append('action',action);
+  Object.keys(fields||{}).forEach(k=>{
+    const v=fields[k];
+    if(v!==undefined&&v!==null&&v!=='')fd.append(k,typeof v==='object'?JSON.stringify(v):v);
+  });
+  if(('config' in (fields||{}))===false&&S.site&&S.site.config)fd.append('config',S.site.config);
+  let d={ok:false,error:'The server answered nothing.'};
+  try{
+    const r=await fetch('?x=wfc',{method:'POST',body:fd,cache:'no-store',credentials:'same-origin'});
+    const txt=await r.text();
+    try{d=JSON.parse(txt);}
+    catch(e){d={ok:false,error:r.status===403?'This account is not allowed to use the Wordfence controller.':'The server sent an answer this window cannot read.'};}
+    if(r.status===403)d={ok:false,error:'This account is not allowed to use the Wordfence controller.'};
+  }catch(e){d={ok:false,error:'The manager could not be reached: '+e.message};}
+  return d;
+}
+function note(id,text){
+  const n=el(id);if(!n)return;
+  n.innerHTML=text||'';
+}
+function saved(text){
+  const n=el('wfcSaved');if(!n)return;
+  n.textContent=text||'';
+  n.classList.add('on');
+  clearTimeout(saved._t);
+  saved._t=setTimeout(()=>n.classList.remove('on'),2200);
+}
+function busy(btn,on,label){
+  if(!btn)return;
+  if(on){btn.dataset.was=btn.textContent;btn.disabled=true;btn.textContent=label||'Working…';}
+  else{btn.disabled=false;btn.textContent=btn.dataset.was||btn.textContent;}
+}
+function fail(d,where){
+  const m=(d&&(d.error||d.raw))?String(d.error||d.raw):'That did not work.';
+  toast(m,4200);
+  note(where,'<b>That did not work.</b> '+esc(m));
+}
+
+/* ── which installation ────────────────────────────────────────────────── */
+async function loadSites(){
+  const d=await api('sites');
+  if(!d.ok){fail(d,'wfcSitesFoot');return false;}
+  S.sites=d.sites||[];
+  renderSiteList();
+  return true;
+}
+function renderSiteList(){
+  const box=el('wfcSiteList');
+  const n=el('wfcSitesN');
+  if(n)n.textContent=S.sites.length?(S.sites.length+' site'+(S.sites.length===1?'':'s')+' scanned'):'';
+  if(!box)return;
+  if(!S.sites.length){
+    box.innerHTML='<div class="pie-empty"><b>No WordPress site was found on this server</b>'
+      +'The controller looks for <code>wp-content/plugins/wordfence/wordfence.php</code> inside every site the manager\'s own scanner reports.</div>';
+    return;
+  }
+  box.innerHTML=S.sites.map((s,i)=>{
+    const on=S.site&&S.site.config===s.config;
+    return '<button type="button" class="pie-site'+(on?' is-on':'')+'" data-site="'+i+'"'+(on?' aria-current="true"':'')+'>'
+      +'<span class="pie-site-badge w">WordPress</span>'
+      +'<span class="pie-site-id">'
+        +'<span class="pie-site-dir">'+esc(s.dir)+'</span>'
+        +'<span class="pie-site-cfg">'+(s.installed
+            ? 'Wordfence '+esc(s.version||'')+' · '+esc(num(s.plugin_files))+' files · '+esc(bytes(s.plugin_bytes))
+            : 'Wordfence is not installed')+'</span>'
+        +(s.installed?'':'<span class="pie-site-missing">Install it from the repository to control it here.</span>')
+      +'</span>'
+      +(on?'<span class="pie-site-tick"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>'
+          :'<span class="pie-site-go"><svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg></span>')
+      +'</button>';
+  }).join('');
+  qa('#wfcSiteList .pie-site').forEach(b=>b.addEventListener('click',()=>chooseSite(parseInt(b.dataset.site,10))));
+}
+async function chooseSite(i){
+  const s=S.sites[i];
+  if(!s)return;
+  if(!s.installed){
+    const b=qa('#wfcSiteList .pie-site')[i];
+    busy(b,true,'Installing…');
+    const d=await api('install',{config:s.config});
+    busy(b,false);
+    if(!d.ok){fail(d,'wfcSitesFoot');return;}
+    toast('Wordfence installed on '+s.dir,3500);
+    await loadSites();
+    const again=S.sites.findIndex(x=>x.config===s.config&&x.installed);
+    if(again<0)return;
+    return chooseSite(again);
+  }
+  S.site=s;
+  renderSiteList();
+  closeMod('wfcChooseOv');
+  openMod('wfcOv');
+  el('wfcBarDir').textContent=s.dir;
+  el('wfcBarCfg').textContent='Wordfence '+(s.version||'')+' · '+s.config;
+  await loadAll();
+}
+function openChooser(){
+  if(!S.sites.length)loadSites();
+  else renderSiteList();
+  openMod('wfcChooseOv');
+}
+
+/* ── loading ───────────────────────────────────────────────────────────── */
+async function loadAll(){
+  note('wfcFootMsg','Reading this installation…');
+  const d=await api('overview');
+  if(!d.ok){fail(d,'wfcFootMsg');return;}
+  S.ov=d;
+  S.values=d.config||{};
+  el('wfcVersion').hidden=false;
+  el('wfcVersion').textContent='Wordfence '+esc(d.version||'')+(d.active?'':' · not active');
+  renderOverview();
+  const c=await api('config');
+  if(c.ok){
+    S.cat=c.catalog||[];S.lscat=c.ls_catalog||[];S.groups=c.groups||[];
+    S.values=c.values||S.values;S.ls=c.ls||{};S.defaults=c.defaults||{};
+  }
+  renderSettings();
+  if(S.tab==='firewall')loadFirewall();
+  if(S.tab==='login')loadLogin();
+  if(S.tab==='scan')loadScan();
+  if(S.tab==='logs')loadLogs();
+  if(S.tab==='tools')loadTools();
+  if(S.tab==='raw')renderRaw();
+  note('wfcFootMsg',d.active?'':'<b>Wordfence is installed here but not active.</b> It is protecting nothing until it is switched on in WordPress.');
+}
+
+/* ── the overview ──────────────────────────────────────────────────────── */
+function renderOverview(){
+  const d=S.ov;if(!d)return;
+  const c=d.counts||{};
+  const cards=[
+    ['Open issues',c.issues_new,c.issues_new?'bad':'good'],
+    ['Ignored issues',c.issues_ignored,''],
+    ['Blocked addresses',c.blocked_ips,''],
+    ['Active blocks',c.blocks,c.blocks?'warn':''],
+    ['Locked out now',c.lockouts,c.lockouts?'bad':''],
+    ['Failed logins',c.failed_logins,''],
+    ['Live traffic rows',c.hits,''],
+    ['Audit events',c.audit,''],
+    ['Users with 2FA',c['2fa_users'],c['2fa_users']?'good':'warn'],
+    ['Unread notices',c.notifications_new,c.notifications_new?'warn':'']
+  ];
+  el('wfcStats').innerHTML=cards.map(x=>
+    '<div class="wfc-stat '+(x[2]||'')+'"><b>'+esc(num(x[1]))+'</b><span>'+esc(x[0])+'</span></div>').join('');
+
+  const h=d.health||[];
+  el('wfcHealth').innerHTML=h.map(x=>
+    '<div class="wfc-h-row '+esc(x.state)+'"><span class="wfc-h-dot"></span>'
+    +'<span class="wfc-h-label">'+esc(x.label)+'</span>'
+    +'<span class="wfc-h-detail">'+esc(x.detail)+'</span></div>').join('')
+    ||'<div class="wfc-h-row"><span class="wfc-h-detail">No health information came back.</span></div>';
+  const bad=h.filter(x=>x.state==='bad').length,warn=h.filter(x=>x.state==='warn').length;
+  el('wfcHealthNote').textContent=bad?(bad+' need'+(bad===1?'s':'')+' attention'+(warn?' · '+warn+' warning'+(warn===1?'':'s'):''))
+                                     :(warn?warn+' warning'+(warn===1?'':'s'):'nothing needs attention');
+
+  const quick=[['firewallEnabled','Firewall'],['loginSecurityEnabled','Brute force protection'],
+               ['liveTrafficEnabled','Live traffic'],['scheduledScansEnabled','Scheduled scans']];
+  el('wfcQuick').innerHTML=quick.map(q=>{
+    const key=q[0],on=S.values[key]!=='0'&&!!S.values[key];
+    return '<div class="wfc-opt"><span class="wfc-opt-l"><span class="wfc-opt-name">'+esc(q[1])+'</span></span>'
+      +'<span class="wfc-opt-r">'+sw(key,on)+'</span></div>';
+  }).join('');
+  bindSwitches(el('wfcQuick'));
+
+  /* installed but switched off is the one state this window can fix in one
+     press, and it is worth saying plainly: Wordfence that is not active
+     protects nothing */
+  const plate=el('wfcHealthNote');
+  if(!d.active){
+    const box=document.createElement('div');
+    box.className='wfc-row-acts';
+    box.style.borderTop='0';
+    box.innerHTML='<button type="button" class="btn btn-xs btn-p" id="wfcActivate">Activate Wordfence</button>'
+      +'<span class="wfc-note" style="border:0;padding:0">It is installed here but switched off, so nothing is protecting the site.</span>';
+    el('wfcHealth').parentNode.insertBefore(box,el('wfcHealth').nextSibling);
+    el('wfcActivate').addEventListener('click',async()=>{
+      busy(el('wfcActivate'),true,'Activating…');
+      const r=await api('activate',{want:'1'});
+      busy(el('wfcActivate'),false);
+      if(!r.ok)return fail(r,'wfcFootMsg');
+      toast('Wordfence is active.',3500);loadAll();
+    });
+  }
+
+  const kit=[
+    ['unblock-me','Unblock and allow-list my IP','lets this browser back in'],
+    ['firewall-off','Turn the firewall off','stops every block'],
+    ['unlock-all','Unlock every locked-out IP',''],
+    ['everything-off','Turn everything off','firewall, brute force, blocks'],
+    ['revoke-2fa','Revoke 2FA for everyone',''],
+    ['kill-scan','Stop a running scan','']
+  ];
+  el('wfcKit').innerHTML=kit.map(k=>
+    '<button type="button" class="btn btn-xs btn-g" data-kit="'+k[0]+'" title="'+esc(k[2])+'">'+esc(k[1])
+    +(k[2]?'<i> · '+esc(k[2])+'</i>':'')+'</button>').join('');
+  qa('#wfcKit [data-kit]').forEach(b=>b.addEventListener('click',()=>kit(b)));
+}
+
+async function kit(btn){
+  const what=btn.dataset.kit;
+  let msg='';
+  if(what==='unblock-me'){
+    /* the address this window is being driven from, as the server sees it */
+    let ip=(S.ov&&S.ov.my_ip)||'';
+    ip=window.prompt('Unblock and allow-list this address:',ip);
+    if(!ip){return;}
+    busy(btn,true,'Unblocking…');
+    const d=await api('emergency',{do:'unblock-me',ip:ip.trim()});
+    busy(btn,false);
+    if(!d.ok)return fail(d,'wfcFootMsg');
+    msg='Unblocked and allow-listed '+d.ip+'.';
+  }else if(what==='revoke-2fa'){
+    if(!window.confirm('Revoke two-factor authentication for every user on this site? Anyone using an app will have to enrol again.'))return;
+    busy(btn,true,'Revoking…');
+    const d=await api('2fa',{do:'revoke-all'});
+    busy(btn,false);
+    if(!d.ok)return fail(d,'wfcFootMsg');
+    msg='Two-factor enrolment cleared for every user.';
+  }else if(what==='unlock-all'){
+    busy(btn,true,'Unlocking…');
+    const d=await api('unlock_all');
+    busy(btn,false);
+    if(!d.ok)return fail(d,'wfcFootMsg');
+    msg='Every lockout was cleared.';
+  }else if(what==='kill-scan'){
+    const d=await api('scan_kill');
+    if(!d.ok)return fail(d,'wfcFootMsg');
+    msg='The running scan has been asked to stop.';
+  }else{
+    if(what==='everything-off'&&!window.confirm('Turn off the firewall, brute force protection and live traffic, and remove every block?'))return;
+    busy(btn,true,'Working…');
+    const d=await api('emergency',{do:what});
+    busy(btn,false);
+    if(!d.ok)return fail(d,'wfcFootMsg');
+    msg=what==='firewall-off'?'The firewall is off.':'Firewall, brute force protection, live traffic and every block are off.';
+  }
+  toast(msg,3500);note('wfcFootMsg',esc(msg));
+  await loadAll();
+}
+
+/* ── settings ──────────────────────────────────────────────────────────── */
+function sw(key,on){
+  return '<button type="button" class="wfc-sw" role="switch" aria-checked="'+(on?'true':'false')+'" '
+       +'data-sw="'+esc(key)+'" title="'+(on?'On':'Off')+'"></button>'
+       +'<span class="wfc-sw-val">'+(on?'on':'off')+'</span>';
+}
+function bindSwitches(root){
+  qa('[data-sw]',root).forEach(b=>b.addEventListener('click',async()=>{
+    const key=b.dataset.sw;
+    const on=b.getAttribute('aria-checked')!=='true';
+    b.setAttribute('aria-checked',on?'true':'false');
+    const v=b.parentNode.querySelector('.wfc-sw-val');
+    if(v)v.textContent=on?'on':'off';
+    await write(key,on?'1':'0','wf');
+  }));
+}
+async function write(key,val,store){
+  const d=await api(store==='ls'?'setls':'set',{pairs:JSON.stringify({[key]:val})});
+  if(!d.ok){toast(d.error||'That setting was not saved.',4000);await loadAll();return false;}
+  if(store==='ls')S.ls[key]=val;else S.values[key]=val;
+  saved('saved');
+  if(d.sync&&d.sync.ok===false)toast('The setting was saved, but the firewall did not confirm it: '+(d.sync.error||''),4500);
+  return true;
+}
+/* One row per setting. The control column is a fixed width on every row, so a
+   long label never pushes its control out of line with the others. */
+function optRow(item,value,store){
+  const v=value===undefined?(S.defaults[item.name]!==undefined?S.defaults[item.name]:''):value;
+  const wide=(item.type==='textarea');
+  let ctrl='';
+  if(item.type==='bool'){
+    const on=(v!=='0'&&v!==''&&!!v);
+    ctrl=sw(item.name,on);
+  }else if(item.type==='select'){
+    ctrl='<select class="pie-sel" data-in="'+esc(item.name)+'">'
+      +item.choices.map(c=>'<option value="'+esc(c)+'"'+(String(v)===c?' selected':'')+'>'+esc(c)+'</option>').join('')
+      +'</select>';
+  }else if(item.type==='int'){
+    ctrl='<input class="pie-inp" type="number" data-in="'+esc(item.name)+'" value="'+esc(v)+'">';
+  }else if(item.type==='masked'){
+    ctrl='<input class="pie-inp" type="password" data-in="'+esc(item.name)+'" value="'+esc(v)+'" autocomplete="off">';
+  }else if(item.type==='textarea'){
+    ctrl='<textarea class="pie-inp" rows="3" data-in="'+esc(item.name)+'">'+esc(v)+'</textarea>';
+  }else{
+    ctrl='<input class="pie-inp" type="text" data-in="'+esc(item.name)+'" value="'+esc(v)+'">';
+  }
+  return '<div class="wfc-opt'+(wide?' wide':'')+'" data-row="'+esc(item.name)+'">'
+    +'<span class="wfc-opt-l"><span class="wfc-opt-name">'+esc(item.label)+'</span>'
+      +(item.note?'<span class="wfc-opt-help">'+esc(item.note)+'</span>':'')
+      +'<span class="wfc-opt-key">'+esc(item.name)+'</span></span>'
+    +'<span class="wfc-opt-r">'+ctrl+'</span></div>';
+}
+function renderOpts(box,items,values,store,filterFn){
+  const rows=items.filter(filterFn||(()=>true));
+  el(box).innerHTML=rows.map(i=>optRow(i,values[i.name],store)).join('');
+  bindSwitches(el(box));
+  qa('[data-in]',el(box)).forEach(inp=>{
+    const commit=async()=>{
+      const item=rows.find(x=>x.name===inp.dataset.in);
+      const val=inp.value;
+      if(item&&item.type==='select'&&item.choices.length&&item.choices.indexOf(val)<0){
+        toast('"'+val+'" is not one of the choices Wordfence accepts for '+item.name+'.',4000);
+        return;
+      }
+      if(await write(inp.dataset.in,val,store)){
+        const r=el(box).querySelector('[data-row="'+CSS.escape(inp.dataset.in)+'"]');
+        if(r){r.classList.add('is-dirty');setTimeout(()=>r.classList.remove('is-dirty'),700);}
+      }
+    };
+    if(inp.tagName==='SELECT')inp.addEventListener('change',commit);
+    else{
+      inp.addEventListener('change',commit);
+      inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();inp.blur();}});
+    }
+  });
+}
+function renderSettings(){
+  const by=g=>S.cat.filter(i=>i.group===g);
+  renderOpts('wfcOptsFirewall',S.cat,S.values,'wf',i=>i.group==='firewall');
+  renderOpts('wfcOptsLogin',S.cat,S.values,'wf',i=>i.group==='login');
+  renderOpts('wfcOptsLs',S.lscat,S.ls,'ls');
+  const sched=S.cat.filter(i=>['scheduledScansEnabled','schedMode','manualScanType','schedStartHour','scanType',
+      'lowResourceScansEnabled','maxMem','maxExecutionTime','scan_maxIssues','scan_maxDuration',
+      'scan_max_resume_attempts','scan_exclude','scan_include_extra','scan_force_ipv4_start','startScansRemotely']
+      .indexOf(i.name)>=0);
+  renderOpts('wfcOptsSched',sched,S.values,'wf');
+  renderOpts('wfcOptsScan',S.cat,S.values,'wf',i=>i.group==='scan'&&sched.indexOf(i)<0);
+}
+
+/* ── firewall ──────────────────────────────────────────────────────────── */
+async function loadFirewall(){
+  const d=await api('waf');
+  S.waf=d;
+  const st=(d.status||'not enabled');
+  el('wfcWafState').textContent='Firewall · '+(st==='enabled'?'on':st==='learning-mode'?'learning':'off');
+  el('wfcWafSub').textContent=d.extended?'running before WordPress loads':'running after plugins load';
+  const kv=(a,b)=>'<div class="wfc-kv"><i>'+esc(a)+'</i><b>'+esc(b)+'</b></div>';
+  el('wfcWafBody').innerHTML=
+     kv('Status',st)
+    +kv('Storage',d.storage||'-')
+    +(d.path?kv('Config file',d.path):'')
+    +kv('Attack data',ago(d.attackData))
+    +kv('Rules updated',ago(d.rulesUpdated))
+    +kv('Learning grace',d.graceEnabled?when(d.learningGrace):'-');
+  const acts=[['enable','Turn on'],['learning','Learning mode'],['disable','Turn off'],
+              ['extended-install','Install extended protection'],['extended-remove','Remove extended protection'],
+              ['sync-rules','Update rules now'],['reload','Reload']];
+  el('wfcWafActs').innerHTML=acts.map(a=>
+    '<button type="button" class="btn btn-xs '+(a[0]==='enable'?'btn-p':'btn-g')+'" data-waf="'+a[0]+'">'+esc(a[1])+'</button>').join('');
+  qa('#wfcWafActs [data-waf]').forEach(b=>b.addEventListener('click',()=>wafAct(b.dataset.waf,b)));
+  if(d.error)note('wfcWafSub',esc(d.error));
+  loadBlocks();
+}
+async function wafAct(what,btn){
+  if(what==='reload')return loadFirewall();
+  if(what==='extended-remove'&&!window.confirm('Remove extended protection? The firewall will run later in the request, which leaves the fastest attacks uncovered.'))return;
+  busy(btn,true,what==='sync-rules'?'Updating…':'Working…');
+  const d=await api('waf_act',{do:what});
+  busy(btn,false);
+  if(!d.ok)return fail(d,'wfcFootMsg');
+  toast(what==='enable'?'Firewall on.':what==='disable'?'Firewall off.':what==='learning'?'Learning mode on.':'Done.',3200);
+  await loadFirewall();
+}
+async function loadBlocks(){
+  const d=await api('blocks');
+  if(!d.ok){note('wfcBlocksNote',esc(d.error||''));return;}
+  S.blocks=d;
+  el('wfcBlocksNote').textContent=(d.blocks||[]).length+' block'+(d.blocks.length===1?'':'s')+' · '+num(d.log.length)+' blocked addresses logged';
+  const rows=d.blocks||[];
+  el('wfcBlocksTable').innerHTML=
+    '<thead><tr><th></th><th>Kind</th><th>Address / target</th><th>Reason</th><th>Hits</th><th>Last</th><th>Expires</th><th></th></tr></thead><tbody>'
+    +(rows.length?rows.map(b=>
+      '<tr'+(b.expired?' style="opacity:.55"':'')+'>'
+      +'<td><label class="wfc-check"><input type="checkbox" class="wfc-bsel" value="'+esc(b.id)+'"></label></td>'
+      +'<td>'+esc(b.type_name)+'</td>'
+      +'<td class="mono">'+esc(b.ip||'-')+(b.parameters?'<br><span class="wfc-opt-help">'+esc(b.parameters)+'</span>':'')+'</td>'
+      +'<td>'+esc(b.reason||'')+'</td>'
+      +'<td class="num">'+esc(num(b.blockedHits))+'</td>'
+      +'<td class="num">'+esc(ago(b.lastAttempt))+'</td>'
+      +'<td class="num">'+(b.permanent?'<span class="wfc-tag bad">never</span>':esc(ago(b.expiration))+(b.expired?' <span class="wfc-tag off">expired</span>':''))+'</td>'
+      +'<td class="acts">'+(b.ip&&b.ip!=='-'?'<button class="btn btn-g" data-unblock="'+esc(b.ip)+'">Unblock</button>':'')+'</td></tr>').join('')
+      :'<tr class="wfc-empty-row"><td colspan="8">Nothing is blocked.</td></tr>')
+    +'</tbody>';
+  const del=document.createElement('span');
+  qa('#wfcBlocksTable [data-unblock]').forEach(b=>b.addEventListener('click',async()=>{
+    const ip=b.dataset.unblock;
+    if(!ip){toast('That block has no single address to unblock - remove it instead.',4000);return;}
+    busy(b,true,'…');
+    const r=await api('unblock',{ip:ip});
+    busy(b,false);
+    if(!r.ok)return fail(r,'wfcFootMsg');
+    toast('Unblocked '+ip,3000);loadBlocks();
+  }));
+  /* ticked rows are removed with the button that appears in the section
+     header, so there is exactly one way to delete and it always asks first */
+  const head=el('wfcBlocksTable').closest('.wfc-sec');
+  if(head&&!head.querySelector('[data-blocks-del]')){
+    const hd=head.querySelector('.wfc-sec-hd');
+    if(hd){
+      const b=document.createElement('button');
+      b.className='btn btn-xs btn-g';b.dataset.blocksDel='1';b.textContent='Remove selected';
+      b.addEventListener('click',async()=>{
+        const ids=qa('#wfcBlocksTable .wfc-bsel:checked').map(x=>x.value);
+        if(!ids.length){toast('Tick the blocks to remove first.',3500);return;}
+        if(!window.confirm('Remove '+ids.length+' block'+(ids.length===1?'':'s')+'?'))return;
+        const r=await api('block_del',{ids:ids});
+        if(!r.ok)return fail(r,'wfcFootMsg');
+        toast('Removed '+ids.length+' block'+(ids.length===1?'':'s')+'.',3200);
+        loadBlocks();
+      });
+      hd.appendChild(b);
+    }
+  }
+}
+
+/* ── login security ────────────────────────────────────────────────────── */
+async function loadLogin(){
+  const d=await api('users');
+  if(!d.ok){note('wfcUsersNote',esc(d.error||''));return;}
+  S.users=d.users||[];
+  el('wfcUsersNote').textContent=S.users.length+' user'+(S.users.length===1?'':'s');
+  el('wfcUsersTable').innerHTML=
+    '<thead><tr><th>User</th><th>Roles</th><th>Email</th><th>2FA</th><th>Passkeys</th><th></th></tr></thead><tbody>'
+    +(S.users.length?S.users.map(u=>
+      '<tr><td><b>'+esc(u.user_login)+'</b></td>'
+      +'<td>'+esc(u.roles)+(u.is_admin?' <span class="wfc-tag warn">admin</span>':'')+'</td>'
+      +'<td class="wrap">'+esc(u.user_email)+'</td>'
+      +'<td>'+(u['2fa']?'<span class="wfc-tag '+(u['2fa_verified']?'on':'warn')+'">'+esc(u['2fa'])+(u['2fa_verified']?'':' · not verified')+'</span>':'<span class="wfc-tag off">none</span>')+'</td>'
+      +'<td class="num">'+esc(num(u.passkeys))+'</td>'
+      +'<td class="acts">'+(u['2fa']?'<button class="btn btn-g" data-revoke="'+esc(u.ID)+'">Revoke 2FA</button>':'')+'</td></tr>').join('')
+      :'<tr class="wfc-empty-row"><td colspan="6">No users were read.</td></tr>')
+    +'</tbody>';
+  qa('#wfcUsersTable [data-revoke]').forEach(b=>b.addEventListener('click',async()=>{
+    busy(b,true,'…');
+    const r=await api('2fa',{do:'revoke',user:b.dataset.revoke});
+    busy(b,false);
+    if(!r.ok)return fail(r,'wfcFootMsg');
+    toast('Two-factor enrolment removed.',3000);loadLogin();
+  }));
+}
+
+/* ── scanner ───────────────────────────────────────────────────────────── */
+async function loadScan(){
+  const d=await api('scan_status');
+  S.scan=d;
+  const run=!!(d&&d.running);
+  el('wfcScanState').textContent='Scanner · '+(run?'running':'idle');
+  el('wfcScanSub').textContent=(d&&d.type_name)?('last full scan: '+ago(d.last)):'';
+  const kv=(a,b)=>'<div class="wfc-kv"><i>'+esc(a)+'</i><b>'+esc(b)+'</b></div>';
+  const stages=(d&&d.stages)?d.stages:{};
+  const stageRows=Object.keys(stages).filter(k=>k&&k.indexOf('time')<0&&k.indexOf('Time')<0).slice(0,10)
+      .map(k=>kv(String(k).replace(/_/g,' '),String(stages[k])));
+  el('wfcScanBody').innerHTML=
+     kv('Last scan',ago(d&&d.last))
+    +kv('Next scheduled',(d&&d.next)?when(d.next):'not scheduled')
+    +kv('Mode',(d&&d.mode)||'-')
+    +(stageRows.length?stageRows.join(''):'')
+    +((d&&d.log&&d.log.length)?'<div class="wfc-kv"><i>Recent activity</i><b>'+esc(d.log.slice(0,6).map(l=>l.msg).join(' · '))+'</b></div>':'');
+  el('wfcScanActs').innerHTML=[['quick','Quick scan'],['standard','Full scan'],['high','High sensitivity'],['kill','Stop scan'],['reload','Reload']]
+    .map(a=>'<button type="button" class="btn btn-xs '+((a[0]==='standard'||a[0]==='quick')?'btn-p':'btn-g')+'" data-scan="'+a[0]+'">'+esc(a[1])+'</button>').join('');
+  qa('#wfcScanActs [data-scan]').forEach(b=>b.addEventListener('click',()=>scanAct(b.dataset.scan,b)));
+  if(run)startPolling();else stopPolling();
+  loadIssues();
+}
+function startPolling(){
+  if(S.scanTimer)return;
+  S.scanTimer=setInterval(async()=>{
+    const d=await api('scan_status');
+    if(!d.ok)return stopPolling();
+    S.scan=d;
+    if(d.running){renderScanProgress(d);}
+    else{stopPolling();loadScan();loadAll();toast('The scan finished.',3500);}
+  },5000);
+}
+function stopPolling(){if(S.scanTimer){clearInterval(S.scanTimer);S.scanTimer=null;}}
+function renderScanProgress(d){
+  const sub=el('wfcScanSub');
+  if(sub)sub.textContent='running · '+(d.type_name||'')+' · last activity '+ago(d.log&&d.log.length?d.log[0].ctime:Date.now()/1000);
+}
+async function scanAct(what,btn){
+  if(what==='reload')return loadScan();
+  if(what==='kill'){
+    const d=await api('scan_kill');
+    if(!d.ok)return fail(d,'wfcFootMsg');
+    toast('The scan has been asked to stop.',3000);
+    return loadScan();
+  }
+  busy(btn,true,'Starting…');
+  const d=await api('scan_start',{type:what});
+  busy(btn,false);
+  if(!d.ok)return fail(d,'wfcFootMsg');
+  toast(what+' scan started.',3200);
+  startPolling();
+  setTimeout(loadScan,2500);
+}
+async function loadIssues(){
+  const d=await api('issues');
+  if(!d.ok){note('wfcIssuesNote',esc(d.error||''));return;}
+  S.issues=d.issues||[];
+  el('wfcIssuesNote').textContent=d.issues.length+' issue'+(d.issues.length===1?'':'s')
+    +(d.pending?' · '+num(d.pending)+' pending':'');
+  el('wfcIssuesTable').innerHTML=
+    '<thead><tr><th>Sev</th><th>Type</th><th>What</th><th>Status</th><th>Seen</th><th></th></tr></thead><tbody>'
+    +(d.issues.length?d.issues.map(i=>
+      '<tr><td class="num">'+esc(i.severity)+'</td><td>'+esc(i.type)+'</td>'
+      +'<td class="wrap"><b>'+esc(i.shortMsg)+'</b>'+(i.longMsg?'<br>'+esc(i.longMsg):'')+'</td>'
+      +'<td>'+esc(i.status)+'</td><td class="num">'+esc(ago(i.time))+'</td>'
+      +'<td class="acts">'
+        +'<button class="btn btn-g" data-issue="ignoreP" data-id="'+esc(i.id)+'">Ignore</button> '
+        +'<button class="btn btn-g" data-issue="unignore" data-id="'+esc(i.id)+'">Reopen</button> '
+        +'<button class="btn btn-g" data-issue="delete" data-id="'+esc(i.id)+'">Delete</button></td></tr>').join('')
+      :'<tr class="wfc-empty-row"><td colspan="6">No issues on record.</td></tr>')
+    +'</tbody>';
+  qa('#wfcIssuesTable [data-issue]').forEach(b=>b.addEventListener('click',async()=>{
+    const d2=await api('issue_act',{id:b.dataset.id,do:b.dataset.issue});
+    if(!d2.ok)return fail(d2,'wfcFootMsg');
+    toast('Issue updated.',2500);loadIssues();
+  }));
+}
+
+/* ── logs ──────────────────────────────────────────────────────────────── */
+async function loadLogs(){
+  const L=S.log;
+  if(L.what==='activity'||L.what==='notifications'){
+    const d=await api('status');
+    if(!d.ok)return fail(d,'wfcLogNote');
+    if(L.what==='activity'){
+      el('wfcLogTable').innerHTML='<thead><tr><th>When</th><th>Level</th><th>Type</th><th>Message</th></tr></thead><tbody>'
+        +((d.status||[]).map(s=>'<tr><td class="num">'+esc(when(s.ctime))+'</td><td class="num">'+esc(s.level)+'</td>'
+          +'<td>'+esc(s.type)+'</td><td class="wrap">'+esc(s.msg)+'</td></tr>').join('')
+          ||'<tr class="wfc-empty-row"><td colspan="4">The activity log is empty.</td></tr>')+'</tbody>';
+      el('wfcLogPager').innerHTML='<span class="pie-note">'+num((d.status||[]).length)+' entries</span>';
+    }else{
+      el('wfcLogTable').innerHTML='<thead><tr><th>When</th><th>Category</th><th>Priority</th><th>Notice</th></tr></thead><tbody>'
+        +((d.notifications||[]).map(n=>'<tr><td class="num">'+esc(when(n.ctime))+'</td><td>'+esc(n.category)+'</td>'
+          +'<td class="num">'+esc(n.priority)+'</td><td class="wrap">'+(n.html||'')+'</td></tr>').join('')
+          ||'<tr class="wfc-empty-row"><td colspan="4">No notifications.</td></tr>')+'</tbody>';
+      el('wfcLogPager').innerHTML='';
+    }
+    return;
+  }
+  const d=await api('log',{what:L.what,q:L.q,limit:L.limit,offset:L.offset});
+  if(!d.ok)return fail(d,'wfcLogNote');
+  L.rows=d.rows||[];L.total=d.total||0;
+  const head={
+    traffic:['When','IP','Status','Action','URL','Browser'],
+    logins:['When','User','Result','Action','IP','Browser'],
+    security:['When','Type','State','Data'],
+    audit:['When','Type','State','Data']
+  }[L.what];
+  const body=L.rows.map(r=>{
+    if(L.what==='traffic')return '<tr><td class="num">'+esc(when(r.attackLogTime||r.ctime))+'</td><td class="mono">'+esc(r.IP)+'</td>'
+      +'<td class="num">'+esc(r.statusCode||'')+(r.isGoogle?' <span class="wfc-tag">google</span>':'')+'</td>'
+      +'<td>'+esc((r.action||'')+(r.actionDescription?' · '+r.actionDescription:''))+'</td>'
+      +'<td class="wrap">'+esc(r.URL||'')+'</td><td class="wrap">'+esc((r.UA||'').slice(0,90))+'</td></tr>';
+    if(L.what==='logins')return '<tr><td class="num">'+esc(when(r.ctime))+'</td><td>'+esc(r.username||'-')+'</td>'
+      +'<td>'+(String(r.fail)==='1'?'<span class="wfc-tag bad">failed</span>':'<span class="wfc-tag on">ok</span>')+'</td>'
+      +'<td>'+esc(r.action||'')+'</td><td class="mono">'+esc(r.IP)+'</td><td class="wrap">'+esc((r.UA||'').slice(0,70))+'</td></tr>';
+    return '<tr><td class="num">'+esc(when(r.event_time))+'</td><td>'+esc(r.type)+'</td><td>'+esc(r.state||'')+'</td>'
+      +'<td class="wrap">'+esc(r.data||'')+'</td></tr>';
+  }).join('');
+  el('wfcLogTable').innerHTML='<thead><tr>'+head.map(h=>'<th>'+esc(h)+'</th>').join('')+'</tr></thead><tbody>'
+    +(body||'<tr class="wfc-empty-row"><td colspan="'+head.length+'">Nothing recorded here yet.</td></tr>')+'</tbody>';
+  const pages=Math.max(1,Math.ceil(L.total/L.limit));
+  const page=Math.floor(L.offset/L.limit)+1;
+  el('wfcLogPager').innerHTML=
+    '<button class="btn btn-xs btn-g"'+(L.offset?'':' disabled')+'" data-page="prev">Newer</button>'
+    +'<span class="pie-note">'+num(L.total)+' rows · page '+page+' / '+pages+'</span>'
+    +'<button class="btn btn-xs btn-g"'+((L.offset+L.limit<L.total)?'':' disabled')+'" data-page="next">Older</button>';
+  qa('#wfcLogPager [data-page]').forEach(b=>b.addEventListener('click',()=>{
+    L.offset=Math.max(0,L.offset+(b.dataset.page==='next'?L.limit:-L.limit));
+    loadLogs();
+  }));
+  note('wfcLogNote',L.q?'Filtered on "'+esc(L.q)+'"':'');
+}
+
+/* ── tools ─────────────────────────────────────────────────────────────── */
+const CACHES=[['traffic','Live traffic rows'],['logins','Login records'],['blocked','Blocked-address log'],
+  ['traffic-rates','Traffic-rate counters'],['audit','Audit log'],['security','Security events'],
+  ['status','Activity log'],['crawlers','Crawler cache'],['locations','Location cache'],
+  ['snipcache','Snippet cache'],['reverse-cache','Reverse-DNS cache'],['waf-failures','WAF failure log']];
+async function loadTools(){
+  el('wfcCaches').innerHTML=CACHES.map(c=>
+    '<button type="button" class="btn btn-g" data-cache="'+c[0]+'">'+esc(c[1])+'<i>empty</i></button>').join('');
+  qa('#wfcCaches [data-cache]').forEach(b=>b.addEventListener('click',async()=>{
+    const c=CACHES.find(x=>x[0]===b.dataset.cache);
+    if(!window.confirm('Empty '+c[1].toLowerCase()+'? This cannot be undone.'))return;
+    busy(b,true,'…');
+    const d=await api('cache',{what:b.dataset.cache});
+    busy(b,false);
+    if(!d.ok)return fail(d,'wfcIoNote');
+    toast('Emptied '+c[1].toLowerCase()+' ('+num(d.rows)+' rows).',3200);
+    loadAll();
+  }));
+  const cr=await api('crons');
+  if(cr.ok){
+    S.crons=cr.crons||[];
+    el('wfcCronNote').textContent=(cr.crons||[]).length+' scheduled Wordfence job'+((cr.crons||[]).length===1?'':'s');
+    el('wfcCronTable').innerHTML='<thead><tr><th>Runs</th><th>In</th><th>Job</th><th>Schedule</th><th></th></tr></thead><tbody>'
+      +((cr.crons||[]).map(c=>'<tr><td class="num">'+esc(when(c.at))+'</td><td class="num">'+esc(mins(Math.max(0,c.in)))+'</td>'
+        +'<td class="wrap">'+esc(c.hook)+'</td><td>'+esc(c.schedule)+'</td>'
+        +'<td class="acts"><button class="btn btn-g" data-cron="'+esc(c.hook)+'">Run now</button></td></tr>').join('')
+        ||'<tr class="wfc-empty-row"><td colspan="5">No Wordfence job is scheduled.</td></tr>')+'</tbody>';
+    qa('#wfcCronTable [data-cron]').forEach(b=>b.addEventListener('click',async()=>{
+      busy(b,true,'…');
+      const d=await api('cron_run',{hook:b.dataset.cron});
+      busy(b,false);
+      if(!d.ok)return fail(d,'wfcIoNote');
+      toast('Ran '+b.dataset.cron+'.',3000);
+    }));
+  }
+  const w=await api('waf');
+  if(w.ok&&w.files){
+    el('wfcFilesNote').textContent=w.files.filter(f=>f.exists).length+' of '+w.files.length+' present';
+    el('wfcFilesTable').innerHTML='<thead><tr><th>File</th><th>Size</th><th>Modified</th><th>Writable</th></tr></thead><tbody>'
+      +w.files.map(f=>'<tr><td class="wrap">'+esc(f.label)+'</td><td class="num">'+(f.exists?esc(bytes(f.bytes)):'<span class="wfc-tag off">missing</span>')+'</td>'
+      +'<td class="num">'+(f.exists?esc(when(f.mtime)):'-')+'</td>'
+      +'<td>'+(f.exists?(f.writable?'<span class="wfc-tag on">yes</span>':'<span class="wfc-tag bad">no</span>'):'-')+'</td></tr>').join('')
+      +'</tbody>';
+  }
+  const ov=await api('overview');
+  if(ov.ok){
+    const t=ov.tables||{};
+    el('wfcTablesTable').innerHTML='<thead><tr><th>Table</th><th>Rows</th><th>Size</th></tr></thead><tbody>'
+      +((t.tables||[]).map(x=>'<tr><td class="wrap">'+esc(x.name)+'</td><td class="num">'+esc(num(x.rows))+'</td><td class="num">'+esc(bytes(x.bytes))+'</td></tr>').join('')
+        ||'<tr class="wfc-empty-row"><td colspan="3">Wordfence has created no tables yet.</td></tr>')
+      +'</tbody>';
+  }
+}
+
+/* ── all settings ──────────────────────────────────────────────────────── */
+function renderRaw(){
+  const q=(S.raw.q||'').toLowerCase();
+  const names=Object.keys(S.values).sort();
+  const shown=names.filter(n=>!q||n.toLowerCase().indexOf(q)>=0||String(S.values[n]).toLowerCase().indexOf(q)>=0);
+  el('wfcRawCount').textContent=shown.length+' of '+names.length;
+  el('wfcOptsRaw').innerHTML=shown.map(n=>{
+    const v=String(S.values[n]);
+    const isBool=(v==='0'||v==='1');
+    if(isBool){
+      return '<div class="wfc-opt"><span class="wfc-opt-l"><span class="wfc-opt-key">'+esc(n)+'</span></span>'
+        +'<span class="wfc-opt-r">'+sw(n,v==='1')+'</span></div>';
+    }
+    return '<div class="wfc-opt"><span class="wfc-opt-l"><span class="wfc-opt-key">'+esc(n)+'</span></span>'
+      +'<span class="wfc-opt-r"><input class="pie-inp" type="text" data-raw="'+esc(n)+'" value="'+esc(v.slice(0,400))+'"></span></div>';
+  }).join('');
+  bindSwitches(el('wfcOptsRaw'));
+  qa('[data-raw]',el('wfcOptsRaw')).forEach(inp=>{
+    inp.addEventListener('change',async()=>{if(await write(inp.dataset.raw,inp.value,'wf'))renderRaw();});
+    inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();inp.blur();}});
+  });
+}
+
+/* ── tabs and wiring ───────────────────────────────────────────────────── */
+function setTab(t){
+  S.tab=t;
+  qa('#wfcTabs .pie-tab').forEach(b=>b.classList.toggle('is-on',b.dataset.tab===t));
+  ['overview','firewall','login','scan','logs','tools','raw'].forEach(k=>{
+    const p=el('wfcPane'+k.charAt(0).toUpperCase()+k.slice(1));
+    if(p)p.hidden=(k!==t);
+  });
+  if(t==='firewall')loadFirewall();
+  if(t==='login')loadLogin();
+  if(t==='scan')loadScan();
+  if(t==='logs')loadLogs();
+  if(t==='tools')loadTools();
+  if(t==='raw')renderRaw();
+}
+function wire(){
+  qa('#wfcTabs .pie-tab').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tab)));
+  qa('#wfcLogTabs .pie-chip').forEach(b=>b.addEventListener('click',()=>{
+    S.log.what=b.dataset.log;S.log.offset=0;
+    qa('#wfcLogTabs .pie-chip').forEach(x=>x.classList.toggle('is-on',x===b));
+    loadLogs();
+  }));
+  let lt=null;
+  el('wfcLogSearch').addEventListener('input',e=>{
+    clearTimeout(lt);const v=e.target.value;
+    lt=setTimeout(()=>{S.log.q=v.trim();S.log.offset=0;loadLogs();},400);
+  });
+  el('wfcLogClear').addEventListener('click',async()=>{
+    const map={traffic:0,logins:1,security:2,audit:3};
+    const what=['traffic','logins','security','audit'];
+    if(S.log.what==='activity'||S.log.what==='notifications'){
+      const d=await api('cache',{what:'status'});
+      if(!d.ok)return fail(d,'wfcLogNote');
+      toast('Activity log emptied ('+num(d.rows)+' rows).',3000);return loadLogs();
+    }
+    if(!window.confirm('Empty this log? It cannot be undone.'))return;
+    const d=await api('cache',{what:S.log.what==='traffic'?'traffic':S.log.what});
+    if(!d.ok)return fail(d,'wfcLogNote');
+    toast('Emptied ('+num(d.rows)+' rows).',3000);
+    S.log.offset=0;loadLogs();loadAll();
+  });
+  let rt=null;
+  el('wfcRawSearch').addEventListener('input',e=>{
+    clearTimeout(rt);const v=e.target.value;
+    rt=setTimeout(()=>{S.raw.q=v.trim();renderRaw();},300);
+  });
+  el('wfcRescan').addEventListener('click',async()=>{
+    busy(el('wfcRescan'),true,'Scanning…');
+    await loadSites();
+    busy(el('wfcRescan'),false);
+  });
+  el('wfcChange').addEventListener('click',openChooser);
+  el('wfcChooseClose').addEventListener('click',()=>closeMod('wfcChooseOv'));
+  el('wfcChooseOv').addEventListener('click',e=>{if(e.target===el('wfcChooseOv'))closeMod('wfcChooseOv');});
+  el('wfcClose').addEventListener('click',()=>closeMod('wfcOv'));
+  el('wfcOv').addEventListener('click',e=>{if(e.target===el('wfcOv'))closeMod('wfcOv');});
+
+  /* blocking */
+  el('wfcBlockKind').addEventListener('change',e=>{
+    const k=e.target.value;
+    el('wfcBlockPType').hidden=(k!=='pattern');
+    el('wfcBlockPermWrap').hidden=(k==='country');
+    el('wfcBlockVal').placeholder={
+      ip:'203.0.113.7',range:'203.0.113.0/24',country:'US,CN',pattern:'sqlmap'
+    }[k]||'';
+  });
+  el('wfcBlockAdd').addEventListener('click',async()=>{
+    const kind=el('wfcBlockKind').value;
+    const val=el('wfcBlockVal').value.trim();
+    if(!val){toast('Nothing to block was typed.',3500);return;}
+    const fields={kind:kind};
+    if(kind==='ip'||kind==='range'){fields.ip=val;if(el('wfcBlockPerm').checked)fields.permanent='1';}
+    else if(kind==='country')fields.countries=val;
+    else{fields.pattern=val;fields.ptype=el('wfcBlockPType').value;}
+    busy(el('wfcBlockAdd'),true,'Blocking…');
+    const d=await api('block_add',fields);
+    busy(el('wfcBlockAdd'),false);
+    if(!d.ok)return fail(d,'wfcFootMsg');
+    el('wfcBlockVal').value='';
+    toast('Block added.',3000);loadBlocks();
+  });
+  el('wfcUnlockAll').addEventListener('click',async()=>{
+    const d=await api('unlock_all');
+    if(!d.ok)return fail(d,'wfcFootMsg');
+    toast('Every lockout was cleared.',3000);loadBlocks();
+  });
+  el('wfcBlocksClear').addEventListener('click',async()=>{
+    if(!window.confirm('Remove every block, including country blocks?'))return;
+    const d=await api('blocks_clear');
+    if(!d.ok)return fail(d,'wfcFootMsg');
+    toast('All blocks removed.',3000);loadBlocks();
+  });
+  el('wfcBlocksReload').addEventListener('click',loadBlocks);
+  el('wfc2faRevokeAll').addEventListener('click',async()=>{
+    if(!window.confirm('Revoke two-factor authentication for every user?'))return;
+    const d=await api('2fa',{do:'revoke-all'});
+    if(!d.ok)return fail(d,'wfcFootMsg');
+    toast('Two-factor enrolment cleared.',3200);loadLogin();
+  });
+
+  /* tools */
+  el('wfcExport').addEventListener('click',async()=>{
+    busy(el('wfcExport'),true,'Exporting…');
+    const d=await api('export');
+    busy(el('wfcExport'),false);
+    if(!d.ok)return fail(d,'wfcIoNote');
+    const out=el('wfcDiagOut');
+    out.hidden=false;
+    out.textContent=d.json||'';
+    el('wfcToken').value=d.json||'';
+    note('wfcIoNote','<b>Copied below.</b> '+(d.json||'').length+' characters - every setting except the licence key and the encryption secrets. Paste it into another site\'s controller to apply the same setup.');
+  });
+  el('wfcImport').addEventListener('click',async()=>{
+    const json=(el('wfcToken').value||'').trim();
+    if(!json){toast('Paste an exported settings block first.',3500);return;}
+    if(!window.confirm('Replace this site\'s Wordfence settings with the pasted ones?'))return;
+    busy(el('wfcImport'),true,'Importing…');
+    const d=await api('import',{json:json});
+    busy(el('wfcImport'),false);
+    if(!d.ok)return fail(d,'wfcIoNote');
+    toast(d.written+' setting'+(d.written===1?'':'s')+' applied.',3500);
+    loadAll();
+  });
+  el('wfcDefaults').addEventListener('click',async()=>{
+    if(!window.confirm('Restore every Wordfence setting to its default?'))return;
+    busy(el('wfcDefaults'),true,'Restoring…');
+    const d=await api('defaults');
+    busy(el('wfcDefaults'),false);
+    if(!d.ok)return fail(d,'wfcIoNote');
+    toast('Defaults restored.',3500);loadAll();
+  });
+  el('wfcDiag').addEventListener('click',async()=>{
+    busy(el('wfcDiag'),true,'Building…');
+    const d=await api('diagnostics');
+    busy(el('wfcDiag'),false);
+    if(!d.ok)return fail(d,'wfcIoNote');
+    const out=el('wfcDiagOut');
+    out.hidden=false;
+    out.textContent=typeof d.diagnostics==='string'?d.diagnostics:JSON.stringify(d.diagnostics,null,1).slice(0,20000);
+  });
+  el('wfcTestEmail').addEventListener('click',async()=>{
+    const to=el('wfcEmailTo').value.trim();
+    if(!to){toast('Type an address to send to.',3500);return;}
+    busy(el('wfcTestEmail'),true,'Sending…');
+    const d=await api('test_email',{to:to});
+    busy(el('wfcTestEmail'),false);
+    if(!d.ok)return fail(d,'wfcIoNote');
+    toast(d.sent?'Test email handed to WordPress.':'WordPress could not send it - check the site\'s mail setup.',4200);
+  });
+
+  document.addEventListener('keydown',e=>{
+    if(e.key!=='Escape')return;
+    if(el('wfcChooseOv').classList.contains('open')){closeMod('wfcChooseOv');return;}
+    if(el('wfcOv').classList.contains('open'))closeMod('wfcOv');
+  });
+}
+
+function boot(){
+  if(!el('wfcOv'))return;
+  if(!S.booted){wire();S.booted=true;}
+  stopPolling();
+  if(S.site){
+    renderSiteList();
+    openMod('wfcOv');
+    loadAll();
+  }else{
+    openChooser();
+  }
+}
+const btn=el('wfcBtn');
+if(btn)btn.addEventListener('click',boot);
+
+})(); // end Wordfence Controller
 </script>
 </body>
 </html>
