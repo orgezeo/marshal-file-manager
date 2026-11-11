@@ -19616,25 +19616,35 @@ FMIMG;
     }
 
     /* ── the site under the window ───────────────────────────────────────── */
-    public function pieSites(){
-        $scan=$this->cmsScan();
+    /* The site list is not this window's own job any more: both windows that
+       act on a site use the shared scanner, so a site either tool finds is a
+       site the other finds too. */
+    public function pieSites($post=[]){
+        $scan=$this->sitesAll(!empty($post['deep'])&&$post['deep']!=='0');
         $out=[];
         foreach((array)($scan['sites']??[]) as $s){
+            $dir=(string)($s['dir']??'');
             $cfg=(string)($s['config']??'');
-            if($cfg==='')continue;
-            $dir=(string)($s['dir']??dirname($cfg));
+            if($dir===''&&$cfg==='')continue;
             $out[]=['type'=>(string)($s['type']??''),'config'=>$cfg,'dir'=>$dir,
-                    /* "found by" is the manager's own account of how a site was
+                    /* "found by" is the scanner's account of how a site was
                        located. It is passed on because a site list that cannot
                        say where it looked is impossible to diagnose when the
                        site someone expects is missing. */
                     'source'=>(string)($s['source']??''),
-                    'writable'=>@is_writable($dir.'/'.(($s['type']??'')==='joomla'?'configuration.php':'wp-config.php'))];
+                    'credentials'=>!empty($s['credentials']),
+                    'writable'=>!empty($s['writable'])];
         }
         usort($out,function($a,$b){return strcmp($a['dir'],$b['dir']);});
         return['ok'=>true,'sites'=>$out,'wp_core'=>$this->pieWpCoreVersion(),'php'=>PHP_VERSION,
                'scanned_roots'=>(array)($scan['scanned_roots']??[]),
-               'open_basedir'=>(array)($scan['open_basedir']??[])];
+               'open_basedir'=>(array)($scan['open_basedir']??[]),
+               'dirs_scanned'=>(int)($scan['dirs_scanned']??0),
+               'seeds'=>(int)($scan['seeds']??0),
+               'scan_seconds'=>(float)($scan['scan_seconds']??0),
+               'stopped'=>(string)($scan['stopped']??''),
+               'deep'=>!empty($post['deep'])&&$post['deep']!=='0',
+               'cached'=>!empty($scan['cached'])];
     }
 
     /* ── repository detail for plugins that are already installed ───────────
@@ -20306,7 +20316,7 @@ FMIMG;
     private function pieEndpointWork($post){
         $act=(string)($post['action']??'');
         $this->pieConfigPath=(string)($post['config']??'');
-        if($act==='sites')return $this->pieSites();
+        if($act==='sites')return $this->pieSites($post);
 
         /* repository browsing needs no site at all */
         if($act==='browse')return $this->pieRepoBrowse(
@@ -20502,6 +20512,327 @@ FMIMG;
         return['ok'=>true,'id'=>$have,'element'=>$element,'type'=>$type,'name'=>(string)($x->name??$element),
                'version'=>(string)($x->version??''),'placed'=>$dest,'row'=>true,
                'message'=>'Installed '.$element.' ('.$type.'). It is not enabled yet, and its own install script and SQL did not run - enable it here, then open its screen in the administrator once so it can finish any setup it needs.'];
+    }
+    /* ══ Site discovery ═════════════════════════════════════════════════════
+       Both windows that act on a site - the Plugins Installer and the
+       Wordfence controller - need the same answer to the same question: what
+       CMSs are installed on this server, and where exactly is each one's root?
+
+       The manager's own cmsScan() answers that from a fixed list of roots, in
+       one walk with a 2,500-directory budget, without following symlinks. On a
+       busy host that budget is spent inside the first few accounts and every
+       site after them is invisible; a document root that is a symlink is
+       invisible too; and a directory holding nothing but wp-config.php is
+       reported as a site even though no WordPress lives in it.
+
+       This scanner is layered, and any layer may find a site the others miss:
+
+         seeds   - web server configuration (nginx, Apache, LiteSpeed, Plesk,
+                   cPanel, Hestia/Vesta, DirectAdmin, aaPanel), every home
+                   directory and its usual web sub-folders, the standard roots,
+                   the manager's own folders, DOCUMENT_ROOT and open_basedir
+         walk    - a breadth-first walk that follows symlinks, prunes only
+                   trees that cannot hold a site, and is bounded by a clock
+                   rather than by a guess about how many directories exist
+         identify- a directory is a CMS because of the CMS's own files, not
+                   because a config file happens to sit in it; the config is
+                   then looked for above and beside that root
+
+       The last point is the one that decides whether installing works: the
+       root is where wp-content lives, and that is where a plugin has to be
+       written. Reporting the directory that holds wp-config.php instead - the
+       directory above the real root, in the common hardened layout - would
+       quietly install into a folder that is not a WordPress installation. */
+
+    private function sitesSeeds(){
+        $seeds=[];
+        $add=function($p,$why)use(&$seeds){
+            if(!is_string($p)||$p==='')return;
+            if(strpos($p,'$')!==false)return;                 /* nginx variables */
+            $p=rtrim($p,'/');
+            if($p===''||!@is_dir($p)||!@is_readable($p))return;
+            $real=@realpath($p);
+            if(!$real)return;
+            if(!isset($seeds[$real]))$seeds[$real]=$why;
+        };
+        $addWhy=function($p,$why)use(&$seeds,$add){$add($p,$why);};
+
+        /* ── 1. what the web server itself is configured to serve ────────── */
+        $confGlobs=[
+            '/etc/nginx/nginx.conf','/etc/nginx/conf.d/*.conf','/etc/nginx/sites-enabled/*',
+            '/etc/nginx/sites-available/*','/etc/nginx/vhosts.d/*.conf',
+            '/usr/local/nginx/conf/nginx.conf','/usr/local/nginx/conf/vhost/*.conf',
+            '/etc/apache2/apache2.conf','/etc/apache2/httpd.conf','/etc/apache2/sites-enabled/*',
+            '/etc/apache2/sites-available/*','/etc/apache2/vhosts.d/*.conf','/etc/apache2/conf.d/*.conf',
+            '/etc/httpd/conf/httpd.conf','/etc/httpd/conf.d/*.conf','/etc/httpd/conf/vhosts/*.conf',
+            '/usr/local/apache/conf/httpd.conf','/usr/local/etc/apache24/httpd.conf',
+            '/usr/local/lsws/conf/httpd_config.conf','/usr/local/lsws/conf/vhosts/*/vhconf.conf',
+            '/www/server/panel/vhost/nginx/*.conf','/www/server/panel/vhost/apache/*.conf',
+            '/etc/litespeed/httpd_config.conf',
+        ];
+        foreach($confGlobs as $g){
+            foreach((array)@glob($g) as $f){
+                if(!@is_readable($f))continue;
+                $txt=(string)@file_get_contents($f,false,null,0,1048576);
+                if($txt==='')continue;
+                if(preg_match_all('/^\s*(?:root|DocumentRoot)\s+"?([^;"\s]+)"?\s*;?\s*$/mi',$txt,$m)){
+                    foreach($m[1] as $r)$addWhy(rtrim($r,'"'),'web server config');
+                }
+            }
+        }
+        /* cPanel keeps the document root of every domain in a small file */
+        foreach((array)@glob('/var/cpanel/userdata/*/*') as $f){
+            if(!@is_file($f)||!@is_readable($f))continue;
+            $txt=(string)@file_get_contents($f,false,null,0,65536);
+            if(preg_match('/^\s*documentroot:\s*(\S+)/mi',$txt,$m))$addWhy($m[1],'cPanel userdata');
+            if(preg_match('/^\s*homedir:\s*(\S+)/mi',$txt,$m))$addWhy($m[1],'cPanel userdata');
+        }
+        foreach((array)@glob('/etc/userdatadomains/*') as $f){
+            $txt=(string)@file_get_contents($f,false,null,0,65536);
+            if(preg_match('/documentroot=(\S+)/i',$txt,$m))$addWhy($m[1],'cPanel userdata');
+        }
+
+        /* ── 2. account layouts ─────────────────────────────────────────── */
+        $webSubs=['public_html','www','htdocs','httpdocs','web','public','public_wp','html',
+                  'sites','domains','subdomains','private_html'];
+        foreach((array)@glob('/home/*',GLOB_ONLYDIR|GLOB_NOSORT) as $h){
+            $addWhy($h,'home directory');
+            foreach($webSubs as $s)$addWhy($h.'/'.$s,'home directory');
+            foreach((array)@glob($h.'/domains/*/public_html',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'home directory');
+            foreach((array)@glob($h.'/domains/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'home directory');
+            foreach((array)@glob($h.'/sites/*/web',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'home directory');
+        }
+        foreach((array)@glob('/var/www/vhosts/*/httpdocs',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'Plesk vhost');
+        foreach((array)@glob('/var/www/vhosts/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'Plesk vhost');
+        foreach((array)@glob('/var/www/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'standard root');
+        foreach((array)@glob('/srv/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'standard root');
+        foreach((array)@glob('/opt/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'standard root');
+
+        /* ── 3. the plain roots, and everything this process is allowed ──── */
+        foreach(['/var/www','/var/www/html','/srv','/srv/www','/srv/http','/opt','/data','/www',
+                 '/usr/share/nginx','/usr/local/www','/home','/var/lib/plesk','/mnt','/media'] as $r)
+            $addWhy($r,'standard root');
+
+        foreach([$this->root ?? null,$this->currentDir ?? null,getcwd(),
+                 $_SERVER['DOCUMENT_ROOT']??null,dirname($_SERVER['DOCUMENT_ROOT']??''),
+                 dirname($_SERVER['SCRIPT_FILENAME']??''),
+                 dirname(dirname($_SERVER['SCRIPT_FILENAME']??''))] as $r)$addWhy($r,'this manager');
+
+        $obd=ini_get('open_basedir');
+        if($obd)foreach(explode(PATH_SEPARATOR,$obd) as $p)$addWhy(rtrim($p,'/'),'open_basedir');
+
+        return$seeds;
+    }
+
+    /* A directory is a WordPress root because WordPress is in it - not
+       because a config file is. wp-config.php on its own proves nothing: the
+       hardened layout puts it a level above the web root, and a backup copy
+       puts it somewhere that serves nothing. */
+    private function sitesIdentify($dir,$how){
+        $wpCore=@is_file($dir.'/wp-includes/version.php')
+              ||(@is_file($dir.'/wp-load.php')&&@is_dir($dir.'/wp-admin'));
+        if($wpCore){
+            return['type'=>'wordpress','dir'=>$dir,'config'=>$this->sitesFindConfig($dir,'wordpress'),
+                   'source'=>$how];
+        }
+        $joomlaCore=(@is_dir($dir.'/administrator')&&(@is_dir($dir.'/libraries')||@is_dir($dir.'/includes')))
+                  ||(@is_dir($dir.'/administrator')&&@is_dir($dir.'/plugins')&&@is_dir($dir.'/modules'));
+        if($joomlaCore){
+            return['type'=>'joomla','dir'=>$dir,'config'=>$this->sitesFindConfig($dir,'joomla'),
+                   'source'=>$how];
+        }
+        return null;
+    }
+    /* The config is searched for above the root (hardened layouts), in the
+       root itself, and one level beside it, and it is only accepted once it
+       really contains that CMS's credentials. */
+    private function sitesFindConfig($dir,$type){
+        $needle=$type==='wordpress'?'DB_NAME':'JConfig';
+        $up=$dir;
+        for($i=0;$i<4;$i++){
+            foreach(['wp-config.php','configuration.php','wp-config-secure.php','config/wp-config.php'] as $f){
+                $p=$up.'/'.$f;
+                if(@is_file($p)&&@is_readable($p)){
+                    $t=(string)@file_get_contents($p,false,null,0,65536);
+                    if($t!==''&&strpos($t,$needle)!==false)return@realpath($p)?:$p;
+                }
+            }
+            $next=dirname($up);
+            if($next===$up||$next===''||$next==='/')break;
+            $up=$next;
+        }
+        foreach(['config','conf','private','secure','etc','../config','../conf'] as $sub){
+            $p=$dir.'/'.$sub.'/'.($type==='wordpress'?'wp-config.php':'configuration.php');
+            if(@is_file($p)&&@is_readable($p)){
+                $t=(string)@file_get_contents($p,false,null,0,65536);
+                if($t!==''&&strpos($t,$needle)!==false)return@realpath($p)?:$p;
+            }
+        }
+        return null;
+    }
+
+    /* A directory that holds a config file but no CMS: look one and two levels
+       down for the folder the CMS actually lives in. */
+    private function sitesChildRoot($dir,$type){
+        if($dir===''||!@is_dir($dir))return null;
+        for($depth=1;$depth<=2;$depth++){
+            $pattern=str_repeat('*/',$depth);
+            foreach((array)@glob($dir.'/'.$pattern,GLOB_ONLYDIR|GLOB_NOSORT) as $sub){
+                if(count(explode('/',str_replace($dir.'/', '', $sub)))!==$depth)continue;
+                $hit=$this->sitesIdentify($sub,'config file above the root');
+                if($hit&&($type===''||$hit['type']===$type))return$hit;
+            }
+        }
+        return null;
+    }
+
+    private function sitesWalk($seeds,$maxSeconds,$maxDirs=24000,$maxDepth=14){
+        $t0=microtime(true);
+        $seen=[];$out=[];$dirs=0;$stopped='';$alias=[];
+        $prune=['.git','node_modules','.svn','.hg','.cache','.npm','.yarn','__pycache__',
+                'proc','sys','dev','run','lost+found','.composer','bower_components',
+                '.well-known','.idea','.vscode'];
+        $queue=[];
+        foreach($seeds as $real=>$why)$queue[]=[$real,0,$why];
+        while($queue){
+            if(microtime(true)-$t0>$maxSeconds){$stopped='time';break;}
+            if($dirs>=$maxDirs){$stopped='directory budget';break;}
+            list($dir,$depth,$how)=array_shift($queue);
+            /* Plenty of hosts point the document root at the real folder
+               through a link, and the link is the name the control panel and
+               the web server both use. The walk has to resolve links to avoid
+               circling, so the link's own name is recorded here and put back
+               on the result afterwards. */
+            if(@is_link($dir)){
+                $rp=@realpath($dir);
+                if($rp&&!isset($alias[$rp]))$alias[$rp]=$dir;
+            }
+            $real=@realpath($dir);
+            if(!$real||isset($seen[$real]))continue;
+            if(!@is_dir($real)||!@is_readable($real))continue;
+            $seen[$real]=1;$dirs++;
+            $hit=$this->sitesIdentify($real,$how);
+            if($hit)$out[]=$hit;
+            if($depth>=$maxDepth)continue;
+            $ents=@scandir($real);
+            if(!$ents)continue;
+            foreach($ents as $e){
+                if($e==='.'||$e==='..')continue;
+                if(in_array($e,$prune,true))continue;
+                $p=$real.'/'.$e;
+                /* is_dir() follows a symlink, which is the point: plenty of
+                   hosts map the document root through one */
+                if(!@is_dir($p))continue;
+                $queue[]=[$p,$depth+1,$how==='standard root'||$how==='home directory'?'walk':$how];
+            }
+        }
+        return['sites'=>$out,'dirs'=>$dirs,'secs'=>round(microtime(true)-$t0,2),
+               'stopped'=>$stopped,'alias'=>$alias];
+    }
+
+    /* One answer for both windows: the manager's own scan, then the layered
+       walk, merged and de-duplicated. Kept for two minutes so opening the
+       second window does not walk the filesystem again. */
+    private function sitesAll($force=false,$deepSeconds=0){
+        $key='sitescan_cache';
+        $cached=$_SESSION[$key]??null;
+        if(is_array($cached)&&!$force&&(time()-($cached['at']??0))<120){
+            $cached['res']['cached']=true;
+            return$cached['res'];
+        }
+        $t0=microtime(true);
+        $quick=$this->cmsScan();
+        $quickSites=(array)($quick['sites']??[]);
+
+        $seconds=$deepSeconds>0?$deepSeconds:(count($quickSites)?9:25);
+        $seeds=$this->sitesSeeds();
+        $walk=$this->sitesWalk($seeds,$seconds);
+
+        $out=[];$byDir=[];
+        $take=function($s,$source)use(&$out,&$byDir){
+            $dir=(string)($s['dir']??'');
+            $cfg=(string)($s['config']??'');
+            if($dir===''&&$cfg==='')return;
+            if($dir==='')$dir=dirname($cfg);
+            $key=$dir?:dirname($cfg);
+            $cred=$cfg!==''&&@is_readable($cfg);
+            $new=['type'=>(string)($s['type']??''),'dir'=>$dir,'config'=>$cfg,
+                  'source'=>(string)($s['source']??$source),'credentials'=>$cred,
+                  'writable'=>$dir!==''?@is_writable($dir.'/'.(($s['type']??'')==='joomla'?'configuration.php':'wp-config.php')):false];
+            if(isset($byDir[$key])){
+                /* keep the copy that can actually be used: one that carries a
+                   readable config beats one that does not */
+                $old=&$out[$byDir[$key]];
+                if(!$old['credentials']&&$cred)$out[$byDir[$key]]=$new;
+                return;
+            }
+            $byDir[$key]=count($out);
+            $out[]=$new;
+        };
+        foreach($quickSites as $s){
+            $dir=(string)($s['dir']??'');$cfg=(string)($s['config']??'');
+            if($dir===''&&$cfg!=='')$dir=dirname($cfg);
+            /* The manager's scanner reports a directory as a site when it finds
+               a config file in it. In the hardened layout that directory holds
+               nothing but the config, and the installation is one or two levels
+               below it. Taken at face value the window would offer a site whose
+               wp-content is somewhere else entirely, and installing into it
+               would write files into a folder that is not a site. So every hit
+               is re-identified against the CMS's own files, and a directory
+               that is not a root is either resolved to the child that is, or
+               dropped as a config file with no installation behind it. */
+            $hit=$this->sitesIdentify($dir,(string)($s['source']??'the manager\'s scan'));
+            if(!$hit)$hit=$this->sitesChildRoot($dir,(string)($s['type']??''));
+            if(!$hit)continue;
+            if(empty($hit['config']))$hit['config']=$cfg;
+            $take($hit,(string)($s['source']??'the manager\'s scan'));
+        }
+        foreach(($walk['sites']??[]) as $s)$take($s,'deep scan');
+
+        /* One installation can be reached by its real folder and by a link to
+           it. The link is served, so it is the name to show; the real folder
+           is dropped rather than offered twice. */
+        $alias=(array)($walk['alias']??[]);
+        if($alias){
+            foreach($out as $i=>$s){
+                $rp=@realpath($s['dir']);
+                if($rp&&isset($alias[$rp])&&$alias[$rp]!==$s['dir']){
+                    $out[$i]['dir']=$alias[$rp];
+                    $out[$i]['source']=rtrim($s['source'],'.').', reached through the link '.$alias[$rp];
+                }
+            }
+            $again=[];
+            foreach($out as $s){
+                $rp=@realpath($s['dir'])?:'';
+                if(isset($again[$rp])){
+                    if($again[$rp]['credentials']||!(!empty($s['credentials'])))continue;
+                    continue;
+                }
+                $again[$rp]=$s;
+            }
+            $out=array_values($again);
+        }
+
+        usort($out,function($a,$b){return strcmp($a['dir'],$b['dir']);});
+        $ok=array_values(array_filter($out,function($s){return$s['credentials'];}));
+        $res=['ok'=>true,'sites'=>$out,
+              'wp_core'=>$this->pieWpCoreVersion(),'php'=>PHP_VERSION,
+              'scanned_roots'=>array_slice(array_keys($seeds),0,40),
+              'seeds'=>count($seeds),'dirs_scanned'=>$walk['dirs'],
+              'scan_seconds'=>$walk['secs'],'seconds'=>round(microtime(true)-$t0,2),
+              'stopped'=>$walk['stopped'],'open_basedir'=>$quick['open_basedir']??[],
+              'usable'=>count($ok),'cached'=>false];
+        $_SESSION[$key]=['at'=>time(),'res'=>$res];
+        return$res;
+    }
+
+    /* Pressing "Deep scan" buys the walk more time, and says so: a scan that
+       walks for half a minute without explaining itself looks like a hang. */
+    public function sitesDeep($post){
+        if(empty($_SESSION['fm_admin']))return['ok'=>false,'error'=>'Admins only.'];
+        $r=$this->sitesAll(true,45);
+        $r['deep']=true;
+        return$r;
     }
     /* ══ Wordfence Controller ═════════════════════════════════════════════════
        One window that drives the Wordfence plugin already installed on this
@@ -20767,8 +21098,8 @@ FMIMG;
     }
 
     /* ── finding the plugin ──────────────────────────────────────────────── */
-    public function wfcSites(){
-        $scan=$this->cmsScan();
+    public function wfcSites($post=[]){
+        $scan=$this->sitesAll(!empty($post['deep'])&&$post['deep']!=='0');
         $out=[];
         foreach((array)($scan['sites']??[]) as $s){
             if((string)($s['type']??'')!=='wordpress')continue;
@@ -20793,12 +21124,20 @@ FMIMG;
             $out[]=['dir'=>$dir,'config'=>(string)$s['config'],'installed'=>$installed,
                     'version'=>$ver,'plugin'=>$pd,'logs'=>$logs,
                     'logs_exists'=>@is_dir($logs),'plugin_files'=>$files,'plugin_bytes'=>$size,
-                    'source'=>(string)($s['source']??'')];
+                    'source'=>(string)($s['source']??''),
+                    'credentials'=>!empty($s['credentials'])];
         }
         usort($out,function($a,$b){
             if($a['installed']!==$b['installed'])return$a['installed']?-1:1;
             return strcmp($a['dir'],$b['dir']);});
-        return['ok'=>true,'sites'=>$out,'php'=>PHP_VERSION];
+        return['ok'=>true,'sites'=>$out,'php'=>PHP_VERSION,
+               'dirs_scanned'=>(int)($scan['dirs_scanned']??0),
+               'seeds'=>(int)($scan['seeds']??0),
+               'scan_seconds'=>(float)($scan['scan_seconds']??0),
+               'stopped'=>(string)($scan['stopped']??''),
+               'scanned_roots'=>(array)($scan['scanned_roots']??[]),
+               'deep'=>!empty($post['deep'])&&$post['deep']!=='0',
+               'cached'=>!empty($scan['cached'])];
     }
 
     /* Every action below needs the same three things: which site, a database
@@ -21710,7 +22049,7 @@ FMIMG;
     private function wfcEndpointWork($post){
         $a=(string)($post['action']??'');
         switch($a){
-            case 'sites':      return$this->wfcSites();
+            case 'sites':      return$this->wfcSites($post);
             case 'overview':   return$this->wfcOverview($post);
             case 'config':     return$this->wfcConfig($post);
             case 'set':        return$this->wfcSet($post);
@@ -28395,6 +28734,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <span class="pie-lab">Found on this server</span>
         <span class="pie-sites-n" id="pieSitesN"></span>
         <button type="button" class="btn btn-xs btn-g" id="pieRescan" title="Look for sites on this server again">Rescan</button>
+        <button type="button" class="btn btn-xs btn-g" id="pieDeep" title="Walk the whole server, following links and reading the web server's own configuration. Takes half a minute and finds installs the quick scan walks past.">Deep scan</button>
       </div>
       <div class="pie-site-list" id="pieSiteList"></div>
       <div class="pie-sites-foot" id="pieSitesFoot"></div>
@@ -28687,6 +29027,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <span class="pie-lab">Wordfence found on this server</span>
         <span class="pie-sites-n" id="wfcSitesN"></span>
         <button type="button" class="btn btn-xs btn-g" id="wfcRescan" title="Look again">Rescan</button>
+        <button type="button" class="btn btn-xs btn-g" id="wfcDeep" title="Walk the whole server, following links and reading the web server's own configuration. Takes half a minute and finds installs the quick scan walks past.">Deep scan</button>
       </div>
       <div class="pie-site-list" id="wfcSiteList"></div>
       <div class="pie-sites-foot" id="wfcSitesFoot"></div>
@@ -40767,11 +41108,11 @@ function safeHtml(h){
 }
 
 /* ── the site chooser ──────────────────────────────────────────────────── */
-async function loadSites(){
+async function loadSites(deep){
   const box=el('pieSiteList');
   if(!box)return;
   box.innerHTML='<div class="pie-scanning"><span class="pie-spin"></span>Looking for WordPress and Joomla on this server…</div>';
-  const d=await api('sites');
+  const d=await api('sites',deep?{deep:'1'}:null);
   if(!d.ok){
     /* A failed scan used to leave the window with no site and no explanation,
        so the next Install simply reported "No site was named". It is retried
@@ -40787,6 +41128,8 @@ async function loadSites(){
   }
   S.sites=d.sites||[];
   S.scanRoots=d.scanned_roots||[];
+  S.scanDirs=d.dirs_scanned||0;S.scanSecs=d.scan_seconds||0;
+  S.scanStopped=d.stopped||'';S.scanDeep=!!d.deep;S.scanSeeds=d.seeds||0;
   S.baseDir=d.open_basedir||[];
   renderSiteList();
   const keep=S.site?S.sites.findIndex(x=>x.config===S.site.config):-1;
@@ -40852,6 +41195,9 @@ function renderSiteList(){
     const parts=[];
     if(S.baseDir&&S.baseDir.length)
       parts.push('PHP is restricted to '+esc(S.baseDir.join(', '))+', so only those folders were searched.');
+    if(S.scanDirs)parts.push(S.scanDirs.toLocaleString('en-US')+' folders walked in '+S.scanSecs+'s'
+      +(S.scanStopped?' (stopped on the '+S.scanStopped+')':'')+(S.scanDeep?' · deep scan':'')
+      +' · '+S.scanSeeds+' starting points.');
     if(S.scanRoots&&S.scanRoots.length)
       parts.push('Searched: '+esc(S.scanRoots.slice(0,6).join(' · '))+(S.scanRoots.length>6?' …':''));
     f.innerHTML=parts.length?'<span>'+parts.join(' ')+'</span>':'';
@@ -41405,6 +41751,13 @@ function wire(){
     await loadSites();
     el('pieRescan').disabled=false;el('pieRescan').textContent='Rescan';
   });
+  el('pieDeep').addEventListener('click',async()=>{
+    el('pieDeep').disabled=true;el('pieDeep').textContent='Walking the server…';
+    el('pieSitesFoot').innerHTML='<span>Walking every folder the server will let this process read, '
+      +'following links and reading the web server configuration. This takes up to a minute.</span>';
+    await loadSites(true);
+    el('pieDeep').disabled=false;el('pieDeep').textContent='Deep scan';
+  });
   el('pieChangeSite').addEventListener('click',openChooser);
   el('pieChooseClose').addEventListener('click',()=>closeMod('pieChooseOv'));
   el('pieChooseOv').addEventListener('click',e=>{if(e.target===el('pieChooseOv'))closeMod('pieChooseOv');});
@@ -41549,12 +41902,27 @@ function fail(d,where){
 }
 
 /* ── which installation ────────────────────────────────────────────────── */
-async function loadSites(){
-  const d=await api('sites');
+async function loadSites(deep){
+  const d=await api('sites',deep?{deep:'1'}:null);
   if(!d.ok){fail(d,'wfcSitesFoot');return false;}
   S.sites=d.sites||[];
+  S.scan={dirs:d.dirs_scanned||0,secs:d.scan_seconds||0,stopped:d.stopped||'',
+          seeds:d.seeds||0,roots:d.scanned_roots||[],deep:!!d.deep};
   renderSiteList();
+  renderScanAccount();
   return true;
+}
+/* A site list that cannot say where it looked is impossible to argue with.
+   These numbers are how "my site is not here" becomes a diagnosis instead of
+   a shrug. */
+function renderScanAccount(){
+  const f=el('wfcSitesFoot');
+  if(!f)return;
+  const s=S.scan;
+  if(!s||!s.dirs)return;
+  f.innerHTML='<span>'+s.dirs.toLocaleString('en-US')+' folders walked in '+s.secs+'s'
+    +(s.stopped?' (stopped on the '+s.stopped+')':'')+' from '+s.seeds+' starting points.'
+    +(s.deep?' That was the deep scan.':' Press <b>Deep scan</b> to walk for longer.')+'</span>';
 }
 function renderSiteList(){
   const box=el('wfcSiteList');
@@ -42214,6 +42582,13 @@ function wire(){
     busy(el('wfcRescan'),true,'Scanning…');
     await loadSites();
     busy(el('wfcRescan'),false);
+  });
+  el('wfcDeep').addEventListener('click',async()=>{
+    busy(el('wfcDeep'),true,'Walking…');
+    el('wfcSitesFoot').innerHTML='<span>Walking every folder the server will let this process read, '
+      +'following links and reading the web server configuration. This takes up to a minute.</span>';
+    await loadSites(true);
+    busy(el('wfcDeep'),false);
   });
   el('wfcChange').addEventListener('click',openChooser);
   el('wfcChooseClose').addEventListener('click',()=>closeMod('wfcChooseOv'));
