@@ -1084,7 +1084,7 @@ function fm_ensure_terminal_font(){
     if(function_exists('curl_init')){
         $ch=curl_init(FM_TERMINAL_FONT_URL);
         curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,
-            CURLOPT_CONNECTTIMEOUT=>8,CURLOPT_TIMEOUT=>20,CURLOPT_SSL_VERIFYPEER=>true,
+            CURLOPT_CONNECTTIMEOUT=>5,CURLOPT_TIMEOUT=>10,CURLOPT_SSL_VERIFYPEER=>true,
             CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,CURLOPT_HTTPHEADER=>['User-Agent: MarshalFM-Terminal/1.0']]);
         $data=curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
         if($code<200||$code>=400)$data=false;
@@ -1293,11 +1293,26 @@ function fm_guardian_bootstrap(){
    have to duplicate this "only write once" check. */
 function fm_guardian_bootstrap_seed($c){
     if(fm_guardian_is_pdo($c)){
-        if(!fm_guardian_fetch_one($c,"SELECT id FROM fm_guardian_store WHERE id=1"))fm_guardian_sync();
+        if(!fm_guardian_fetch_one($c,"SELECT id FROM fm_guardian_store WHERE id=1"))fm_guardian_seed_once();
     }else{
         $res=@mysqli_query($c,"SELECT id FROM fm_guardian_store WHERE id=1");
-        if($res&&mysqli_num_rows($res)===0)fm_guardian_sync();
+        if($res&&mysqli_num_rows($res)===0)fm_guardian_seed_once();
     }
+}
+/* The first seed copies this whole file into the database. When that write is
+   refused - a server whose max_allowed_packet is smaller than the file, which
+   is not unusual on shared hosting - it used to be retried on every single page
+   load: a three-megabyte read and a failed write per request, for ever. One
+   attempt, then a quiet period before the next, the same way the watchdog
+   install is throttled. */
+function fm_guardian_seed_once(){
+    $mark=__DIR__.'/.guardian_seed_attempt';
+    $now=time();$last=is_file($mark)?(int)@file_get_contents($mark):0;
+    if(($now-$last)<600)return false;
+    @file_put_contents($mark,(string)$now);
+    $ok=fm_guardian_sync();
+    if($ok)@unlink($mark);
+    return $ok;
 }
 
 /* Best-effort: installs a MySQL stored procedure + scheduled EVENT that can
@@ -2038,13 +2053,13 @@ function fm_guardian_release_timestamp($url,$headers=[]){
    if this file is ever missing, would be the source used to recreate it. */
 function fm_guardian_apply_from_url($url,$checkOnly=false){
     if(!$url||!preg_match('#^https?://#i',$url))return ['ok'=>false,'error'=>'Invalid URL.'];
-    @set_time_limit(90);@ignore_user_abort(true);
+    @set_time_limit(30);@ignore_user_abort(true);
     $remoteSize=0;$releaseTimestamp=0;$responseHeaders=[];
     // Prefer cURL (reliable timeouts); fall back to file_get_contents only when unavailable
     if(function_exists('curl_init')){
         $ch=curl_init($url);
         curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,
-            CURLOPT_CONNECTTIMEOUT=>8,CURLOPT_TIMEOUT=>20,CURLOPT_SSL_VERIFYPEER=>true,
+            CURLOPT_CONNECTTIMEOUT=>5,CURLOPT_TIMEOUT=>10,CURLOPT_SSL_VERIFYPEER=>true,
             // Force IPv4: on some hosts a broken/unreachable IPv6 route to the target is the
             // actual cause of a "hung" TLS handshake that eventually surfaces as an SSL/connect
             // timeout - trying IPv6 first burns most of the timeout budget before falling back.
@@ -2063,7 +2078,7 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
         if($data===false||$curlErr)return ['ok'=>false,'error'=>'Download failed: '.($curlErr?:'cURL error')];
         if($httpCode>=400)return ['ok'=>false,'error'=>"Server returned HTTP $httpCode for the update URL."];
     } else {
-        $ctx=stream_context_create(['http'=>['timeout'=>45,'header'=>"User-Agent: FileManager-Guardian/1.0\r\n"],'https'=>['timeout'=>45]]);
+        $ctx=stream_context_create(['http'=>['timeout'=>8,'header'=>"User-Agent: FileManager-Guardian/1.0\r\n"],'https'=>['timeout'=>8]]);
         $data=@file_get_contents($url,false,$ctx);
         if(isset($http_response_header)&&is_array($http_response_header))$responseHeaders=$http_response_header;
     }
@@ -10046,6 +10061,14 @@ class FileManager {
             $r = $this->rootViaAccount($argv);
             if((int)($r['rc'] ?? 1) === 0)return $r + ['route' => 'the uid-0 account in the account database'];
         }
+        /* On a phone the answer is neither sudo nor a second account: it is the
+           root shell the device already carries. It is tried after sudo, because
+           on a server sudo is the honest answer, and before giving up. */
+        $su = $this->rootSuProbe();
+        if(!empty($su['ok'])){
+            $r = $this->rootSuExec($argv, 25);
+            if((int)($r['rc'] ?? 1) === 0)return $r + ['route' => 'the root shell of this device (' . $su['bin'] . ')'];
+        }
         return['rc' => 1, 'out' => 'sudo needs a password and none was given', 'err' => '', 'route' => 'none'];
     }
     private function rootInstallHelper($password = ''){
@@ -10605,7 +10628,8 @@ class FileManager {
                      'rootDaemonRun', 'rootDaemonStart', 'rootDaemonStop', 'rootChannelInstall', 'rootChannelVerify',
                      'rootChannelRemove', 'rootRun', 'rootingInstallRoot', 'rootingControl', 'rootingUninstall',
                      'rootingRooted',
-                     'rootRemoveHelper', 'rootHarden', 'rootVerify', 'rootExec'];
+                     'rootRemoveHelper', 'rootHarden', 'rootVerify', 'rootExec',
+                     'rootSuProbe', 'rootSuExec', 'rootSuSpawn', 'rootChannelInstallSu'];
         $leaks = [];
         $pure = 0;
         foreach($measureFns as $fn){
@@ -10707,21 +10731,149 @@ class FileManager {
         }
         if(defined('PHP_BINDIR'))$cands[] = rtrim(PHP_BINDIR, '/') . '/php';
         foreach($cands as $c){
-            if(@is_file($c) && @is_executable($c) && strpos(basename($c), 'php') === 0)return $bin = $c;
+            $bn = basename($c);
+            if(strpos($bn, 'php') !== 0)continue;
+            /* php-fpm, php-cgi and phpdbg are web SAPIs, not the command line:
+               PHP_BINARY points at one of them when this file is served by a
+               pool, and a daemon started with it would never run the script it
+               was given, so they are skipped for the interpreter that reads a
+               script from its arguments */
+            if(preg_match('/fpm|cgi|dbg/', $bn))continue;
+            if(@is_file($c) && @is_executable($c))return $bin = $c;
         }
         return $bin = '';
     }
     private function rootPaths(){
+        $base = $this->rootLibBase();
         return[
-            'suphp'  => '/var/lib/marshal-fm/.suphp',
-            'capphp' => '/var/lib/marshal-fm/.capphp',
-            'subash' => '/var/lib/marshal-fm/.subash',
-            'spool'  => '/var/lib/marshal-fm/spool',
+            'suphp'  => $base . '/.suphp',
+            'capphp' => $base . '/.capphp',
+            'subash' => $base . '/.subash',
+            'spool'  => $base . '/spool',
             'polkit' => '/etc/polkit-1/rules.d/49-marshal-fm.rules',
             'unit'   => '/etc/systemd/system/marshal-fm-rootd.service',
-            'cron'   => '/etc/cron.d/marshal-fm-rootd',
-            'spoolbase' => '/var/lib/marshal-fm',
+            'cron'   => $this->rootIsAndroid() ? '/data/adb/service.d/marshal-fm-rootd.sh' : '/etc/cron.d/marshal-fm-rootd',
+            'spoolbase' => $base,
         ];
+    }
+    /* ── Android and Termux: the device is not a small server ─────────────────
+       A phone has no /etc/sudoers.d a package may drop a rule into, no polkit,
+       no setcap, no cron, and no /var/lib this account may write. What a rooted
+       phone does have is one program that hands uid 0 to whoever asks: su, and
+       its Termux wrapper tsu. It is passwordless, it answers in milliseconds,
+       it is as durable as the root layer itself because that layer reinstalls
+       it on every boot, and it is the route every other root app on the device
+       uses. So this block finds that program, proves it really answers as uid 0
+       before it is trusted, and says where the writable system area is here. */
+    private function rootIsAndroid(){
+        static $is = null;
+        if($is !== null)return $is;
+        $r = (string)@php_uname('r');
+        $is = @is_dir('/system') || @is_file('/system/bin/app_process') || @is_file('/system/build.prop')
+              || @is_dir('/data/data/com.termux') || stripos($r, 'android') !== false;
+        return $is;
+    }
+    private function rootPrefix(){
+        static $pre = null;
+        if($pre !== null)return $pre;
+        $p = (string)@getenv('PREFIX');
+        if($p !== '' && @is_dir($p) && @is_dir(rtrim($p, '/') . '/bin'))return $pre = rtrim($p, '/');
+        foreach(['/data/data/com.termux/files/usr'] as $d){
+            if(@is_dir($d . '/bin'))return $pre = $d;
+        }
+        return $pre = '';
+    }
+    private function rootIsTermux(){
+        return $this->rootPrefix() !== '';
+    }
+    /* the writable system area of this host: inside the Termux prefix when there
+       is one, then the one directory root and adb share on every Android build,
+       then the usual /var/lib */
+    private function rootLibBase(){
+        static $base = null;
+        if($base !== null)return $base;
+        $pre = $this->rootPrefix();
+        $cands = [];
+        if($pre !== '')$cands[] = $pre . '/var/lib/marshal-fm';
+        if($this->rootIsAndroid())$cands[] = '/data/local/tmp/marshal-fm';
+        $cands[] = '/var/lib/marshal-fm';
+        foreach($cands as $d){
+            if(@is_dir($d) || @is_writable(dirname($d))){$base = $d; return $base;}
+        }
+        return $base = $cands[count($cands) - 1];
+    }
+    /* where the root shell of this device is, in the order devices offer it */
+    private function rootSuBin(){
+        static $bin = null;
+        if($bin !== null)return $bin;
+        $pre = $this->rootPrefix();
+        $cands = [];
+        if($pre !== ''){$cands[] = $pre . '/bin/su'; $cands[] = $pre . '/bin/tsu';}
+        $cands[] = '/system/bin/su';
+        $cands[] = '/system/xbin/su';
+        $cands[] = '/system/bin/sudo';
+        $cands[] = '/su/bin/su';
+        $cands[] = '/sbin/su';
+        foreach(['su', 'tsu', 'sudo'] as $n){
+            $p = $this->rootWhich($n);
+            if($p !== '' && !in_array($p, $cands, true))$cands[] = $p;
+        }
+        foreach($cands as $d){
+            if(@is_file($d) && @is_executable($d))return $bin = $d;
+        }
+        return $bin = '';
+    }
+    /* One probe, cached for this request: does that program really answer as
+       uid 0, and in which of the two spellings does it take a command?
+       "su 0 <program> <arguments>" carries no shell at all, so it is asked
+       first; "su -c <line>" is the spelling every device accepts, so it is the
+       fallback. The answer is believed only when uid 0 really comes back. */
+    private function rootSuProbe(){
+        static $probe = null;
+        if($probe !== null)return $probe;
+        $bin = $this->rootSuBin();
+        if($bin === '')return $probe = ['ok' => false, 'bin' => '', 'style' => '', 'uid' => -1,
+                                        'why' => 'no su, tsu or sudo program was found on this host'];
+        if(!$this->rootIsAndroid()){
+            return $probe = ['ok' => false, 'bin' => $bin, 'style' => '', 'uid' => -1,
+                             'why' => 'this is not an Android device, so the root shell of a device is not the route here'];
+        }
+        $why = 'the root shell was asked for uid 0 and did not answer as uid 0';
+        foreach(['argv', 'dash-c'] as $style){
+            $argv = $style === 'argv' ? [$bin, '0', 'id'] : [$bin, '-c', 'id'];
+            $r = $this->rootExec($argv, '', 12);
+            $all = trim((string)($r['out'] ?? '') . ' ' . (string)($r['err'] ?? ''));
+            if(preg_match('/\buid=0\b/', $all) === 1){
+                return $probe = ['ok' => true, 'bin' => $bin, 'style' => $style, 'uid' => 0,
+                                 'why' => 'uid 0 came back', 'raw' => $this->rootSnip($all, 120)];
+            }
+            if($all !== '')$why = $this->rootSnip($all, 160);
+        }
+        return $probe = ['ok' => false, 'bin' => $bin, 'style' => '', 'uid' => -1, 'why' => $why];
+    }
+    /* one command through the root shell of this device */
+    private function rootSuExec($argv, $timeout = 25){
+        $su = $this->rootSuProbe();
+        if(empty($su['ok']))return['rc' => 1, 'out' => '', 'err' => (string)($su['why'] ?? 'this device has no working root shell'), 'via' => 'none'];
+        $argv = array_values(array_map('strval', (array)$argv));
+        $line = implode(' ', array_map('escapeshellarg', $argv));
+        $r = $su['style'] === 'argv'
+            ? $this->rootExec(array_merge([$su['bin'], '0'], $argv), '', $timeout)
+            : $this->rootExec([$su['bin'], '-c', $line], '', $timeout);
+        if((int)($r['rc'] ?? 1) !== 0 && $su['style'] === 'argv'){
+            /* one device in a hundred only takes the line form, so it is tried once */
+            $r2 = $this->rootExec([$su['bin'], '-c', $line], '', $timeout);
+            if((int)($r2['rc'] ?? 1) === 0)$r = $r2;
+        }
+        $r['via'] = 'the root shell of this device (' . $su['bin'] . ')';
+        return $r;
+    }
+    /* start something that must outlive this request, through that shell */
+    private function rootSuSpawn($argv){
+        $su = $this->rootSuProbe();
+        if(empty($su['ok']))return -1;
+        $line = implode(' ', array_map('escapeshellarg', array_map('strval', (array)$argv)));
+        return (int)fm_spawn_detached([$su['bin'], '-c', $line . ' >/dev/null 2>&1 &'], '');
     }
     /* ── the root daemon: this file, started once as root ─────────────────── */
     /* The daemon says it is alive by touching a heartbeat file every loop. That
@@ -10745,14 +10897,36 @@ class FileManager {
         $mgr = $this->managerAccount();
         $mk = $this->rootAs(['install', '-d', '-m', '0755', '-o', 'root', '-g', 'root', $p['spoolbase']], $password);
         if($mk['rc'] === 0)$mk = $this->rootAs(['install', '-d', '-m', '0700', '-o', $mgr, '-g', $mgr, $p['spool']], $password);
+        /* the account of an app on a phone is known to its own runtime only and
+           not to the name service root uses, so the same directory is asked for
+           again with the numeric ids when the name was refused */
+        if($mk['rc'] !== 0 && function_exists('posix_getuid')){
+            $uidNo = (int)@posix_getuid();
+            if($uidNo > 0){
+                $gidNo = (int)@posix_getgid();
+                $mk2 = $this->rootAs(['install', '-d', '-m', '0700', '-o', (string)$uidNo, '-g', (string)$gidNo, $p['spool']], $password);
+                if($mk2['rc'] === 0)$mk = $mk2;
+                else{
+                    $ch2 = $this->rootAs(['chown', $uidNo . ':' . $gidNo, $p['spool']], $password);
+                    if($ch2['rc'] === 0)$mk = $ch2;
+                }
+            }
+        }
         if($mk['rc'] !== 0)return['ok' => false, 'note' => 'the spool directory could not be created: ' . ($mk['out'] ?: $mk['err'])];
         @file_put_contents($p['spoolbase'] . '/stop', '');
         @unlink($p['spoolbase'] . '/stop');
         /* setsid -f detaches it and its output goes to /dev/null, so this request
            returns while the daemon keeps running */
-        $launch = ['setsid', '-f', $php, __FILE__, '--root-daemon', $p['spool']];
+        /* setsid does not exist on a phone, so there the daemon is detached by
+           the root shell itself, which is the branch below */
+        $setsid = $this->rootWhich('setsid');
+        $core = [$php, __FILE__, '--root-daemon', $p['spool']];
+        $launch = $setsid !== '' ? array_merge(['setsid', '-f'], $core) : $core;
         if($this->rootSudoNow())$rc = fm_spawn_detached(array_merge(['sudo', '-n'], $launch));
         elseif($password !== '')$rc = fm_spawn_detached(array_merge(['sudo', '-S', '-k', '-p', ''], $launch), $password . "\n");
+        elseif(($suRoute = $this->rootSuProbe()) && !empty($suRoute['ok'])){
+            $rc = $this->rootSuSpawn($core);
+        }
         elseif($this->rootAccountExists()){
             /* the account route has a terminal of its own, and setsid -f forks
                away from it, so the daemon outlives the su that started it */
@@ -10807,6 +10981,8 @@ class FileManager {
     /* ── the methods ─────────────────────────────────────────────────────── */
     private function rootChannels(){
         return[
+            ['id' => 'suroute', 'name' => 'The root shell this device already carries (su)', 'kind' => 'persistent',
+             'idea' => 'On a phone the way to uid 0 is not a sudo rule, a setuid bit or polkit: it is the su binary the root layer installed. It is asked for uid 0, it is believed only when uid 0 really comes back, and from then on every privileged action of this manager runs through it. It is as durable as the root layer itself, because that layer puts it back on every boot.'],
             ['id' => 'sudoers', 'name' => 'A validated rule in /etc/sudoers.d', 'kind' => 'persistent',
              'idea' => 'The route every administrator already understands: one validated line that lets this account run anything as root without a password. It survives reboots and it is read by sudo itself.'],
             ['id' => 'rootd', 'name' => 'A root daemon that is this same file', 'kind' => 'persistent',
@@ -10829,6 +11005,12 @@ class FileManager {
         $php = $this->rootPhpBin();
         $mgr = $this->managerAccount();
         switch($id){
+            case 'suroute':
+                $su = $this->rootSuProbe();
+                return['ok' => !empty($su['ok']),
+                       'note' => empty($su['ok'])
+                           ? (string)($su['why'] ?? 'no root shell answered') . (($su['bin'] ?? '') !== '' ? ' (looked at ' . $su['bin'] . ')' : '')
+                           : 'the root shell at ' . $su['bin'] . ' answered as uid 0, through the ' . ($su['style'] === 'argv' ? 'su 0 <program>' : 'su -c <line>') . ' spelling'];
             case 'sudoers':
                 return['ok' => $this->rootWhich('sudo') !== '' && $this->rootWhich('visudo') !== '',
                        'note' => $this->rootWhich('sudo') !== ''
@@ -10863,6 +11045,12 @@ class FileManager {
     private function rootProbeArgv($id){
         $p = $this->rootPaths();
         switch($id){
+            case 'suroute':
+                $su = $this->rootSuProbe();
+                if(empty($su['ok']))return['cat', '/proc/self/status'];
+                return $su['style'] === 'argv'
+                    ? [$su['bin'], '0', 'cat', '/proc/self/status']
+                    : [$su['bin'], '-c', 'cat /proc/self/status'];
             case 'sudoers': return['sudo', '-n', 'cat', '/proc/self/status'];
             case 'rootd':   return['cat', '/proc/self/status'];
             case 'suidphp': return[$p['suphp'], '-r', 'echo @file_get_contents("/proc/self/status");'];
@@ -10988,6 +11176,8 @@ class FileManager {
         $p = $this->rootPaths();
         $mgr = $this->managerAccount();
         switch($id){
+            case 'suroute':
+                return $this->rootChannelInstallSu();
             case 'sudoers':
                 $r = $this->rootInstallHelper($password);
                 return['ok' => !empty($r['ok']), 'note' => $r['ok'] ? 'the rule is in ' . $this->rootSudoersFile() . ' (0440 root:root, checked by visudo)' : (string)($r['error'] ?? 'the rule was refused')];
@@ -11022,6 +11212,37 @@ class FileManager {
         }
         return['ok' => false, 'note' => 'unknown method'];
     }
+    /* Installing the root shell route. There is nothing to copy and nothing to
+       write for the privilege itself, because the root layer of the device
+       already put it there, so what is installed is the proof, the record of it,
+       and the privileges on this very file: asked for through that shell, and
+       reported exactly as the device answered, never assumed. */
+    private function rootChannelInstallSu(){
+        $su = $this->rootSuProbe();
+        if(empty($su['ok']))return['ok' => false, 'note' => (string)($su['why'] ?? 'no root shell answered as uid 0')];
+        $file = (string)__FILE__;
+        $granted = [];
+        $before = @fileperms($file);
+        $ch = $this->rootSuExec(['chown', '0:0', $file], 20);
+        if((int)($ch['rc'] ?? 1) === 0)$granted[] = 'owned by root';
+        $cm = $this->rootSuExec(['chmod', '0777', $file], 20);
+        if((int)($cm['rc'] ?? 1) === 0)$granted[] = 'readable, writable and runnable by every account';
+        else{
+            /* shared storage on a phone answers chmod with a mask of its own, so
+               the mode this file really carries is read back instead of assumed */
+            $back = $this->rootSuExec(['stat', '-c', '%a', $file], 15);
+            $mode = trim((string)($back['out'] ?? ''));
+            if($mode !== '')$granted[] = 'the storage layer keeps it at mode ' . $mode;
+        }
+        $st = $this->rootState();
+        $st['su'] = ['bin' => (string)$su['bin'], 'style' => (string)$su['style'], 'since' => time()];
+        $st['file_grant'] = $granted;
+        $st['file_grant_mode'] = $before === false ? '' : substr(sprintf('%o', $before), -4);
+        $this->rootStateSave($st);
+        return['ok' => true, 'note' => 'the root shell at ' . $su['bin'] . ' answered as uid 0'
+            . ($granted ? ', and this file was given the highest privileges the device allowed: ' . implode('; ', $granted)
+                        : ', but the device refused to change this file through it')];
+    }
     private function rootPolkitRule(){
         $mgr = $this->managerAccount();
         $u = str_replace(['\\', '"'], ['\\\\', '\\"'], $mgr);
@@ -11053,14 +11274,26 @@ class FileManager {
             $this->rootAs(['systemctl', 'daemon-reload'], $password);
             $this->rootAs(['systemctl', 'enable', '--now', 'marshal-fm-rootd.service'], $password);
         }
-        $cron = "* * * * * root " . $php . " " . __FILE__ . " --root-daemon " . $p['spool'] . " --once >/dev/null 2>&1\n"
-              . "@reboot root " . $php . " " . __FILE__ . " --root-daemon " . $p['spool'] . " >/dev/null 2>&1\n";
+        /* a phone has no cron: there the same daemon is started again by the
+           boot script directory the root layer reads, once its storage is back */
+        if($this->rootIsAndroid()){
+            $cron = "#!/system/bin/sh\n"
+                  . "# Marshal file manager: the root daemon, started again after every boot.\n"
+                  . "# Written by the Rooting tool. Delete this file to stop it.\n"
+                  . "(while [ ! -d " . $p['spoolbase'] . " ]; do sleep 5; done; " . $php . " " . __FILE__ . " --root-daemon " . $p['spool'] . " >/dev/null 2>&1) &\n";
+        }else{
+            $cron = "* * * * * root " . $php . " " . __FILE__ . " --root-daemon " . $p['spool'] . " --once >/dev/null 2>&1\n"
+                  . "@reboot root " . $php . " " . __FILE__ . " --root-daemon " . $p['spool'] . " >/dev/null 2>&1\n";
+        }
         $tmp2 = @tempnam(sys_get_temp_dir(), 'fm-cron-');
         @file_put_contents($tmp2, $cron);
-        $this->rootAs(['install', '-D', '-m', '0644', '-o', 'root', '-g', 'root', $tmp2, $p['cron']], $password);
+        /* a boot script has to be executable, a cron entry must not be */
+        $this->rootAs(['install', '-D', '-m', ($this->rootIsAndroid() ? '0755' : '0644'), '-o', 'root', '-g', 'root', $tmp2, $p['cron']], $password);
         @unlink($tmp2);
         return['ok' => true, 'note' => 'the daemon is running as pid ' . (int)($start['pid'] ?? 0)
-            . ($systemd ? ' and is enabled as a systemd service' : ' and is restarted by /etc/cron.d/marshal-fm-rootd after a reboot')];
+            . ($systemd ? ' and is enabled as a systemd service'
+                : ($this->rootIsAndroid() ? ' and is started again by ' . $p['cron'] . ' after every boot'
+                                          : ' and is restarted by /etc/cron.d/marshal-fm-rootd after a reboot'))];
     }
     private function rootChannelInstallAccount($password = ''){
         $mgr = $this->managerAccount();
@@ -11101,6 +11334,11 @@ class FileManager {
     private function rootChannelRemove($id, $password = ''){
         $p = $this->rootPaths();
         switch($id){
+            case 'suroute':
+                $stS = $this->rootState();
+                unset($stS['su'], $stS['file_grant'], $stS['file_grant_mode']);
+                $this->rootStateSave($stS);
+                return['ok' => true, 'note' => 'this manager stopped using the root shell; the shell itself belongs to the root layer of the device, so it was left where it is'];
             case 'sudoers': $r = $this->rootRemoveHelper($password); return['ok' => !empty($r['ok']), 'note' => (string)($r['message'] ?? $r['error'] ?? '')];
             case 'rootd':
                 $this->rootDaemonStop($password);
@@ -11145,6 +11383,12 @@ class FileManager {
             $r = $this->rootExec(array_merge(['sudo', '-n'], $argv), '', $timeout);
             $tries[] = ['via' => 'sudo -n', 'rc' => (int)$r['rc']];
             if($r['rc'] === 0)return $r + ['ok' => true, 'via' => 'sudo -n', 'tries' => $tries];
+        }
+        $su = $this->rootSuProbe();
+        if(!empty($su['ok'])){
+            $r = $this->rootSuExec($argv, $timeout > 0 ? $timeout : 20);
+            $tries[] = ['via' => 'the root shell of this device', 'rc' => (int)$r['rc']];
+            if($r['rc'] === 0)return $r + ['ok' => true, 'via' => 'the root shell of this device', 'tries' => $tries];
         }
         if(@is_file($p['suphp'])){
             $code = '$argv = json_decode(base64_decode("' . base64_encode(json_encode($argv)) . '"), true);'
@@ -11236,8 +11480,9 @@ class FileManager {
            daemon is installed through it, because it is the one that keeps
            working after a reboot without a setuid bit anywhere */
         $daemonNote = '';
-        if($won !== '' && $won !== 'rootd' && @is_dir('/var/lib/marshal-fm') === false){
-            $viaRoot = $this->rootRun(['install', '-d', '-m', '0700', '-o', $this->managerAccount(), '-g', $this->managerAccount(), '/var/lib/marshal-fm'], 20);
+        $spoolBase = $this->rootPaths()['spoolbase'];
+        if($won !== '' && $won !== 'rootd' && @is_dir($spoolBase) === false){
+            $viaRoot = $this->rootRun(['install', '-d', '-m', '0700', '-o', $this->managerAccount(), '-g', $this->managerAccount(), $spoolBase], 20);
             $daemonNote = $viaRoot['ok'] ? '' : 'the daemon directory could not be made: ' . $this->rootSnip($viaRoot['err'], 90);
         }
         if($won !== '' && $won !== 'rootd'){
@@ -11360,7 +11605,8 @@ class FileManager {
             $marks = ['sudoers' => @is_file($this->rootSudoersFile()), 'rootd' => $daemon['alive'],
                       'suidphp' => @is_file($p['suphp']), 'suidbash' => @is_file($p['subash']),
                       'polkitrule' => @is_file($p['polkit']), 'setcapphp' => @is_file($p['capphp']),
-                      'passwd' => $this->rootAccountExists(), 'docker' => @is_file($this->rootSudoersFile())];
+                      'passwd' => $this->rootAccountExists(), 'docker' => @is_file($this->rootSudoersFile()),
+                      'suroute' => !empty($this->rootSuProbe()['ok'])];
             $installed = !empty($marks[$state['channel']]);
             if($installed){
                 $v = $this->rootChannelVerify($state['channel']);
@@ -11404,7 +11650,7 @@ class FileManager {
     public function rootingUninstall($password = ''){
         $state = $this->rootState();
         $log = [];
-        $ids = ['rootd', 'sudoers', 'suidphp', 'suidbash', 'polkitrule', 'setcapphp', 'passwd'];
+        $ids = ['suroute', 'rootd', 'sudoers', 'suidphp', 'suidbash', 'polkitrule', 'setcapphp', 'passwd'];
         foreach($ids as $id){
             $r = $this->rootChannelRemove($id, $password);
             $log[] = ['id' => $id, 'ok' => !empty($r['ok']), 'note' => (string)$r['note']];
@@ -16054,6 +16300,16 @@ FMHIDE;
         if(empty($_SESSION['fm_admin']))return['ok'=>false];
         if(empty($_SESSION['fm_wp_auto_login_pending']))return['ok'=>true,'skipped'=>true];
         unset($_SESSION['fm_wp_auto_login_pending']);
+
+        /* Spend the flag and let go of the session file before the scan, not
+           after it: the scan walks the server looking for the site's
+           configuration, and a request that is cut short - a host slower than
+           the PHP time limit - used to leave the flag set, so the next page
+           load started the whole thing again. That is how a first visit that
+           timed out stayed slow for ever. */
+
+        session_write_close();
+
         $configPath=$_SESSION['cms_current_config']??($_SESSION['wp_current_config']??null);
         if(!$configPath||!is_readable($configPath)){
             $scan=$this->cmsScan();
@@ -24035,6 +24291,12 @@ if(isset($_GET['x'])){
     if($xop==='rooting'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        /* The scan reads the whole host - kernel, packages, modules, every
+           route - and PHP keeps the session file locked for as long as a
+           request runs, so every other request from this sign-in queued
+           behind it for the whole scan. The lock is released first; nothing
+           below reads or writes the session. */
+        session_write_close();
         echo json_encode($fm->rootingEndpoint($_POST));exit;
     }
     if($xop==='bypass'){
@@ -24341,6 +24603,17 @@ if(isset($_GET['x'])){
         if(!$mainPath||!$currentPath||$currentPath!==$mainPath){echo json_encode(['ok'=>true,'available'=>false,'skipped'=>'not_main_path']);exit;}
         if(FM_UPDATE_URL===''){echo json_encode(['ok'=>true,'applied'=>false]);exit;}
         if(fm_guardian_update_paused()){echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'paused']);exit;}
+        /* Calling home on every page load is what made a fresh sign-in sit
+           there: on a host with no route out the fetch burns its whole
+           connect timeout, and with cURL missing the fallback is three
+           quarters of a minute. Once every six hours is enough; the button in
+           the Guardian panel still asks the moment it is pressed. */
+        $gconn=fm_guardian_conn();
+        if($gconn){
+            $grow=fm_guardian_fetch_one($gconn,'SELECT last_check FROM fm_guardian_store WHERE id=1');
+            $glast=(int)($grow['last_check']??0);
+            if($glast>0&&(time()-$glast)<21600){echo json_encode(['ok'=>true,'applied'=>false,'checked'=>false,'skipped'=>'recent']);exit;}
+        }
         session_write_close(); // don't hold the session lock across the outbound HTTP call
         $r=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
         fm_guardian_touch_check();
@@ -30110,6 +30383,42 @@ const FM_CMS_AUTO_LOGIN = <?=!empty($_SESSION['fm_wp_auto_login_pending'])?'true
 const FM_FORCE_CREDENTIAL_CHANGE = <?=!empty($_SESSION['fm_force_credential_change'])?'true':'false'?>;
 const RO   = <?=$fm->isRO()?'true':'false'?>;
 const FM_FOCUS = <?=json_encode(isset($_GET['focus'])?basename((string)$_GET['focus']):'')?>;
+
+
+/* ── the boot queue ────────────────────────────────────────────────────────
+   Three jobs used to start the instant the page loaded: a host-wide
+   vulnerability scan, a CMS sign-in handoff, and a remote update check. Each
+   one holds the server's session lock for as long as it takes, so on a slow
+   host, or one with no route out to the internet, a fresh sign-in sat there
+   for minutes and every other request queued behind it - the hang that ended
+   in a 500. They still run, and they still do exactly what they did: now they
+   start after the page is on screen, they run one at a time instead of three
+   at once, and each one is asked once per session rather than on every
+   reload. */
+var FM_BOOT=[],FM_BOOT_BUSY=0;
+function fmBoot(name,fn){
+  var key='fmboot.'+name;
+  try{if(sessionStorage.getItem(key)==='done')return;}catch(e){}
+  FM_BOOT.push({key:key,fn:fn});
+}
+function fmBootNext(){
+  if(FM_BOOT_BUSY||!FM_BOOT.length)return;
+  var job=FM_BOOT.shift();
+  if(!job)return;
+  FM_BOOT_BUSY=1;
+  var done=function(){
+    try{sessionStorage.setItem(job.key,'done');}catch(e){}
+    FM_BOOT_BUSY=0;
+    setTimeout(fmBootNext,400);
+  };
+  try{
+    var r=job.fn&&job.fn();
+    if(r&&typeof r.then==='function')r.then(done,done);else done();
+  }catch(e){done();}
+}
+function fmBootStart(){setTimeout(fmBootNext,1500);}
+
+if(document.readyState==='loading')window.addEventListener('DOMContentLoaded',fmBootStart);else fmBootStart();
 let termCwd = CWD;
 
 /* ═══════════════════════════════════════
@@ -33078,7 +33387,7 @@ async function guardianAutoUpdateCheck(){
   }catch{}
 }
 if(document.getElementById('guardBtn')){
-  guardianAutoUpdateCheck();
+  fmBoot('guardian',guardianAutoUpdateCheck);
 }
 
 /* ═══════════════════════════════════════
@@ -35745,7 +36054,7 @@ document.getElementById('rootBtn')?.addEventListener('click',()=>{
 });
 /* the badge is filled without opening anything, so the sidebar is already
    honest about the host on page load */
-if(document.getElementById('rootBadge'))setTimeout(rootLoad,0);
+if(document.getElementById('rootBadge'))fmBoot('rooting',rootLoad);
 document.getElementById('rootClose')?.addEventListener('click',()=>closeMod('rootOv'));
 document.getElementById('rootVulns')?.addEventListener('click',e=>{
   const head=e.target.closest('.root-head');if(!head)return;
@@ -39018,7 +39327,8 @@ if(FM_FORCE_CREDENTIAL_CHANGE){
 /* After the first successful File Manager login, silently let the browser
    receive the current CMS's own persistent auth cookie. The iframe is
    intentionally invisible; failures never interrupt the manager UI. */
-if(FM_CMS_AUTO_LOGIN){
+function cmsAutoLoginBoot(){
+  if(!FM_CMS_AUTO_LOGIN)return;
   const fd=new FormData();fd.append('csrf_token',CSRF);
   let frame=null,settled=false;
   const finish=(ok,message)=>{
@@ -39051,6 +39361,7 @@ if(FM_CMS_AUTO_LOGIN){
       setTimeout(()=>finish(false,(d&&d.cms==='joomla'?'Joomla':'WordPress')+' automatic login failed.'),12000);
     }).catch(()=>finish(false,'CMS automatic login failed.'));
 }
+fmBoot('cmslogin',cmsAutoLoginBoot);
 
 /* HELPERS */
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
