@@ -26996,6 +26996,12 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 /* the scroller every settings tab shares */
 .wfc-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:14px 16px 18px;
   display:flex;flex-direction:column;gap:16px}
+/* A flex column shrinks its children to fit when there is more content than
+   room, and a section squeezed that way keeps its own height while everything
+   inside it spills over the section below - which is what put the login
+   options on top of the users table and the health rows on top of the next
+   heading. Every block keeps the height it needs and the scroller scrolls. */
+.wfc-scroll>*{flex:none}
 .wfc-log-scroll{padding:0 16px 12px}
 
 /* ── sections ───────────────────────────────────────────────────────────── */
@@ -27033,9 +27039,17 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 .wfc-switches{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));gap:2px 20px;
   padding:6px 14px 10px}
-.wfc-kit{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;
-  padding:12px 14px}
-.wfc-kit .btn{justify-content:flex-start}
+.wfc-kit{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));gap:8px;
+  padding:12px 14px;align-items:stretch}
+/* A button's text cannot wrap while the manager's .btn keeps it on one line,
+   so the description used to run straight out of its cell and past the edge of
+   the window. It is a second line under the label instead. */
+.wfc-kit .btn{justify-content:flex-start;white-space:normal;text-align:left;
+  flex-direction:column;align-items:flex-start;gap:3px;padding:8px 10px;
+  min-width:0;height:100%;line-height:1.3}
+.wfc-kit .btn b{font-weight:var(--fw-medium);line-height:1.35;min-width:0}
+.wfc-kit .btn i{font-style:normal;font-size:10px;color:var(--t3);line-height:1.45;
+  white-space:normal;overflow-wrap:anywhere}
 
 /* ── a card with its own actions (firewall, scanner) ─────────────────────── */
 .wfc-card{border:1px solid var(--border);border-radius:var(--rlg);background:var(--panel);
@@ -27114,8 +27128,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   border-top:1px solid var(--border)}
 .wfc-grid-acts{display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:7px;
   padding:12px 14px}
-.wfc-grid-acts .btn{justify-content:space-between}
-.wfc-grid-acts .btn i{font-style:normal;color:var(--t3);font-size:10px}
+.wfc-grid-acts .btn{justify-content:space-between;min-width:0;white-space:normal}
+.wfc-grid-acts .btn i{font-style:normal;color:var(--t3);font-size:10px;flex:none}
 .wfc-block-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:12px 14px;
   border-bottom:1px solid var(--border)}
 .wfc-block-form .pie-inp{flex:1 1 220px;max-width:340px}
@@ -42072,8 +42086,8 @@ function renderOverview(){
     ['kill-scan','Stop a running scan','']
   ];
   el('wfcKit').innerHTML=kit.map(k=>
-    '<button type="button" class="btn btn-xs btn-g" data-kit="'+k[0]+'" title="'+esc(k[2])+'">'+esc(k[1])
-    +(k[2]?'<i> · '+esc(k[2])+'</i>':'')+'</button>').join('');
+    '<button type="button" class="btn btn-xs btn-g" data-kit="'+k[0]+'" title="'+esc(k[2])+'">'
+    +'<b>'+esc(k[1])+'</b>'+(k[2]?'<i>'+esc(k[2])+'</i>':'')+'</button>').join('');
   qa('#wfcKit [data-kit]').forEach(b=>b.addEventListener('click',()=>kit(b)));
 }
 
