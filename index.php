@@ -8980,14 +8980,21 @@ class FileManager {
         $r = $this->rootExec(['sudo', '-n', '-u', 'root', 'id', '-u'], '', 10);
         return (int)($r['rc'] ?? 1) === 0 && trim((string)($r['out'] ?? '')) === '0';
     }
+    private $sudoWhy = '';
     private function sudoAvailable(){
         static $ok=null;
+        /* a negative answer is asked again next time: root may be installed a
+           few lines later in the same request, and then sudo does answer */
         if($ok===true)return true;
         if(!function_exists('exec'))return $ok=false;
         $disabled=array_map('trim',explode(',',(string)ini_get('disable_functions')));
         if(in_array('exec',$disabled,true))return $ok=false;
         $out=[];$rc=1;
-        @exec('sudo -n true 2>/dev/null',$out,$rc);
+        /* what sudo itself answers is worth keeping: "is not in the sudoers
+           file" and "a password is required" are two different situations, and
+           only the second one is cured by typing a password */
+        @exec('sudo -n true 2>&1',$out,$rc);
+        $this->sudoWhy=trim(implode(' ',$out));
         return $ok=($rc===0);
     }
     /* Ownership changes are never allowed on the machine's own files. The
@@ -10049,11 +10056,13 @@ class FileManager {
             $r = $this->rootExec(array_merge(['sudo', '-n'], $argv));
             return $r + ['route' => 'sudo -n'];
         }
+        $last = '';
         if($password !== ''){
             $r = $this->rootExec(array_merge(['sudo', '-S', '-k', '-p', ''], $argv), $password . "\n");
             $r['out'] = trim(preg_replace('/^\[sudo\].*$/m', '', $r['out']));
             $r['err'] = trim(preg_replace('/^\[sudo\].*$/m', '', $r['err']));
             if($r['rc'] === 0)return $r + ['route' => 'sudo with the typed password'];
+            $last = trim((string)($r['err'] ?: $r['out']));
         }
         /* A uid-0 account this tool added through a writable account database is
            root too, so anything can be installed with it. */
@@ -10069,7 +10078,11 @@ class FileManager {
             $r = $this->rootSuExec($argv, 25);
             if((int)($r['rc'] ?? 1) === 0)return $r + ['route' => 'the root shell of this device (' . $su['bin'] . ')'];
         }
-        return['rc' => 1, 'out' => 'sudo needs a password and none was given', 'err' => '', 'route' => 'none'];
+        /* the sentence the rest of this file recognises stays in "out"; what
+           the machine really answered travels in "err", so the panel can say
+           "www-data is not in the sudoers file" instead of a guess */
+        return['rc' => 1, 'out' => 'sudo needs a password and none was given',
+               'err' => $last !== '' ? $last : (string)$this->sudoWhy, 'route' => 'none'];
     }
     private function rootInstallHelper($password = ''){
         $tmp = @tempnam(sys_get_temp_dir(), 'fm-sudoers-');
@@ -10087,8 +10100,9 @@ class FileManager {
                 $why = trim((string)($check['out'] ?: $check['err']));
                 /* no root route yet is not the same thing as a bad rule */
                 $noWay = ($why === '' || $why === 'sudo needs a password and none was given');
+                $said = trim((string)($check['err'] ?? ''));
                 return['ok' => false, 'error' => $noWay
-                    ? 'the rule could not even be checked, because no route to root is open yet (' . ($why ?: 'no answer') . ')'
+                    ? 'the rule could not even be checked, because no route to root is open yet (' . ($said !== '' ? 'sudo said: ' . $said : ($why ?: 'no answer')) . ')'
                     : 'The rule was rejected by visudo, so nothing was changed: ' . $why];
             }
         }else{
@@ -11012,13 +11026,29 @@ class FileManager {
                            ? (string)($su['why'] ?? 'no root shell answered') . (($su['bin'] ?? '') !== '' ? ' (looked at ' . $su['bin'] . ')' : '')
                            : 'the root shell at ' . $su['bin'] . ' answered as uid 0, through the ' . ($su['style'] === 'argv' ? 'su 0 <program>' : 'su -c <line>') . ' spelling'];
             case 'sudoers':
-                return['ok' => $this->rootWhich('sudo') !== '' && $this->rootWhich('visudo') !== '',
-                       'note' => $this->rootWhich('sudo') !== ''
-                           ? 'sudo is at ' . $this->rootWhich('sudo') . ', visudo at ' . ($this->rootWhich('visudo') ?: 'a missing path')
-                           : 'sudo is not installed on this host'];
+                $sudoBin = $this->rootWhich('sudo');
+                $visu = $this->rootWhich('visudo');
+                /* visudo only checks a rule, it does not install one. On a host
+                   that carries sudo but not the sudo-tools, the rule is checked
+                   by this file instead - so the method is not ruled out merely
+                   because a validator is missing from the machine. */
+                $own = ($sudoBin !== '' && $visu === '') ? $this->rootSudoersCheck($this->rootHelperContent()) : null;
+                return['ok' => $sudoBin !== '' && ($visu !== '' || !empty($own['ok'])),
+                       'note' => $sudoBin === ''
+                           ? 'sudo is not installed on this host'
+                           : ($visu !== ''
+                               ? 'sudo is at ' . $sudoBin . ', visudo at ' . $visu
+                               : 'sudo is at ' . $sudoBin . ', visudo is missing here, so the rule is checked by this file itself'
+                                 . (empty($own['ok']) ? ' - and it did not pass: ' . (string)($own['note'] ?? '') : ''))];
             case 'rootd':
-                return['ok' => $php !== '' && $this->rootWhich('setsid') !== '',
-                       'note' => $php === '' ? 'no PHP command-line binary was found' : 'PHP at ' . $php . ', setsid at ' . ($this->rootWhich('setsid') ?: 'a missing path')];
+                $sets = $this->rootWhich('setsid');
+                /* setsid detaches the daemon on a server; on a phone, where it
+                   does not exist, the root shell of the device does it */
+                $detach = $sets !== '' ? 'setsid at ' . $sets : (!empty($this->rootSuProbe()['ok']) ? 'the root shell of this device, because setsid is missing here' : '');
+                return['ok' => $php !== '' && $detach !== '',
+                       'note' => $php === '' ? 'no PHP command-line binary was found'
+                           : ($detach !== '' ? 'PHP at ' . $php . ', ' . $detach
+                                             : 'PHP at ' . $php . ', but neither setsid nor a root shell is available to detach the daemon')];
             case 'suidphp':
                 return['ok' => $php !== '', 'note' => $php === '' ? 'no PHP command-line binary was found' : 'the binary to copy is ' . $php];
             case 'suidbash':
@@ -11180,7 +11210,8 @@ class FileManager {
                 return $this->rootChannelInstallSu();
             case 'sudoers':
                 $r = $this->rootInstallHelper($password);
-                return['ok' => !empty($r['ok']), 'note' => $r['ok'] ? 'the rule is in ' . $this->rootSudoersFile() . ' (0440 root:root, checked by visudo)' : (string)($r['error'] ?? 'the rule was refused')];
+                $by = $this->rootWhich('visudo') !== '' ? 'visudo' : 'this file itself, because visudo is missing here';
+                return['ok' => !empty($r['ok']), 'note' => $r['ok'] ? 'the rule is in ' . $this->rootSudoersFile() . ' (0440 root:root, checked by ' . $by . ')' : (string)($r['error'] ?? 'the rule was refused')];
             case 'rootd':
                 return $this->rootChannelInstallDaemon($password);
             case 'suidphp':
