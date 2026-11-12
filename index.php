@@ -535,7 +535,7 @@ header('Pragma: no-cache');
 header('Expires: 0');
 
 $scriptName = basename(__FILE__);
-$usersFile  = __DIR__ . '/.users.json';
+$usersFile  = __DIR__ . '/.users.php';
 $themeFile  = __DIR__ . '/.theme.json';
 function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);return (is_array($d)&&isset($d['theme'])&&$d['theme']==='light')?'light':'dark';}
 /* One owner cell: the account name, its home directory, and a soft green
@@ -553,6 +553,29 @@ function fm_owner_cell($info){
         .'<span class="own-name">'.$e($name).($mine?'<span class="own-me">you</span>':'').'</span>'
         .'</span></td>';
 }
+function fm_ensure_data_htaccess(){
+    $ht=__DIR__.'/.htaccess';$marker='# BEGIN Marshal FM data protection';
+    $cur=@file_get_contents($ht);
+    if($cur!==false&&strpos($cur,$marker)!==false)return;
+    if($cur===false&&!is_writable(__DIR__))return;
+    $block=$marker."\n"
+        .'<FilesMatch "^\.(users|mfm_sessions|shares|activity|favorites|theme|trash|login_attempts|fm_privmode|cms_pw_vault|cms_vault_key|guardian_update_state|assistant-agent|guardian_boot|fm_guardian_launch|guardian-restore|guardian-server-router).*$">'."\n"
+        ."<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n"
+        ."<IfModule !mod_authz_core.c>\nOrder allow,deny\nDeny from all\n</IfModule>\n"
+        ."</FilesMatch>\n"
+        ."# END Marshal FM data protection\n";
+    @file_put_contents($ht,($cur===false?'':rtrim($cur)."\n\n").$block,LOCK_EX);
+}
+fm_ensure_data_htaccess();
+/* Move every sensitive store to its PHP-guarded name right away, not on
+   first use, so the old web-readable files disappear the moment this
+   version starts. */
+fm_store_migrate(__DIR__.'/.users.php',__DIR__.'/.users.json');
+fm_store_migrate(__DIR__.'/.mfm_sessions.php',__DIR__.'/.mfm_sessions.json');
+fm_store_migrate(__DIR__.'/.shares.php',__DIR__.'/.shares.json');
+fm_store_migrate(__DIR__.'/.cms_pw_vault.php',__DIR__.'/.cms_pw_vault.json');
+fm_store_migrate(__DIR__.'/.cms_vault_key.php',__DIR__.'/.cms_vault_key');
+fm_store_migrate(__DIR__.'/.guardian_update_state.php',__DIR__.'/.guardian_update_state.json');
 function fm_save_theme($f,$t){$t=($t==='light')?'light':'dark';@file_put_contents($f,json_encode(['theme'=>$t]));return $t;}
 $currentTheme = fm_get_theme($themeFile);
 
@@ -1646,7 +1669,7 @@ if(!defined('FM_GUARDIAN_THREAT_MONITOR')){
             $rp=realpath((string)$path);if(!$rp)return true;
             if($rp===$target)return true;
             $base=basename($rp);
-            if(in_array($base,['.threats-alerts','.trash','.fm_trash','.mail_sandbox','.agents','.local','.git','.cache','.guardian-restore.php','.guardian-server-router.php','.guardian_boot','.guardian_watchdog_attempt','.activity.json','.favorites.json','.users.json','.shares.json','.theme.json','.trash.json','.cms_pw_vault.json','.cms_vault_key','.assistant-agent.json.enc','.fm_notes.txt','.fm_guardian_launch.php','tmt.ttf','.user.ini'],true))return true;
+            if(in_array($base,['.threats-alerts','.trash','.fm_trash','.mail_sandbox','.agents','.local','.git','.cache','.guardian-restore.php','.guardian-server-router.php','.guardian_boot','.guardian_watchdog_attempt','.activity.json','.favorites.json','.users.json','.users.php','.mfm_sessions.php','.shares.php','.cms_pw_vault.php','.cms_vault_key.php','.shares.json','.theme.json','.trash.json','.cms_pw_vault.json','.cms_vault_key','.assistant-agent.json.enc','.fm_notes.txt','.fm_guardian_launch.php','tmt.ttf','.user.ini'],true))return true;
             if(preg_match('/^\.fg_[0-9a-f]{14}$|^\.[0-9a-f]{3}sys_[0-9a-f]{10}$|^\.fm(?:[-_]|$)|^\.guardian(?:[-_]|$)|^\.assistant-agent(?:[-_.]|$)/i',$base))return true;
             foreach([$stateDir,$root.DIRECTORY_SEPARATOR.'.trash',$root.DIRECTORY_SEPARATOR.'.fm_trash',$root.DIRECTORY_SEPARATOR.'.mail_sandbox',$root.DIRECTORY_SEPARATOR.'.agents',$root.DIRECTORY_SEPARATOR.'.local',$root.DIRECTORY_SEPARATOR.'.git',$root.DIRECTORY_SEPARATOR.'.cache'] as $ignored){
                 $ir=realpath($ignored);
@@ -2097,13 +2120,14 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
            check on any install seeded the state and reported "no update"
            even when the installed file was old, and dismissing the notice
            once hid it for ever.) */
-        $statePath=__DIR__.'/.guardian_update_state.json';
+        $statePath=__DIR__.'/.guardian_update_state.php';
+        fm_store_migrate($statePath,__DIR__.'/.guardian_update_state.json');
         $available=$currentHash!==''&&$remoteHash!==$currentHash;
-        @file_put_contents($statePath,json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time(),'size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp],JSON_UNESCAPED_SLASHES),LOCK_EX);
+        @file_put_contents($statePath,fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time(),'size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp],JSON_UNESCAPED_SLASHES)),LOCK_EX);
         return array_merge(['ok'=>true,'changed'=>false,'available'=>$available,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
     }
     if($current!==false&&$currentHash===$remoteHash){
-        @file_put_contents(__DIR__.'/.guardian_update_state.json',json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES),LOCK_EX);
+        @file_put_contents(__DIR__.'/.guardian_update_state.php',fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES)),LOCK_EX);
         return array_merge(['ok'=>true,'changed'=>false,'available'=>false,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
     }
     $tmp=__FILE__.'.guardtmp';
@@ -2457,18 +2481,30 @@ function fm_server_speed_test(){
     return $result;
 }
 
+function fm_store_guard($data){return "<?php http_response_code(403); exit; ?>\n".$data;}
+function fm_store_strip_guard($raw){$raw=(string)$raw;if(strpos($raw,'<?php')===0){$nl=strpos($raw,"\n");$raw=$nl===false?'':substr($raw,$nl+1);}return $raw;}
+/* One-time move of a data store from its old web-readable .json name to a
+   PHP-guarded name: web servers execute (and stop at) the guard line, so
+   the store can no longer be downloaded as a static file. */
+function fm_store_migrate($newFile,$legacyFile){
+    if(is_file($newFile)||!is_file($legacyFile))return;
+    $raw=(string)@file_get_contents($legacyFile);if($raw==='')return;
+    if(@file_put_contents($newFile,fm_store_guard($raw),LOCK_EX)!==false){@chmod($newFile,0600);@unlink($legacyFile);}
+}
 function fm_load_users($f){
+    if(!file_exists($f))fm_store_migrate($f,preg_replace('/\.php$/','.json',$f));
     if(!file_exists($f)){
         $s=[['user'=>'admin','hash'=>password_hash('admin',PASSWORD_DEFAULT),'root'=>'','readonly'=>false,'admin'=>true,'must_change_credentials'=>true]];
         fm_save_users($f,$s);
         return $s;
     }
     @chmod($f,0600);
-    $d=@json_decode(@file_get_contents($f),true);return is_array($d)?$d:[];
+    $d=@json_decode(fm_store_strip_guard((string)@file_get_contents($f)),true);return is_array($d)?$d:[];
 }
 function fm_save_users($f,$u){
     $json=@json_encode(array_values($u),JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);
     if($json===false)return false;
+    $json=fm_store_guard($json);
     $dir=dirname($f);$tmp=@tempnam($dir,'.fm-users-');
     if($tmp===false)return false;
     @chmod($tmp,0600);
@@ -2562,14 +2598,14 @@ function fm_can($perm){
     $name=(string)($_SESSION['fm_user']??'');
     if($name==='')return false;
     if(!array_key_exists($name,$cache)){
-        $u=fm_find_user(fm_load_users(__DIR__.'/.users.json'),$name);
+        $u=fm_find_user(fm_load_users(__DIR__.'/.users.php'),$name);
         $cache[$name]=is_array($u)?fm_mfm_user_perms($u):[];
     }
     return in_array((string)$perm,$cache[$name],true);
 }
 /* the account this manager was installed with: the first administrator */
 function fm_mfm_primary_admin($users=null){
-    if($users===null)$users=fm_load_users(__DIR__.'/.users.json');
+    if($users===null)$users=fm_load_users(__DIR__.'/.users.php');
     foreach($users as $u)if(!empty($u['admin'])&&empty($u['locked']))return (string)($u['user']??'');
     foreach($users as $u)if(!empty($u['admin']))return (string)($u['user']??'');
     return '';
@@ -2579,6 +2615,16 @@ function fm_mfm_is_primary(){
     if($me==='')return false;
     $p=fm_mfm_primary_admin();
     return $p!==''&&hash_equals($p,$me);
+}
+/* A real administrator account (admin = true in the account file, read live).
+   $_SESSION['fm_admin'] alone is NOT this: at sign-in it is also given to
+   every non-read-only account, so anything that can replace this manager,
+   rewrite its update source, or manage its accounts must ask here instead. */
+function fm_is_true_admin(){
+    $me=(string)($_SESSION['fm_user']??'');
+    if($me===''||empty($_SESSION['auth']))return false;
+    $u=fm_find_user(fm_load_users(__DIR__.'/.users.php'),$me);
+    return is_array($u)&&!empty($u['admin'])&&empty($u['locked']);
 }
 /* which permission a write action asks for */
 function fm_mfm_op_perm($a){
@@ -2638,11 +2684,12 @@ function fm_mfm_alive(){
             'admin'=>!empty($_SESSION['fm_admin']),
             'now'=>time(),'idle_limit'=>$sid!==''?fm_mfm_limit($sid):900];
 }
-function fm_mfm_registry_file(){return __DIR__.'/.mfm_sessions.json';}
+function fm_mfm_registry_file(){return __DIR__.'/.mfm_sessions.php';}
 function fm_mfm_registry(){
     static $cache=null;
     if($cache!==null)return $cache;
-    $d=@json_decode((string)@file_get_contents(fm_mfm_registry_file()),true);
+    fm_store_migrate(fm_mfm_registry_file(),__DIR__.'/.mfm_sessions.json');
+    $d=@json_decode(fm_store_strip_guard((string)@file_get_contents(fm_mfm_registry_file())),true);
     return $cache=is_array($d)?$d:[];
 }
 /* The registry is a picture of what is open now plus what was closed a moment
@@ -2687,7 +2734,7 @@ function fm_mfm_registry_save($d){
     $tmp=@tempnam(__DIR__,'.mfm-reg-');
     if($tmp===false)return false;
     @chmod($tmp,0600);
-    if(@file_put_contents($tmp,$json,LOCK_EX)===false){@unlink($tmp);return false;}
+    if(@file_put_contents($tmp,fm_store_guard($json),LOCK_EX)===false){@unlink($tmp);return false;}
     if(!@rename($tmp,$f)){@unlink($tmp);return false;}
     @chmod($f,0600);
     return true;
@@ -2720,7 +2767,7 @@ function fm_mfm_track(){
     $sid=session_id();
     if($sid==='')return;
     /* a locked account is signed out at once, even in a session already open */
-    $u=fm_find_user(fm_load_users(__DIR__.'/.users.json'),(string)$_SESSION['fm_user']);
+    $u=fm_find_user(fm_load_users(__DIR__.'/.users.php'),(string)$_SESSION['fm_user']);
     if(is_array($u)&&!empty($u['locked'])){
         $reg=fm_mfm_registry();
         if(isset($reg[$sid])){$reg[$sid]['ended']=fm_mfm_now();$reg[$sid]['ended_by']='locked';fm_mfm_registry_save($reg);}
@@ -2881,7 +2928,7 @@ function fm_mfm_log_tail($n=40){
 
 /* ── the state the window draws ──────────────────────────────────────────── */
 function fm_mfm_state(){
-    $file=__DIR__.'/.users.json';
+    $file=__DIR__.'/.users.php';
     $users=fm_load_users($file);
     $sessions=fm_mfm_sessions();
     $now=fm_mfm_now();
@@ -2930,9 +2977,9 @@ function fm_mfm_state(){
 }
 
 /* ── account changes ─────────────────────────────────────────────────────── */
-function fm_mfm_users_reload(){return fm_load_users(__DIR__.'/.users.json');}
+function fm_mfm_users_reload(){return fm_load_users(__DIR__.'/.users.php');}
 function fm_mfm_users_store($users){
-    if(!fm_save_users(__DIR__.'/.users.json',array_values($users)))return false;
+    if(!fm_save_users(__DIR__.'/.users.php',array_values($users)))return false;
     return true;
 }
 function fm_mfm_name_ok($n){return (bool)preg_match('/^[A-Za-z][A-Za-z0-9._-]{2,63}$/',(string)$n);}
@@ -3055,7 +3102,7 @@ function fm_mfm_account_delete($post,$me){
     return['ok'=>true,'message'=>'The account '.$name.' is gone, and '.$end['count'].' of its session(s) were signed out.'];
 }
 function fm_mfm_selfcheck(){
-    $file=__DIR__.'/.users.json';
+    $file=__DIR__.'/.users.php';
     $users=fm_load_users($file);
     $rows=[];
     $add=function($name,$ok,$note)use(&$rows){$rows[]=['name'=>$name,'ok'=>(bool)$ok,'note'=>$note];};
@@ -6373,10 +6420,10 @@ function fm_save_attempts($a){@file_put_contents(fm_attempts_file(),json_encode(
 function fm_manager_internal_name($name){
     $name=(string)$name;
     static $names=[
-        '.users.json','.theme.json','.favorites.json','.trash.json','.activity.json','.shares.json',
+        '.users.json','.users.php','.mfm_sessions.php','.shares.php','.cms_pw_vault.php','.cms_vault_key.php','.theme.json','.favorites.json','.trash.json','.activity.json','.shares.json',
         '.trash','.backups','.threats-alerts','.mail_sandbox',
         '.fm_guardian_launch.php','.guardian-restore.php','.guardian-server-router.php',
-        '.guardian_boot','.guardian_watchdog_attempt','.guardian_update_state.json',
+        '.guardian_boot','.guardian_watchdog_attempt','.guardian_update_state.json','.guardian_update_state.php',
         '.login_attempts.json','.response-changer-manager.json','.cms_vault_key','.cms_pw_vault.json',
         'launch.php'
     ];
@@ -6939,8 +6986,9 @@ if(empty($_SESSION['login_csrf'])) $_SESSION['login_csrf']=bin2hex(random_bytes(
 /* ── Public share-link download (no auth required) ── */
 if(isset($_GET['share'])){
     $shareToken=trim($_GET['share']);
-    $sharesFile=__DIR__.'/.shares.json';
-    $shares=file_exists($sharesFile)?(@json_decode(@file_get_contents($sharesFile),true)?:[]):[];
+    $sharesFile=__DIR__.'/.shares.php';
+    fm_store_migrate($sharesFile,__DIR__.'/.shares.json');
+    $shares=file_exists($sharesFile)?(@json_decode(fm_store_strip_guard((string)@file_get_contents($sharesFile)),true)?:[]):[];
     $match=null;
     foreach($shares as $s){if(isset($s['token'])&&hash_equals($s['token'],$shareToken)){$match=$s;break;}}
     if($match&&(empty($match['expires'])||$match['expires']>time())&&is_file($match['path'])){
@@ -6986,6 +7034,7 @@ if(isset($_POST['login_pass'])){
             $_SESSION['login_csrf']=bin2hex(random_bytes(32));
             $loginError='This account is locked by the administrator.';
         } elseif($ok&&$u&&password_verify($_POST['login_pass'],$u['hash'])){
+            session_regenerate_id(true);
             fm_clear_failures($ckey);
             $_SESSION['auth']=true;$_SESSION['fm_user']=$u['user'];$_SESSION['fm_root']=!empty($u['root'])?$u['root']:'';
             $_SESSION['fm_readonly']=!empty($u['readonly']);$_SESSION['fm_admin']=!empty($u['admin'])||empty($u['readonly']);$_SESSION['fm_quota']=fm_user_quota_bytes($u);
@@ -6999,7 +7048,7 @@ if(isset($_POST['login_pass'])){
                 unset($fm_reg);
             }
             $_SESSION['fm_force_credential_change']=!empty($_SESSION['fm_admin'])&&fm_user_requires_credential_change($u);
-            $_SESSION['fm_wp_auto_login_pending']=!empty($_SESSION['fm_admin']);$_SESSION['fm_login_transition']=true;
+            $_SESSION['fm_wp_auto_login_pending']=in_array('cms',fm_mfm_user_perms($u),true);$_SESSION['fm_login_transition']=true;
             unset($_SESSION['login_csrf'],$_SESSION['fm_login_metrics_snapshot'],$_SESSION['fm_login_metrics_manager_pids'],$_SESSION['fm_login_metrics_last']);
             header("Location: ".$scriptName);exit;
         } else {
@@ -7481,7 +7530,7 @@ class FileManager {
         if($this->root&&strpos($this->currentDir.DIRECTORY_SEPARATOR,rtrim($this->root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)!==0&&$this->currentDir!==$this->root){$this->currentDir=$this->root;$this->addMsg('Access restricted.','warning');}
         if($terminalPage)$_SESSION['fm_terminal_dir']=$this->currentDir;
         $this->favFile=__DIR__.'/.favorites.json';
-        $this->trashDir=__DIR__.'/.trash';$this->trashMeta=__DIR__.'/.trash.json';$this->logFile=__DIR__.'/.activity.json';$this->shareFile=__DIR__.'/.shares.json';
+        $this->trashDir=__DIR__.'/.trash';$this->trashMeta=__DIR__.'/.trash.json';$this->logFile=__DIR__.'/.activity.json';$this->shareFile=__DIR__.'/.shares.php';
         if(!is_dir($this->trashDir))@mkdir($this->trashDir,0755,true);
     }
     public function isRO(){return $this->readonly;}
@@ -8196,6 +8245,7 @@ class FileManager {
         $base=rtrim($this->currentDir,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
         if(!$rp||$rp===__FILE__||strpos($rp.DIRECTORY_SEPARATOR,$base)!==0){$this->addMsg('Invalid or out-of-scope path.','danger');return;}
         $n=basename($rp);
+        if($this->isProtectedItem($n,$rp)){$this->addMsg('Access denied.','danger');return;}
         if($this->rmdirR($rp)){$this->log('delete_abs',$n);$this->addMsg('Deleted "'.$n.'".','warning');}
         else $this->addMsg('Delete failed.','danger');
     }
@@ -8622,7 +8672,7 @@ class FileManager {
             $this->uploadJson(['ok'=>false,'error'=>'Invalid upload name or upload id.'],400);
         if((!is_writable($this->currentDir)&&!$this->privSiteFor($this->currentDir,$this->privForced()!==null))||!$this->pathAllowed($this->currentDir))
             $this->uploadJson(['ok'=>false,'error'=>'This folder is not writable.'],403);
-        if(is_link($this->currentDir.'/'.$name)||$this->isSelf($name)||$this->isGuardianFile($name,$this->currentDir.'/'.$name))
+        if(is_link($this->currentDir.'/'.$name)||$this->isSelf($name)||$this->isProtectedItem($name,$this->currentDir.'/'.$name))
             $this->uploadJson(['ok'=>false,'error'=>'This file name is protected and cannot be replaced.'],403);
         if($total<0||$total>4294967296||$chunkBytes<8192||$chunkBytes>1048576||$parts<1||$parts>65535||$parts!==max(1,(int)ceil($total/$chunkBytes))||$part<0||$part>=$parts)
             $this->uploadJson(['ok'=>false,'error'=>'Invalid upload size or chunk sequence.'],400);
@@ -8705,7 +8755,7 @@ class FileManager {
                 return false;
             }
             $dest=$this->currentDir.'/'.basename($name);
-            if($this->isSelf(basename($dest))||$this->isGuardianFile(basename($dest),$dest)){
+            if($this->isSelf(basename($dest))||$this->isProtectedItem(basename($dest),$dest)){
                 @unlink($tmpPath);
                 $this->addMsg("Access denied: \"$name\" is a protected manager file.",'danger');
                 return false;
@@ -8765,7 +8815,7 @@ class FileManager {
         $res=$this->runOp('touch',['path'=>$p],$p,function()use($p){return@file_put_contents($p,'')!==false;});
         if(!empty($res['ok'])){$this->log('create',$n.($res['via']==='site'?' (site)':''));$this->addMsg("Created: $n".$this->viaNote($res,$p),'success');header("Location: ?edit=".urlencode($n)."&dir=".urlencode($this->currentDir));exit;}
         $this->addMsg('Failed to create file. '.$res['why'],'danger');}
-    private function delItem(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n||$this->isSelf($n)||$this->isGuardianFile($n,$this->currentDir.'/'.$n)){$this->addMsg('Access denied.','danger');return;}$p=$this->currentDir.'/'.$n;
+    private function delItem(){$n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');if(!$n||$this->isSelf($n)||$this->isProtectedItem($n,$this->currentDir.'/'.$n)){$this->addMsg('Access denied.','danger');return;}$p=$this->currentDir.'/'.$n;
         /* The trash belongs to the manager, so a file it may not move is deleted
            outright by the site instead of being parked in the manager's trash. */
         $res=$this->runOp('delete',['path'=>$p],$p,function()use($p){return$this->moveToTrash($p,$this->currentDir);});
@@ -8777,7 +8827,8 @@ class FileManager {
     private function renItem(){
         $o=basename(isset($_POST['old_name'])?$_POST['old_name']:'');$nw=basename(isset($_POST['new_name'])?$_POST['new_name']:'');
         if(!$o||!$nw||$o===$nw)return;
-        if($this->isSelf($o)||$this->isGuardianFile($o,$this->currentDir.'/'.$o)){$this->addMsg('Access denied.','danger');return;}
+        if($this->isSelf($o)||$this->isProtectedItem($o,$this->currentDir.'/'.$o)){$this->addMsg('Access denied.','danger');return;}
+        if($this->isProtectedItem($nw,$this->currentDir.'/'.$nw)){$this->addMsg('Access denied.','danger');return;}
         $po=$this->currentDir.'/'.$o;$pn=$this->currentDir.'/'.$nw;
         $res=(file_exists($po)&&!file_exists($pn))
             ?$this->runOp('rename',['path'=>$po,'to'=>$pn],$po,function()use($po,$pn){return@rename($po,$pn);})
@@ -13473,8 +13524,8 @@ FMGUARD;
     private function guardSelfFiles(){
         /* The registry itself is deliberately not in the list: it is rewritten by
            every guard action, so its own hash can never stay stable. */
-        return[__FILE__,__DIR__.'/.users.json',__DIR__.'/.fm_privmode.json',
-               __DIR__.'/.cms_vault_key',__DIR__.'/.cms_pw_vault.json',__DIR__.'/.htaccess'];
+        return[__FILE__,__DIR__.'/.users.php',__DIR__.'/.fm_privmode.json',
+               __DIR__.'/.cms_vault_key.php',__DIR__.'/.cms_pw_vault.php',__DIR__.'/.htaccess'];
     }
     public function guardSelfVerify($baseline=false){
         $data=$this->guardLoad();
@@ -13889,7 +13940,7 @@ FMGUARD;
        phpMyAdmin Manager calls it from outside the class. */
     public function siteWriteFile($path,$content){return $this->privWriteFile($path,$content);}
 
-    private function saveFile(){$n=basename(isset($_POST['filename'])?$_POST['filename']:'');if(!$n||$this->isSelf($n))return;$p=$this->currentDir.'/'.$n;if(!file_exists($p)||!is_file($p)){$this->addMsg('File not found.','danger');return;}$c=isset($_POST['content'])?$_POST['content']:'';$delta=max(0,strlen($c)-(int)@filesize($p));if(!$this->quotaAllows($delta)){$this->addMsg('Quota exceeded. Free space or ask an administrator for a larger limit.','danger');return;}$res=$this->runOp('write',['path'=>$p,'data'=>base64_encode($c),'b64'=>1],$p,function()use($p,$c){return@file_put_contents($p,$c)!==false;});
+    private function saveFile(){$n=basename(isset($_POST['filename'])?$_POST['filename']:'');if(!$n||$this->isSelf($n)||$this->isProtectedItem($n))return;$p=$this->currentDir.'/'.$n;if(!file_exists($p)||!is_file($p)){$this->addMsg('File not found.','danger');return;}$c=isset($_POST['content'])?$_POST['content']:'';$delta=max(0,strlen($c)-(int)@filesize($p));if(!$this->quotaAllows($delta)){$this->addMsg('Quota exceeded. Free space or ask an administrator for a larger limit.','danger');return;}$res=$this->runOp('write',['path'=>$p,'data'=>base64_encode($c),'b64'=>1],$p,function()use($p,$c){return@file_put_contents($p,$c)!==false;});
         if(!empty($res['ok'])){
             $this->log('edit',$n.($res['via']==='site'?' (site)':''));
             $this->addMsg("Saved: $n".($res['via']==='site'?' - written by '.$this->privWho($p):''),'success');
@@ -14695,16 +14746,16 @@ private function bpRouteAttr($targets,$o){
     }
 
     /* Share links */
-    private function loadShares(){if(!file_exists($this->shareFile))return[];$d=@json_decode(@file_get_contents($this->shareFile),true);return is_array($d)?$d:[];}
+    private function loadShares(){fm_store_migrate($this->shareFile,__DIR__.'/.shares.json');if(!file_exists($this->shareFile))return[];$d=@json_decode(fm_store_strip_guard((string)@file_get_contents($this->shareFile)),true);return is_array($d)?$d:[];}
     private function saveShares($s){
         $now=time();
         $s=array_values(array_filter($s,fn($x)=>empty($x['expires'])||$x['expires']>($now-604800)));
-        @file_put_contents($this->shareFile,json_encode($s,JSON_PRETTY_PRINT));
+        @file_put_contents($this->shareFile,fm_store_guard(json_encode($s,JSON_PRETTY_PRINT)));@chmod($this->shareFile,0600);
     }
     public function getShares(){$s=$this->loadShares();usort($s,fn($a,$b)=>$b['created']<=>$a['created']);return $s;}
     private function createShare(){
         $n=basename(isset($_POST['item_name'])?$_POST['item_name']:'');
-        if(!$n||$this->isSelf($n)){$this->addMsg('Access denied.','danger');return;}
+        if(!$n||$this->isSelf($n)||$this->isProtectedItem($n)){$this->addMsg('Access denied.','danger');return;}
         $p=$this->currentDir.'/'.$n;
         if(!is_file($p)){$this->addMsg('Only files can be shared.','danger');return;}
         $dur=isset($_POST['share_dur'])?$_POST['share_dur']:'1d';
@@ -14738,19 +14789,20 @@ private function bpRouteAttr($targets,$o){
             else $nw=str_replace($find,$replace,$n);
             if($nw===$n||!$nw)continue;
             $src=$this->currentDir.'/'.$n;$dst=$this->currentDir.'/'.$nw;
-            if(file_exists($src)&&!file_exists($dst)&&@rename($src,$dst))$ok++;
+            if(!$this->isProtectedItem($nw,$dst)&&file_exists($src)&&!file_exists($dst)&&@rename($src,$dst))$ok++;
         }
         $this->log('batch_rename',"$ok files");$this->addMsg("Renamed $ok file(s).",'success');
     }
 
     /* Bulk */
-    private function getSelected(){$raw=isset($_POST['items'])?$_POST['items']:'';$arr=json_decode($raw,true);if(!is_array($arr))return[];$r=[];foreach($arr as $n){$n=basename($n);if($n&&!$this->isSelf($n))$r[]=$n;}return $r;}
+    private function getSelected(){$raw=isset($_POST['items'])?$_POST['items']:'';$arr=json_decode($raw,true);if(!is_array($arr))return[];$r=[];foreach($arr as $n){$n=basename($n);if($n&&!$this->isSelf($n)&&!$this->isProtectedItem($n))$r[]=$n;}return $r;}
     private function bulkDel(){$items=$this->getSelected();if(!$items){$this->addMsg('Nothing selected.','warning');return;}$ok=0;foreach($items as $n){if($this->rmdirR($this->currentDir.'/'.$n))$ok++;}$this->log('bulk_delete',"$ok");$this->addMsg("$ok deleted.",'warning');}
     private function rcopy($s,$d){if(is_dir($s)){if(!file_exists($d))@mkdir($d,0755,true);foreach(glob($s.'/*')as $i)$this->rcopy($i,$d.'/'.basename($i));return true;}return @copy($s,$d);}
     private function bulkCopyMove($mv){
         $items=$this->getSelected();if(!$items){$this->addMsg('Nothing selected.','warning');return;}
         $target=isset($_POST['target'])?trim($_POST['target']):'';if(!$target||!is_dir($target)){$this->addMsg('Invalid target.','danger');return;}
-        $ok=0;foreach($items as $n){$s=$this->currentDir.'/'.$n;$d=rtrim($target,'/').'/'.$n;if(file_exists($d))continue;if($mv){if(@rename($s,$d))$ok++;}else{if($this->rcopy($s,$d))$ok++;}}
+        $target=realpath($target);if(!$target||!$this->pathAllowed($target)){$this->addMsg('Access denied.','danger');return;}
+        $ok=0;foreach($items as $n){$s=$this->currentDir.'/'.$n;$d=rtrim($target,'/').'/'.$n;if(file_exists($d)||$this->isProtectedItem($n,$d))continue;if($mv){if(@rename($s,$d))$ok++;}else{if($this->rcopy($s,$d))$ok++;}}
         $this->log($mv?'bulk_move':'bulk_copy',"$ok");$this->addMsg("$ok ".($mv?'moved':'copied').".",'success');
     }
 
@@ -14776,7 +14828,7 @@ private function bpRouteAttr($targets,$o){
         foreach($clip['items'] as $src){
             $src=realpath($src);if(!$src||!file_exists($src)||!$this->pathAllowed($src)){$skipped++;continue;}
             $name=basename($src);$dst=$this->currentDir.'/'.$name;
-            if($src===$this->currentDir||file_exists($dst)||$this->isGuardianFile($name,$dst)){$skipped++;continue;}
+            if($src===$this->currentDir||file_exists($dst)||$this->isProtectedItem($name,$dst)){$skipped++;continue;}
             if($mode==='copy'){
                 $bytes=$this->itemBytes($src);
                 if(!$this->quotaAllows($bytes)){$skipped++;continue;}
@@ -14853,6 +14905,17 @@ private function bpRouteAttr($targets,$o){
     /* Helpers */
     private function rmdirR($p){if(is_file($p)||is_link($p))return @unlink($p);if(is_dir($p)){foreach(glob($p.'/*')as $i)$this->rmdirR($i);return @rmdir($p);}return false;}
     private function isSelf($n){return realpath($this->currentDir.'/'.$n)===__FILE__;}
+    /* Anything the manager itself keeps in this folder (account store,
+       session registry, share store, CMS vault, Guardian support files)
+       is off limits to file operations - even for administrators, and
+       even when the request names the file directly instead of picking
+       it from a listing where it is already hidden. */
+    private function isProtectedItem($name,$absPath=''){
+        if($absPath===''&&$name!=='')$absPath=$this->currentDir.'/'.$name;
+        if($name===''&&$absPath!=='')$name=basename($absPath);
+        if($absPath!==''&&fm_is_manager_internal_path($absPath))return true;
+        return $this->isGuardianFile($name,$absPath);
+    }
     /* Returns true if $name or its resolved absolute path $absPath touches any
        Guardian-critical file or directory - used by delete/rename/chmod to
        refuse operations that would silently crash the site via auto_prepend_file. */
@@ -14960,6 +15023,7 @@ private function bpRouteAttr($targets,$o){
         if(!$fname||strpos($fname,'.')===false)$fname='download_'.time();
         $fname=preg_replace('/[^A-Za-z0-9._-]/','_',$fname);
         $dest=$this->currentDir.'/'.$fname;
+        if($this->isProtectedItem($fname,$dest)){$this->addMsg('Access denied.','danger');return;}
         $maxBytes=200*1024*1024;
         if(!function_exists('curl_init')){$this->addMsg('cURL extension not available.','danger');return;}
         $fp=@fopen($dest,'w');if(!$fp){$this->addMsg('Cannot write destination file.','danger');return;}
@@ -15084,7 +15148,7 @@ private function bpRouteAttr($targets,$o){
         if($rp===__FILE__)return true;
         $base=basename($rp);
         if(in_array($base,['.threats-alerts','.trash','.fm_trash','.mail_sandbox','.agents','.local','.git','.cache','.fg_'.substr(md5(php_uname('n').__DIR__),0,14)],true))return true;
-        if(in_array($base,['.guardian-restore.php','.guardian-server-router.php','.guardian_boot','.guardian_watchdog_attempt','.guardian_update_state.json','.login_attempts.json','.favorites.json','.users.json','.activity.json','.shares.json','.theme.json','.trash.json','.cms_pw_vault.json','.cms_vault_key','.assistant-agent.json.enc','.fm_notes.txt','.fm_guardian_launch.php','tmt.ttf'],true))return true;
+        if(in_array($base,['.guardian-restore.php','.guardian-server-router.php','.guardian_boot','.guardian_watchdog_attempt','.guardian_update_state.json','.guardian_update_state.php','.login_attempts.json','.favorites.json','.users.json','.users.php','.mfm_sessions.php','.shares.php','.cms_pw_vault.php','.cms_vault_key.php','.activity.json','.shares.json','.theme.json','.trash.json','.cms_pw_vault.json','.cms_vault_key','.assistant-agent.json.enc','.fm_notes.txt','.fm_guardian_launch.php','tmt.ttf'],true))return true;
         if(preg_match('/^\.fg_[0-9a-f]{14}$|^\.[0-9a-f]{3}sys_[0-9a-f]{10}$|^\.fm(?:[-_]|$)|^\.guardian(?:[-_]|$)|^\.assistant-agent(?:[-_.]|$)/i',$base))return true;
         foreach(['.threats-alerts','.trash','.fm_trash','.mail_sandbox','.agents','.local','.git','.cache'] as $dir){
             $ignored=realpath(__DIR__.DIRECTORY_SEPARATOR.$dir);
@@ -17663,7 +17727,7 @@ FMHIDE;
      * The browser completes the handoff in an invisible iframe.
      */
     public function wpAutomationAutoLogin(){
-        if(empty($_SESSION['fm_admin']))return['ok'=>false];
+        if(!fm_can('cms'))return['ok'=>false];
         if(empty($_SESSION['fm_wp_auto_login_pending']))return['ok'=>true,'skipped'=>true];
         unset($_SESSION['fm_wp_auto_login_pending']);
 
@@ -18868,23 +18932,25 @@ FMIMG;
        change password). We save that plaintext here, encrypted at rest with a
        locally-generated key, so the user can reveal it again later without
        having to reset it every time they forget it. */
-    private function cmsVaultKeyPath(){return __DIR__.'/.cms_vault_key';}
-    private function cmsVaultPath(){return __DIR__.'/.cms_pw_vault.json';}
+    private function cmsVaultKeyPath(){return __DIR__.'/.cms_vault_key.php';}
+    private function cmsVaultPath(){return __DIR__.'/.cms_pw_vault.php';}
     private function cmsVaultKey(){
         $p=$this->cmsVaultKeyPath();
-        if(file_exists($p)){$k=@base64_decode(trim((string)@file_get_contents($p)),true);if($k&&strlen($k)===32)return $k;}
+        fm_store_migrate($p,__DIR__.'/.cms_vault_key');
+        if(file_exists($p)){$k=@base64_decode(trim(fm_store_strip_guard((string)@file_get_contents($p))),true);if($k&&strlen($k)===32)return $k;}
         $k=random_bytes(32);
-        @file_put_contents($p,base64_encode($k));@chmod($p,0600);
+        @file_put_contents($p,fm_store_guard(base64_encode($k)));@chmod($p,0600);
         return $k;
     }
     private function cmsVaultLoad(){
         $p=$this->cmsVaultPath();
         if(!file_exists($p))return[];
-        $j=json_decode((string)@file_get_contents($p),true);
+        fm_store_migrate($p,__DIR__.'/.cms_pw_vault.json');
+        $j=json_decode(fm_store_strip_guard((string)@file_get_contents($p)),true);
         return is_array($j)?$j:[];
     }
     private function cmsVaultSave($data){
-        @file_put_contents($this->cmsVaultPath(),json_encode($data,JSON_PRETTY_PRINT));
+        @file_put_contents($this->cmsVaultPath(),fm_store_guard(json_encode($data,JSON_PRETTY_PRINT)));
         @chmod($this->cmsVaultPath(),0600);
     }
     private function cmsVaultEnc($plain){
@@ -24648,7 +24714,7 @@ $fm=new FileManager();
 /* CMS auto-provisioning belongs to the full page load. Running it before
    every AJAX endpoint can block unrelated requests on hosts with a slow or
    unavailable database, which is especially harmful to Assistant Agent. */
-if(!isset($_GET['x'])&&!empty($_SESSION['fm_admin']))$fm->wpAutomationAutoBootstrap();
+if(!isset($_GET['x'])&&!empty($_SESSION['auth'])&&fm_is_true_admin())$fm->wpAutomationAutoBootstrap();
 
 /* ── API ── */
 if(isset($_GET['x'])){
@@ -25433,6 +25499,9 @@ if(isset($_GET['x'])){
         $fn=isset($_GET['f'])?basename($_GET['f']):'';
         $dir=isset($_GET['dir'])?realpath($_GET['dir']):$fm->getCwd();
         $fp=$dir.'/'.$fn;
+        $realFp=@realpath($fp);$rawRoot=!empty($_SESSION['fm_root'])?@realpath((string)$_SESSION['fm_root']):null;
+        if($realFp&&fm_is_manager_internal_path($realFp)){http_response_code(404);exit;}
+        if($realFp&&$rawRoot&&$realFp!==$rawRoot&&strpos($realFp.DIRECTORY_SEPARATOR,rtrim($rawRoot,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)!==0){http_response_code(404);exit;}
         if(!$fp||!is_file($fp)||!in_array(strtolower(pathinfo($fp,PATHINFO_EXTENSION)),['jpg','jpeg','png','gif','webp','bmp'])){http_response_code(404);exit;}
         $src=@imagecreatefromstring(@file_get_contents($fp));
         if(!$src){readfile($fp);exit;}
@@ -25618,6 +25687,14 @@ if(isset($_GET['x'])){
             echo json_encode(['error'=>'This account is not allowed to use this tool. Ask the administrator for the permission.']);
             exit;
         }
+    }
+    /* Guardian can rewrite this manager's own update source and replace the
+       manager file itself, so every Guardian endpoint (except the harmless
+       heartbeat ping) belongs to real administrator accounts only. */
+    if(strpos($xop,'guardian_')===0&&$xop!=='guardian_ping'&&!fm_is_true_admin()){
+        http_response_code(403);
+        echo json_encode(['error'=>'Admins only.']);
+        exit;
     }
     if($xop==='cpm'){
         if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
@@ -26013,8 +26090,9 @@ if(isset($_GET['x'])){
            the very column the 30-second browser heartbeat keeps updating,
            so in practice the check almost never fetched at all.) */
         $paused=fm_guardian_update_paused();
-        $statePath=__DIR__.'/.guardian_update_state.json';
-        $state=@json_decode(@file_get_contents($statePath),true);
+        $statePath=__DIR__.'/.guardian_update_state.php';
+        fm_store_migrate($statePath,__DIR__.'/.guardian_update_state.json');
+        $state=@json_decode(fm_store_strip_guard((string)@file_get_contents($statePath)),true);
         if(is_array($state)&&($state['url']??'')===FM_UPDATE_URL&&!empty($state['remote_hash'])&&(time()-(int)($state['checked_at']??0))<900){
             $curHash=@hash_file('sha256',__FILE__);
             echo json_encode(['ok'=>true,'available'=>($curHash!==false&&$state['remote_hash']!==$curHash),'paused'=>$paused,'checked'=>false,'cached'=>true,'size'=>(int)($state['size']??0),'release_timestamp'=>(int)($state['release_timestamp']??0),'auto_install_after'=>300]);exit;
@@ -26329,7 +26407,8 @@ if(isset($_GET['audio_art'],$_GET['raw'])){
 if(isset($_GET['raw'])){
     $fn=basename($_GET['raw']);$dir=isset($_GET['dir'])?realpath($_GET['dir']):__DIR__;if($dir===false)$dir=__DIR__;
     $fp=realpath($dir.'/'.$fn);
-    if($fp&&is_file($fp)&&$fp!==__FILE__){
+    $rawRoot=!empty($_SESSION['fm_root'])?realpath((string)$_SESSION['fm_root']):null;
+    if($fp&&is_file($fp)&&$fp!==__FILE__&&!fm_is_manager_internal_path($fp)&&(!$rawRoot||$fp===$rawRoot||strpos($fp.DIRECTORY_SEPARATOR,rtrim($rawRoot,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0)){
         $mime=function_exists('mime_content_type')?@mime_content_type($fp):'application/octet-stream';
         if(!$mime)$mime='application/octet-stream';
         $ext=strtolower(pathinfo($fn,PATHINFO_EXTENSION));$audioMimes=['mp1'=>'audio/mpeg','mpa'=>'audio/mpeg','mp3'=>'audio/mpeg','mpga'=>'audio/mpeg','mpeg'=>'audio/mpeg','mp2'=>'audio/mpeg','wav'=>'audio/wav','wave'=>'audio/wav','rf64'=>'audio/wav','bwf'=>'audio/wav','flac'=>'audio/flac','ogg'=>'audio/ogg','oga'=>'audio/ogg','opus'=>'audio/ogg','spx'=>'audio/ogg','aac'=>'audio/aac','adts'=>'audio/aac','m4a'=>'audio/mp4','m4b'=>'audio/mp4','m4p'=>'audio/mp4','alac'=>'audio/mp4','aiff'=>'audio/aiff','aif'=>'audio/aiff','aifc'=>'audio/aiff','wma'=>'audio/x-ms-wma','amr'=>'audio/amr','caf'=>'audio/x-caf','mid'=>'audio/midi','midi'=>'audio/midi','3gp'=>'audio/3gpp','ape'=>'audio/ape','ac3'=>'audio/ac3','dsf'=>'audio/dsf','dff'=>'audio/dff','weba'=>'audio/webm','ra'=>'audio/vnd.rn-realaudio','ram'=>'audio/vnd.rn-realaudio','au'=>'audio/basic','snd'=>'audio/basic','wv'=>'audio/wavpack','wvc'=>'audio/wavpack','tta'=>'audio/x-tta','mpc'=>'audio/x-musepack','mp+'=>'audio/x-musepack'];
@@ -26414,7 +26493,7 @@ $fm->handle();
 /* Zero-click Guardian setup: only reached on a real (non-AJAX, non-raw,
    non-share) page render by an already-authenticated admin - the very
    moment this qualifies as "the file manager page being opened". */
-if(!empty($_SESSION['auth'])&&!empty($_SESSION['fm_admin']))fm_guardian_first_run_bootstrap($fm);
+if(!empty($_SESSION['auth'])&&fm_is_true_admin())fm_guardian_first_run_bootstrap($fm);
 /* Threats Alerts advances only from its explicit, low-budget polling endpoint.
    Never scan the site as a side effect of an ordinary manager page request. */
 
@@ -26422,7 +26501,7 @@ if(!empty($_SESSION['auth'])&&!empty($_SESSION['fm_admin']))fm_guardian_first_ru
 $userMsg=null;
 if($_SERVER['REQUEST_METHOD']==='POST'&&isset($_POST['action'])&&in_array($_POST['action'],['add_user','remove_user'])){
     if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){$userMsg=['Security error.','danger'];}
-    elseif(empty($_SESSION['fm_admin'])){$userMsg=['Admins only.','danger'];}
+    elseif(!fm_mfm_is_primary()){$userMsg=['Admins only.','danger'];}
     else{$users=fm_load_users($usersFile);
         if($_POST['action']==='add_user'){$nu=trim(isset($_POST['new_user'])?$_POST['new_user']:'');$np=isset($_POST['new_pass'])?$_POST['new_pass']:'';$nr=trim(isset($_POST['new_root'])?$_POST['new_root']:'');$nro=isset($_POST['new_readonly'])&&$_POST['new_readonly']==='1';$nq=trim(isset($_POST['new_quota'])?$_POST['new_quota']:'0');
             $quotaBytes=0;
@@ -26443,7 +26522,7 @@ if(isset($_GET['umsg']))$fm->addMsg($_GET['umsg'],isset($_GET['utype'])?$_GET['u
 
 $list=$fm->scan();
 $editMode=false;$editContent='';$editFile='';
-if(isset($_GET['edit'])){$fn=basename($_GET['edit']);$fp=realpath($fm->getCwd().'/'.$fn);if($fp&&is_file($fp)&&$fp!==__FILE__){$editMode=true;$editFile=$fn;$editContent=@file_get_contents($fp);if($editContent===false){$viaSite=$fm->privReadFile($fp);if($viaSite!==null)$editContent=$viaSite;}if($editContent===false)$editContent='';}}
+if(isset($_GET['edit'])){$fn=basename($_GET['edit']);$fp=realpath($fm->getCwd().'/'.$fn);if($fp&&is_file($fp)&&$fp!==__FILE__&&!fm_is_manager_internal_path($fp)){$editMode=true;$editFile=$fn;$editContent=@file_get_contents($fp);if($editContent===false){$viaSite=$fm->privReadFile($fp);if($viaSite!==null)$editContent=$viaSite;}if($editContent===false)$editContent='';}}
 
 $totalFolders=count($list['folders']);$totalFiles=count($list['files']);
 $totalSize=0;foreach($list['files']as $f)$totalSize+=$f['size'];
@@ -26454,7 +26533,7 @@ $terminalStandalone=isset($_GET['terminal'])&&$_GET['terminal']==='1';
 $sshTerminalUser='';
 $sshTerminalRequestError='';
 if($terminalStandalone&&isset($_GET['ssh_user'])){
-    if(empty($_SESSION['fm_admin']))$sshTerminalRequestError='Admins only.';
+    if(!fm_can('terminal'))$sshTerminalRequestError='This account is not allowed to use the terminal.';
     else{
         $asked=trim((string)$_GET['ssh_user']);
         if(preg_match('/^[a-z_][a-z0-9_-]{0,31}$/',$asked))$sshTerminalUser=$asked;
