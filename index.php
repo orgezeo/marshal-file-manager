@@ -29275,7 +29275,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <!-- Top banner ad (between the toolbar and the filter bar) -->
     <div class="fm-top-ad" id="fmTopAd">
       <a class="fm-top-ad-link" href="https://t.me/s4base" target="_blank" rel="noopener noreferrer sponsored" aria-label="Marshall File Manager on Telegram">
-        <img src="ads/ma.jpg" alt="Marshall File Manager, All in One - @s4base">
+        <img src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/ads/ma.jpg" alt="Marshall File Manager, All in One - @s4base">
       </a>
       <button type="button" class="fm-top-ad-close" aria-label="Hide this banner" title="Hide" onclick="var ad=document.getElementById('fmTopAd');if(ad){ad.style.display='none';}try{sessionStorage.setItem('fmTopAdHidden','1');}catch(e){}"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
