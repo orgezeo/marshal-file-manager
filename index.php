@@ -25383,6 +25383,41 @@ if(isset($_GET['x'])){
         echo json_encode(fm_server_speed_test());exit;
     }
     if($xop==='ls'){echo json_encode(array_values(array_filter(scandir($fm->getCwd())?:[],fn($x)=>$x!=='.'&&$x!=='..')));exit;}
+    if($xop==='global_search'){
+        $q=trim((string)($_GET['gsq']??''));
+        $base=realpath($fm->getCwd());
+        if($base===false||$q===''){echo json_encode(['ok'=>true,'base'=>'','results'=>[],'scanned'=>0]);exit;}
+        $results=[];$scanned=0;$truncated=false;$start=microtime(true);
+        try{
+            $dirIt=new RecursiveDirectoryIterator($base,FilesystemIterator::SKIP_DOTS);
+            $filter=new RecursiveCallbackFilterIterator($dirIt,function($current){
+                $name=$current->getFilename();
+                if($name===''||$name[0]==='.')return false;
+                if(function_exists('fm_is_manager_internal_path')&&fm_is_manager_internal_path($current->getPathname()))return false;
+                return true;
+            });
+            $it=new RecursiveIteratorIterator($filter,RecursiveIteratorIterator::SELF_FIRST);
+            foreach($it as $info){
+                $scanned++;
+                if($scanned>12000||(microtime(true)-$start)>2.5){$truncated=true;break;}
+                $path=$info->getPathname();$name=$info->getFilename();
+                $rel=substr($path,strlen($base)+1);
+                $namePos=stripos($name,$q);
+                if($namePos===false&&stripos($rel,$q)===false)continue;
+                $isDir=$info->isDir();
+                $score=$namePos===0?0:($namePos!==false?1:2);
+                $results[]=['name'=>$name,'path'=>$path,'dir'=>$isDir?$path:dirname($path),'rel'=>str_replace(DIRECTORY_SEPARATOR,'/',$rel),'is_dir'=>$isDir,'type'=>$isDir?'folder':$fm->getType($name),'size'=>$isDir?0:(int)@filesize($path),'mtime'=>(int)@filemtime($path),'score'=>$score];
+                if(count($results)>=400){$truncated=true;break;}
+            }
+        }catch(Throwable $e){}
+        usort($results,function($a,$b){
+            if($a['score']!==$b['score'])return $a['score']<=>$b['score'];
+            if($a['is_dir']!==$b['is_dir'])return $a['is_dir']?-1:1;
+            return strnatcasecmp($a['name'],$b['name']);
+        });
+        foreach($results as &$r)unset($r['score']);
+        echo json_encode(['ok'=>true,'base'=>$base,'query'=>$q,'results'=>array_slice(array_values($results),0,28),'scanned'=>$scanned,'truncated'=>$truncated],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
     if($xop==='office_preview'){
         $fn=basename(isset($_GET['f'])?$_GET['f']:'');
         header('Content-Type: application/json;charset=utf-8');
@@ -26490,6 +26525,53 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .tsearch svg{width:13px;height:13px;stroke:var(--t3);fill:none;stroke-width:2;stroke-linecap:round;flex-shrink:0}
 .tsearch input{background:transparent;border:none;outline:none;color:var(--t1);font-size:12px;padding:6px 4px;width:150px}
 .tsearch input::placeholder{color:var(--t3)}
+/* ══ TOP SEARCH ANYTHING ══ */
+.topbar{position:relative}
+.topbar>#menuBtn,.topbar>.dv,.topbar>.bc,.topbar .tb-right>*{transition:opacity .24s ease,transform .32s cubic-bezier(.22,1,.36,1),visibility .24s ease}
+.topbar.search-hiding>#menuBtn,.topbar.search-hiding>.dv,.topbar.search-hiding>.bc,.topbar.search-restoring>#menuBtn,.topbar.search-restoring>.dv,.topbar.search-restoring>.bc,.topbar.search-hiding .tb-right>*:not(.top-logout-form),.topbar.search-restoring .tb-right>*:not(.top-logout-form),.topbar.search-hiding .tb-right .top-fav button,.topbar.search-restoring .tb-right .top-fav button{opacity:0;visibility:hidden;transform:translateY(-4px) scale(.96);pointer-events:none}
+.topbar.search-expanded>#menuBtn,.topbar.search-expanded>.dv,.topbar.search-expanded>.bc,.topbar.search-expanded .tb-right>*:not(.top-logout-form){display:none!important}
+.topbar.search-expanded .brand{width:auto;flex-basis:auto;padding-right:0;position:relative;z-index:6}
+.topbar.search-expanded .tb-right{margin-left:auto;position:relative;z-index:6}
+.topbar.search-expanded .tsearch{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(780px,calc(100% - 290px));height:40px;border-radius:999px;padding:0 6px 0 16px;gap:9px;background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,0)),var(--surf);border-color:rgba(148,163,184,.48);box-shadow:0 18px 42px rgba(0,0,0,.32),0 0 0 4px rgba(148,163,184,.09),inset 0 1px 0 rgba(255,255,255,.07);z-index:5}
+.topbar.search-expanded .tsearch>svg{width:16px;height:16px;stroke:var(--link)}
+.topbar.search-expanded .tsearch input{width:auto;flex:1;font-size:13.5px;padding:8px 2px}
+.tsearch-close{width:28px;height:28px;min-width:28px;display:grid;place-items:center;padding:0;border:0;border-radius:50%;background:var(--hov);color:var(--t2);cursor:pointer;opacity:0;visibility:hidden;transform:scale(.55) rotate(-45deg);transition:opacity .22s ease,transform .3s cubic-bezier(.22,1.35,.36,1),background .15s,color .15s}
+.tsearch-close svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round}
+.tsearch-close:hover{background:var(--act);color:var(--t1)}
+.topbar.search-expanded .tsearch-close{opacity:1;visibility:visible;transform:none;pointer-events:auto}
+.tsearch-panel{position:absolute;top:calc(100% + 12px);left:0;width:100%;max-height:min(64vh,560px);overflow-y:auto;padding:10px;border:1px solid var(--border);border-radius:20px;background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,0) 42%),var(--panel);box-shadow:0 30px 70px rgba(0,0,0,.48),0 10px 28px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.06);opacity:0;visibility:hidden;transform:translateY(-8px) scale(.985);transform-origin:top center;transition:opacity .24s ease,transform .34s cubic-bezier(.22,1.2,.36,1),visibility .24s;pointer-events:none;z-index:400;text-align:left}
+.tsearch-panel.open{opacity:1;visibility:visible;transform:none;pointer-events:auto}
+.tsearch-panel::-webkit-scrollbar{width:4px}.tsearch-panel::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:99px}
+.ts-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 10px 7px;font-size:9.5px;font-weight:800;text-transform:uppercase;letter-spacing:.11em;color:var(--t3)}
+.ts-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px}
+.ts-list{display:flex;flex-direction:column;gap:4px}
+.ts-item{display:flex;align-items:center;gap:11px;width:100%;padding:9px 10px;border:0;border-radius:13px;background:transparent;color:var(--t1);font:inherit;text-align:left;text-decoration:none;cursor:pointer;transition:background .14s,transform .16s}
+.ts-item:hover,.ts-item.active{background:var(--hov)}
+.ts-item.active{box-shadow:inset 0 0 0 1px var(--border)}
+.ts-ico{width:34px;height:34px;min-width:34px;display:grid;place-items:center;border-radius:11px;background:rgba(148,163,184,.10);color:var(--t2)}
+.ts-ico svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.ts-ico.type-folder{color:#fbbf24;background:rgba(251,191,36,.12)}
+.ts-ico.type-image{color:#fbbf24;background:rgba(245,158,11,.11)}
+.ts-ico.type-code{color:#a5b4fc;background:rgba(129,140,248,.12)}
+.ts-ico.type-audio{color:#c4b5fd;background:rgba(167,139,250,.12)}
+.ts-ico.type-video{color:#f9a8d4;background:rgba(236,72,153,.11)}
+.ts-ico.type-archive{color:#fdba74;background:rgba(249,115,22,.11)}
+.ts-main{min-width:0;flex:1;display:flex;flex-direction:column;gap:1px}
+.ts-name{font-size:13px;font-weight:650;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ts-name mark,.ts-sub mark{background:transparent;color:var(--amber);font-weight:850}
+.ts-sub{font-size:11px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ts-kind{flex-shrink:0;padding:3px 7px;border-radius:999px;background:var(--field);border:1px solid var(--border);color:var(--t3);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.07em}
+.ts-more,.ts-hint,.ts-empty{padding:9px 10px 5px;font-size:11.5px;line-height:1.55;color:var(--t3)}
+.ts-loading{display:flex;align-items:center;gap:9px;padding:12px 10px;font-size:12px;color:var(--t2)}
+.ts-spinner{width:16px;height:16px;min-width:16px;border-radius:50%;border:2px solid rgba(148,163,184,.25);border-top-color:var(--amber);animation:tsSpin .7s linear infinite}
+@keyframes tsSpin{to{transform:rotate(360deg)}}
+.ts-foot{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:9px;padding:10px;border-top:1px solid var(--border);font-size:10.5px;color:var(--t3)}
+.ts-foot kbd{font:600 10px 'Inter',ui-sans-serif,system-ui,sans-serif;padding:2px 5px;border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;background:var(--field);color:var(--t2)}
+:root[data-theme="light"] .tsearch-panel{box-shadow:0 30px 70px rgba(15,23,42,.20),0 10px 28px rgba(15,23,42,.12)}
+:root[data-theme="light"] .topbar.search-expanded .tsearch{box-shadow:0 18px 42px rgba(15,23,42,.16),0 0 0 4px rgba(100,116,139,.10)}
+@media(max-width:900px){.topbar.search-expanded .tsearch{width:calc(100% - 190px)}.ts-grid{grid-template-columns:1fr}}
+@media(max-width:720px){.topbar.search-expanded .tsearch{width:calc(100% - 148px);height:38px}.tsearch-panel{border-radius:16px}.ts-kind{display:none}}
+@media(prefers-reduced-motion:reduce){.tsearch-panel,.tsearch-close,.topbar>#menuBtn,.topbar>.dv,.topbar>.bc,.topbar .tb-right>*{transition:none}.ts-spinner{animation-duration:1.4s}}
 
 /* ══ SIDEBAR ══ */
 .sidebar{grid-area:sb;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
@@ -28915,10 +28997,12 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     </div>
     <?php endforeach;?>
   </nav>
-  <form method="get" class="tsearch">
+  <form method="get" class="tsearch" id="topSearchForm" role="search">
     <input type="hidden" name="dir" value="<?=htmlspecialchars($fm->getCwd())?>">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-    <input type="text" name="q" placeholder="Search files…" value="<?=htmlspecialchars(isset($_GET['q'])?$_GET['q']:'')?>">
+    <input type="text" name="q" id="topSearchInput" placeholder="Search anything" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="topSearchPanel" aria-label="Search anything" value="<?=htmlspecialchars(isset($_GET['q'])?$_GET['q']:'')?>">
+    <button type="button" class="tsearch-close" id="topSearchClose" aria-label="Clear or close search" title="Clear / close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    <div class="tsearch-panel" id="topSearchPanel" role="listbox" aria-label="Search suggestions"></div>
   </form>
   <div class="tb-right">
     <?php $isFav=$fm->isFav($fm->getCwd());?>
@@ -28947,7 +29031,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <?php endif;?>
     <span style="font-size:11.5px;color:var(--t3);padding:0 2px;white-space:nowrap"><?=htmlspecialchars($_SESSION['fm_user']??'')?></span>
     <div class="dv"></div>
-    <form method="post">
+    <form method="post" class="top-logout-form">
       <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>">
       <input type="hidden" name="action" value="logout">
       <button class="btn btn-sm btn-red"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg><span>Logout</span></button>
@@ -33452,6 +33536,158 @@ if(FM_FOCUS){
     setTimeout(()=>row.classList.remove('threat-focus-hit'),4200);
   },80);
 }
+
+/* ═══════════════════════════════════════
+   TOP SEARCH ANYTHING — focus expands the field to the centre of the
+   topbar (everything else in that bar fades away except the MFM brand
+   and Logout), a suggestions panel offers the Tools from the sidebar,
+   and files are searched live and recursively inside the current
+   folder via ?x=global_search. Enter opens the active suggestion;
+   files land on their folder with the existing FM_FOCUS highlight.
+═══════════════════════════════════════ */
+(function(){
+  const topbar=document.querySelector('.topbar'),form=document.getElementById('topSearchForm'),input=document.getElementById('topSearchInput'),panel=document.getElementById('topSearchPanel'),closeBtn=document.getElementById('topSearchClose');
+  if(!topbar||!form||!input||!panel)return;
+  const tsEsc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const tsBytes=b=>{b=Number(b||0);if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';};
+  const folderSvg='<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+  function fileSvg(type){
+    if(type==='image')return '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
+    if(type==='code'||type==='data'||type==='config')return '<svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>';
+    if(type==='audio')return '<svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+    if(type==='video')return '<svg viewBox="0 0 24 24"><rect x="2" y="5" width="14" height="14" rx="2"/><path d="M16 10l6-4v12l-6-4z"/></svg>';
+    if(type==='archive')return '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9M10 13h4"/></svg>';
+    return '<svg viewBox="0 0 24 24"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
+  }
+  const tools=(()=>{
+    const secs=[...document.querySelectorAll('.sidebar .sb-sec')];
+    const sec=secs.find(s=>{const l=s.querySelector('.sb-label');return l&&(l.textContent||'').trim().toLowerCase().startsWith('tools');});
+    if(!sec)return[];
+    return [...sec.querySelectorAll('.sb-item')].map(el=>{
+      const c=el.cloneNode(true);c.querySelectorAll('span').forEach(x=>x.remove());
+      const name=(c.textContent||'').replace(/\s+/g,' ').trim();
+      return{name,icon:el.querySelector('svg')?el.querySelector('svg').outerHTML:folderSvg,el};
+    }).filter(t=>t.name);
+  })();
+  let expanded=false,openTimer=null,activeIndex=-1,items=[],fileResults=[],fileLoading=false,fileTruncated=false,debounce=null,seq=0,controller=null;
+  function highlight(text,q){
+    text=String(text??'');if(!q)return tsEsc(text);
+    const i=text.toLowerCase().indexOf(q.toLowerCase());if(i<0)return tsEsc(text);
+    return tsEsc(text.slice(0,i))+'<mark>'+tsEsc(text.slice(i,i+q.length))+'</mark>'+tsEsc(text.slice(i+q.length));
+  }
+  function currentFolderName(){const p=String(CWD||'').split('/').filter(Boolean);return p.length?p[p.length-1]:'current folder';}
+  function setActive(i){
+    if(!items.length||i<0){activeIndex=-1;panel.querySelectorAll('.ts-item').forEach(el=>el.classList.remove('active'));return;}
+    activeIndex=(i+items.length)%items.length;
+    panel.querySelectorAll('.ts-item').forEach((el,j)=>{el.classList.toggle('active',j===activeIndex);if(j===activeIndex)el.scrollIntoView({block:'nearest'});});
+  }
+  function render(){
+    const q=input.value.trim(),ql=q.toLowerCase();
+    const matchedTools=tools.filter(t=>!ql||t.name.toLowerCase().includes(ql));
+    const shownTools=ql?matchedTools.slice(0,8):matchedTools.slice(0,12);
+    items=[];let html='';
+    if(shownTools.length){
+      html+='<div class="ts-head"><span>Tools</span><span>'+matchedTools.length+' available</span></div><div class="ts-grid">';
+      shownTools.forEach(t=>{const idx=items.length;items.push({kind:'tool',tool:t});
+        html+='<button type="button" class="ts-item" role="option" data-idx="'+idx+'"><span class="ts-ico">'+t.icon+'</span><span class="ts-main"><span class="ts-name">'+highlight(t.name,q)+'</span><span class="ts-sub">Open tool</span></span><span class="ts-kind">Tool</span></button>';});
+      html+='</div>';
+      if(!ql&&matchedTools.length>shownTools.length)html+='<div class="ts-more">+'+(matchedTools.length-shownTools.length)+' more tools — start typing to filter</div>';
+    }
+    if(q){
+      html+='<div class="ts-head"><span>Files</span><span>'+(fileLoading?'Searching…':'in '+tsEsc(currentFolderName())+' &amp; subfolders')+'</span></div>';
+      if(fileLoading&&!fileResults.length){
+        html+='<div class="ts-loading"><span class="ts-spinner"></span>Searching this folder and all subfolders…</div>';
+      }else if(fileResults.length){
+        html+='<div class="ts-list">';
+        fileResults.forEach(r=>{const idx=items.length;
+          const href=r.is_dir?('?dir='+encodeURIComponent(r.path)):('?dir='+encodeURIComponent(r.dir)+'&focus='+encodeURIComponent(r.name));
+          items.push({kind:'file',href});
+          const parent=r.rel&&r.rel.includes('/')?r.rel.slice(0,r.rel.lastIndexOf('/')):'Current folder';
+          const meta=r.is_dir?'Folder · open path':(String(r.type||'file')+' · '+tsBytes(r.size));
+          const icon=r.is_dir?folderSvg:fileSvg(String(r.type||'file'));
+          html+='<a class="ts-item" role="option" data-idx="'+idx+'" href="'+tsEsc(href)+'"><span class="ts-ico type-'+tsEsc(String(r.type||'file').replace(/[^a-z0-9_-]/gi,''))+'">'+icon+'</span><span class="ts-main"><span class="ts-name">'+highlight(r.name,q)+'</span><span class="ts-sub">'+highlight(parent,q)+' · '+tsEsc(meta)+'</span></span><span class="ts-kind">'+(r.is_dir?'Folder':'File')+'</span></a>';});
+        html+='</div>';
+        if(fileTruncated)html+='<div class="ts-more">Showing the best matches — refine your search for more precise results</div>';
+      }else if(!fileLoading){
+        html+='<div class="ts-empty">No files match &ldquo;'+tsEsc(q)+'&rdquo; in this folder or its subfolders.</div>';
+      }
+    }else{
+      html+='<div class="ts-head"><span>Files</span><span>recursive</span></div><div class="ts-hint">Type a file or folder name to search '+tsEsc(currentFolderName())+' and everything inside it.</div>';
+    }
+    html+='<div class="ts-foot"><span><kbd>↑</kbd> <kbd>↓</kbd> navigate</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></div>';
+    panel.innerHTML=html;
+    panel.querySelectorAll('.ts-item').forEach(el=>{
+      const idx=Number(el.dataset.idx);
+      el.addEventListener('mouseenter',()=>setActive(idx));
+      el.addEventListener('click',e=>{e.preventDefault();activate(idx);});
+    });
+    setActive(q&&items.length?0:-1);
+  }
+  function activate(i){
+    const item=items[i];if(!item)return;
+    if(item.kind==='tool'){const el=item.tool.el;closeSearch();setTimeout(()=>{try{el.click();}catch(e){}},90);}
+    else if(item.kind==='file'){location.href=item.href;}
+  }
+  async function fetchFiles(q){
+    const mine=++seq;
+    if(controller)try{controller.abort();}catch(e){}
+    controller=('AbortController' in window)?new AbortController():null;
+    fileLoading=true;render();
+    try{
+      const res=await fetch('?x=global_search&gsq='+encodeURIComponent(q)+'&dir='+encodeURIComponent(CWD),{credentials:'same-origin',signal:controller?controller.signal:undefined});
+      const data=await res.json();
+      if(mine!==seq)return;
+      fileResults=Array.isArray(data.results)?data.results:[];fileTruncated=!!data.truncated;
+    }catch(e){if(mine!==seq||(e&&e.name==='AbortError'))return;fileResults=[];}
+    if(mine===seq){fileLoading=false;render();}
+  }
+  function openSearch(){
+    if(expanded||openTimer)return;
+    render();
+    topbar.classList.add('search-hiding');
+    openTimer=setTimeout(()=>{
+      openTimer=null;expanded=true;
+      topbar.classList.remove('search-hiding');topbar.classList.add('search-expanded');
+      input.setAttribute('aria-expanded','true');
+      requestAnimationFrame(()=>panel.classList.add('open'));
+    },200);
+  }
+  function closeSearch(){
+    if(openTimer){clearTimeout(openTimer);openTimer=null;}
+    if(!expanded)return;
+    expanded=false;seq++;if(controller)try{controller.abort();}catch(e){}
+    panel.classList.remove('open');
+    topbar.classList.add('search-restoring');topbar.classList.remove('search-expanded');
+    input.setAttribute('aria-expanded','false');
+    requestAnimationFrame(()=>requestAnimationFrame(()=>topbar.classList.remove('search-restoring')));
+  }
+  input.addEventListener('focus',openSearch);
+  input.addEventListener('click',openSearch);
+  input.addEventListener('input',()=>{
+    if(!expanded&&!openTimer)openSearch();
+    fileResults=[];fileTruncated=false;
+    clearTimeout(debounce);
+    const q=input.value.trim();
+    if(!q){seq++;if(controller)try{controller.abort();}catch(e){}fileLoading=false;render();return;}
+    fileLoading=true;render();
+    debounce=setTimeout(()=>fetchFiles(q),180);
+  });
+  input.addEventListener('keydown',e=>{
+    if(e.key==='ArrowDown'){e.preventDefault();setActive(activeIndex+1);}
+    else if(e.key==='ArrowUp'){e.preventDefault();setActive(activeIndex-1);}
+    else if(e.key==='Enter'&&expanded&&activeIndex>=0&&items[activeIndex]){e.preventDefault();activate(activeIndex);}
+    else if(e.key==='Escape'){e.preventDefault();closeSearch();input.blur();}
+  });
+  form.addEventListener('submit',e=>{
+    if(expanded&&activeIndex>=0&&items[activeIndex]&&input.value.trim()){e.preventDefault();activate(activeIndex);}
+  });
+  closeBtn.addEventListener('mousedown',e=>e.preventDefault());
+  closeBtn.addEventListener('click',()=>{
+    if(input.value){input.value='';fileResults=[];render();input.focus();}
+    else{closeSearch();input.blur();}
+  });
+  document.addEventListener('mousedown',e=>{if(expanded&&!topbar.contains(e.target))closeSearch();});
+})();
 
 /* ── Theme toggle (shared across all users/devices, saved server-side) ── */
 (function(){
