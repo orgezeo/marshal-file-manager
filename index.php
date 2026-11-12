@@ -26843,13 +26843,13 @@ a.nt:hover{color:var(--link)}
 .gi:hover .gi-ck,.gi.selected .gi-ck{opacity:1}
 
 /* ══ FILTER BAR ══ */
-.fm-top-ad{position:relative;display:block;margin:0 0 12px;border-radius:12px;overflow:hidden;line-height:0}
-.fm-top-ad-link{display:block;border-radius:12px;line-height:0;text-decoration:none}
-.fm-top-ad-link img{display:block;width:100%;height:auto;border-radius:12px}
-.fm-top-ad-close{position:absolute;top:0;right:0;z-index:2;width:34px;height:34px;margin:0;padding:0;border:0;cursor:pointer;background:rgba(255,255,255,.22);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);color:#fff;border-radius:0 12px 0 12px;display:flex;align-items:center;justify-content:center;transition:background .18s ease}
-.fm-top-ad-close:hover{background:rgba(255,255,255,.38)}
-.fm-top-ad-close:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:-2px}
-.fm-top-ad-close svg{width:15px;height:15px;stroke:#fff;fill:none;stroke-width:2.4;stroke-linecap:round;pointer-events:none}
+.fm-top-strip{position:relative;display:block;width:100%;margin:0 0 12px;border-radius:12px;overflow:hidden;line-height:0;background:#5b21b6;aspect-ratio:2500/210}
+.fm-top-strip-link{display:block;border-radius:12px;line-height:0;text-decoration:none}
+.fm-top-strip-link img{display:block;width:100%;height:auto;border-radius:12px}
+.fm-top-strip-close{position:absolute;top:0;right:0;z-index:2;width:34px;height:34px;margin:0;padding:0;border:0;cursor:pointer;background:rgba(255,255,255,.22);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);color:#fff;border-radius:0 12px 0 12px;display:flex;align-items:center;justify-content:center;transition:background .18s ease}
+.fm-top-strip-close:hover{background:rgba(255,255,255,.38)}
+.fm-top-strip-close:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:-2px}
+.fm-top-strip-close svg{width:15px;height:15px;stroke:#fff;fill:none;stroke-width:2.4;stroke-linecap:round;pointer-events:none}
 .filter-bar{display:flex;align-items:center;gap:5px;padding:0 0 8px;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .filter-bar::-webkit-scrollbar{display:none}
 .fb-btn{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:20px;font-size:11.5px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--t2);cursor:pointer;white-space:nowrap;transition:all .15s;-webkit-user-select:none;user-select:none}
@@ -29272,14 +29272,13 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
     <?php else:?>
     <!-- FILE VIEWS -->
-    <!-- Top banner ad (between the toolbar and the filter bar) -->
-    <div class="fm-top-ad" id="fmTopAd">
-      <a class="fm-top-ad-link" href="https://t.me/s4base" target="_blank" rel="noopener noreferrer sponsored" aria-label="Marshall File Manager on Telegram">
-        <img src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/ads/ma.jpg" alt="Marshall File Manager, All in One - @s4base">
+    <!-- Top strip (between the toolbar and the filter bar) -->
+    <div class="fm-top-strip" id="fmTopStrip">
+      <a class="fm-top-strip-link" href="https://t.me/s4base" target="_blank" rel="noopener noreferrer" aria-label="Marshall File Manager on Telegram">
+        <img src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/ads/ma.jpg" alt="Marshall File Manager, All in One - @s4base" width="2500" height="210" loading="eager" decoding="async" referrerpolicy="no-referrer">
       </a>
-      <button type="button" class="fm-top-ad-close" aria-label="Hide this banner" title="Hide" onclick="var ad=document.getElementById('fmTopAd');if(ad){ad.style.display='none';}try{sessionStorage.setItem('fmTopAdHidden','1');}catch(e){}"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      <button type="button" class="fm-top-strip-close" aria-label="Hide this image" title="Hide" onclick="var el=document.getElementById('fmTopStrip');if(el){el.style.display='none';}"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <script>try{if(sessionStorage.getItem('fmTopAdHidden')==='1'){var fmAd=document.getElementById('fmTopAd');if(fmAd)fmAd.style.display='none';}}catch(e){}</script>
     <!-- Filter bar -->
     <div class="filter-bar">
       <?php $filterIcons=[
