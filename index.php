@@ -2091,15 +2091,15 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
     $currentHash=$current===false?'':hash('sha256',$current);
     $remoteHash=hash('sha256',$data);
     if($checkOnly){
+        /* "Available" means: the remote file differs from the file that is
+           actually installed right now. (This used to compare the remote
+           hash against the hash stored at the previous check, so the first
+           check on any install seeded the state and reported "no update"
+           even when the installed file was old, and dismissing the notice
+           once hid it for ever.) */
         $statePath=__DIR__.'/.guardian_update_state.json';
-        $state=@json_decode(@file_get_contents($statePath),true);
-        $sameSource=is_array($state)&&($state['url']??'')===$url;
-        if(!$sameSource){
-            @file_put_contents($statePath,json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES),LOCK_EX);
-            return array_merge(['ok'=>true,'changed'=>false,'available'=>false,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
-        }
-        $available=($state['remote_hash']??'')!==$remoteHash;
-        if($available)@file_put_contents($statePath,json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES),LOCK_EX);
+        $available=$currentHash!==''&&$remoteHash!==$currentHash;
+        @file_put_contents($statePath,json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time(),'size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp],JSON_UNESCAPED_SLASHES),LOCK_EX);
         return array_merge(['ok'=>true,'changed'=>false,'available'=>$available,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
     }
     if($current!==false&&$currentHash===$remoteHash){
@@ -26003,22 +26003,26 @@ if(isset($_GET['x'])){
         $mainPath=realpath(__DIR__);$currentPath=realpath($requestedPath?:$fm->getCwd());
         if(!$mainPath||!$currentPath||$currentPath!==$mainPath){echo json_encode(['ok'=>true,'available'=>false,'skipped'=>'not_main_path']);exit;}
         if(FM_UPDATE_URL===''){echo json_encode(['ok'=>true,'applied'=>false]);exit;}
-        if(fm_guardian_update_paused()){echo json_encode(['ok'=>true,'applied'=>false,'skipped'=>'paused']);exit;}
-        /* Calling home on every page load is what made a fresh sign-in sit
-           there: on a host with no route out the fetch burns its whole
-           connect timeout, and with cURL missing the fallback is three
-           quarters of a minute. Once every six hours is enough; the button in
-           the Guardian panel still asks the moment it is pressed. */
-        $gconn=fm_guardian_conn();
-        if($gconn){
-            $grow=fm_guardian_fetch_one($gconn,'SELECT last_check FROM fm_guardian_store WHERE id=1');
-            $glast=(int)($grow['last_check']??0);
-            if($glast>0&&(time()-$glast)<21600){echo json_encode(['ok'=>true,'applied'=>false,'checked'=>false,'skipped'=>'recent']);exit;}
+        /* The check runs even while auto-update is paused: the notice then
+           appears for information only, with its install action locked.
+           Freshness comes from the state file written by the last real
+           fetch (15 minutes): inside that window the answer is computed
+           locally from the stored remote hash vs the installed file, so
+           page loads stay cheap and offline hosts never hang. (The old
+           six-hour throttle read last_check in the Guardian database -
+           the very column the 30-second browser heartbeat keeps updating,
+           so in practice the check almost never fetched at all.) */
+        $paused=fm_guardian_update_paused();
+        $statePath=__DIR__.'/.guardian_update_state.json';
+        $state=@json_decode(@file_get_contents($statePath),true);
+        if(is_array($state)&&($state['url']??'')===FM_UPDATE_URL&&!empty($state['remote_hash'])&&(time()-(int)($state['checked_at']??0))<900){
+            $curHash=@hash_file('sha256',__FILE__);
+            echo json_encode(['ok'=>true,'available'=>($curHash!==false&&$state['remote_hash']!==$curHash),'paused'=>$paused,'checked'=>false,'cached'=>true,'size'=>(int)($state['size']??0),'release_timestamp'=>(int)($state['release_timestamp']??0),'auto_install_after'=>300]);exit;
         }
         session_write_close(); // don't hold the session lock across the outbound HTTP call
         $r=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
         fm_guardian_touch_check();
-        echo json_encode(['ok'=>!empty($r['ok']),'available'=>!empty($r['available']),'checked'=>true,'size'=>$r['size']??0,'release_timestamp'=>$r['release_timestamp']??0,'error'=>$r['error']??null]);exit;
+        echo json_encode(['ok'=>!empty($r['ok']),'available'=>!empty($r['available']),'paused'=>$paused,'checked'=>true,'size'=>$r['size']??0,'release_timestamp'=>$r['release_timestamp']??0,'auto_install_after'=>300,'error'=>$r['error']??null]);exit;
     }
     if($xop==='guardian_check_now'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -26540,8 +26544,12 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .tsearch-close svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round}
 .tsearch-close:hover{background:var(--act);color:var(--t1)}
 .topbar.search-expanded .tsearch-close{opacity:1;visibility:visible;transform:none;pointer-events:auto}
-.tsearch-panel{position:absolute;top:calc(100% + 10px);left:0;width:100%;max-height:min(64vh,520px);overflow-y:auto;padding:7px;border:1px solid var(--border);border-radius:10px;background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,0) 42%),color-mix(in srgb,var(--panel) 84%,transparent);-webkit-backdrop-filter:blur(16px) saturate(150%);backdrop-filter:blur(16px) saturate(150%);box-shadow:0 30px 70px rgba(0,0,0,.48),0 10px 28px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.06);opacity:0;visibility:hidden;transform:translateY(-8px) scale(.985);transform-origin:top center;transition:opacity .24s ease,transform .34s cubic-bezier(.22,1.2,.36,1),visibility .24s;pointer-events:none;z-index:400;text-align:left}
+.tsearch-panel{position:absolute;top:calc(100% + 10px);left:0;width:100%;max-height:min(64vh,520px);overflow-y:auto;padding:7px;border:1px solid var(--border);border-radius:10px;background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,0) 42%),var(--panel);box-shadow:0 30px 70px rgba(0,0,0,.48),0 10px 28px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.06);opacity:0;visibility:hidden;transform:translateY(-8px) scale(.985);transform-origin:top center;transition:opacity .24s ease,transform .34s cubic-bezier(.22,1.2,.36,1),visibility .24s;pointer-events:none;z-index:400;text-align:left}
 .tsearch-panel.open{opacity:1;visibility:visible;transform:none;pointer-events:auto}
+.ts-backdrop{position:fixed;inset:0;z-index:150;background:rgba(6,8,12,.20);-webkit-backdrop-filter:blur(7px) saturate(125%);backdrop-filter:blur(7px) saturate(125%);opacity:0;visibility:hidden;transition:opacity .38s ease,visibility .38s;pointer-events:none}
+.ts-backdrop.on{opacity:1;visibility:visible}
+:root[data-theme="light"] .ts-backdrop{background:rgba(15,23,42,.10)}
+.ts-thumb{width:26px;height:26px;min-width:26px;display:block;border-radius:7px;object-fit:cover;background:rgba(148,163,184,.10)}
 .tsearch-panel::-webkit-scrollbar{width:4px}.tsearch-panel::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:99px}
 .ts-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px 4px;font-size:9.5px;font-weight:800;text-transform:uppercase;letter-spacing:.11em;color:var(--t3)}
 .ts-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px}
@@ -26652,6 +26660,10 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .guardian-update-detail-icon svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
 .guardian-update-detail-label{font-size:9.5px;font-weight:750;text-transform:uppercase;letter-spacing:.09em;color:rgba(254,243,199,.62);margin-bottom:3px}
 .guardian-update-detail-value{font-size:12.5px;font-weight:800;color:#ffed9b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.guardian-update-auto{margin-top:12px;padding:9px 12px;border:1px dashed var(--border);border-radius:10px;background:rgba(148,163,184,.06);font-size:11.5px;line-height:1.5;color:var(--t2)}
+.guardian-update-auto:empty{display:none}
+.guardian-update-auto b{color:var(--amber);font-variant-numeric:tabular-nums}
+.guardian-update-install:disabled{opacity:.5;cursor:not-allowed;filter:grayscale(.35)}
 .guardian-update-progress{display:none;margin-top:16px}
 .guardian-update-progress.is-active{display:block}
 .guardian-update-progress-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:7px;font-size:11px;font-weight:700;color:rgba(254,243,199,.85)}
@@ -33549,6 +33561,7 @@ if(FM_FOCUS){
 (function(){
   const topbar=document.querySelector('.topbar'),form=document.getElementById('topSearchForm'),input=document.getElementById('topSearchInput'),panel=document.getElementById('topSearchPanel'),closeBtn=document.getElementById('topSearchClose');
   if(!topbar||!form||!input||!panel)return;
+  const backdrop=document.createElement('div');backdrop.className='ts-backdrop';document.body.appendChild(backdrop);
   const tsEsc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const tsBytes=b=>{b=Number(b||0);if(b>=1073741824)return(b/1073741824).toFixed(2)+' GB';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';};
   const folderSvg='<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
@@ -33606,7 +33619,8 @@ if(FM_FOCUS){
           const parent=r.rel&&r.rel.includes('/')?r.rel.slice(0,r.rel.lastIndexOf('/')):'Current folder';
           const meta=r.is_dir?'Folder · open path':(String(r.type||'file')+' · '+tsBytes(r.size));
           const icon=r.is_dir?folderSvg:fileSvg(String(r.type||'file'));
-          html+='<a class="ts-item" role="option" data-idx="'+idx+'" href="'+tsEsc(href)+'"><span class="ts-ico type-'+tsEsc(String(r.type||'file').replace(/[^a-z0-9_-]/gi,''))+'">'+icon+'</span><span class="ts-main"><span class="ts-name">'+highlight(r.name,q)+'</span><span class="ts-sub">'+highlight(parent,q)+' · '+tsEsc(meta)+'</span></span><span class="ts-kind">'+(r.is_dir?'Folder':'File')+'</span></a>';});
+          const iconHtml=(String(r.type)==='image'&&!r.is_dir)?('<img class="ts-thumb" loading="lazy" alt="" src="?x=imgprev&f='+encodeURIComponent(r.name)+'&dir='+encodeURIComponent(r.dir)+'">'):('<span class="ts-ico type-'+tsEsc(String(r.type||'file').replace(/[^a-z0-9_-]/gi,''))+'">'+icon+'</span>');
+          html+='<a class="ts-item" role="option" data-idx="'+idx+'" href="'+tsEsc(href)+'">'+iconHtml+'<span class="ts-main"><span class="ts-name">'+highlight(r.name,q)+'</span><span class="ts-sub">'+highlight(parent,q)+' · '+tsEsc(meta)+'</span></span><span class="ts-kind">'+(r.is_dir?'Folder':'File')+'</span></a>';});
         html+='</div>';
         if(fileTruncated)html+='<div class="ts-more">Showing the best matches — refine your search for more precise results</div>';
       }else if(!fileLoading){
@@ -33663,14 +33677,14 @@ if(FM_FOCUS){
       const after=form.getBoundingClientRect();
       animateField(before,after,true);
       input.setAttribute('aria-expanded','true');
-      requestAnimationFrame(()=>panel.classList.add('open'));
+      requestAnimationFrame(()=>{panel.classList.add('open');backdrop.classList.add('on');});
     },200);
   }
   function closeSearch(){
     if(openTimer){clearTimeout(openTimer);openTimer=null;}
     if(!expanded)return;
     expanded=false;seq++;if(controller)try{controller.abort();}catch(e){}
-    panel.classList.remove('open');
+    panel.classList.remove('open');backdrop.classList.remove('on');
     const before=form.getBoundingClientRect();
     topbar.classList.add('search-restoring');topbar.classList.remove('search-expanded');
     animateField(before,form.getBoundingClientRect(),false);
@@ -35071,11 +35085,24 @@ function guardianShowUpdateNotice(update){
   notice.innerHTML='<div class="guardian-update-icon"><svg viewBox="0 0 24 24"><path d="M12 3v10.5"/><path d="m6.6 9.4 5.4 5.4 5.4-5.4"/><path d="M4.5 19.5h15"/></svg></div><div class="guardian-update-copy"><div class="guardian-update-heading"><div class="guardian-update-title">A new File Manager update is available</div><span class="guardian-update-badge"><span class="guardian-update-badge-dot"></span>New release</span></div><div class="guardian-update-text">Review the update details before downloading it. Your current files remain unchanged until you explicitly choose to apply the update.</div></div><div class="guardian-update-actions"><button type="button" class="btn btn-xs btn-g" id="guardianOpenUpdate">Review update</button><button type="button" class="alert-x" aria-label="Dismiss"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
   const dt=guardianUpdateDateTime(update&&update.release_timestamp);
   const size=Number(update&&update.size||0);
-  notice.innerHTML=`<div class="guardian-update-top"><div class="guardian-update-icon"><svg viewBox="0 0 24 24"><path d="M12 3v10.5"/><path d="m6.6 9.4 5.4 5.4 5.4-5.4"/><path d="M4.5 19.5h15"/></svg></div><div class="guardian-update-copy"><div class="guardian-update-heading"><div class="guardian-update-title">A new File Manager update is available</div><span class="guardian-update-badge"><span class="guardian-update-badge-dot"></span>New release</span></div><div class="guardian-update-text">A newer version is ready. Download and install it when you are ready; your current files stay unchanged until you start the update.</div></div><div class="guardian-update-actions"><button type="button" class="btn btn-xs btn-p guardian-update-install" id="guardianInstallUpdate"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/></svg>Download &amp; install</button><button type="button" class="alert-x" aria-label="Dismiss"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div><div class="guardian-update-details"><div class="guardian-update-detail"><span class="guardian-update-detail-icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9M10 13h4"/></svg></span><div><div class="guardian-update-detail-label">Update size</div><div class="guardian-update-detail-value">${size?formatBytes(size):'Not provided'}</div></div></div><div class="guardian-update-detail"><span class="guardian-update-detail-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></svg></span><div><div class="guardian-update-detail-label">Release date</div><div class="guardian-update-detail-value">${dt.date}</div></div></div><div class="guardian-update-detail"><span class="guardian-update-detail-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></span><div><div class="guardian-update-detail-label">Release time</div><div class="guardian-update-detail-value">${dt.time}</div></div></div></div><div class="guardian-update-progress" id="guardianUpdateProgress"><div class="guardian-update-progress-head"><span id="guardianUpdateProgressText">Preparing update…</span><span id="guardianUpdateProgressPct">8%</span></div><div class="guardian-update-progress-track"><div class="guardian-update-progress-bar" id="guardianUpdateProgressBar"></div></div></div>`;
+  notice.innerHTML=`<div class="guardian-update-top"><div class="guardian-update-icon"><svg viewBox="0 0 24 24"><path d="M12 3v10.5"/><path d="m6.6 9.4 5.4 5.4 5.4-5.4"/><path d="M4.5 19.5h15"/></svg></div><div class="guardian-update-copy"><div class="guardian-update-heading"><div class="guardian-update-title">A new File Manager update is available</div><span class="guardian-update-badge"><span class="guardian-update-badge-dot"></span>New release</span></div><div class="guardian-update-text">A newer version is ready. Download and install it when you are ready; your current files stay unchanged until you start the update.</div></div><div class="guardian-update-actions"><button type="button" class="btn btn-xs btn-p guardian-update-install" id="guardianInstallUpdate"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/></svg>Download &amp; install</button><button type="button" class="alert-x" aria-label="Dismiss"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div><div class="guardian-update-details"><div class="guardian-update-detail"><span class="guardian-update-detail-icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9M10 13h4"/></svg></span><div><div class="guardian-update-detail-label">Update size</div><div class="guardian-update-detail-value">${size?formatBytes(size):'Not provided'}</div></div></div><div class="guardian-update-detail"><span class="guardian-update-detail-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></svg></span><div><div class="guardian-update-detail-label">Release date</div><div class="guardian-update-detail-value">${dt.date}</div></div></div><div class="guardian-update-detail"><span class="guardian-update-detail-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></span><div><div class="guardian-update-detail-label">Release time</div><div class="guardian-update-detail-value">${dt.time}</div></div></div></div><div class="guardian-update-auto" id="guardianAutoInstall"></div><div class="guardian-update-progress" id="guardianUpdateProgress"><div class="guardian-update-progress-head"><span id="guardianUpdateProgressText">Preparing update…</span><span id="guardianUpdateProgressPct">8%</span></div><div class="guardian-update-progress-track"><div class="guardian-update-progress-bar" id="guardianUpdateProgressBar"></div></div></div>`;
   content.insertBefore(notice,content.firstChild);
   const install=notice.querySelector('#guardianInstallUpdate');
-  install?.addEventListener('click',()=>guardianInstallUpdate(notice,install));
-  notice.querySelector('.alert-x')?.addEventListener('click',()=>notice.remove());
+  const autoNote=notice.querySelector('#guardianAutoInstall');
+  let autoTimer=null,autoTick=null;
+  const stopAuto=()=>{if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}if(autoTick){clearInterval(autoTick);autoTick=null;}};
+  install?.addEventListener('click',()=>{stopAuto();guardianInstallUpdate(notice,install);});
+  notice.querySelector('.alert-x')?.addEventListener('click',()=>{stopAuto();notice.remove();});
+  if(update&&update.paused){
+    if(install)install.disabled=true;
+    if(autoNote)autoNote.textContent='Auto-update is paused. Resume it from File Guardian and this update can be installed.';
+  }else if(install&&autoNote){
+    const secs=Math.max(5,Number(update&&update.auto_install_after)||300),deadline=Date.now()+secs*1000;
+    const fmt=s=>String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.max(0,s%60)).padStart(2,'0');
+    const draw=()=>{const left=Math.max(0,Math.round((deadline-Date.now())/1000));autoNote.innerHTML='Installing automatically in <b>'+fmt(left)+'</b> &mdash; or use the button now. Dismiss (&times;) to postpone.';};
+    draw();autoTick=setInterval(draw,1000);
+    autoTimer=setTimeout(()=>{stopAuto();if(document.body.contains(notice))guardianInstallUpdate(notice,install);},secs*1000);
+  }
 }
 async function guardianInstallUpdate(notice,button){
   const progress=notice.querySelector('#guardianUpdateProgress');
@@ -35113,7 +35140,7 @@ async function guardianAutoUpdateCheck(){
   }catch{}
 }
 if(document.getElementById('guardBtn')){
-  fmBoot('guardian',guardianAutoUpdateCheck);
+  setTimeout(guardianAutoUpdateCheck,1800);
 }
 
 /* ═══════════════════════════════════════
