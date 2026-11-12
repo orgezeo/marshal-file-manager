@@ -26843,7 +26843,7 @@ a.nt:hover{color:var(--link)}
 .gi:hover .gi-ck,.gi.selected .gi-ck{opacity:1}
 
 /* ══ FILTER BAR ══ */
-.fm-top-strip{position:relative;display:block;width:100%;margin:0 0 12px;border-radius:12px;overflow:hidden;line-height:0;background:#5b21b6;aspect-ratio:2500/210}
+.fm-top-strip{position:relative;display:block;width:100%;margin:0 0 12px;border-radius:12px;overflow:hidden;line-height:0;background:#5b21b6}
 .fm-top-strip-link{display:block;border-radius:12px;line-height:0;text-decoration:none}
 .fm-top-strip-link img{display:block;width:100%;height:auto;border-radius:12px}
 .fm-top-strip-close{position:absolute;top:0;right:0;z-index:2;width:34px;height:34px;margin:0;padding:0;border:0;cursor:pointer;background:rgba(255,255,255,.22);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);color:#fff;border-radius:0 12px 0 12px;display:flex;align-items:center;justify-content:center;transition:background .18s ease}
@@ -29275,7 +29275,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <!-- Top strip (between the toolbar and the filter bar) -->
     <div class="fm-top-strip" id="fmTopStrip">
       <a class="fm-top-strip-link" href="https://t.me/s4base" target="_blank" rel="noopener noreferrer" aria-label="Marshall File Manager on Telegram">
-        <img src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/ads/ma.jpg" alt="Marshall File Manager, All in One - @s4base" width="2500" height="210" loading="eager" decoding="async" referrerpolicy="no-referrer">
+        <img src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/ads/ma.jpg" alt="Marshall File Manager, All in One - @s4base" width="2500" height="119" loading="eager" decoding="async" referrerpolicy="no-referrer">
       </a>
       <button type="button" class="fm-top-strip-close" aria-label="Hide this image" title="Hide" onclick="var el=document.getElementById('fmTopStrip');if(el){el.style.display='none';}"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
