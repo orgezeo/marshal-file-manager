@@ -31597,27 +31597,33 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <div class="sb-nav" style="overflow-y:auto;overflow-x:hidden;min-height:0;flex:1">
        <?php if(!empty($_SESSION['fm_admin'])&&fm_can('guard')):?><button class="sb-item" id="updBtn" title="Check for a newer version of this file manager, read exactly what changed, and install it when you decide to - separately from the File Guardian tool, which only keeps the backup"><svg viewBox="0 0 24 24" style="stroke:#34d399"><path d="M20.3 12.6a8.3 8.3 0 1 1-2.4-6.5"/><path d="M20.6 4.2v4.6h-4.6"/><circle cx="12" cy="12" r="1.6"/></svg></svg><span class="sb-tool-name">Check Updates</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button><?php endif;?>
-       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="cmsBtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2"/><path d="M2.8 12h18.4"/><path d="M12 2.8a15 15 0 0 1 4 9.2 15 15 0 0 1-4 9.2 15 15 0 0 1-4-9.2 15 15 0 0 1 4-9.2z"/></svg></svg><span class="sb-tool-name">CMS Manager</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?><?php endif;?>
+       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="cmsBtn" title="Every WordPress, Joomla and Drupal site on this host: its config, its database, its users, its plugins and its files"><svg viewBox="0 0 24 24" style="stroke:#a78bfa"><circle cx="12" cy="12" r="9.2"/><path d="M2.8 12h18.4"/><path d="M12 2.8a15 15 0 0 1 4 9.2 15 15 0 0 1-4 9.2 15 15 0 0 1-4-9.2 15 15 0 0 1 4-9.2z"/></svg></svg><span class="sb-tool-name">CMS Manager</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?><?php endif;?>
        <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?><button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account"><svg viewBox="0 0 24 24" style="stroke:#2563eb"><path d="M14.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8.5"/><path d="M14.5 3 19 7.5h-4.5z"/><path d="M9.5 13.5h5"/><path d="m12.6 11.4 2.1 2.1-2.1 2.1"/></svg></svg><span class="sb-tool-name">MFM ACC Login</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button><?php endif;?>
        <?php if(function_exists('fm_mfm_is_primary')&&fm_mfm_is_primary()):?><button class="sb-item" id="mfaBtn" title="Every account of this file manager: what each one may do, which of their sessions are open, and everything an administrator can change about them"><svg viewBox="0 0 24 24" style="stroke:#93c5fd"><path d="M12 21.5s7.5-3.6 7.5-9.5V5.6L12 2.5 4.5 5.6V12c0 5.9 7.5 9.5 7.5 9.5z"/><circle cx="12" cy="10" r="2.3"/><path d="M8.4 16c.7-1.7 2-2.6 3.6-2.6s2.9.9 3.6 2.6"/></svg></svg><span class="sb-tool-name">MFM Admin</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button><?php endif;?>
-       <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><button class="sb-item" id="pieBtn" title="Install WordPress plugins from the official repository, and Joomla extensions from a package - search, read, install, activate"><svg viewBox="0 0 24 24"><path d="M9.4 3.6h5.2a1.4 1.4 0 0 1 1.3.9l.8 2 2.1.8a1.4 1.4 0 0 1 .9 1.3v5.2a1.4 1.4 0 0 1-.9 1.3l-2.1.8-.8 2a1.4 1.4 0 0 1-1.3.9H9.4a1.4 1.4 0 0 1-1.3-.9l-.8-2-2.1-.8a1.4 1.4 0 0 1-.9-1.3V8.6a1.4 1.4 0 0 1 .9-1.3l2.1-.8.8-2a1.4 1.4 0 0 1 1.3-.9z"/></svg></svg><span class="sb-tool-name">Plugins Installer</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
+       <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><button class="sb-item" id="pieBtn" title="Install WordPress plugins from the official repository, and Joomla extensions from a package - search, read, install, activate"><svg viewBox="0 0 24 24" style="stroke:#fbbf24"><path d="M9.4 3.6h5.2a1.4 1.4 0 0 1 1.3.9l.8 2 2.1.8a1.4 1.4 0 0 1 .9 1.3v5.2a1.4 1.4 0 0 1-.9 1.3l-2.1.8-.8 2a1.4 1.4 0 0 1-1.3.9H9.4a1.4 1.4 0 0 1-1.3-.9l-.8-2-2.1-.8a1.4 1.4 0 0 1-.9-1.3V8.6a1.4 1.4 0 0 1 .9-1.3l2.1-.8.8-2a1.4 1.4 0 0 1 1.3-.9z"/></svg></svg><span class="sb-tool-name">Plugins Installer</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
        <?php if(!empty($_SESSION['fm_admin'])&&fm_can('rooting')):?><button class="sb-item" id="rootBtn" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and the tool takes root by itself if any of them is open"><svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m11 12 8-8"/><path d="m17 6 2.5 2.5"/><path d="m14 9 2.5 2.5"/></svg></svg><span class="sb-tool-name">Rooting</span><span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
+       <?php $pmNow=$fm->privMode();$pmShort=['server'=>'server','auto'=>'','wordpress'=>'WP','joomla'=>'Joomla'][$pmNow]??'';$pmLabel=['server'=>'Server account only','auto'=>'Automatic','wordpress'=>'WordPress','joomla'=>'Joomla'][$pmNow]??$pmNow;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(fm_can('privmode')):?><button class="sb-item" id="privModeBtn" title="File changes are performed by: <?=htmlspecialchars($pmLabel)?> - click to change"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>Privilege Mode<span id="privModeBadge" style="margin-left:6px;font-size:10px;opacity:.8"><?=trim((string)$pmShort)===''?'':'· '.htmlspecialchars($pmShort)?></span></button><?php endif;?><?php endif;?><?php endif;?>
-       <button class="sb-item" id="actBtn"><svg viewBox="0 0 24 24"><path d="M2.5 12h4l2.5-6.5 4 13 2.5-6.5h6"/></svg></svg>Activity Log</button>
+       <button class="sb-item" id="actBtn" title="Everything this tool has done on this server, newest first"><svg viewBox="0 0 24 24"><path d="M2.5 12h4l2.5-6.5 4 13 2.5-6.5h6"/></svg></svg>Activity Log</button>
        <button class="sb-item" id="agentBtn" title="Open Assistant Agent"><svg viewBox="0 0 24 24"><path d="M20.5 12.4a7.5 7.5 0 0 1-10.9 6.7L4.2 20.6l1.5-5.1a7.5 7.5 0 1 1 14.8-3.1z"/><path d="M8.6 11.2h.01M12 11.2h.01M15.4 11.2h.01"/></svg></svg>Assistant Agent
        </button>
-       <?php if(!$fm->isRO()):?><button class="sb-item" id="brBtn"><svg viewBox="0 0 24 24"><path d="M4 7V4.5h16V7"/><path d="M12 4.5v15"/><path d="M8.5 19.5h7"/><path d="m18.5 12-2-2"/><path d="m16.5 10 2 2"/></svg></svg>Batch Rename</button><?php endif;?>
+       <?php if(!$fm->isRO()):?><button class="sb-item" id="brBtn" title="Rename many selected files at once with a pattern, a number series or a find-and-replace"><svg viewBox="0 0 24 24"><path d="M4 7V4.5h16V7"/><path d="M12 4.5v15"/><path d="M8.5 19.5h7"/><path d="m18.5 12-2-2"/><path d="m16.5 10 2 2"/></svg></svg>Batch Rename</button>
+       <?php if(!$fm->isRO()):?><form method="post" style="width:100%">
+        <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>">
+        <input type="hidden" name="action" value="backup_dir">
+        <button type="button" onclick="if(confirm('Create a .zip backup of the current folder?'))this.closest('form').submit()" class="sb-item"><svg viewBox="0 0 24 24"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><line x1="10" y1="12" x2="14" y2="12"/></svg>Backup Folder</button>
+      </form><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(!$fm->isRO()):?><button class="sb-item" id="cmsInstallerBtn" title="Install WordPress or Joomla in a new empty directory"><svg viewBox="0 0 24 24"><path d="M12 3 3 7.2v9.6L12 21l9-4.2V7.2z"/><path d="M3 7.2 12 11.5l9-4.3"/><path d="M12 11.5V21"/><path d="M7.5 5 16.5 9.2"/></svg></svg>CMS Installer</button><?php endif;?><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="configInspectorBtn" title="Find and read CMS and application configuration files"><svg viewBox="0 0 24 24"><path d="M9 3.5H6.2A1.7 1.7 0 0 0 4.5 5.2v13.6a1.7 1.7 0 0 0 1.7 1.7H9"/><path d="M15 3.5h2.8a1.7 1.7 0 0 1 1.7 1.7v13.6a1.7 1.7 0 0 1-1.7 1.7H15"/><circle cx="12" cy="11" r="2.6"/><path d="M12 12.6v4"/></svg></svg>Config Inspector</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(!empty($_SESSION['auth'])&&fm_can('cpm')):?><button class="sb-item" id="cpanelBtn" title="Find the cPanel server, every account on it, and open any of them signed in - no password typed anywhere"><svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2"/><path d="M2.5 8.5h19"/><circle cx="5.6" cy="6.2" r=".9"/><circle cx="8.4" cy="6.2" r=".9"/><path d="M6.5 12.5h11M6.5 16h6"/></svg></svg>cPanel Manager</button><?php endif;?><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="envBtn"><svg viewBox="0 0 24 24"><path d="M8.5 4 5 20"/><path d="M19.5 4 16 20"/><path d="m3 9.5 2.2 2.5L3 14.5"/><path d="m21 9.5-2.2 2.5L21 14.5"/></svg></svg>ENV Reader</button><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="guardBtn"><svg viewBox="0 0 24 24"><path d="M12 21.5s7.5-3.6 7.5-9.5V5.6L12 2.5 4.5 5.6V12c0 5.9 7.5 9.5 7.5 9.5z"/></svg></svg>File Guardian</button><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><button class="sb-item" id="dupBtn"><svg viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5v-3a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/></svg></svg>Find Duplicates</button><?php endif;?>
+       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="envBtn" title="Read the environment variables of the running PHP process"><svg viewBox="0 0 24 24"><path d="M8.5 4 5 20"/><path d="M19.5 4 16 20"/><path d="m3 9.5 2.2 2.5L3 14.5"/><path d="m21 9.5-2.2 2.5L21 14.5"/></svg></svg>ENV Reader</button><?php endif;?><?php endif;?>
+       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="guardBtn" title="Keep a backup of this file manager and put it back if it is deleted or replaced"><svg viewBox="0 0 24 24"><path d="M12 21.5s7.5-3.6 7.5-9.5V5.6L12 2.5 4.5 5.6V12c0 5.9 7.5 9.5 7.5 9.5z"/></svg></svg>File Guardian</button><?php endif;?><?php endif;?>
+       <?php if(!$fm->isRO()):?><button class="sb-item" id="dupBtn" title="Find files with identical content, wasting disk space"><svg viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5v-3a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/></svg></svg>Find Duplicates</button><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="wpImagesBtn" title="Replace images on a WordPress page and dashboard"><svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2"/><circle cx="8.2" cy="9.5" r="1.7"/><path d="m4 17.4 4.6-4.3 3.2 3 2.6-2.3 5.4 5"/></svg></svg>Images Replacer</button><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><button class="sb-item" id="largeBtn"><svg viewBox="0 0 24 24"><path d="M12.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4.5"/><path d="M12.5 3 18 8.5h-5.5z"/><circle cx="16.5" cy="16.5" r="4"/><path d="m19.4 19.4 2 2"/></svg></svg>Large Files</button><?php endif;?>
-       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="errLogBtn"><svg viewBox="0 0 24 24"><path d="M6 2.8h9l4.5 4.5v13a1.8 1.8 0 0 1-1.8 1.8H6a1.8 1.8 0 0 1-1.8-1.8V4.6A1.8 1.8 0 0 1 6 2.8z"/><path d="M14.5 2.8v5h5"/><path d="M8 12h7M8 15.5h7M8 8.5h3"/></svg></svg>Log Viewer</button><?php endif;?><?php endif;?>
+       <?php if(!$fm->isRO()):?><button class="sb-item" id="largeBtn" title="Every big file on this server, largest first, so space can be freed"><svg viewBox="0 0 24 24"><path d="M12.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4.5"/><path d="M12.5 3 18 8.5h-5.5z"/><circle cx="16.5" cy="16.5" r="4"/><path d="m19.4 19.4 2 2"/></svg></svg>Large Files</button><?php endif;?>
+       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="errLogBtn" title="Read the PHP error log without leaving the browser"><svg viewBox="0 0 24 24"><path d="M6 2.8h9l4.5 4.5v13a1.8 1.8 0 0 1-1.8 1.8H6a1.8 1.8 0 0 1-1.8-1.8V4.6A1.8 1.8 0 0 1 6 2.8z"/><path d="M14.5 2.8v5h5"/><path d="M8 12h7M8 15.5h7M8 8.5h3"/></svg></svg>Log Viewer</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="wpNumbersBtn" title="Change displayed WordPress dashboard numbers without changing site data"><svg viewBox="0 0 24 24"><path d="M3.5 20.5h17"/><rect x="5.5" y="12" width="3.2" height="6"/><rect x="10.4" y="8.5" width="3.2" height="9.5"/><rect x="15.3" y="4.5" width="3.2" height="13.5"/></svg></svg>Numbers control</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><a href="?x=phpinfo" target="_blank" class="sb-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 2-3 4"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>PHP Info</a><?php endif;?><?php endif;?>
        <?php if(!empty($_SESSION['auth'])&&fm_can('pma')):?><button class="sb-item" id="pmaBtn" title="Every phpMyAdmin on this host: its version, its files, its database account, its address - and a press that signs you in"><svg viewBox="0 0 24 24"><rect x="2.5" y="3.5" width="19" height="17" rx="2"/><path d="M2.5 8h19"/><ellipse cx="12" cy="14.6" rx="4.6" ry="1.9"/><path d="M7.4 14.6v2.6c0 1 2.1 1.9 4.6 1.9s4.6-.9 4.6-1.9v-2.6"/></svg></svg>phpMyAdmin Manager
@@ -31626,21 +31632,21 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
        </button><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="rootingScanBtn" title="Read-only local privilege-escalation exposure scan"><svg viewBox="0 0 24 24"><path d="M12 20.8s6.5-3.2 6.5-8.3V6.2L12 3.6 5.5 6.2v6.3c0 5.1 6.5 8.3 6.5 8.3z"/><circle cx="12" cy="11" r="2.6"/><path d="m14 13 2.2 2.2"/></svg></svg>Rooting Scan</button><?php endif;?><?php endif;?>
        <button class="sb-item" id="mfmSelectedSongsBtn" title="Play the Selected Songs repository playlist"><svg viewBox="0 0 24 24"><circle cx="7" cy="17.5" r="3"/><circle cx="18" cy="15.5" r="3"/><path d="M10 17.5V6.2l11-2.2v11.5"/></svg></svg>Selected Songs</button>
-       <button class="sb-item" id="srvBtn"><svg viewBox="0 0 24 24"><rect x="2.5" y="3" width="19" height="7" rx="1.8"/><rect x="2.5" y="14" width="19" height="7" rx="1.8"/><path d="M6.2 6.5h.01M6.2 17.5h.01"/><path d="M10 6.5h7M10 17.5h7"/></svg></svg>Server Info</button>
+       <button class="sb-item" id="srvBtn" title="The operating system, kernel, CPU, memory and disk of this machine"><svg viewBox="0 0 24 24"><rect x="2.5" y="3" width="19" height="7" rx="1.8"/><rect x="2.5" y="14" width="19" height="7" rx="1.8"/><path d="M6.2 6.5h.01M6.2 17.5h.01"/><path d="M10 6.5h7M10 17.5h7"/></svg></svg>Server Info</button>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(fm_can('inspector')):?><button class="sb-item" id="sessBtn" title="Inspect, extend or revoke real login sessions (WordPress / Joomla)"><svg viewBox="0 0 24 24"><rect x="3.5" y="10.5" width="17" height="10" rx="2"/><path d="M7.5 10.5V7a4.5 4.5 0 0 1 9 0v3.5"/><path d="M12 14.5v2.5"/></svg></svg>Session Inspector</button><?php endif;?><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><button class="sb-item" id="sharesBtn"><svg viewBox="0 0 24 24"><circle cx="18" cy="5.5" r="2.8"/><circle cx="6" cy="12" r="2.8"/><circle cx="18" cy="18.5" r="2.8"/><path d="m8.5 13.4 7 3.8M15.5 6.8 8.5 10.6"/></svg></svg>Share Links</button><?php endif;?>
+       <?php if(!$fm->isRO()):?><button class="sb-item" id="sharesBtn" title="Public download links for files, with an expiry and a password"><svg viewBox="0 0 24 24"><circle cx="18" cy="5.5" r="2.8"/><circle cx="6" cy="12" r="2.8"/><circle cx="18" cy="18.5" r="2.8"/><path d="m8.5 13.4 7 3.8M15.5 6.8 8.5 10.6"/></svg></svg>Share Links</button><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(!empty($_SESSION['fm_admin'])&&fm_can('guard')):?><button class="sb-item" id="sfgBtn" title="Files this tool installed in a site, backed up and put back if they are deleted (WordPress cron)"><svg viewBox="0 0 24 24"><path d="M13.5 2.8H6.2A1.7 1.7 0 0 0 4.5 4.5v15a1.7 1.7 0 0 0 1.7 1.7h7.3"/><path d="M13.5 2.8 19 8.3v4"/><path d="M13.5 2.8v5.5H19"/><path d="M17 14.2 20.5 17.7 15.6 22.6 12.8 22l-.6-2.8z"/></svg></svg>Site Files Guard<span id="sfgBadge" style="margin-left:6px;font-size:10px;opacity:.8"></span></button><?php endif;?><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="smtpSenderBtn"><svg viewBox="0 0 24 24"><path d="M21.4 3.2 2.6 10.4l6.1 2.2"/><path d="M21.4 3.2 15 21l-3-6.5"/><path d="m8.7 12.6 12.7-9.4"/></svg></svg>SMTP Sender</button><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><button class="sb-item" id="speedBtn"><svg viewBox="0 0 24 24"><path d="M3.6 17.5a9 9 0 1 1 16.8 0"/><path d="m12 13.5 4-4"/><circle cx="12" cy="14.6" r="1.4"/></svg></svg>Speed Test</button><?php endif;?>
-       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="sqlBtn"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.6" rx="7.4" ry="2.9"/><path d="M4.6 5.6v12.8c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9V5.6"/><path d="M4.6 12c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9"/></svg></svg>SQL Manager</button><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="sshBtn"><svg viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="12" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/><polyline points="6.5 9 8.5 11 6.5 13"/><path d="M11 13h3.5"/></svg></svg>SSH Access</button><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><button class="sb-item" id="symlinkBtn"><svg viewBox="0 0 24 24"><path d="M10 13.5a4.5 4.5 0 0 0 6.8.5l2.7-2.7a4.5 4.5 0 0 0-6.4-6.4l-1.5 1.5"/><path d="M14 10.5a4.5 4.5 0 0 0-6.8-.5l-2.7 2.7a4.5 4.5 0 0 0 6.4 6.4l1.5-1.5"/></svg></svg>Symlink</button><?php endif;?>
-       <?php if(!$fm->isRO()&&fm_can('terminal')):?><button class="sb-item" id="termBtn"><svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2"/><polyline points="6.5 9.5 9.5 12 6.5 14.5"/><line x1="11.5" y1="15" x2="16" y2="15"/></svg></svg>Terminal</button><?php endif;?>
+       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="smtpSenderBtn" title="Send mail through an SMTP server, with a test message"><svg viewBox="0 0 24 24"><path d="M21.4 3.2 2.6 10.4l6.1 2.2"/><path d="M21.4 3.2 15 21l-3-6.5"/><path d="m8.7 12.6 12.7-9.4"/></svg></svg>SMTP Sender</button><?php endif;?><?php endif;?>
+       <?php if(!$fm->isRO()):?><button class="sb-item" id="speedBtn" title="Measure how fast this server reads and writes disk"><svg viewBox="0 0 24 24"><path d="M3.6 17.5a9 9 0 1 1 16.8 0"/><path d="m12 13.5 4-4"/><circle cx="12" cy="14.6" r="1.4"/></svg></svg>Speed Test</button><?php endif;?>
+       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="sqlBtn" title="Run SQL against a database on this host and read the answer"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.6" rx="7.4" ry="2.9"/><path d="M4.6 5.6v12.8c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9V5.6"/><path d="M4.6 12c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9"/></svg></svg>SQL Manager</button><?php endif;?><?php endif;?>
+       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="sshBtn" title="Manage SSH accounts and keys on this server"><svg viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="12" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/><polyline points="6.5 9 8.5 11 6.5 13"/><path d="M11 13h3.5"/></svg></svg>SSH Access</button><?php endif;?><?php endif;?>
+       <?php if(!$fm->isRO()):?><button class="sb-item" id="symlinkBtn" title="Create a symbolic link where the filesystem does not offer one"><svg viewBox="0 0 24 24"><path d="M10 13.5a4.5 4.5 0 0 0 6.8.5l2.7-2.7a4.5 4.5 0 0 0-6.4-6.4l-1.5 1.5"/><path d="M14 10.5a4.5 4.5 0 0 0-6.8-.5l-2.7 2.7a4.5 4.5 0 0 0 6.4 6.4l1.5-1.5"/></svg></svg>Symlink</button><?php endif;?>
+       <?php if(!$fm->isRO()&&fm_can('terminal')):?><button class="sb-item" id="termBtn" title="A real shell on this server in a new tab"><svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2"/><polyline points="6.5 9.5 9.5 12 6.5 14.5"/><line x1="11.5" y1="15" x2="16" y2="15"/></svg></svg>Terminal</button><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="threatsBtn" title="Review suspicious small files and CMS accounts"><svg viewBox="0 0 24 24"><path d="M12 3 2.9 19.2a1.4 1.4 0 0 0 1.2 2.1h15.8a1.4 1.4 0 0 0 1.2-2.1z"/><path d="M12 9v4.6"/><path d="M12 17h.01"/></svg></svg>Threats Alerts</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?><button class="sb-item" id="webmailBtn" title="Every mailbox on this host - WordPress, Joomla, mail folders, mail servers and cPanel accounts - opened without a sign-in"><svg viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="m3.4 6.6 8.6 6.4 8.6-6.4"/></svg></svg>Webmail Manager</button><?php endif;?><?php endif;?><?php endif;?>
        <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><button class="sb-item" id="wfcBtn" title="Drive the Wordfence plugin installed on this server - firewall, blocks, scans, logs and every setting"><svg viewBox="0 0 24 24"><rect x="2.6" y="4" width="18.8" height="16" rx="1.6"/><path d="M2.6 9.3h18.8M2.6 14.7h18.8"/><path d="M8.5 4v5.3M15.5 9.3v5.4M8.5 14.7V20M15.5 4v5.3"/></svg></svg>Wordfence Controller
        </button><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="wpAutomationBtn"><svg viewBox="0 0 24 24"><path d="M20.4 12a8.4 8.4 0 1 1-2.7-6.2"/><path d="M20.7 4v4.4h-4.4"/><circle cx="12" cy="12" r="2.6"/><path d="M12 9.4V6.6M12 17.4v-2.8M9.4 12H6.6M17.4 12h-2.8"/></svg></svg>WordPress Automation</button><?php endif;?><?php endif;?>
+       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="wpAutomationBtn" title="Install, repair, back up and reach into a WordPress site: cron, database, updates"><svg viewBox="0 0 24 24"><path d="M20.4 12a8.4 8.4 0 1 1-2.7-6.2"/><path d="M20.7 4v4.4h-4.4"/><circle cx="12" cy="12" r="2.6"/><path d="M12 9.4V6.6M12 17.4v-2.8M9.4 12H6.6M17.4 12h-2.8"/></svg></svg>WordPress Automation</button><?php endif;?><?php endif;?>
     </div>
   </div>
   <div class="sb-div"></div>
@@ -36076,10 +36082,32 @@ if(FM_FOCUS){
     const secs=[...document.querySelectorAll('.sidebar .sb-sec')];
     const sec=secs.find(s=>{const l=s.querySelector('.sb-label');return l&&(l.textContent||'').trim().toLowerCase().startsWith('tools');});
     if(!sec)return[];
+    /* The name of a tool is not always loose text inside the row: the starred
+       tools carry it in a <span class="sb-tool-name">, and a badge such as the
+       Privilege Mode one sits in its own span too. Stripping every span - which
+       is what this used to do - therefore deleted the name of every installed
+       tool, so none of them could ever be found here, and it left badges glued
+       to the names of the others. Read the name from the name span when there
+       is one, and otherwise read the row without its icon, its star and its
+       badge spans. */
     return [...sec.querySelectorAll('.sb-item')].map(el=>{
-      const c=el.cloneNode(true);c.querySelectorAll('span').forEach(x=>x.remove());
-      const name=(c.textContent||'').replace(/\s+/g,' ').trim();
-      return{name,icon:el.querySelector('svg')?el.querySelector('svg').outerHTML:folderSvg,el};
+      const clone=el.cloneNode(true);
+      clone.querySelectorAll('.sb-star,.sb-tool-name').forEach(x=>x.remove());
+      clone.querySelectorAll('span').forEach(x=>{                       /* badges only */
+        const txt=(x.textContent||'').trim();
+        if(x.id||/^[\u00b7\s\d]*$/.test(txt))x.remove();
+      });
+      const named=el.querySelector('.sb-tool-name');
+      const name=(named?named.textContent:(clone.textContent||'')).replace(/\s+/g,' ').trim();
+      /* the tooltip is a real description, and searching a description is
+         usually what someone actually wants ("update", "wordpress", "root") */
+      const hint=(el.getAttribute('title')||el.getAttribute('data-label')||'').replace(/\s+/g,' ').trim();
+      const id=el.id||'';
+      const target=el.tagName==='A'?(el.getAttribute('href')||''):'';
+      const installed=!!el.querySelector('.sb-star');
+      const iconEl=el.querySelector('svg');
+      const icon=iconEl?iconEl.outerHTML:folderSvg;
+      return{name,hint,id,target,installed,icon,el,search:(name+' '+hint+' '+id.replace(/Btn$/,'')).toLowerCase()};
     }).filter(t=>t.name);
   })();
   let expanded=false,openTimer=null,activeIndex=-1,items=[],fileResults=[],fileLoading=false,fileTruncated=false,debounce=null,seq=0,controller=null;
@@ -36096,13 +36124,30 @@ if(FM_FOCUS){
   }
   function render(){
     const q=input.value.trim(),ql=q.toLowerCase();
-    const matchedTools=tools.filter(t=>!ql||t.name.toLowerCase().includes(ql));
-    const shownTools=ql?matchedTools.slice(0,8):matchedTools.slice(0,12);
+    /* A query matches a tool by its name, by its tooltip, or by its id. Names
+       that start with the query come first, then names that contain it, then
+       tools found only through their description - so typing "guard" reaches
+       File Guardian before it reaches anything that merely mentions guarding. */
+    const score=t=>{
+      if(!ql)return t.installed?0:1;
+      const n=t.name.toLowerCase();
+      if(n.startsWith(ql))return 0;
+      if(n.includes(ql))return 1;
+      const words=n.split(/[^a-z0-9]+/).filter(Boolean);
+      if(words.some(w=>w.startsWith(ql)))return 2;
+      if(t.search.includes(ql))return 3;
+      return 99;
+    };
+    const matchedTools=tools.map(t=>({t,s:score(t)})).filter(x=>x.s<99)
+      .sort((a,b)=>a.s-b.s||(b.t.installed?1:0)-(a.t.installed?1:0)||a.t.name.localeCompare(b.t.name))
+      .map(x=>x.t);
+    const shownTools=ql?matchedTools.slice(0,10):matchedTools.slice(0,14);
     items=[];let html='';
     if(shownTools.length){
       html+='<div class="ts-head"><span>Tools</span><span>'+matchedTools.length+' available</span></div><div class="ts-grid">';
       shownTools.forEach(t=>{const idx=items.length;items.push({kind:'tool',tool:t});
-        html+='<button type="button" class="ts-item" role="option" data-idx="'+idx+'"><span class="ts-ico">'+t.icon+'</span><span class="ts-main"><span class="ts-name">'+highlight(t.name,q)+'</span><span class="ts-sub">Open tool</span></span><span class="ts-kind">Tool</span></button>';});
+        const sub=t.hint&&ql&&!t.name.toLowerCase().includes(ql)?tsEsc(t.hint.slice(0,90)):'Open tool';
+        html+='<button type="button" class="ts-item" role="option" data-idx="'+idx+'" title="'+tsEsc(t.hint)+'"><span class="ts-ico">'+t.icon+'</span><span class="ts-main"><span class="ts-name">'+highlight(t.name,q)+'</span><span class="ts-sub">'+sub+'</span></span><span class="ts-kind">'+(t.installed?'Installed':'Tool')+'</span></button>';});
       html+='</div>';
       if(!ql&&matchedTools.length>shownTools.length)html+='<div class="ts-more">+'+(matchedTools.length-shownTools.length)+' more tools — start typing to filter</div>';
     }
@@ -36128,6 +36173,9 @@ if(FM_FOCUS){
     }else{
       html+='<div class="ts-head"><span>Files</span><span>recursive</span></div><div class="ts-hint">Type a file or folder name to search '+tsEsc(currentFolderName())+' and everything inside it.</div>';
     }
+    if(q&&!matchedTools.length&&!fileResults.length&&!fileLoading){
+      html+='<div class="ts-empty">Nothing called &ldquo;'+tsEsc(q)+'&rdquo; here - not a tool, not a file in this folder or below it.</div>';
+    }
     html+='<div class="ts-foot"><span><kbd>↑</kbd> <kbd>↓</kbd> navigate</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></div>';
     panel.innerHTML=html;
     panel.querySelectorAll('.ts-item').forEach(el=>{
@@ -36139,7 +36187,12 @@ if(FM_FOCUS){
   }
   function activate(i){
     const item=items[i];if(!item)return;
-    if(item.kind==='tool'){const el=item.tool.el;closeSearch();setTimeout(()=>{try{el.click();}catch(e){}},90);}
+    if(item.kind==='tool'){
+      const t=item.tool,el=t.el;
+      closeSearch();
+      if(t.target){location.href=t.target;return;}          /* a link such as PHP Info */
+      setTimeout(()=>{try{el.click();}catch(e){}},90);      /* the tool's own handler */
+    }
     else if(item.kind==='file'){location.href=item.href;}
   }
   async function fetchFiles(q){
@@ -39462,7 +39515,12 @@ document.getElementById('cmsInstallerClose')?.addEventListener('click',()=>close
 
 async function cmsQuickLogin(){
   const btn=document.getElementById('cmsQuickBtn');
-  if(btn){btn.disabled=true;btn.dataset.oldText=btn.textContent;btn.textContent='Checking…';}
+  /* Only the label changes while the check runs. Writing textContent into the
+     whole button used to wipe its icon, its name span and its star, so the row
+     came back as plain text after the first failed attempt - and then vanished
+     from Search Anything, which reads the name span. */
+  const lbl=btn?btn.querySelector('.sb-tool-name'):null;
+  if(btn){btn.disabled=true;btn.dataset.oldLabel=lbl?lbl.textContent:'';if(lbl)lbl.textContent='Checking…';}
   try{
     const info=await fetch('?x=cms_quick_info',{cache:'no-store'}).then(r=>r.json());
     if(info.error){toast(info.error);return;}
@@ -39501,7 +39559,7 @@ async function cmsQuickLogin(){
     toast('MFM ACC is not configured yet. Choose a password and confirm creation.');
   }catch(e){toast('CMS quick login failed: '+String(e));}
   finally{
-    if(btn){btn.disabled=false;btn.textContent=btn.dataset.oldText||'MFM ACC Login';}
+    if(btn){btn.disabled=false;const l2=btn.querySelector('.sb-tool-name');if(l2)l2.textContent=btn.dataset.oldLabel||'MFM ACC Login';}
   }
 }
 document.getElementById('cmsQuickBtn')?.addEventListener('click',cmsQuickLogin);
