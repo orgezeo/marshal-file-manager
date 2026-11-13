@@ -27995,6 +27995,15 @@ if(isset($_GET['x'])){
         $st=fm_guardian_status();$st['update_paused']=fm_guardian_update_paused();
         echo json_encode($st);exit;
     }
+    if($xop==='update_reload'){
+        /* Only ever reloads this very file, and only for an administrator:
+           it exists because the pause switch is kept as a define inside the
+           file, so a change to it has to be read back rather than guessed. */
+        if(!fm_is_true_admin()){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        $ok=@opcache_invalidate(__FILE__,true);
+        echo json_encode(['ok'=>true,'opcache_cleared'=>(bool)$ok,'paused'=>fm_guardian_update_paused(),'url'=>(string)FM_UPDATE_URL]);exit;
+    }
     if($xop==='update_status'){
         /* What the Check Updates panel needs and nothing more: the version
            that is installed, the version that is offered, and how the two
@@ -28070,7 +28079,17 @@ if(isset($_GET['x'])){
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
         $newUrl=trim(isset($_POST['update_url'])?$_POST['update_url']:'');
         if($newUrl!==''&&!preg_match('#^https?://#i',$newUrl)){echo json_encode(['error'=>'The update URL must start with http:// or https://']);exit;}
+        /* Rewriting FM_UPDATE_URL must leave every other define exactly as it
+           was. The rewrite used to carry the pause flag along in its own
+           value, so saving a link quietly turned automatic updates off - the
+           switch and the URL are two independent settings. */
+        $wasPaused=fm_guardian_update_paused();
         $ok1=fm_guardian_rewrite_constant('FM_UPDATE_URL',$newUrl);
+        if($ok1&&fm_guardian_update_paused()!==$wasPaused)fm_guardian_rewrite_constant('FM_UPDATE_PAUSED',$wasPaused,true);
+        if(isset($_POST['expect_paused'])&&$_POST['expect_paused']!==''){
+            $want=!empty($_POST['expect_paused'])&&$_POST['expect_paused']!=='0';
+            if(fm_guardian_update_paused()!==$want)fm_guardian_rewrite_constant('FM_UPDATE_PAUSED',$want,true);
+        }
         if($fm)$fm->log('guardian_settings',"url=".($newUrl?:'(empty)'));
         echo json_encode(['ok'=>$ok1,'reload'=>true]);exit;
     }
@@ -28813,6 +28832,12 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .upd-switch-t{font-size:11.5px;color:var(--t2);line-height:1.45}
 .upd-switch-t b{color:var(--t1)}
 @media(max-width:620px){.upd-grid,.upd-details,.upd-vs{grid-template-columns:1fr}.upd-vs{grid-template-columns:1fr}.upd-vs-mid{text-align:center}.upd-hero{flex-wrap:wrap}.upd-hero-badge{margin-left:0}}
+.guardian-auto-strip{display:flex;align-items:center;gap:10px;margin:0 0 12px;padding:10px 13px;border-radius:12px;border:1px solid rgba(52,211,153,.32);background:linear-gradient(135deg,rgba(16,185,129,.13),rgba(16,185,129,.04));color:#a7f3d0;font-size:12px;animation:guardianUpdateIn .35s ease both;flex-wrap:wrap}
+.guardian-auto-strip-ic{flex:0 0 auto;width:26px;height:26px;display:grid;place-items:center;border-radius:8px;background:rgba(52,211,153,.18);color:#6ee7b7}
+.guardian-auto-strip-ic svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round}
+.guardian-auto-strip-t{flex:1 1 220px;min-width:0;line-height:1.4}
+.guardian-auto-strip-bar{flex:1 1 120px;height:5px;border-radius:999px;background:rgba(255,255,255,.09);overflow:hidden;min-width:90px}
+.guardian-auto-strip-bar>i{display:block;height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,#34d399,#10b981);transition:width .25s ease}
 .guardian-update-card{position:relative;isolation:isolate;overflow:hidden;display:block;margin:0 0 14px;padding:20px 22px;border:1px solid rgba(251,191,36,.48);border-radius:18px;color:#fde68a;background:radial-gradient(560px 190px at 6% -25%,rgba(251,191,36,.30),rgba(251,191,36,0) 62%),radial-gradient(500px 220px at 98% -35%,rgba(249,115,22,.22),rgba(249,115,22,0) 62%),linear-gradient(135deg,rgba(120,72,10,.44),rgba(62,36,8,.34) 48%,rgba(22,17,7,.58));box-shadow:0 18px 42px rgba(0,0,0,.34),0 10px 28px rgba(245,158,11,.14),inset 0 1px 0 rgba(255,255,255,.11),inset 0 0 0 1px rgba(255,255,255,.03);backdrop-filter:blur(14px) saturate(140%);-webkit-backdrop-filter:blur(14px) saturate(140%);animation:guardianUpdateIn .45s cubic-bezier(.22,1.25,.36,1) both}
 .guardian-update-card::before{content:"";position:absolute;inset:0 0 auto;height:3px;background:linear-gradient(90deg,rgba(251,191,36,0),#fbbf24 28%,#f97316 55%,#fde68a 78%,rgba(253,230,138,0));opacity:.95}
 .guardian-update-card::after{content:"";position:absolute;top:-90px;right:-50px;width:250px;height:250px;border-radius:50%;background:radial-gradient(circle,rgba(251,191,36,.22),rgba(251,191,36,0) 68%);pointer-events:none;z-index:-1}
@@ -29146,13 +29171,21 @@ a.nt:hover{color:var(--link)}
 .gi:hover .gi-ck,.gi.selected .gi-ck{opacity:1}
 
 /* ══ FILTER BAR ══ */
-.fm-top-strip{position:relative;display:block;width:100%;margin:0 0 12px;border-radius:12px;overflow:hidden;line-height:0;background:#5b21b6}
-.fm-top-strip-link{display:block;border-radius:12px;line-height:0;text-decoration:none}
-.fm-top-strip-link img{display:block;width:100%;height:auto;border-radius:12px}
-.fm-top-strip-close{position:absolute;top:0;right:0;z-index:2;width:34px;height:34px;margin:0;padding:0;border:0;cursor:pointer;background:rgba(255,255,255,.22);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);color:#fff;border-radius:0 12px 0 12px;display:flex;align-items:center;justify-content:center;transition:background .18s ease}
+/* The strip is one soft rectangle at full width and tightens as the screen
+   narrows: the radius is a fraction of the viewport, so a phone gets an almost
+   square corner while a desktop keeps the soft one. The close button follows
+   the same curve, staying a comfortable target without eating the picture. */
+.fm-top-strip{--fms-r:clamp(3px,1.15vw,12px);--fms-x:clamp(20px,3.4vw,34px);--fms-gap:clamp(6px,1vw,12px);position:relative;display:block;width:100%;margin:0 0 var(--fms-gap);border-radius:var(--fms-r);overflow:hidden;line-height:0;background:#5b21b6}
+.fm-top-strip-link{display:block;border-radius:var(--fms-r);line-height:0;text-decoration:none}
+.fm-top-strip-link img{display:block;width:100%;height:auto;border-radius:var(--fms-r)}
+.fm-top-strip-close{position:absolute;top:0;right:0;z-index:2;width:var(--fms-x);height:var(--fms-x);margin:0;padding:0;border:0;cursor:pointer;background:rgba(255,255,255,.22);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);color:#fff;border-radius:0 var(--fms-r) 0 var(--fms-r);display:flex;align-items:center;justify-content:center;transition:background .18s ease,width .2s ease,height .2s ease}
 .fm-top-strip-close:hover{background:rgba(255,255,255,.38)}
 .fm-top-strip-close:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:-2px}
-.fm-top-strip-close svg{width:15px;height:15px;stroke:#fff;fill:none;stroke-width:2.4;stroke-linecap:round;pointer-events:none}
+.fm-top-strip-close svg{width:clamp(9px,1.45vw,15px);height:clamp(9px,1.45vw,15px);stroke:#fff;fill:none;stroke-width:2.4;stroke-linecap:round;pointer-events:none}
+/* two explicit steps, for browsers that ignore clamp() on a variable */
+@media(max-width:900px){.fm-top-strip{--fms-r:7px;--fms-x:28px}}
+@media(max-width:640px){.fm-top-strip{--fms-r:4px;--fms-x:24px;--fms-gap:8px}}
+@media(max-width:420px){.fm-top-strip{--fms-r:2px;--fms-x:21px;--fms-gap:6px}}
 .filter-bar{display:flex;align-items:center;gap:5px;padding:0 0 8px;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .filter-bar::-webkit-scrollbar{display:none}
 .fb-btn{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:20px;font-size:11.5px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--t2);cursor:pointer;white-space:nowrap;transition:all .15s;-webkit-user-select:none;user-select:none}
@@ -37298,7 +37331,11 @@ function guardianShowUpdateNotice(update){
   notice.querySelector('.alert-x')?.addEventListener('click',()=>{stopAuto();notice.remove();});
   if(update&&update.paused){
     if(install)install.disabled=true;
-    if(autoNote)autoNote.textContent='Auto-update is paused. Resume it from File Guardian and this update can be installed.';
+    if(autoNote)autoNote.textContent=(update&&update.paused_because==='install_failed')
+      ? 'The automatic install did not finish'+(update&&update.error?': '+update.error:'')+'. Nothing was changed - press install to try again, or open Check Updates.'
+      : (update&&update.paused_because==='just_installed'
+        ? 'A version was installed a moment ago, so this one waits for your word instead of installing itself again.'
+        : 'Automatic installation is paused, so this release waits for you. Turn the switch back on in Check Updates and it will install by itself again.');
   }else if(install&&autoNote){
     const secs=Math.max(5,Number(update&&update.auto_install_after)||300),deadline=Date.now()+secs*1000;
     const fmt=s=>String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.max(0,s%60)).padStart(2,'0');
@@ -37333,13 +37370,51 @@ async function guardianInstallUpdate(notice,button){
     pct.textContent='Failed';bar.style.width='0%';
   }
 }
+/* Only the paused state gets the yellow card. When automatic updates are on,
+   the release is installed the moment it is seen, with a quiet strip saying
+   so - no review step, because the tool was told to act alone. */
+async function guardianInstallQuiet(d){
+  const content=document.getElementById('dropzone');
+  if(!content)return;
+  if(document.getElementById('guardianUpdateNotice'))return;
+  const strip=document.createElement('div');
+  strip.id='guardianUpdateNotice';
+  strip.className='guardian-auto-strip';
+  strip.setAttribute('role','status');
+  strip.innerHTML='<span class="guardian-auto-strip-ic"><svg viewBox="0 0 24 24"><path d="M12 3v10.5"/><path d="m6.6 9.4 5.4 5.4 5.4-5.4"/><path d="M4.5 19.5h15"/></svg></span>'
+    +'<span class="guardian-auto-strip-t">A new version was found and is being installed automatically…</span>'
+    +'<span class="guardian-auto-strip-bar"><i></i></span>';
+  content.insertBefore(strip,content.firstChild);
+  const bar=strip.querySelector('.guardian-auto-strip-bar > i');
+  let v=12;
+  const tick=setInterval(()=>{v=Math.min(v+Math.max(2,Math.round((92-v)*.14)),92);if(bar)bar.style.width=v+'%';},220);
+  try{
+    const fd=new FormData();fd.append('csrf_token',CSRF);
+    const r=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(x=>x.json());
+    clearInterval(tick);
+    if(!r||r.error||!r.ok)throw new Error((r&&r.error)||'The install did not complete.');
+    if(bar)bar.style.width='100%';
+    strip.querySelector('.guardian-auto-strip-t').textContent=r.changed?'Installed. Reloading…':'Already current. Reloading…';
+    try{sessionStorage.setItem('fmUpdInstalledAt',String(Date.now()));}catch{}
+    setTimeout(()=>location.reload(),900);
+  }catch(e){
+    clearInterval(tick);
+    strip.remove();
+    guardianShowUpdateNotice(Object.assign({},d,{paused:true,paused_because:'install_failed',error:String(e.message||e)}));
+  }
+}
 async function guardianAutoUpdateCheck(){
   if(CWD!==FM_MAIN_PATH)return;
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);
     fd.append('fm_path_b64',btoa(unescape(encodeURIComponent(CWD))));
     const d=await fetch('?x=guardian_autocheck',{method:'POST',body:fd}).then(r=>r.json());
-    if(d&&d.available)guardianShowUpdateNotice(d);
+    if(!d||!d.available)return;
+    if(d.paused){guardianShowUpdateNotice(d);return;}
+    /* a reload loop guard: the same update is not installed twice in a row */
+    let last=0;try{last=Number(sessionStorage.getItem('fmUpdInstalledAt')||0);}catch{}
+    if(last&&Date.now()-last<120000){guardianShowUpdateNotice(Object.assign({},d,{paused:true,paused_because:'just_installed'}));return;}
+    await guardianInstallQuiet(d);
   }catch{}
 }
 if(document.getElementById('guardBtn')){
@@ -37445,9 +37520,9 @@ function updRender(s){
   /* automatic checks */
   h+='<div class="upd-sec"><div class="upd-sec-h">Automatic checks<span class="rule"></span></div>'
     +'<label class="upd-switch"><input type="checkbox" id="updPaused" '+(s.paused?'':'checked')+'>'
-    +'<span class="upd-switch-t"><b>Check for new versions on my own</b><br>'+(s.paused
-        ?'Paused. A check still runs when you open the manager, but the notice shows the release and the install button stays locked.'
-        :'A fresh version is noticed as soon as you open the manager, and installing starts on its own after a short countdown unless you dismiss the notice.')+'</span></label></div>';
+    +'<span class="upd-switch-t"><b>Check for new versions and install them on my own</b><br>'+(s.paused
+        ?'Paused. Checking still happens when you open the manager, but nothing installs: the release is shown and the install button waits for you.'
+        :'On. A newer version is noticed as soon as you open the manager and is installed straight away, without a review step. Turn this off when you want every update to wait for your word.')+'</span></label></div>';
 
   /* actions */
   h+='<div class="upd-actions">'
@@ -37480,11 +37555,18 @@ function updWire(s){
     try{
       const r=await fetch('?x=guardian_pause_update',{method:'POST',body:fd}).then(r=>r.json());
       if(!r||!r.ok)throw new Error('refused');
-      updFlash(want?'Automatic checks are on again.':'Automatic checks are paused. The install button in the notice stays locked until this is turned back on.','good');
+      updFlash(want?'On: a newer version will now be installed by itself as soon as it is seen.':'Off: updates wait for you now; the release is shown and the install button stays locked until this is turned back on.','good');
       UPD_STATE=null;updLoad(false);
     }catch{e.target.checked=!want;updFlash('That could not be changed.','bad');}
   });
-  if(s.available&&!s.paused&&!UPD_BUSY)updArmAuto();
+  if(s.available&&s.paused){
+    const el=document.getElementById('updAuto');
+    if(el){el.style.display='flex';el.innerHTML='<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07L12 5"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07L12 19"/></svg>Automatic installation is paused: this release waits for you. <b>Install</b> is right here when you want it.';}
+  }else if(s.available&&!s.paused&&!UPD_BUSY){
+    const el=document.getElementById('updAuto');
+    if(el){el.style.display='flex';el.innerHTML='<span class="upd-spin" style="width:12px;height:12px;border-width:2px"></span>Installing on its own, as soon as it was seen — no action needed.';}
+    setTimeout(()=>{if(!UPD_BUSY)updInstall(false);},1200);
+  }
 }
 /* the countdown in this panel mirrors the notice, so both say the same */
 function updArmAuto(){
@@ -37511,6 +37593,8 @@ async function updSaveUrl(){
   const url=(inp&&inp.value||'').trim();
   if(url&&!/^https?:\/\//i.test(url)){updFlash('The link must begin with http:// or https://','bad');return;}
   const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('update_url',url);
+  const pw=document.getElementById('updPaused');
+  if(pw)fd.append('expect_paused',pw.checked?'0':'1');
   updFlash('Saving…','info');
   try{
     const r=await fetch('?x=guardian_save',{method:'POST',body:fd}).then(r=>r.json());
