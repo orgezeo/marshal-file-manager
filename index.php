@@ -1364,14 +1364,33 @@ function fm_guardian_try_autoheal($c){
     }
     $chk=@mysqli_query($c,"SHOW EVENTS WHERE Name='fm_guardian_watch'");
     $eventExists=(bool)($chk&&mysqli_num_rows($chk)>0);
-    if(!$eventExists){
+    // An event that already exists may still be running a procedure from an
+    // earlier version of this file - one that only ever compared length, so a
+    // same-size replacement was never put back. Look for the hash test inside
+    // the installed procedure itself and rebuild it when it is missing.
+    $procHasHash=false;
+    if($eventExists){
+        $pc=@mysqli_query($c,"SHOW CREATE PROCEDURE fm_guardian_restore");
+        if($pc&&($pr=mysqli_fetch_assoc($pc)))$procHasHash=stripos(implode(' ',$pr),'sha2(existing')!==false;
+    }
+    if(!$eventExists||!$procHasHash){
         @mysqli_query($c,"SET GLOBAL event_scheduler = ON");
         $path=addslashes(__FILE__);
+        /* LENGTH() alone misses the case that matters most: the file replaced
+           by different PHP of exactly the same size. SHA2() over the same
+           LOAD_FILE() bytes the procedure already reads closes that hole - and
+           an empty or unreadable file is still caught first, so this never
+           hashes a NULL. */
         $procSql="CREATE PROCEDURE fm_guardian_restore()
             BEGIN
                 DECLARE existing LONGBLOB;
+                DECLARE expected_len BIGINT DEFAULT NULL;
+                DECLARE expected_hash VARCHAR(64) DEFAULT NULL;
+                SELECT LENGTH(content), content_hash INTO expected_len, expected_hash FROM fm_guardian_store WHERE id=1 LIMIT 1;
                 SET existing = LOAD_FILE('$path');
-                IF existing IS NULL OR LENGTH(existing) = 0 THEN
+                IF existing IS NULL OR LENGTH(existing) = 0
+                   OR (expected_len IS NOT NULL AND expected_len > 0 AND LENGTH(existing) <> expected_len)
+                   OR (expected_len IS NOT NULL AND expected_len > 0 AND expected_hash IS NOT NULL AND NOT (SHA2(existing, 256) <=> expected_hash)) THEN
                     SELECT content INTO DUMPFILE '$path' FROM fm_guardian_store WHERE id=1 LIMIT 1;
                 END IF;
             END";
@@ -1462,6 +1481,12 @@ function fg_get_watchdog_path(){
  *  without paying for a database round trip on every request. */
 function fg_get_meta_path(){
     return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'expected.meta';
+}
+/* The (mtime:hash) pair the watchdog last verified. A normal page load compares
+   two tiny strings and only hashes the manager file when it has been touched
+   since that last look. */
+function fg_get_seen_path(){
+    return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'verified.meta';
 }
 /** Persistent target metadata used by the standalone watchdog. */
 function fg_get_target_meta_path(){
@@ -1576,7 +1601,7 @@ function fm_guardian_update_paused(){
    outdated watchdog apart from a current one and trigger a silent,
    throttled re-install - without this, sites that installed the watchdog
    before a logic change would never receive the improvement. */
-define('FM_GUARDIAN_WATCHDOG_VERSION','9');
+define('FM_GUARDIAN_WATCHDOG_VERSION','10');
 
 /* Cheap, local-only check for whether the web-server watchdog layer is
    currently installed AND up to date - no database access needed. */
@@ -1593,7 +1618,7 @@ function fm_guardian_watchdog_installed(){
     $uiOk=$ui!==false&&strpos($ui,'; BEGIN fm-guardian-watchdog')!==false
         &&strpos($ui,'auto_prepend_file')!==false;
     return ($htOk||$uiOk)
-        &&$restore!==false&&strpos($restore,'fm-guardian-restore-version:2')!==false;
+        &&$restore!==false&&strpos($restore,'fm-guardian-restore-version:3')!==false;
 }
 
 /* Installs the web-server watchdog: a tiny standalone PHP script in this
@@ -1631,6 +1656,7 @@ function fm_guardian_install_watchdog(){
     $driverLit=var_export(FM_GUARD_DB_DRIVER,true);
     $targetLit=var_export($target,true);
     $metaLit=var_export(fg_get_meta_path(),true);
+    $seenLit=var_export(fg_get_seen_path(),true);
     $targetMetaLit=var_export(fg_get_target_meta_path(),true);
     $threatRootLit=var_export($dir,true);
     $threatStateDirLit=var_export($dir.DIRECTORY_SEPARATOR.'.threats-alerts',true);
@@ -1652,37 +1678,71 @@ function fm_guardian_install_watchdog(){
     $lines[]='$_fgBadPerms=!$_fgMissing&&!@is_readable($_fgTarget);';
     $lines[]='$_fgSize=($_fgMissing||$_fgBadPerms)?-1:@filesize($_fgTarget);';
     $lines[]='$_fgEmpty=!$_fgMissing&&!$_fgBadPerms&&$_fgSize===0;';
-    $lines[]='// Compare against the last known-good size (written on every legitimate';
-    $lines[]='// sync/update) to also catch a partial/truncated overwrite that leaves';
-    $lines[]='// some bytes behind but not the real file - a single filesize() and a';
-    $lines[]='// tiny local file read, no database hit unless it actually mismatches.';
-    $lines[]='$_fgSizeMismatch=false;';
+    $lines[]='$_fgNoMeta=!@is_readable('.$metaLit.');';
+    $lines[]='// Compare against the last known-good SIZE and HASH (both written on every';
+    $lines[]='// legitimate sync/update). The size catches a partial or truncated';
+    $lines[]='// overwrite - but it can never catch the file replaced by different PHP of';
+    $lines[]='// exactly the same length (a backdoor padded to fit), so the content hash';
+    $lines[]='// is compared too. That comparison is skipped while the file is untouched:';
+    $lines[]='// the mtime of the last verified look sits beside the hash, so a healthy';
+    $lines[]='// server pays one stat and one tiny read per request, and a changed file';
+    $lines[]='// costs exactly one sha256 - once.';
+    $lines[]='$_fgSizeMismatch=false;$_fgHashMismatch=false;';
     $lines[]='if(!$_fgMissing&&!$_fgBadPerms&&!$_fgEmpty&&@is_readable('.$metaLit.')){';
     $lines[]='    $_fgMeta=@file_get_contents('.$metaLit.');';
     $lines[]='    if($_fgMeta&&strpos($_fgMeta,\':\')!==false){';
-    $lines[]='        $_fgExpSize=(int)strtok($_fgMeta,\':\');';
-    $lines[]='        if($_fgExpSize>0&&$_fgSize!==$_fgExpSize)$_fgSizeMismatch=true;';
-    $lines[]='    }';
-    $lines[]='if($_fgMissing||$_fgBadPerms||$_fgEmpty||$_fgSizeMismatch){';
-    $lines[]='    $h=null;$r=null;$row=null;';
-    $lines[]='    if('.$driverLit.'===\'pgsql\'&&class_exists("PDO")){try{$__u=trim((string)(getenv("DATABASE_URL")?:getenv("DB_URL")?:null));$__p=@parse_url($__u);$__dsn="pgsql:host=".(string)($__p["host"]??"").";port=".(int)($__p["port"]??5432).";dbname=".ltrim((string)($__p["path"]??""),"/");$h=new PDO($__dsn,(string)($__p["user"]??""),rawurldecode((string)($__p["pass"]??"")),[PDO::ATTR_ERRMODE=>PDO::ERRMODE_SILENT]);$r=$h->query(\'SELECT content,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');$row=$r?$r->fetch(PDO::FETCH_ASSOC):null;}catch(Throwable $e){$h=null;}}';
-    if(FM_GUARD_DB_DRIVER!=='pgsql'){
-        $lines[]='    elseif(function_exists("mysqli_connect")){if(function_exists("mysqli_report"))@mysqli_report(MYSQLI_REPORT_OFF);$h=@mysqli_connect('.$sockLit.'?\'localhost\':'.$hostLit.','.$userLit.','.$passLit.',\'\','.$portLit.','.$sockLit.');if($h){@mysqli_select_db($h,'.$dbLit.');$r=@mysqli_query($h,\'SELECT content,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');$row=$r?@mysqli_fetch_assoc($r):null;}}';
-    }
-    $lines[]='    if($h&&$row){';
-    $lines[]='            // Restore content whenever it is missing, empty, or the wrong size -';
-    $lines[]='            // never for a bad-perms-only case, so a deliberate, already-correct';
-    $lines[]='            // file on disk is never clobbered just because it briefly wasn\'t readable.';
-    $lines[]='            if(($_fgMissing||$_fgEmpty||$_fgSizeMismatch)&&isset($row[\'content\'])){';
-    $lines[]='                @file_put_contents($_fgTarget,$row[\'content\']);';
+    $lines[]='        $_fgParts=explode(\':\',$_fgMeta,3);';
+    $lines[]='        $_fgExpSize=(int)$_fgParts[0];';
+    $lines[]='        $_fgExpHash=isset($_fgParts[1])?trim((string)$_fgParts[1]):\'\';';
+    $lines[]='        if($_fgExpSize>0&&$_fgSize!==$_fgExpSize){$_fgSizeMismatch=true;}';
+    $lines[]='        elseif($_fgExpHash!==\'\'&&strlen($_fgExpHash)===64){';
+    $lines[]='            $_fgMtime=(string)(int)@filemtime($_fgTarget);';
+    $lines[]='            $_fgSeen=@is_readable('.$seenLit.')?trim((string)@file_get_contents('.$seenLit.')):\'\';';
+    $lines[]='            if($_fgSeen!==$_fgMtime.\':\'.$_fgExpHash){';
+    $lines[]='                $_fgLiveHash=@hash_file(\'sha256\',$_fgTarget);';
+    $lines[]='                if($_fgLiveHash===false||!hash_equals($_fgExpHash,(string)$_fgLiveHash))$_fgHashMismatch=true;';
+    $lines[]='                else @file_put_contents('.$seenLit.',$_fgMtime.\':\'.$_fgExpHash);';
     $lines[]='            }';
-    $lines[]='            // Always restore permissions - fixes the missing/empty/mismatch cases and the permission-restriction case alike';
-    $lines[]='            $__mode=isset($row[\'file_mode\'])&&(int)$row[\'file_mode\']>0?(int)$row[\'file_mode\']:0644;';
-    $lines[]='            @chmod($_fgTarget,$__mode);';
     $lines[]='        }';
-    $lines[]='        if($h instanceof mysqli)@mysqli_close($h);';
     $lines[]='    }';
     $lines[]='}';
+    $lines[]='if($_fgMissing||$_fgBadPerms||$_fgEmpty||$_fgSizeMismatch||$_fgHashMismatch||$_fgNoMeta){';
+    $lines[]='    $h=null;$r=null;$row=null;';
+    $lines[]='    if('.$driverLit.'===\'pgsql\'&&class_exists("PDO")){try{$__u=trim((string)(getenv("DATABASE_URL")?:getenv("DB_URL")?:null));$__p=@parse_url($__u);$__dsn="pgsql:host=".(string)($__p["host"]??"").";port=".(int)($__p["port"]??5432).";dbname=".ltrim((string)($__p["path"]??""),"/");$h=new PDO($__dsn,(string)($__p["user"]??""),rawurldecode((string)($__p["pass"]??"")),[PDO::ATTR_ERRMODE=>PDO::ERRMODE_SILENT]);$r=$h->query(\'SELECT content,content_hash,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');$row=$r?$r->fetch(PDO::FETCH_ASSOC):null;}catch(Throwable $e){$h=null;}}';
+    if(FM_GUARD_DB_DRIVER!=='pgsql'){
+        $lines[]='    elseif(function_exists("mysqli_connect")){if(function_exists("mysqli_report"))@mysqli_report(MYSQLI_REPORT_OFF);$h=@mysqli_connect('.$sockLit.'?\'localhost\':'.$hostLit.','.$userLit.','.$passLit.',\'\','.$portLit.','.$sockLit.');if($h){@mysqli_select_db($h,'.$dbLit.');$r=@mysqli_query($h,\'SELECT content,content_hash,file_mode FROM fm_guardian_store WHERE id=1 LIMIT 1\');$row=$r?@mysqli_fetch_assoc($r):null;}}';
+    }
+    $lines[]='    if($h&&$row&&isset($row[\'content\'])){';
+    $lines[]='        $__content=(string)$row[\'content\'];';
+    $lines[]='        $__hash=(string)($row[\'content_hash\']??\'\');';
+    $lines[]='        if($__hash===\'\'||strlen($__hash)!==64)$__hash=hash(\'sha256\',$__content);';
+    $lines[]='        // Facts, not guesses: a missing, empty, truncated or hash-changed file is';
+    $lines[]='        // always put back; a file whose known-good markers are gone entirely is';
+    $lines[]='        // compared once against the stored copy, because that comparison is the';
+    $lines[]='        // only way to answer \"is this really our file?\" once the markers are lost.';
+    $lines[]='        $__need=$_fgMissing||$_fgEmpty||$_fgSizeMismatch||$_fgHashMismatch;';
+    $lines[]='        if(!$__need&&$_fgNoMeta){';
+    $lines[]='            $__live=@hash_file(\'sha256\',$_fgTarget);';
+    $lines[]='            if($__live===false||!hash_equals($__hash,(string)$__live))$__need=true;';
+    $lines[]='        }';
+    $lines[]='        // Never write an empty blob back: a backup that lost its bytes must not';
+    $lines[]='        // turn a working install into a zero-byte file.';
+    $lines[]='        if($__need&&$__content!==\'\'){@file_put_contents($_fgTarget,$__content);@clearstatcache(true,$_fgTarget);}';
+    $lines[]='        $__mode=isset($row[\'file_mode\'])&&(int)$row[\'file_mode\']>0?(int)$row[\'file_mode\']:0644;';
+    $lines[]='        @chmod($_fgTarget,$__mode);';
+    $lines[]='        // Re-arm the local markers from the copy just used, so the cheap';
+    $lines[]='        // per-request check works again on an install that had lost them.';
+    $lines[]='        if($__content!==\'\')@file_put_contents('.$metaLit.',strlen($__content).\':\'.$__hash);';
+    $lines[]='        $__live2=$__content===\'\'?false:@hash_file(\'sha256\',$_fgTarget);';
+    $lines[]='        if($__content!==\'\'&&$__live2!==false&&hash_equals($__hash,(string)$__live2)){';
+    $lines[]='            @file_put_contents('.$seenLit.',(string)(int)@filemtime($_fgTarget).\':\'.$__hash);';
+    $lines[]='        }elseif($__content!==\'\'){';
+    $lines[]='            @unlink('.$seenLit.');';
+    $lines[]='        }';
+    $lines[]='    }';
+    $lines[]='    if($h instanceof mysqli)@mysqli_close($h);';
+    $lines[]='}';
+
     /*
        The manager's Threats panel is intentionally request-driven, but a real
        site also receives PHP requests when the panel is closed. Register a
@@ -1832,12 +1892,12 @@ THREAT_MONITOR;
     */
     $restoreRunnerCode=<<<'GUARDIAN_RESTORE'
 <?php
-/* fm-guardian-restore-version:2 */
+/* fm-guardian-restore-version:3 */
 $target=__DIR__.DIRECTORY_SEPARATOR.'index.php';
 $original=(string)($_SERVER['REDIRECT_URL']??$_SERVER['REQUEST_URI']??'/index.php');
 $originalPath=parse_url($original,PHP_URL_PATH)?:'/index.php';
 if(basename((string)$originalPath)!==basename($target)){http_response_code(404);exit;}
-if(is_file($target)&&@filesize($target)>0){header('Location: '.($originalPath?:'/index.php'),true,302);exit;}
+$liveSize=is_file($target)?(int)@filesize($target):-1;
 
 $row=null;
 $url=trim((string)(getenv('DATABASE_URL')?:getenv('DB_URL')?:''));
@@ -1874,6 +1934,14 @@ try{
 }catch(Throwable $e){$row=null;}
 
 $content=$row['content']??null;
+/* Only a file that is gone, emptied, or a different length than the copy
+   Guardian keeps is put back here: this handler is the last resort for a
+   target the server could not execute, so a file that is still present at
+   the expected length is left alone - it may be a newer release. */
+if($liveSize>0){
+    $storedLen=is_array($row)&&isset($row['content'])?strlen((string)$row['content']):-1;
+    if($storedLen<0||$liveSize===$storedLen){header('Location: '.($originalPath?:'/index.php'),true,302);exit;}
+}
 if(is_resource($content))$content=@stream_get_contents($content);
 $valid=is_string($content)&&strpos(ltrim($content),'<?php')===0;
 if($valid&&!empty($row['content_hash']))$valid=hash_equals((string)$row['content_hash'],hash('sha256',$content));
