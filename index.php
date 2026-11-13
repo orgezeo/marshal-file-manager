@@ -27995,6 +27995,53 @@ if(isset($_GET['x'])){
         $st=fm_guardian_status();$st['update_paused']=fm_guardian_update_paused();
         echo json_encode($st);exit;
     }
+    if($xop==='update_status'){
+        /* What the Check Updates panel needs and nothing more: the version
+           that is installed, the version that is offered, and how the two
+           compare - never a fetch, never a write. It reads the same state
+           file the automatic check uses, so the panel and the notice can
+           never disagree. */
+        if(!fm_is_true_admin()){echo json_encode(['error'=>'Admins only.']);exit;}
+        $statePath=__DIR__.'/.guardian_update_state.php';
+        fm_store_migrate($statePath,__DIR__.'/.guardian_update_state.json');
+        $state=@json_decode(fm_store_strip_guard((string)@file_get_contents($statePath)),true);
+        $installedHash=@hash_file('sha256',__FILE__);
+        $remoteHash=is_array($state)?(string)($state['remote_hash']??''):'';
+        $checkedAt=is_array($state)?(int)($state['checked_at']??0):0;
+        $fileSize=@filesize(__FILE__);
+        $stateAge=time()-$checkedAt;
+        echo json_encode([
+            'ok' =>true,
+            'installed' =>[
+                'path' =>__FILE__,
+                'name' =>basename(__FILE__),
+                'version' =>defined('FM_VERSION')?FM_VERSION:'',
+                'size' =>(int)$fileSize,
+                'modified' =>@filemtime(__FILE__)?:0,
+                'hash' =>$installedHash?:'',
+                'mode' =>substr(sprintf('%o',(int)@fileperms(__FILE__)),-4),
+            ],
+            'remote' =>[
+                'url' =>(string)FM_UPDATE_URL,
+                'configured' =>FM_UPDATE_URL!=='',
+                'hash' =>$remoteHash,
+                'size' =>(int)(is_array($state)?($state['size']??0):0),
+                'release_timestamp' =>(int)(is_array($state)?($state['release_timestamp']??0):0),
+                'checked_at' =>$checkedAt,
+                'age' =>$checkedAt?max(0,$stateAge):null,
+                'fresh' =>$checkedAt>0&&$stateAge<900,
+            ],
+            'available' =>$remoteHash!==''&&$installedHash!==false&&$remoteHash!==$installedHash,
+            'paused' =>fm_guardian_update_paused(),
+            'auto_install_after' =>300,
+            'limits' =>['memory_limit'=>ini_get('memory_limit'),'max_execution_time'=>(string)ini_get('max_execution_time'),'allow_url_fopen'=>(bool)ini_get('allow_url_fopen')],
+            'writable' =>['directory'=>@is_writable(__DIR__),'file'=>@is_writable(__FILE__)],
+            'guardian' =>['db'=>($g=fm_guardian_status())?(bool)($g['db_connected']??false):false,
+                         'backup_installed' =>(bool)($g['installed']??false),
+                         'backup_at' =>(int)($g['installed_at']??0)],
+            'checked_now' =>false,
+        ]);exit;
+    }
     if($xop==='guardian_pause_update'){
         // Deliberately pause the fully-automatic remote update check only -
         // auto-update is ON by default and this is meant to be a short,
@@ -28086,6 +28133,28 @@ if(isset($_GET['x'])){
         $ok=fm_guardian_sync();
         if($ok)$fm->log('guardian_sync','Manual sync to database');
         echo json_encode(['ok'=>$ok]);exit;
+    }
+    if($xop==='guardian_restore_backup'){
+        /* The one thing File Guardian is for: the copy it keeps in its own
+           database, written back over this file. It is a different action
+           from installing an update - no URL is fetched, nothing new enters
+           the server, and the copy that comes back is this exact tool. */
+        if(!fm_is_true_admin()){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        $c=fm_guardian_conn();
+        if(!$c){echo json_encode(['error'=>'The File Guardian database is not reachable, so there is no copy to put back.']);exit;}
+        $row=fm_guardian_fetch_one($c,'SELECT content,content_hash FROM fm_guardian_store WHERE id=1');
+        $content=is_array($row)?(string)($row['content']??''):'';
+        if($content===''){echo json_encode(['error'=>'The backup is empty: sync it first while this file is healthy.']);exit;}
+        $tmp=__FILE__.'.fm-restore-'.bin2hex(random_bytes(4));
+        if(@file_put_contents($tmp,$content)===false){echo json_encode(['error'=>'The copy could not be staged next to this file.']);exit;}
+        $out=[];$rc=1;
+        if(defined('PHP_BINARY')&&PHP_BINARY!=='')@exec(escapeshellarg(PHP_BINARY).' -l '.escapeshellarg($tmp).' 2>&1',$out,$rc);
+        if($rc!==0){@unlink($tmp);echo json_encode(['error'=>'The stored copy does not pass the PHP syntax check, so it was not put back.']);exit;}
+        @chmod($tmp,(int)@fileperms(__FILE__));
+        if(!@rename($tmp,__FILE__)){@unlink($tmp);echo json_encode(['error'=>'The file could not be replaced.']);exit;}
+        if($fm)$fm->log('guardian_restore','File restored from the Guardian backup');
+        echo json_encode(['ok'=>true,'restored'=>true,'hash'=>(string)@hash_file('sha256',__FILE__)]);exit;
     }
     if($xop==='guardian_provision'){
         /* One-click fix for "Not reachable": admin pastes a MySQL login that
@@ -28669,6 +28738,81 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 /* ══ ALERTS ══ */
 .alerts{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
 .alert{display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:var(--r);font-size:13px;border:1px solid transparent;animation:alertIn .3s var(--spring) both}
+.sb-item .sb-tool-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-item .sb-star{margin-left:auto;padding-left:8px;display:inline-flex;align-items:center;flex:0 0 auto;opacity:.9;transition:transform .25s cubic-bezier(.22,1.25,.36,1),opacity .2s,filter .2s}
+.sb-item .sb-star svg{width:13px;height:13px;display:block;filter:drop-shadow(0 0 5px rgba(251,191,36,.55))}
+.sb-item .sb-star svg polygon{stroke:rgba(255,255,255,.5);stroke-width:.9;stroke-linejoin:round}
+.sb-item:hover .sb-star{filter:drop-shadow(0 0 7px rgba(251,191,36,.7))}
+.sb-item:hover .sb-star{transform:rotate(-12deg) scale(1.18);opacity:1;filter:brightness(1.15)}
+.sb-item .sb-star svg polygon{filter:drop-shadow(0 1px 1px rgba(0,0,0,.45))}
+/* ══ CHECK UPDATES ══ */
+.upd-mod{width:min(760px,96vw);max-height:88vh;overflow:hidden;display:flex;flex-direction:column}
+.upd-head{background:radial-gradient(420px 130px at 8% -60%,rgba(52,211,153,.22),rgba(52,211,153,0) 70%),linear-gradient(180deg,rgba(16,185,129,.06),rgba(0,0,0,0));border-bottom:1px solid rgba(52,211,153,.16)}
+.upd-mod-icon{background:linear-gradient(145deg,#6ee7b7,#10b981 55%,#047857);color:#052e23;box-shadow:0 10px 24px rgba(16,185,129,.30),inset 0 1px 0 rgba(255,255,255,.5)}
+.upd-sub{font-size:11px;color:var(--t3);margin-top:3px;line-height:1.4}
+.upd-loading{display:flex;align-items:center;gap:10px;justify-content:center;padding:44px;color:var(--t3);font-size:12.5px}
+.upd-spin{width:15px;height:15px;border-radius:50%;border:2px solid rgba(52,211,153,.28);border-top-color:#34d399;animation:updSpin .8s linear infinite;display:inline-block}
+@keyframes updSpin{to{transform:rotate(360deg)}}
+.upd-wrap{padding:16px 18px 20px}
+.upd-hero{position:relative;overflow:hidden;border-radius:16px;padding:16px 18px;border:1px solid rgba(255,255,255,.09);background:radial-gradient(420px 160px at 4% -40%,rgba(52,211,153,.22),rgba(52,211,153,0) 66%),linear-gradient(135deg,rgba(9,32,26,.85),rgba(8,17,20,.75));display:flex;align-items:center;gap:14px}
+.upd-hero.is-new{border-color:rgba(52,211,153,.42);box-shadow:0 14px 34px rgba(16,185,129,.16)}
+.upd-hero.is-current{border-color:rgba(148,163,184,.28)}
+.upd-hero.is-off{border-color:rgba(251,191,36,.34)}
+.upd-hero-icon{flex:0 0 auto;width:46px;height:46px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(145deg,#6ee7b7,#10b981 60%,#065f46);color:#052e23;box-shadow:0 10px 22px rgba(16,185,129,.3),inset 0 1px 0 rgba(255,255,255,.5)}
+.upd-hero-icon svg{width:23px;height:23px;stroke:currentColor;fill:none;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round}
+.upd-hero-icon.is-off{background:linear-gradient(145deg,#fde68a,#f59e0b 60%,#b45309);color:#451a03;box-shadow:0 10px 22px rgba(245,158,11,.28),inset 0 1px 0 rgba(255,255,255,.5)}
+.upd-hero-title{font-size:14.5px;font-weight:700;color:#e8fbf3;letter-spacing:-.01em}
+.upd-hero-text{font-size:11.5px;color:var(--t2);margin-top:3px;line-height:1.5}
+.upd-hero-badge{margin-left:auto;flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:5px 9px;border-radius:999px;border:1px solid rgba(52,211,153,.4);background:rgba(16,185,129,.14);color:#6ee7b7}
+.upd-hero-badge .dot{width:6px;height:6px;border-radius:50%;background:#34d399;box-shadow:0 0 0 3px rgba(52,211,153,.2);animation:updPulse 2s ease-in-out infinite}
+@keyframes updPulse{0%,100%{opacity:1}50%{opacity:.45}}
+.upd-sec{margin-top:16px}
+.upd-sec-h{display:flex;align-items:center;gap:8px;font-size:10.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--t3);margin-bottom:9px}
+.upd-sec-h .rule{flex:1;height:1px;background:linear-gradient(90deg,rgba(255,255,255,.12),rgba(255,255,255,0))}
+.upd-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.upd-card{border:1px solid rgba(255,255,255,.08);border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.012));padding:11px 12px;min-width:0}
+.upd-card-k{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--t3);display:flex;align-items:center;gap:6px}
+.upd-card-k svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;opacity:.9}
+.upd-card-v{font-size:12.5px;color:var(--t1);font-weight:600;margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.upd-card-s{font-size:10.5px;color:var(--t3);margin-top:3px;font-family:'JetBrains Mono',monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.upd-card-v.is-good{color:#6ee7b7}.upd-card-v.is-warn{color:#fcd34d}.upd-card-v.is-bad{color:#fca5a5}
+.upd-vs{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:center}
+.upd-vs-mid{font-size:10px;font-weight:800;letter-spacing:.08em;color:var(--t3)}
+.upd-vs-box{border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:12px;background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.012));text-align:center}
+.upd-vs-box.is-new{border-color:rgba(52,211,153,.4);background:linear-gradient(180deg,rgba(16,185,129,.12),rgba(16,185,129,.03))}
+.upd-vs-label{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--t3)}
+.upd-vs-hash{font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:700;color:var(--t1);margin-top:6px;letter-spacing:.02em}
+.upd-vs-note{font-size:10.5px;color:var(--t3);margin-top:4px}
+.upd-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+.upd-detail{display:flex;align-items:center;gap:9px;border:1px solid rgba(255,255,255,.07);border-radius:11px;padding:9px 10px;background:rgba(255,255,255,.02)}
+.upd-detail-ic{flex:0 0 auto;width:26px;height:26px;border-radius:8px;display:grid;place-items:center;background:rgba(52,211,153,.12);color:#6ee7b7}
+.upd-detail-ic svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.upd-detail-l{font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--t3)}
+.upd-detail-v{font-size:11.5px;font-weight:600;color:var(--t1);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.upd-url{display:flex;gap:8px;align-items:center}
+.upd-url .inp{flex:1;min-width:0;font-family:'JetBrains Mono',monospace;font-size:11.5px}
+.upd-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,255,255,.07)}
+.upd-actions .btn{height:34px}
+.upd-actions .spacer{flex:1}
+.upd-note{font-size:11px;color:var(--t3);margin-top:10px;line-height:1.55}
+.upd-note b{color:var(--t2)}
+.upd-msg{font-size:11.5px;margin-top:10px;min-height:15px;line-height:1.5}
+.upd-msg.is-good{color:#6ee7b7}.upd-msg.is-bad{color:#fca5a5}.upd-msg.is-info{color:var(--t3)}
+.upd-bar{height:6px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden;margin-top:12px;display:none}
+.upd-bar.is-on{display:block}
+.upd-bar>i{display:block;height:100%;width:0%;border-radius:999px;background:linear-gradient(90deg,#34d399,#10b981 55%,#6ee7b7);transition:width .3s ease;box-shadow:0 0 12px rgba(52,211,153,.5)}
+.upd-prog-txt{font-size:11px;color:var(--t2);margin-top:7px;display:none}
+.upd-prog-txt.is-on{display:block}
+.upd-auto{display:flex;align-items:center;gap:8px;font-size:11px;color:#a7f3d0;background:rgba(16,185,129,.09);border:1px solid rgba(52,211,153,.22);border-radius:10px;padding:8px 11px;margin-top:12px}
+.upd-auto b{font-variant-numeric:tabular-nums}
+.upd-switch{display:flex;align-items:center;gap:10px;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:11px 12px;background:rgba(255,255,255,.02);cursor:pointer;margin-top:10px}
+.upd-switch input{appearance:none;-webkit-appearance:none;width:34px;height:19px;border-radius:999px;background:rgba(148,163,184,.3);position:relative;cursor:pointer;transition:background .2s;flex:0 0 auto;outline:none}
+.upd-switch input::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#e2e8f0;transition:transform .2s}
+.upd-switch input:checked{background:#10b981}
+.upd-switch input:checked::after{transform:translateX(15px);background:#062e24}
+.upd-switch-t{font-size:11.5px;color:var(--t2);line-height:1.45}
+.upd-switch-t b{color:var(--t1)}
+@media(max-width:620px){.upd-grid,.upd-details,.upd-vs{grid-template-columns:1fr}.upd-vs{grid-template-columns:1fr}.upd-vs-mid{text-align:center}.upd-hero{flex-wrap:wrap}.upd-hero-badge{margin-left:0}}
 .guardian-update-card{position:relative;isolation:isolate;overflow:hidden;display:block;margin:0 0 14px;padding:20px 22px;border:1px solid rgba(251,191,36,.48);border-radius:18px;color:#fde68a;background:radial-gradient(560px 190px at 6% -25%,rgba(251,191,36,.30),rgba(251,191,36,0) 62%),radial-gradient(500px 220px at 98% -35%,rgba(249,115,22,.22),rgba(249,115,22,0) 62%),linear-gradient(135deg,rgba(120,72,10,.44),rgba(62,36,8,.34) 48%,rgba(22,17,7,.58));box-shadow:0 18px 42px rgba(0,0,0,.34),0 10px 28px rgba(245,158,11,.14),inset 0 1px 0 rgba(255,255,255,.11),inset 0 0 0 1px rgba(255,255,255,.03);backdrop-filter:blur(14px) saturate(140%);-webkit-backdrop-filter:blur(14px) saturate(140%);animation:guardianUpdateIn .45s cubic-bezier(.22,1.25,.36,1) both}
 .guardian-update-card::before{content:"";position:absolute;inset:0 0 auto;height:3px;background:linear-gradient(90deg,rgba(251,191,36,0),#fbbf24 28%,#f97316 55%,#fde68a 78%,rgba(253,230,138,0));opacity:.95}
 .guardian-update-card::after{content:"";position:absolute;top:-90px;right:-50px;width:250px;height:250px;border-radius:50%;background:radial-gradient(circle,rgba(251,191,36,.22),rgba(251,191,36,0) 68%);pointer-events:none;z-index:-1}
@@ -31107,16 +31251,21 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="sb-sec" style="flex-shrink:1;min-height:0;display:flex;flex-direction:column"><div class="sb-label">Tools</div>
     <div class="sb-nav" style="overflow-y:auto;overflow-x:hidden;min-height:0;flex:1">
        <?php if(!empty($_SESSION['fm_admin'])&&fm_can('rooting')):?>
-       <button class="sb-item" id="rootBtn" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and the tool takes root by itself if any of them is open"><svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 7.65-7.65"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg>Rooting<span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span></button>
+       <button class="sb-item" id="rootBtn" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and the tool takes root by itself if any of them is open"><svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 7.65-7.65"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg><span class="sb-tool-name">Rooting</span><span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#fbbf24;stroke:#fde68a;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button>
        <?php endif;?>
        <?php if(function_exists('fm_mfm_is_primary')&&fm_mfm_is_primary()):?>
        <button class="sb-item" id="mfaBtn" title="Every account of this file manager: what each one may do, which of their sessions are open, and everything an administrator can change about them">
-         <svg viewBox="0 0 24 24" style="stroke:#93c5fd"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="9.5" cy="11" r="2"/><path d="M13.2 9.6a2.6 2.6 0 0 1 0 5.2"/><path d="M16 12h.01"/></svg>MFM Admin
+         <svg viewBox="0 0 24 24" style="stroke:#93c5fd"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="9.5" cy="11" r="2"/><path d="M13.2 9.6a2.6 2.6 0 0 1 0 5.2"/><path d="M16 12h.01"/></svg><span class="sb-tool-name">MFM Admin</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#93c5fd;stroke:#dbeafe;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button>
        <?php endif;?>
        <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?>
        <button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account">
-         <svg viewBox="0 0 24 24" style="stroke:#2563eb"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/><path d="m15 5 3 3"/></svg>CMS MFM ACC Login
+         <svg viewBox="0 0 24 24" style="stroke:#2563eb"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/><path d="m15 5 3 3"/></svg><span class="sb-tool-name">MFM ACC Login</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#60a5fa;stroke:#bfdbfe;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
+       </button>
+       <?php endif;?>
+       <?php if(!empty($_SESSION['fm_admin'])&&fm_can('guard')):?>
+       <button class="sb-item" id="updBtn" title="Check for a newer version of this file manager, read exactly what changed, and install it when you decide to - separately from the File Guardian tool, which only keeps the backup">
+         <svg viewBox="0 0 24 24" style="stroke:#34d399"><path d="M12 3v10.5"/><path d="m7.2 9.2 4.8 4.8 4.8-4.8"/><path d="M4 20.5h16"/><circle cx="19" cy="5" r="2.2"/><path d="M19 2.8v2.4M19 4.8v.6"/></svg><span class="sb-tool-name">Check Updates</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#34d399;stroke:#a7f3d0;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button>
        <?php endif;?>
        <?php if(!empty($_SESSION['auth'])&&fm_can('pma')):?>
@@ -33158,6 +33307,23 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div class="mod mod-md">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div><span class="mod-title">File Guardian</span><button class="btn btn-icon btn-g" id="guardClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
     <div class="mod-body" id="guardBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+  </div>
+</div>
+<?php endif;?>
+
+<!-- CHECK UPDATES -->
+<?php if(!empty($_SESSION['fm_admin'])&&fm_can('guard')):?>
+<div class="mod-ov" id="updOv" role="dialog" aria-modal="true" aria-labelledby="updTitle">
+  <div class="mod mod-lg upd-mod">
+    <div class="mod-head upd-head">
+      <div class="mod-icon upd-mod-icon"><svg viewBox="0 0 24 24"><path d="M12 3v10.5"/><path d="m7.2 9.2 4.8 4.8 4.8-4.8"/><path d="M4 20.5h16"/><circle cx="18.6" cy="5.4" r="2.1"/></svg></div>
+      <div style="min-width:0;flex:1">
+        <span class="mod-title" id="updTitle">Check Updates</span>
+        <div class="upd-sub">The version installed here, the version offered, and the decision to install it</div>
+      </div>
+      <button class="btn btn-icon btn-g" id="updClose" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body" id="updBody"><div class="upd-loading"><span class="upd-spin"></span>Reading what is installed…</div></div>
   </div>
 </div>
 <?php endif;?>
@@ -35276,7 +35442,7 @@ function openMod(id){document.getElementById(id)?.classList.add('open');}
 function closeMod(id){document.getElementById(id)?.classList.remove('open');if(id==='configInspectorOv'&&typeof resetConfigInspectorView==='function')resetConfigInspectorView();if(id==='rootingScanOv'&&typeof resetRootingScanView==='function')resetRootingScanView();if(id==='mfmOv'&&typeof mfaWatch==='function')[mfaWatch(false),typeof mfaDrawer==='function'&&mfaDrawer(false)];}
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
-  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','privOv','sessOv','guardOv','sfgOv','ownOv','rootOv','bpOv','mfmOv','pmaOv'].forEach(closeMod);
+  ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','privOv','sessOv','guardOv','updOv','sfgOv','ownOv','rootOv','bpOv','mfmOv','pmaOv'].forEach(closeMod);
   closeSheet();closeCtx();
 });
 ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','ownOv','rootOv','bpOv'].forEach(id=>{
@@ -37181,6 +37347,267 @@ if(document.getElementById('guardBtn')){
 }
 
 /* ═══════════════════════════════════════
+   CHECK UPDATES - its own tool, separate from File Guardian
+   File Guardian keeps a backup of this file and puts it back.
+   This panel only ever answers one question: is there a newer
+   version, what exactly changes, and do you want it now?
+═══════════════════════════════════════ */
+let UPD_STATE=null,UPD_TIMER=null,UPD_BUSY=false;
+function updAgo(ts){
+  if(!ts)return 'never';
+  const s=Math.max(0,Math.round(Date.now()/1000-ts));
+  if(s<60)return s+' seconds ago';
+  if(s<3600)return Math.round(s/60)+' minutes ago';
+  if(s<86400)return Math.round(s/3600)+' hours ago';
+  return Math.round(s/86400)+' days ago';
+}
+function updWhen(ts){
+  if(!ts)return '-';
+  const d=new Date(ts*1000);
+  return d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})+' · '+d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+}
+function updHash(h){return h?String(h).slice(0,10)+'…':'not read yet';}
+function updIco(name){
+  const p={
+    file:'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>',
+    size:'<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9M10 13h4"/>',
+    clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+    cal:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/>',
+    shield:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+    link:'<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+    disk:'<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/>'
+  }[name]||'<circle cx="12" cy="12" r="9"/>';
+  return '<svg viewBox="0 0 24 24">'+p+'</svg>';
+}
+function updCard(k,ic,v,sub,cls){
+  return '<div class="upd-card"><div class="upd-card-k">'+updIco(ic)+k+'</div>'
+    +'<div class="upd-card-v '+(cls||'')+'" title="'+esc(String(v))+'">'+esc(String(v))+'</div>'
+    +(sub?'<div class="upd-card-s" title="'+esc(String(sub))+'">'+esc(String(sub))+'</div>':'')+'</div>';
+}
+async function updLoad(announce){
+  const body=document.getElementById('updBody');
+  if(!body)return;
+  if(!UPD_STATE)body.innerHTML='<div class="upd-loading"><span class="upd-spin"></span>Reading what is installed…</div>';
+  let d=null;
+  try{d=await fetch('?x=update_status',{cache:'no-store'}).then(r=>r.json());}catch{}
+  if(!d||d.error){body.innerHTML='<div class="upd-wrap"><div class="upd-msg is-bad">'+(d&&d.error?esc(d.error):'The local status could not be read.')+'</div></div>';return;}
+  UPD_STATE=d;
+  body.innerHTML=updRender(d);
+  updWire(d);
+  if(announce)updFlash('Reading done · the installed file and the offered one were compared','info');
+}
+function updRender(s){
+  const inst=s.installed||{},rem=s.remote||{},g=s.guardian||{};
+  const avail=!!s.available,off=!rem.configured;
+  const heroCls=off?'is-off':(avail?'is-new':'is-current');
+  const heroTitle=off?'No update source is set':(avail?'A newer version is ready':'This file is the newest version');
+  const heroText=off
+    ?'Without a source there is nothing to compare. Paste the raw link of the file you want to follow and the panel will do the rest.'
+    :(avail?'The offered file differs from the one installed here. Nothing changes until you press install, and the file is backed up first.'
+            :'The installed file matches the one the source offers, byte for byte. Nothing to do, and nothing was written.');
+  const badge=off?'Not set':(avail?'New release':'Up to date');
+  const heroIco=off?'<path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/>':'<path d="M12 3v10.5"/><path d="m7.2 9.2 4.8 4.8 4.8-4.8"/><path d="M4 20.5h16"/>';
+  let h='<div class="upd-wrap">';
+  h+='<div class="upd-hero '+heroCls+'"><div class="upd-hero-icon '+(off?'is-off':'')+'"><svg viewBox="0 0 24 24">'+heroIco+'</svg></div>'
+    +'<div style="min-width:0;flex:1"><div class="upd-hero-title">'+heroTitle+'</div><div class="upd-hero-text">'+heroText+'</div></div>'
+    +'<span class="upd-hero-badge">'+(off?'':'<span class="dot"></span>')+badge+'</span></div>';
+
+  /* what is installed against what is offered */
+  h+='<div class="upd-sec"><div class="upd-sec-h">Installed here<span class="rule"></span>Offered by the source</div>'
+    +'<div class="upd-vs">'
+    +'<div class="upd-vs-box"><div class="upd-vs-label">On this server</div><div class="upd-vs-hash" title="'+esc(inst.hash||'')+'">'+esc(updHash(inst.hash))+'</div><div class="upd-vs-note">'+formatBytes(inst.size||0)+' · mode '+esc(inst.mode||'-')+'</div></div>'
+    +'<div class="upd-vs-mid">'+(off?'·':(avail?'≠':'='))+'</div>'
+    +'<div class="upd-vs-box '+(avail?'is-new':'')+'"><div class="upd-vs-label">Offered</div><div class="upd-vs-hash" title="'+esc(rem.hash||'')+'">'+esc(off?'no source set':updHash(rem.hash))+'</div><div class="upd-vs-note">'+(off?'-':(rem.size?formatBytes(rem.size)+' · ':'')+'checked '+esc(updAgo(rem.checked_at)))+'</div></div>'
+    +'</div></div>';
+
+  /* the facts */
+  h+='<div class="upd-sec"><div class="upd-sec-h">The release<span class="rule"></span></div><div class="upd-details">'
+    +'<div class="upd-detail"><span class="upd-detail-ic">'+updIco('cal')+'</span><div style="min-width:0"><div class="upd-detail-l">Release date</div><div class="upd-detail-v">'+esc(rem.release_timestamp?updWhen(rem.release_timestamp):'-')+'</div></div></div>'
+    +'<div class="upd-detail"><span class="upd-detail-ic">'+updIco('size')+'</span><div style="min-width:0"><div class="upd-detail-l">Update size</div><div class="upd-detail-v">'+(rem.size?formatBytes(rem.size):'-')+'</div></div></div>'
+    +'<div class="upd-detail"><span class="upd-detail-ic">'+updIco('clock')+'</span><div style="min-width:0"><div class="upd-detail-l">Last check</div><div class="upd-detail-v">'+esc(updAgo(rem.checked_at))+'</div></div></div>'
+    +'</div></div>';
+
+  /* the file and its surroundings */
+  h+='<div class="upd-sec"><div class="upd-sec-h">This installation<span class="rule"></span></div><div class="upd-grid">'
+    +updCard('File',"file",inst.name||'index.php',inst.path||'',"")
+    +updCard('Modified',"clock",inst.modified?updWhen(inst.modified):'-','the moment it was last written','')
+    +updCard('Folder writable',"disk",s.writable&&s.writable.directory?'Yes':'No',s.writable&&s.writable.file?'the file itself may be written':'the folder, not the file',(s.writable&&s.writable.directory)?'is-good':'is-bad')
+    +updCard('Backup held by File Guardian',"shield",g.backup_installed?'A copy is kept':'No copy yet',g.backup_installed?(g.backup_at?updWhen(g.backup_at):'restore available'):'File Guardian can take one first',g.backup_installed?'is-good':'is-warn')
+    +'</div></div>';
+
+  /* the source */
+  h+='<div class="upd-sec"><div class="upd-sec-h">Where updates come from<span class="rule"></span></div>'
+    +'<div class="upd-url"><input class="inp" id="updUrl" placeholder="https://…/index.php (raw file link)" value="'+esc(rem.url||'')+'">'
+    +'<button class="btn btn-p btn-sm" id="updSaveUrl">Save</button></div>'
+    +'<div class="upd-note">The link must point straight at a .php file. Nothing is downloaded from it until a check runs, and a check never writes: only <b>Download &amp; install</b> does, after a backup.</div>'
+    +'</div>';
+
+  /* automatic checks */
+  h+='<div class="upd-sec"><div class="upd-sec-h">Automatic checks<span class="rule"></span></div>'
+    +'<label class="upd-switch"><input type="checkbox" id="updPaused" '+(s.paused?'':'checked')+'>'
+    +'<span class="upd-switch-t"><b>Check for new versions on my own</b><br>'+(s.paused
+        ?'Paused. A check still runs when you open the manager, but the notice shows the release and the install button stays locked.'
+        :'A fresh version is noticed as soon as you open the manager, and installing starts on its own after a short countdown unless you dismiss the notice.')+'</span></label></div>';
+
+  /* actions */
+  h+='<div class="upd-actions">'
+    +'<button class="btn btn-g" id="updCheckNow">Check Now</button>'
+    +(avail?'<button class="btn btn-p" id="updInstall"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/></svg>Download &amp; install</button>':'')
+    +'<span class="spacer"></span>'
+    +'<button class="btn btn-g" id="updGuardian">File Guardian</button>'
+    +'</div>'
+    +'<div class="upd-bar" id="updBar"><i></i></div><div class="upd-prog-txt" id="updProgTxt"></div>'
+    +'<div class="upd-auto" id="updAuto" style="display:none"></div>'
+    +'<div class="upd-msg is-info" id="updMsg"></div>'
+    +'</div>';
+  return h;
+}
+function updFlash(text,kind){
+  const m=document.getElementById('updMsg');
+  if(!m)return;
+  m.className='upd-msg '+(kind==='bad'?'is-bad':kind==='good'?'is-good':'is-info');
+  m.textContent=text;
+}
+function updWire(s){
+  document.getElementById('updSaveUrl')?.addEventListener('click',updSaveUrl);
+  document.getElementById('updCheckNow')?.addEventListener('click',()=>updCheckNow(true));
+  document.getElementById('updInstall')?.addEventListener('click',()=>updInstall(true));
+  document.getElementById('updGuardian')?.addEventListener('click',()=>{closeMod('updOv');openMod('guardOv');guardLoad();});
+  const paused=document.getElementById('updPaused');
+  paused?.addEventListener('change',async e=>{
+    const want=e.target.checked;
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('paused',want?'0':'1');
+    try{
+      const r=await fetch('?x=guardian_pause_update',{method:'POST',body:fd}).then(r=>r.json());
+      if(!r||!r.ok)throw new Error('refused');
+      updFlash(want?'Automatic checks are on again.':'Automatic checks are paused. The install button in the notice stays locked until this is turned back on.','good');
+      UPD_STATE=null;updLoad(false);
+    }catch{e.target.checked=!want;updFlash('That could not be changed.','bad');}
+  });
+  if(s.available&&!s.paused&&!UPD_BUSY)updArmAuto();
+}
+/* the countdown in this panel mirrors the notice, so both say the same */
+function updArmAuto(){
+  const el=document.getElementById('updAuto');
+  if(!el)return;
+  clearInterval(UPD_TIMER);
+  const secs=Math.max(5,Number(UPD_STATE&&UPD_STATE.auto_install_after)||300);
+  const deadline=Date.now()+secs*1000;
+  const fmt=x=>String(Math.floor(x/60)).padStart(2,'0')+':'+String(Math.max(0,x%60)).padStart(2,'0');
+  el.style.display='flex';
+  const draw=()=>{
+    const left=Math.max(0,Math.round((deadline-Date.now())/1000));
+    el.innerHTML='<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>Installing on its own in <b>'+fmt(left)+'</b> — or press install now.';
+  };
+  draw();
+  UPD_TIMER=setInterval(()=>{
+    const left=Math.max(0,Math.round((deadline-Date.now())/1000));
+    if(left<=0){clearInterval(UPD_TIMER);updInstall(false);return;}
+    draw();
+  },1000);
+}
+async function updSaveUrl(){
+  const inp=document.getElementById('updUrl');
+  const url=(inp&&inp.value||'').trim();
+  if(url&&!/^https?:\/\//i.test(url)){updFlash('The link must begin with http:// or https://','bad');return;}
+  const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('update_url',url);
+  updFlash('Saving…','info');
+  try{
+    const r=await fetch('?x=guardian_save',{method:'POST',body:fd}).then(r=>r.json());
+    if(!r||!r.ok)throw new Error((r&&r.error)||'refused');
+    updFlash('Saved. The file was rewritten in place, so it will reload once.','good');
+    setTimeout(()=>location.reload(),700);
+  }catch(e){updFlash('The link was not saved: '+String(e.message||e),'bad');}
+}
+async function updCheckNow(manual){
+  if(UPD_BUSY)return;
+  UPD_BUSY=true;
+  clearInterval(UPD_TIMER);
+  const bar=document.getElementById('updBar'),txt=document.getElementById('updProgTxt'),b=bar?bar.querySelector('i'):null;
+  if(manual&&bar&&txt){bar.classList.add('is-on');txt.classList.add('is-on');}
+  if(manual)updFlash('Reaching the source and comparing it with the installed file…','info');
+  let v=12;
+  const t=setInterval(()=>{
+    if(!b)return;
+    v=Math.min(v+Math.max(2,Math.round((92-v)*.14)),92);
+    b.style.width=v+'%';
+    if(txt)txt.textContent=v<55?'Fetching the offered file…':'Comparing the two files…';
+  },240);
+  try{
+    const fd=new FormData();fd.append('csrf_token',CSRF);
+    const d=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(r=>r.json());
+    clearInterval(t);
+    if(!d||d.error||!d.ok)throw new Error((d&&d.error)||'The check did not complete.');
+    if(b)b.style.width='100%';
+    UPD_STATE=null;
+    await updLoad(false);
+    const st=UPD_STATE||{};
+    if(st.available)updFlash('A newer file is being offered ('+formatBytes((st.remote&&st.remote.size)||0)+', released '+(st.remote&&st.remote.release_timestamp?updWhen(st.remote.release_timestamp):'date not given')+'). Nothing has changed yet.','good');
+    else updFlash('Checked: the installed file is already the one the source offers.','good');
+  }catch(e){
+    clearInterval(t);
+    if(b)b.style.width='0%';
+    updFlash('The check failed: '+String(e.message||e)+'. The installed file was not touched.','bad');
+  }finally{
+    UPD_BUSY=false;
+    setTimeout(()=>{if(bar)bar.classList.remove('is-on');if(txt)txt.classList.remove('is-on');},1800);
+  }
+}
+async function updInstall(fromPanel){
+  if(UPD_BUSY)return;
+  const st=UPD_STATE||{};
+  if(st.paused&&fromPanel){
+    updFlash('Automatic checks are paused, and installing from here is part of them. Turn them back on above, or install from the notice.','bad');
+    return;
+  }
+  UPD_BUSY=true;
+  clearInterval(UPD_TIMER);
+  const auto=document.getElementById('updAuto');if(auto)auto.style.display='none';
+  const bar=document.getElementById('updBar'),txt=document.getElementById('updProgTxt'),b=bar?bar.querySelector('i'):null;
+  if(bar&&txt){bar.classList.add('is-on');txt.classList.add('is-on');}
+  let v=10;
+  const t=setInterval(()=>{
+    if(!b)return;
+    v=Math.min(v+Math.max(2,Math.round((94-v)*.13)),94);
+    b.style.width=v+'%';
+    if(txt)txt.textContent=v<40?'Downloading the offered file…':v<74?'Checking it is valid PHP…':'Installing it, keeping a backup…';
+  },260);
+  try{
+    const fd=new FormData();fd.append('csrf_token',CSRF);
+    const d=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(r=>r.json());
+    clearInterval(t);
+    if(!d||d.error||!d.ok)throw new Error((d&&d.error)||'The install did not complete.');
+    if(b)b.style.width='100%';
+    updFlash(d.changed?'Installed. Reloading the manager…':'Nothing to install: the file was already current. Reloading…','good');
+    setTimeout(()=>location.reload(),1000);
+  }catch(e){
+    clearInterval(t);
+    if(b)b.style.width='0%';
+    updFlash('The install failed: '+String(e.message||e)+'. The previous file is in place and unchanged.','bad');
+  }finally{
+    UPD_BUSY=false;
+    setTimeout(()=>{if(bar)bar.classList.remove('is-on');if(txt)txt.classList.remove('is-on');},1800);
+  }
+}
+function openUpdatesPanel(){
+  if(!document.getElementById('updOv'))return;
+  openMod('updOv');
+  UPD_STATE=null;
+  updLoad(false);
+}
+document.getElementById('updBtn')?.addEventListener('click',openUpdatesPanel);
+document.getElementById('updClose')?.addEventListener('click',()=>{clearInterval(UPD_TIMER);closeMod('updOv');});
+/* the notice in the content area now sends people to this panel */
+document.addEventListener('click',e=>{
+  const b=e.target.closest&&e.target.closest('#guardianOpenUpdate');
+  if(!b)return;
+  e.preventDefault();
+  const n=b.closest('.guardian-update-card');
+  if(n)n.remove();
+  openUpdatesPanel();
+},true);
+
+/* ═══════════════════════════════════════
    LARGE FILES FINDER
 ═══════════════════════════════════════ */
 function fmtPath(p){return p.replace(CWD,'').replace(/^\//,'')||'.';}
@@ -38636,7 +39063,7 @@ async function cmsQuickLogin(){
     cmsAllRoles=rd.roles||[];
     cmsQuickPending=true;
     await openCmsAdd();
-    document.getElementById('cmsAddTitle').textContent='Set up CMS MFM ACC';
+    document.getElementById('cmsAddTitle').textContent='Set up MFM ACC';
     const user=document.getElementById('cmsAddUser');
     user.value='mfmadmin';user.readOnly=true;
     document.getElementById('cmsAddEmailLabel').style.display='none';
@@ -38652,10 +39079,10 @@ async function cmsQuickLogin(){
       const admin=[...sel.options].find(o=>/super\s*users|administrator/i.test(o.textContent));
       if(admin)sel.value=admin.value;
     }
-    toast('CMS MFM ACC is not configured. Choose a password and confirm creation.');
+    toast('MFM ACC is not configured yet. Choose a password and confirm creation.');
   }catch(e){toast('CMS quick login failed: '+String(e));}
   finally{
-    if(btn){btn.disabled=false;btn.textContent=btn.dataset.oldText||'CMS MFM ACC Login';}
+    if(btn){btn.disabled=false;btn.textContent=btn.dataset.oldText||'MFM ACC Login';}
   }
 }
 document.getElementById('cmsQuickBtn')?.addEventListener('click',cmsQuickLogin);
@@ -41326,7 +41753,7 @@ async function guardLoad(){
     el.innerHTML=`
       <div style="padding:16px">
         <div style="font-size:11.5px;color:var(--t3);line-height:1.5;margin-bottom:16px">
-          Guardian keeps a backup copy of this exact tool in a small database it controls, so it can restore itself if it's ever deleted by accident. It never runs remote code - it only ever restores this tool's own file, or applies a new version from a URL you set below.
+          Guardian keeps a backup copy of this exact tool in a small database it controls, so it can restore itself if it is ever deleted by accident. It never runs remote code and never fetches anything from the network: it only ever puts this tool's own copy back. Versions, releases and installing an update are the job of <b>Check Updates</b>, its own tool in the sidebar.
         </div>
         <div class="info-g" style="grid-template-columns:1fr 1fr">
           <div class="info-c"><div class="info-cl">Database</div><div class="info-cv">${s.db_connected?'<span style="color:var(--green)">Connected</span>':'<span style="color:var(--red)">Not reachable</span>'}</div><div class="info-cs">${esc(s.db_user)}@${esc(s.db_host)}:${s.db_port}/${esc(s.db_name)}</div></div>
@@ -41349,22 +41776,23 @@ async function guardLoad(){
             <button class="btn btn-p" id="guardProvisionBtn">Auto-create database &amp; user</button>
           </div>
         </div>`:''}
-        <div class="field" style="margin-top:16px"><label>Update URL (raw .php link)</label><input class="inp" id="guardUrl" placeholder="https://example.com/path/to/latest.php" value="${esc(s.update_url||'')}"></div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--t2);margin:10px 0"><input type="checkbox" id="guardUpdatePaused" ${s.update_paused?'checked':''}> Pause automatic update checks (backup/restore always stays active and can't be turned off; auto-update is ON by default and resumes as soon as you uncheck this)</label>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-          <button class="btn btn-p" id="guardSaveBtn">Save</button>
-          <button class="btn btn-g" id="guardCheckBtn">Check Updates Now</button>
-          <button class="btn btn-g" id="guardSyncBtn">Sync Backup Now</button>
+        <div style="margin-top:16px;padding:12px 14px;border:1px solid rgba(52,211,153,.28);border-radius:12px;background:rgba(16,185,129,.08);display:flex;align-items:center;gap:11px">
+          <span style="flex:0 0 auto;width:30px;height:30px;display:grid;place-items:center;border-radius:9px;background:rgba(52,211,153,.16);color:#6ee7b7"><svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round"><path d="M12 3v10.5"/><path d="m7.2 9.2 4.8 4.8 4.8-4.8"/><path d="M4 20.5h16"/></svg></span>
+          <div style="min-width:0;flex:1"><div style="font-size:12px;color:#a7f3d0;font-weight:600">Checking for new versions lives in its own tool now</div><div style="font-size:11px;color:var(--t3);margin-top:2px;line-height:1.45">This panel keeps the backup of this file and puts it back if it is deleted. Versions, changes and installing an update are in <b>Check Updates</b> in the sidebar.</div></div>
+          <button class="btn btn-g btn-xs" id="guardOpenUpdatesBtn" style="flex:0 0 auto">Open Check Updates</button>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+          <button class="btn btn-p" id="guardSyncBtn">Sync Backup Now</button>
+          <button class="btn btn-g" id="guardRestoreBtn">Restore From Backup</button>
         </div>
         <div id="guardMsg" style="font-size:11.5px;margin-top:10px;color:var(--t3)"></div>
       </div>`;
-    document.getElementById('guardSaveBtn').addEventListener('click',guardSave);
-    document.getElementById('guardCheckBtn').addEventListener('click',guardCheckNow);
+    document.getElementById('guardOpenUpdatesBtn')?.addEventListener('click',()=>{closeMod('guardOv');openUpdatesPanel();});
+    document.getElementById('guardRestoreBtn')?.addEventListener('click',guardRestoreNow);
     document.getElementById('guardSyncBtn').addEventListener('click',guardSyncNow);
     document.getElementById('guardProvisionBtn')?.addEventListener('click',guardProvisionNow);
     document.getElementById('guardAutodiscoverBtn')?.addEventListener('click',guardAutodiscoverNow);
     document.getElementById('guardAutocreateBtn')?.addEventListener('click',guardAutocreateNow);
-    document.getElementById('guardUpdatePaused').addEventListener('change',guardTogglePause);
   }catch{el.innerHTML='<div style="padding:20px;color:#fca5a5">Failed to load.</div>';}
 }
 async function guardTogglePause(e){
@@ -41442,6 +41870,20 @@ async function guardSyncNow(){
     const r=await fetch('?x=guardian_sync_now',{method:'POST',body:fd}).then(r=>r.json());
     msg.style.color=r.ok?'var(--green)':'#fca5a5';msg.textContent=r.ok?'Backup synced.':'Sync failed (check database connection).';
   }catch{msg.textContent='Sync failed.';msg.style.color='#fca5a5';}
+}
+async function guardRestoreNow(){
+  const msg=document.getElementById('guardMsg');
+  if(!confirm('Put the copy File Guardian keeps in its database back over this file? Nothing is fetched from the network, and the current file is replaced by that copy.'))return;
+  if(msg){msg.style.color='var(--t3)';msg.textContent='Putting the copy back…';}
+  const fd=new FormData();fd.append('csrf_token',CSRF);
+  try{
+    const r=await fetch('?x=guardian_restore_backup',{method:'POST',body:fd}).then(r=>r.json());
+    if(!r||!r.ok||r.error)throw new Error((r&&r.error)||'The copy was not put back.');
+    if(msg){msg.style.color='var(--green)';msg.textContent='Restored. Reloading…';}
+    setTimeout(()=>location.reload(),900);
+  }catch(e){
+    if(msg){msg.style.color='#fca5a5';msg.textContent=String(e.message||e);}
+  }
 }
 document.getElementById('guardBtn')?.addEventListener('click',()=>{openMod('guardOv');guardLoad();});
 document.getElementById('guardClose')?.addEventListener('click',()=>closeMod('guardOv'));
