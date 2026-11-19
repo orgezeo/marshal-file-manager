@@ -538,8 +538,8 @@ $scriptName = basename(__FILE__);
 $usersFile  = __DIR__ . '/.users.php';
 $themeFile  = __DIR__ . '/.theme.json';
 /* Installed theme packs. One pack today: Windows 11. */
-function fm_theme_packs(){return ['win11'=>['name'=>'Windows 11','author'=>'mfm']];}
-function fm_theme_allowed($t){return in_array($t,['light','dark'],true)||isset(fm_theme_packs()[$t]);}
+function fm_theme_packs(){return ['win11'=>['name'=>'Windows 11','author'=>'mfm'],'win11d'=>['name'=>'Windows 11 Dark','author'=>'mfm']];}
+function fm_theme_allowed($t){return in_array($t,['light','dark','win11d'],true)||isset(fm_theme_packs()[$t]);}
 function fm_theme_active($t){global $currentTheme;return isset($currentTheme)&&$currentTheme===(string)$t;}
 function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);$t=(is_array($d)&&isset($d['theme']))?(string)$d['theme']:'';return fm_theme_allowed($t)?$t:'dark';}
 /* One owner cell: the account name, its home directory, and a soft green
@@ -2432,13 +2432,26 @@ function fm_guardian_selftest_htaccess(){
    rename/replace operations. Try the atomic same-directory rename first, then
    fall back to a locked in-place write and verify the exact bytes. */
 function fm_guardian_commit_source($path,$newSrc,$oldSrc){
-    $tmp=$path.'.guardtmp.'.getmypid();
-    if(@file_put_contents($tmp,$newSrc,LOCK_EX)===false)return false;
-    $mode=@fileperms($path);
-    if($mode!==false)@chmod($tmp,$mode&0777);
+    /* A fixed temp name (.guardtmp) is a trap: a leftover from an aborted
+       install makes file_put_contents fail on some hosts, and two admins
+       pressing install at once collide. A unique name per attempt removes
+       both, and the file is created with the same mode as the target. */
+    $tmp=$path.'.guardtmp.'.getmypid().'.'.substr(hash('sha256',uniqid('',true)),0,8);
+    $mode=@fileperms($path);$mode=$mode!==false?($mode&0777):0644;
+    if(@file_put_contents($tmp,$newSrc,LOCK_EX)===false){
+        /* The folder may not allow creating files while the file itself is
+           writable (shared hosts). Write in place instead of giving up. */
+        $direct=@file_put_contents($path,$newSrc,LOCK_EX);
+        if($direct===false)return false;
+        $actual=@file_get_contents($path);
+        if($actual!==false&&hash('sha256',$actual)===hash('sha256',$newSrc)){fm_guardian_invalidate_opcache($path);return true;}
+        @file_put_contents($path,$oldSrc,LOCK_EX);
+        return false;
+    }
+    @chmod($tmp,$mode);
     if(!is_link($path)&&@rename($tmp,$path)){
         $written=@file_get_contents($path);
-        if($written!==false&&hash('sha256',$written)===hash('sha256',$newSrc))return true;
+        if($written!==false&&hash('sha256',$written)===hash('sha256',$newSrc)){@chmod($path,$mode);fm_guardian_invalidate_opcache($path);return true;}
         // A successful rename should be exact, but do not leave a bad file
         // behind if a filesystem reports success while returning stale bytes.
         @file_put_contents($path,$oldSrc,LOCK_EX);
@@ -2451,12 +2464,26 @@ function fm_guardian_commit_source($path,$newSrc,$oldSrc){
     $written=@file_put_contents($path,$newSrc,LOCK_EX);
     if($written!==false){
         $actual=@file_get_contents($path);
-        if($actual!==false&&hash('sha256',$actual)===hash('sha256',$newSrc))return true;
+        if($actual!==false&&hash('sha256',$actual)===hash('sha256',$newSrc)){fm_guardian_invalidate_opcache($path);return true;}
     }
     // Best-effort rollback keeps a failed settings update from leaving a
     // truncated manager file.
     @file_put_contents($path,$oldSrc,LOCK_EX);
     return false;
+}
+
+/* PHP keeps the compiled form of this file in OPcache. Replacing the file on
+   disk does not, by itself, make the running site serve the new code: until
+   the entry is invalidated the server keeps executing the old build, which
+   looks exactly like "the update did nothing". Every successful write goes
+   through here so the new bytes are actually served on the next request. */
+function fm_guardian_invalidate_opcache($path){
+    $ok=false;
+    if(function_exists('opcache_invalidate')){@opcache_invalidate($path,true);$ok=true;}
+    if(function_exists('opcache_reset')&&$path===__FILE__){@opcache_reset();$ok=true;}
+    if(function_exists('apc_clear_cache')){@apc_clear_cache();$ok=true;}
+    if(function_exists('realpath_cache_size'))@clearstatcache(true,$path);
+    return $ok;
 }
 
 /* Rewrites a single define('NAME', ...) line INSIDE THIS FILE'S OWN SOURCE
@@ -2658,8 +2685,14 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
         @file_put_contents(__DIR__.'/.guardian_update_state.php',fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES)),LOCK_EX);
         return array_merge(['ok'=>true,'changed'=>false,'available'=>false,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
     }
-    $tmp=__FILE__.'.guardtmp';
-    if(@file_put_contents($tmp,$data)===false)return ['ok'=>false,'error'=>'Could not write temp file (check permissions).'];
+    $tmp=__FILE__.'.guardtmp.'.getmypid().'.'.substr(hash('sha256',uniqid('',true)),0,8);
+    if(@file_put_contents($tmp,$data)===false){
+        /* folder not writable for new files: try in place, keep the backup path */
+        if(!fm_guardian_commit_source(__FILE__,$data,$current))return ['ok'=>false,'error'=>'Could not replace the file: the folder is not writable and writing the file in place failed too. In the file manager set index.php to 0644 and its folder to 0755, then press install again.'];
+        fm_guardian_sync($data);@fm_guardian_install_watchdog();
+        return ['ok'=>true,'changed'=>true,'method'=>'in-place'];
+    }
+    @chmod($tmp,@fileperms(__FILE__)&0777);
     $lintDownload=fm_php_lint($tmp);
     if($lintDownload['ran']&&!$lintDownload['ok']){
         @unlink($tmp);
@@ -2667,7 +2700,11 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
             . ($lintDownload['out']!=='' ? '(' . $lintDownload['out'] . ')' : '')
             . ($lintDownload['why']!=='' ? ' [checked by: ' . $lintDownload['why'] . ']' : '')];
     }
-    if(!@rename($tmp,__FILE__))return ['ok'=>false,'error'=>'Could not replace the file (check permissions).'];
+    if(!@rename($tmp,__FILE__)){
+        @unlink($tmp);
+        if(!fm_guardian_commit_source(__FILE__,$data,$current))return ['ok'=>false,'error'=>'Could not replace the file: rename failed and the in-place write failed as well. In the file manager set index.php to 0644 and its folder to 0755, then press install again.'];
+    }
+    fm_guardian_invalidate_opcache(__FILE__);
     fm_guardian_sync($data);
     // The watchdog embeds this file's own restore logic + the expected-size
     // marker; refresh it right away so a site that installed the watchdog
@@ -2721,12 +2758,23 @@ function fm_force_update_install($url){
     if(empty($g['ok']))return $g;
     $data=$g['data'];
     /* lint before touching anything - the same check a normal update runs */
-    $tmp=__FILE__.'.forcetmp.'.getmypid();
-    if(@file_put_contents($tmp,$data,LOCK_EX)===false)return ['ok'=>false,'error'=>'The downloaded file could not be staged next to index.php (folder not writable).'];
-    $lint=fm_php_lint($tmp);
-    if($lint['ran']&&!$lint['ok']){@unlink($tmp);
-        return ['ok'=>false,'error'=>'The downloaded file failed the PHP syntax check, so it was not installed. '.($lint['out']!==''?'('.$lint['out'].')':'')];}
-    @unlink($tmp);
+    $tmp=__FILE__.'.forcetmp.'.getmypid().'.'.substr(hash('sha256',uniqid('',true)),0,8);
+    $staged=@file_put_contents($tmp,$data,LOCK_EX)!==false;
+    if($staged){
+        $lint=fm_php_lint($tmp);
+        if($lint['ran']&&!$lint['ok']){@unlink($tmp);
+            return ['ok'=>false,'error'=>'The downloaded file failed the PHP syntax check, so it was not installed. '.($lint['out']!==''?'('.$lint['out'].')':'')];}
+        @unlink($tmp);
+    }else{
+        /* The folder refuses new files (common on shared hosting) but the file
+           itself may still be writable. Lint the bytes from a temp copy in the
+           system temp folder, then write straight over index.php. */
+        $t2=@tempnam(sys_get_temp_dir(),'fmforce');
+        if($t2!==false){@file_put_contents($t2,$data);$lint=fm_php_lint($t2);@unlink($t2);
+            if($lint['ran']&&!$lint['ok'])return ['ok'=>false,'error'=>'The downloaded file failed the PHP syntax check, so it was not installed. '.($lint['out']!==''?'('.$lint['out'].')':'')];}
+        if(!@is_writable(__FILE__))return ['ok'=>false,'error'=>'Neither the folder nor index.php is writable by PHP. Press "Fix permissions" and try again, or set index.php to 0644 and its folder to 0755 in the file manager.'];
+    }
+    if($staged)@unlink($tmp);
     $old=@file_get_contents(__FILE__);
     if($old===false)return ['ok'=>false,'error'=>'The installed file could not be read, so no backup could be taken; nothing was replaced.'];
     $oldHash=hash('sha256',$old);
@@ -7823,6 +7871,127 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
 }
 @media(max-width:760px){.login-shell,.login-center{display:contents}.login-wallpaper,.login-actions,.login-settings-panel,.login-help-panel{display:none!important}.linux-topbar,.login-logo-desktop,.login-form-desktop{display:none}.login-logo-mobile,.login-form-mobile{display:block}}
 @media(prefers-reduced-motion:reduce){.login-shell,.card,.login-wallpaper,.login-settings-panel,.login-help-panel{animation:none;transition:none}}
+/* ── Win11 loading spinner: the ring of fading dots, drawn in CSS ─────── */
+@keyframes fmWinSpin{to{transform:rotate(360deg)}}
+.upd-spin,.win-spinner{
+  width:18px;height:18px;border-radius:50%;border:0 !important;
+  background:none !important;
+  -webkit-mask:none;mask:none;
+  position:relative;display:inline-block;
+}
+.upd-spin::before,.win-spinner::before{
+  content:'';position:absolute;inset:0;border-radius:50%;
+  background:conic-gradient(from 0deg,
+     rgba(76,194,255,0) 0deg 12deg,
+     rgba(76,194,255,.18) 40deg,
+     rgba(76,194,255,.55) 200deg,
+     rgba(76,194,255,1) 340deg,
+     rgba(76,194,255,0) 360deg);
+  -webkit-mask:radial-gradient(circle,transparent 0 53%,#000 55%);
+  mask:radial-gradient(circle,transparent 0 53%,#000 55%);
+  animation:fmWinSpin .85s linear infinite;
+}
+:root[data-theme="win11"] .upd-spin::before,
+:root[data-theme="win11d"] .upd-spin::before,
+:root[data-theme="win11"] .win-spinner::before,
+:root[data-theme="win11d"] .win-spinner::before{
+  background:conic-gradient(from 0deg,
+     rgba(0,103,192,0) 0deg 12deg,rgba(0,103,192,.2) 40deg,
+     rgba(0,103,192,.6) 200deg,rgba(0,103,192,1) 340deg,rgba(0,103,192,0) 360deg);
+}
+:root[data-theme="win11d"] .upd-spin::before,:root[data-theme="win11d"] .win-spinner::before{
+  background:conic-gradient(from 0deg,
+     rgba(76,194,255,0) 0deg 12deg,rgba(76,194,255,.22) 40deg,
+     rgba(76,194,255,.65) 200deg,rgba(76,194,255,1) 340deg,rgba(76,194,255,0) 360deg);
+}
+/* buttons that spin on submit keep their glyph, they just pulse like Win11 */
+@keyframes fmWinBusy{0%,100%{opacity:1}50%{opacity:.55}}
+.upd-loading{display:flex;align-items:center;gap:9px}
+
+@media(min-width:861px){
+  /* the desktop login is its own layout (round avatar + pill field), so the
+     Win11 pack keeps that structure and only repaints its chrome. */
+  :root[data-theme="win11"] .login-logo-desktop,
+  :root[data-theme="win11d"] .login-logo-desktop{
+    border-radius:8px;background:rgba(255,255,255,.7);
+    box-shadow:0 8px 24px rgba(0,0,0,.12);border:1px solid rgba(0,0,0,.06);
+  }
+  :root[data-theme="win11d"] .login-logo-desktop{
+    background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.08);
+    box-shadow:0 8px 24px rgba(0,0,0,.45);
+  }
+  /* the pill becomes a Win11 text box: 4px corners, accent underline */
+  :root[data-theme="win11"] .login-entry-row{
+    width:min(320px,100%);height:34px;border-radius:4px;padding:0;
+    background:rgba(255,255,255,.76);border:1px solid rgba(0,0,0,.14);
+    border-bottom-color:rgba(0,0,0,.44);box-shadow:none;
+  }
+  :root[data-theme="win11"] .login-entry-row:focus-within{
+    background:#fff;border-bottom:2px solid #0067c0;
+  }
+  :root[data-theme="win11d"] .login-entry-row{
+    width:min(320px,100%);height:34px;border-radius:4px;padding:0;
+    background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.09);
+    border-bottom-color:rgba(255,255,255,.44);box-shadow:none;
+  }
+  :root[data-theme="win11d"] .login-entry-row:focus-within{
+    background:rgba(255,255,255,.08);border-bottom:2px solid #4cc2ff;
+  }
+  :root[data-theme="win11"] .login-entry-row input{
+    color:#1b1b1b;font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:13.5px;
+  }
+  :root[data-theme="win11d"] .login-entry-row input{color:#fff}
+  :root[data-theme="win11"] .login-entry-row input::placeholder{color:rgba(0,0,0,.45)}
+  :root[data-theme="win11d"] .login-entry-row input::placeholder{color:rgba(255,255,255,.5)}
+  /* the arrow button: Win11 accent square-ish button */
+  :root[data-theme="win11"] .login-next,
+  :root[data-theme="win11d"] .login-next{
+    width:28px;height:28px;flex:0 0 28px;border-radius:4px;margin-right:2px;
+  }
+  :root[data-theme="win11"] .login-next{background:#0067c0;color:#fff}
+  :root[data-theme="win11"] .login-next:hover{background:#1983d5}
+  :root[data-theme="win11d"] .login-next{background:#4cc2ff;color:#003049}
+  :root[data-theme="win11d"] .login-next:hover{background:#6fd0ff}
+  /* the top strip: Win11 acrylic bar with the live clock */
+  :root[data-theme="win11"] .linux-topbar,
+  :root[data-theme="win11d"] .linux-topbar{
+    background:rgba(249,249,249,.72);
+    -webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);
+    border-bottom:1px solid rgba(0,0,0,.09);color:#1b1b1b;
+  }
+  :root[data-theme="win11d"] .linux-topbar{
+    background:rgba(32,32,32,.72);border-bottom-color:rgba(255,255,255,.09);color:#fff;
+  }
+  :root[data-theme="win11"] .linux-date,:root[data-theme="win11"] .linux-clock{color:#1b1b1b}
+  :root[data-theme="win11d"] .linux-date,:root[data-theme="win11d"] .linux-clock{color:#fff}
+  :root[data-theme="win11"] .cpu-bars i{background:#0067c0}
+  :root[data-theme="win11d"] .cpu-bars i{background:#4cc2ff}
+  /* the two round tools at the bottom right */
+  :root[data-theme="win11"] .login-action{
+    background:rgba(255,255,255,.8);border:1px solid rgba(0,0,0,.09);border-radius:4px;color:#1b1b1b;
+    -webkit-backdrop-filter:blur(30px);backdrop-filter:blur(30px);
+  }
+  :root[data-theme="win11d"] .login-action{
+    background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.09);color:#fff;
+    -webkit-backdrop-filter:blur(30px);backdrop-filter:blur(30px);
+  }
+  :root[data-theme="win11"] .login-action:hover{background:#fff}
+  :root[data-theme="win11d"] .login-action:hover{background:rgba(255,255,255,.1)}
+  /* wallpaper / help panels keep their content, Win11 acrylic chrome */
+  :root[data-theme="win11"] .login-settings-panel,
+  :root[data-theme="win11"] .login-help-panel{
+    background:rgba(249,249,249,.92);border:1px solid rgba(0,0,0,.09);border-radius:8px;
+    -webkit-backdrop-filter:blur(60px) saturate(160%);backdrop-filter:blur(60px) saturate(160%);
+    box-shadow:0 16px 40px rgba(0,0,0,.2);
+  }
+  :root[data-theme="win11d"] .login-settings-panel,
+  :root[data-theme="win11d"] .login-help-panel{
+    background:rgba(44,44,44,.94);border-color:rgba(255,255,255,.09);
+    -webkit-backdrop-filter:blur(60px) saturate(160%);backdrop-filter:blur(60px) saturate(160%);
+    box-shadow:0 16px 40px rgba(0,0,0,.55);
+  }
+  :root[data-theme="win11"] .wallpaper-tile,
+  :root[data-theme="win11d"] .wallpaper-tile{border-radius:4px}
 </style></head><body>
 <div class="login-wallpaper is-visible" id="loginWallpaperA" aria-hidden="true" style="background-image:url('https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/wallpapers/default_home.jpg')"></div>
 <div class="login-wallpaper" id="loginWallpaperB" aria-hidden="true"></div>
@@ -30408,6 +30577,46 @@ if(isset($_GET['x'])){
         }
         echo json_encode($r);exit;
     }
+    if($xop==='guardian_fix_permissions'){
+        /* One press that makes the next install succeed instead of failing
+           silently: relaxes this file/folder to the modes every shared host
+           accepts, clears OPcache, and reports exactly what it found and what
+           it changed. Nothing here downloads or replaces any file. */
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
+        $self=__FILE__;$dir=__DIR__;$steps=[];$problems=[];
+        $fileMode=sprintf('%04o',@fileperms($self)&0777);
+        $dirMode=sprintf('%04o',@fileperms($dir)&0777);
+        $steps[]=['what'=>'index.php mode before','value'=>$fileMode];
+        $steps[]=['what'=>'folder mode before','value'=>$dirMode];
+        $steps[]=['what'=>'index.php writable','value'=>(@is_writable($self)?'yes':'no')];
+        $steps[]=['what'=>'folder writable','value'=>(@is_writable($dir)?'yes':'no')];
+        $steps[]=['what'=>'PHP user','value'=>(function_exists('posix_getpwuid')&&function_exists('posix_geteuid')?((posix_getpwuid(posix_geteuid())['name']??(string)posix_geteuid())):(string)getmyuid())];
+        $steps[]=['what'=>'file owner uid','value'=>(string)@fileowner($self)];
+        /* 0644 + 0755 is the pair that works on every host and is still safe:
+           the file stays non-executable and the folder is not world-writable. */
+        if(@chmod($self,0644))$steps[]=['what'=>'index.php mode after','value'=>sprintf('%04o',@fileperms($self)&0777)];
+        else $problems[]='Could not chmod index.php (owner mismatch).';
+        if(@chmod($dir,0755))$steps[]=['what'=>'folder mode after','value'=>sprintf('%04o',@fileperms($dir)&0777)];
+        else $problems[]='Could not chmod the folder (owner mismatch).';
+        @clearstatcache(true,$self);@clearstatcache(true,$dir);
+        $steps[]=['what'=>'index.php writable (after)','value'=>(@is_writable($self)?'yes':'no')];
+        $steps[]=['what'=>'folder writable (after)','value'=>(@is_writable($dir)?'yes':'no')];
+        @fm_guardian_invalidate_opcache($self);
+        $steps[]=['what'=>'OPcache invalidated','value'=>(function_exists('opcache_invalidate')?'yes':'no opcache on this PHP')];
+        /* A real write test beats every flag: if this succeeds, the install
+           path can replace the file on this host. */
+        $probe=$dir.'/.fm_write_probe_'.getmypid();
+        $wrote=@file_put_contents($probe,'probe');
+        $steps[]=['what'=>'write test in folder','value'=>($wrote!==false?'ok':'failed')];
+        if($wrote!==false)@unlink($probe);else $problems[]='The folder refuses new files: the file can still be written in place, and install now falls back to that.';
+        $inplace=@file_put_contents($self,@file_get_contents($self),LOCK_EX)!==false;
+        $steps[]=['what'=>'write test on index.php itself','value'=>($inplace?'ok':'failed')];
+        if(!$inplace)$problems[]='index.php itself is not writable: no update can ever install. Change the owner to the PHP user or set 0644.';
+        echo json_encode(['ok'=>empty($problems),'problems'=>$problems,'steps'=>$steps,'file_mode'=>$fileMode,'dir_mode'=>$dirMode,'php_user'=>php_uname('n')]);exit;
+    }
     if($xop==='guardian_sync_now'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
@@ -30859,14 +31068,21 @@ function svgFile($t='file'){global $fm;$color=$fm->getColor($t);$p=['image'=>'<r
    grid Microsoft uses in File Explorer: a soft graded body, a darker fold
    and a fully round outline. They are only emitted for the win11 theme,
    so the stock outline set stays exactly as it was. */
-function svgFolderWindows11($empty=false){
-    $body='<linearGradient id="wfA" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE7A9"/><stop offset="1" stop-color="#FFC83D"/></linearGradient>';
-    $lip ='<linearGradient id="wfB" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFD87A"/><stop offset="1" stop-color="#F5A623"/></linearGradient>';
+function svgFolderWindows11($empty=false,$dark=false){
+    /* One geometry, drawn N times on a page, must not reuse document-wide
+       gradient ids: the second copy overrides the first, and once a browser
+       resolves url(#wfA) to a gradient that lives inside a different (or
+       removed) <svg>, the whole folder paints as an empty box. A per-instance
+       suffix keeps every copy self-contained. */
+    static $wfSeq=0;$wfSeq++;
+    $uid='wf'.substr(md5('fmfolder'.$wfSeq.microtime(true).mt_rand()),0,8);
+    $body='<linearGradient id="'.$uid.'a" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE7A9"/><stop offset="1" stop-color="#FFC83D"/></linearGradient>';
+    $lip ='<linearGradient id="'.$uid.'b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFD87A"/><stop offset="1" stop-color="#F5A623"/></linearGradient>';
     return '<svg class="ti ti-w11" viewBox="0 0 20 20" fill="none" aria-hidden="true">'
         .'<defs>'.$body.$lip.'</defs>'
-        .'<path d="M2.5 5.2A1.7 1.7 0 0 1 4.2 3.5h3.05c.45 0 .88.18 1.2.5l1.1 1.1h5.25A1.7 1.7 0 0 1 16.5 6.8v.7H2.5z" fill="url(#wfB)"/>'
-        .'<path d="M2.5 8.05c0-.94.76-1.7 1.7-1.7h11.6c.94 0 1.7.76 1.7 1.7v6.25a1.7 1.7 0 0 1-1.7 1.7H4.2a1.7 1.7 0 0 1-1.7-1.7z" fill="url(#wfA)"/>'
-        .'<path d="M2.5 8.05c0-.94.76-1.7 1.7-1.7h11.6c.94 0 1.7.76 1.7 1.7v.35H2.5z" fill="#FFD87A" opacity=".85"/>'
+        .'<path d="M2.5 5.2A1.7 1.7 0 0 1 4.2 3.5h3.05c.45 0 .88.18 1.2.5l1.1 1.1h5.25A1.7 1.7 0 0 1 16.5 6.8v.7H2.5z" fill="url(#'.$uid.'b)"/>'
+        .'<path d="M2.5 8.05c0-.94.76-1.7 1.7-1.7h11.6c.94 0 1.7.76 1.7 1.7v6.25a1.7 1.7 0 0 1-1.7 1.7H4.2a1.7 1.7 0 0 1-1.7-1.7z" fill="url(#'.$uid.'a)"/>'
+        .'<path d="M2.5 8.05c0-.94.76-1.7 1.7-1.7h11.6c.94 0 1.7.76 1.7 1.7v.35H2.5z" fill="' . ($dark?'#9a8340':'#FFD87A') . '" opacity=".85"/>'
         .($empty?'':'')
         .'</svg>';
 }
@@ -30893,7 +31109,11 @@ function svgFileWindows11($t='file'){
         .$txt
         .'</svg>';
 }
-function svgFolderRendered(){return fm_theme_active('win11')?svgFolderWindows11():svgFolder();}
+function svgFolderRendered(){
+    if(fm_theme_active('win11'))return svgFolderWindows11();
+    if(fm_theme_active('win11d'))return svgFolderWindows11(false,true);
+    return svgFolder();
+}
 function svgFileRendered($t='file'){return fm_theme_active('win11')?svgFileWindows11($t):svgFile($t);}
 
 ?>
@@ -31470,6 +31690,157 @@ a.nt:hover{color:var(--link)}
 .gi-m{font-size:10px;color:var(--t3);font-family:'JetBrains Mono',monospace}
 .gi-ck{position:absolute;top:6px;left:6px;opacity:0;transition:opacity .15s}
 .gi:hover .gi-ck,.gi.selected .gi-ck{opacity:1}
+/* ════════════════════════════════════════════════════════════════════════
+   FILE VIEW MODES - Extra large / Large / Medium / Small icons, List,
+   Details, Tiles, Content (the Windows 11 View menu). The mode is a class
+   on <html> so every layer - table, grid, icons - follows it, and it is
+   remembered the same way the old toggle was.
+   ════════════════════════════════════════════════════════════════════════ */
+.viewmenu-wrap{position:relative;display:inline-flex}
+.viewmenu{position:absolute;top:calc(100% + 6px);right:0;z-index:1200;min-width:218px;padding:6px;
+  background:var(--surf);border:1px solid var(--border2);border-radius:8px;
+  box-shadow:0 8px 26px rgba(0,0,0,.28),0 2px 6px rgba(0,0,0,.18);
+  display:none;flex-direction:column;gap:1px}
+.viewmenu.open{display:flex;animation:vmIn .13s var(--spring) both}
+@keyframes vmIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+.vm-head{padding:6px 10px 4px;font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--t3)}
+.vm-sep{height:1px;margin:4px 6px;background:var(--border)}
+.vm-item{display:flex;align-items:center;gap:10px;width:100%;padding:7px 10px;border:0;border-radius:5px;
+  background:transparent;color:var(--t1);font:inherit;font-size:13px;text-align:left;cursor:pointer;
+  transition:background .09s linear}
+.vm-item:hover{background:var(--hov)}
+.vm-item.on{background:var(--act)}
+.vm-item.on::after{content:'';margin-left:auto;width:5px;height:9px;border:solid currentColor;border-width:0 1.6px 1.6px 0;transform:rotate(45deg) translateY(-1px)}
+.vm-ic{display:grid;place-items:center;width:18px;height:18px;color:var(--t2);flex:0 0 auto}
+.vm-ic svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+
+/* ── ICON SIZES : the row icon. Default is Medium (30px, was 29). ──────── */
+:root[data-view="xlarge"] .ft .ib{width:56px;height:56px;border-radius:10px}
+:root[data-view="xlarge"] .ft .ib .ti{width:34px;height:34px}
+:root[data-view="xlarge"] .ft .nc img{width:56px!important;height:56px!important}
+:root[data-view="xlarge"] .ft td{padding:11px 10px}
+:root[data-view="xlarge"] .ft .nm{font-size:14px}
+:root[data-view="large"] .ft .ib{width:44px;height:44px;border-radius:10px}
+:root[data-view="large"] .ft .ib .ti{width:27px;height:27px}
+:root[data-view="large"] .ft .nc img{width:44px!important;height:44px!important}
+:root[data-view="large"] .ft td{padding:8px 10px}
+:root[data-view="large"] .ft .nm{font-size:13.5px}
+:root[data-view="medium"] .ft .ib{width:32px;height:32px}
+:root[data-view="medium"] .ft .ib .ti{width:20px;height:20px}
+:root[data-view="medium"] .ft .nc img{width:32px!important;height:32px!important}
+:root[data-view="small"] .ft .ib{width:24px;height:24px;border-radius:6px}
+:root[data-view="small"] .ft .ib .ti{width:15px;height:15px}
+:root[data-view="small"] .ft .nc img{width:24px!important;height:24px!important}
+:root[data-view="small"] .ft td{padding:3px 10px}
+:root[data-view="small"] .ft .nm{font-size:12.5px}
+
+/* ── LIST : name only, no grid padding, dense rows ─────────────────────── */
+:root[data-view="list"] .ft td{padding:4px 10px}
+:root[data-view="list"] .ft .ib{width:22px;height:22px;border-radius:5px;background:transparent!important}
+:root[data-view="list"] .ft .ib .ti{width:17px;height:17px}
+:root[data-view="list"] .ft .nc img{width:22px!important;height:22px!important}
+
+/* ── DETAILS : the full table (default) ────────────────────────────────── */
+:root[data-view="details"] .ft .ib{width:30px;height:30px}
+
+/* ── TILES : bigger grid cards with two lines of meta ─────────────────── */
+:root[data-view="tiles"] .gv{grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
+:root[data-view="tiles"] .gi{flex-direction:row;align-items:center;gap:11px;text-align:left;padding:9px 11px}
+:root[data-view="tiles"] .gi-ic{width:46px;height:46px;border-radius:9px}
+:root[data-view="tiles"] .gi-ic .ti{width:27px;height:27px}
+:root[data-view="tiles"] .gi-th{width:46px;height:46px}
+:root[data-view="tiles"] .gi-n{text-align:left;max-width:100%;-webkit-line-clamp:2;font-size:12.5px}
+:root[data-view="tiles"] .gi-m{text-align:left}
+
+/* ── CONTENT : one item per row, columns of information ───────────────── */
+:root[data-view="content"] .gv{grid-template-columns:1fr;gap:0;padding:0}
+:root[data-view="content"] .gi{flex-direction:row;align-items:center;gap:12px;border:0;border-bottom:1px solid var(--border);
+  border-radius:0;background:transparent;padding:7px 12px}
+:root[data-view="content"] .gi:hover{background:var(--hov);transform:none}
+:root[data-view="content"] .gi-ic{width:34px;height:34px;border-radius:7px}
+:root[data-view="content"] .gi-ic .ti{width:21px;height:21px}
+:root[data-view="content"] .gi-th{width:34px;height:34px}
+:root[data-view="content"] .gi-n{text-align:left;max-width:46%;-webkit-line-clamp:1;font-size:12.5px;flex:0 0 auto}
+:root[data-view="content"] .gi-m{text-align:left;margin-left:auto;font-size:11px;opacity:.85}
+
+/* ── grid icon sizes follow the mode too ──────────────────────────────── */
+:root[data-view="xlarge"] .gv{grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px}
+:root[data-view="xlarge"] .gi-ic{width:76px;height:76px;border-radius:14px}
+:root[data-view="xlarge"] .gi-ic .ti{width:46px;height:46px}
+:root[data-view="xlarge"] .gi-th{width:76px;height:76px}
+:root[data-view="xlarge"] .gi-n{font-size:12.5px;max-width:130px}
+:root[data-view="large"] .gv{grid-template-columns:repeat(auto-fill,minmax(126px,1fr));gap:8px}
+:root[data-view="large"] .gi-ic{width:56px;height:56px;border-radius:11px}
+:root[data-view="large"] .gi-ic .ti{width:34px;height:34px}
+:root[data-view="large"] .gi-th{width:56px;height:56px}
+:root[data-view="medium"] .gv{grid-template-columns:repeat(auto-fill,minmax(116px,1fr))}
+:root[data-view="medium"] .gi-ic{width:44px;height:44px;border-radius:10px}
+:root[data-view="medium"] .gi-ic .ti{width:26px;height:26px}
+:root[data-view="medium"] .gi-th{width:44px;height:44px}
+:root[data-view="small"] .gv{grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:4px}
+:root[data-view="small"] .gi-ic{width:30px;height:30px;border-radius:7px}
+:root[data-view="small"] .gi-ic .ti{width:18px;height:18px}
+:root[data-view="small"] .gi-th{width:30px;height:30px}
+:root[data-view="small"] .gi-n{font-size:10.5px;-webkit-line-clamp:1}
+:root[data-view="list"] .gv,:root[data-view="details"] .gv{grid-template-columns:repeat(auto-fill,minmax(112px,1fr))}
+
+
+/* ── the Win11 marks are drawn on a 20×20 canvas while the default glyphs
+      use 24×24: a single size rule gave them mismatched visual weights, and
+      the folder in particular collapsed to a hairline. Every icon slot now
+      sizes both canvases; the folder gets one step more so a filled mark
+      matches the optical size of an outlined one. ─────────────────────── */
+:root .ib .ti{display:block;flex:0 0 auto}
+:root[data-view="medium"] .ft .ib .ti.ti-w11{width:22px;height:22px}
+:root[data-view="small"] .ft .ib .ti.ti-w11{width:17px;height:17px}
+:root[data-view="large"] .ft .ib .ti.ti-w11{width:30px;height:30px}
+:root[data-view="xlarge"] .ft .ib .ti.ti-w11{width:38px;height:38px}
+:root[data-view="list"] .ft .ib .ti.ti-w11{width:18px;height:18px}
+:root[data-view="medium"] .gi-ic .ti.ti-w11{width:28px;height:28px}
+:root[data-view="small"] .gi-ic .ti.ti-w11{width:20px;height:20px}
+:root[data-view="large"] .gi-ic .ti.ti-w11{width:38px;height:38px}
+:root[data-view="xlarge"] .gi-ic .ti.ti-w11{width:52px;height:52px}
+:root[data-view="tiles"] .gi-ic .ti.ti-w11{width:30px;height:30px}
+:root[data-view="content"] .gi-ic .ti.ti-w11{width:23px;height:23px}
+/* the folder wrapper must not clip its mark */
+.ib,.gi-ic{overflow:visible}
+:root[data-theme="win11"] .ti-w11,:root[data-theme="win11d"] .ti-w11{overflow:visible}
+
+/* ── the content panel must read as a surface in the dark pack too ────── */
+:root[data-theme="win11"] .main,:root[data-theme="win11d"] .main{border:1px solid var(--border);border-radius:8px}
+:root[data-theme="win11d"] .main{background:rgba(255,255,255,.045)}
+:root[data-theme="win11d"] .ft{background:rgba(255,255,255,.035)}
+:root[data-theme="win11d"] .ft thead tr{background:rgba(255,255,255,.06)}
+:root[data-theme="win11d"] .ft tbody tr:hover{background:rgba(255,255,255,.06)}
+:root[data-theme="win11d"] .ft tbody tr.selected{background:rgba(76,194,255,.14)}
+:root[data-theme="win11d"] .gi{background:rgba(255,255,255,.045);border-color:transparent}
+:root[data-theme="win11d"] .gi:hover{background:rgba(255,255,255,.075);border-color:rgba(255,255,255,.09)}
+:root[data-theme="win11d"] .nc .nm,:root[data-theme="win11d"] .gi-n{color:#fff}
+:root[data-theme="win11d"] .btn-g{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12);color:#fff}
+:root[data-theme="win11d"] .btn-g:hover{background:rgba(255,255,255,.09)}
+
+/* ════════════════════════════════════════════════════════════════════════
+   WINDOWS 11 PACK - LOGIN SCREEN (desktop widths only, ≥861px) + SPINNER
+   The wallpaper picker, the account picture and every existing login
+   control stay exactly where they are: this only repaints their chrome.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── login screen, desktop only ───────────────────────────────────────── */
+/* below 861px nothing changes: the mobile login keeps the current look */
+/* ── DETAILS / PREVIEW PANE ────────────────────────────────────────────── */
+.filepane{display:none;position:fixed;top:132px;right:12px;width:288px;max-height:calc(100vh - 200px);z-index:900;border-left:1px solid var(--border);border-radius:8px;
+  padding:14px 14px 18px;overflow:auto;background:var(--raised);font-size:12.5px}
+.filepane.open{display:block}
+.filepane h4{margin:0 0 10px;font-size:12px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--t3)}
+.filepane .fp-ic{display:grid;place-items:center;width:100%;height:132px;border-radius:8px;
+  background:var(--hov);margin-bottom:12px;overflow:hidden}
+.filepane .fp-ic .ti{width:64px;height:64px}
+.filepane .fp-ic img{max-width:100%;max-height:100%;object-fit:contain}
+.filepane .fp-name{font-weight:600;word-break:break-word;margin-bottom:10px;font-size:13px}
+.filepane dl{display:grid;grid-template-columns:auto 1fr;gap:5px 10px;margin:0}
+.filepane dt{color:var(--t3);font-size:11.5px}
+.filepane dd{margin:0;color:var(--t1);font-size:11.5px;word-break:break-word;text-align:right}
+.content-main>#lvw,.content-main>#gvw{min-width:0}
 
 /* ══ FILTER BAR ══ */
 /* The strip is one soft rectangle at full width and tightens as the screen
@@ -33516,16 +33887,18 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
    ═══════════════════════════════════════════════════════════════════════ */
 :root[data-theme="win11"]{
   --bg:#f3f3f3;--panel:#f3f3f3;--surf:#f9f9f9;--raised:rgba(255,255,255,.7);--hov:rgba(0,0,0,.0373);--act:rgba(0,0,0,.0605);
-  --border:rgba(0,0,0,.0578);--border2:rgba(0,0,0,.16);
-  --t1:#1b1b1b;--t2:rgba(0,0,0,.6063);--t3:rgba(0,0,0,.4458);--link:#0067c0;
+  /* Win11 light uses ~14% for structure lines and 21% for control strokes;
+     the previous 5.8% made button edges and table rules almost invisible. */
+  --border:rgba(0,0,0,.14);--border2:rgba(0,0,0,.21);
+  --t1:#1b1b1b;--t2:rgba(0,0,0,.68);--t3:rgba(0,0,0,.52);--link:#0067c0;
   --indigo:#0067c0;--indigo2:#0067c0;--check:#0067c0;--check-border:#0067c0;
   --green:#0f7b0f;--amber:#9d5d00;--red:#c42b1c;--blue:#0067c0;--pink:#c239b3;--purple:#8764b8;
   --r:4px;--rlg:8px;--rxl:8px;
   --spring:cubic-bezier(.1,.9,.2,1);--out:cubic-bezier(.1,.9,.2,1);
   --fw-regular:400;--fw-medium:400;--fw-strong:600;--fw-muted:400;
-  --field:rgba(255,255,255,.7);--fieldb:rgba(0,0,0,.0578);--fieldb-h:rgba(0,0,0,.16);--fieldh:rgba(0,0,0,.0373);
+  --field:rgba(255,255,255,.7);--fieldb:rgba(0,0,0,.14);--fieldb-h:rgba(0,0,0,.26);--fieldh:rgba(0,0,0,.0373);
   --wm-accent:#0067c0;--wm-accent-h:#1983d5;--wm-accent-p:#005ba4;
-  --wm-stroke-t:rgba(0,0,0,.0578);--wm-stroke-b:rgba(0,0,0,.16);
+  --wm-stroke-t:rgba(0,0,0,.14);--wm-stroke-b:rgba(0,0,0,.21);
   --wm-card:rgba(255,255,255,.7);--wm-card2:rgba(255,255,255,.5);
   --wm-fill-h:rgba(0,0,0,.0373);--wm-fill-p:rgba(0,0,0,.0241);
   --wm-close:#c42b1c;--wm-close-h:#c42b1c;
@@ -33551,7 +33924,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11"] .wm-title{
   grid-area:wm;display:flex;align-items:center;gap:10px;height:32px;padding:0 0 0 12px;
   background:rgba(243,243,243,.82);-webkit-backdrop-filter:blur(30px) saturate(160%);
-  backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(0,0,0,.0578);
+  backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(0,0,0,.12);
   -webkit-user-select:none;user-select:none;position:relative;z-index:300;overflow:hidden;
 }
 .wm-title-ico{width:16px;height:16px;flex-shrink:0;border-radius:4px;display:grid;place-items:center}
@@ -33624,8 +33997,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11"] .content::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.35);background-clip:content-box}
 
 /* ── FILE LIST (Details view) ────────────────────────────────────────── */
-:root[data-theme="win11"] .ft{border-collapse:separate;border-spacing:0;border:1px solid rgba(0,0,0,.0578);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.5)}
-:root[data-theme="win11"] .ft thead tr{background:rgba(255,255,255,.7);border-bottom:1px solid rgba(0,0,0,.0803)}
+:root[data-theme="win11"] .ft{border-collapse:separate;border-spacing:0;border:1px solid rgba(0,0,0,.12);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.5)}
+:root[data-theme="win11"] .ft thead tr{background:rgba(255,255,255,.7);border-bottom:1px solid rgba(0,0,0,.14)}
 :root[data-theme="win11"] .ft th{
   padding:6px 10px;font-size:12px;font-weight:400;text-transform:none;letter-spacing:0;
   color:rgba(0,0,0,.6063);border-right:1px solid rgba(0,0,0,.0578);
@@ -33821,6 +34194,317 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   :root[data-theme="win11"] .wm-title-txt{font-size:11.5px}
   :root[data-theme="win11"] .wm-cap-btn{width:44px}
 }
+:root[data-theme="win11d"]{
+  --bg:#202020;--panel:#202020;--surf:#2b2b2b;--raised:rgba(255,255,255,.0512);--hov:rgba(255,255,255,.0605);--act:rgba(255,255,255,.0419);
+  /* Win11 light uses ~14% for structure lines and 21% for control strokes;
+     the previous 5.8% made button edges and table rules almost invisible. */
+  --border:rgba(255,255,255,.0933);--border2:rgba(255,255,255,.1409);
+  --t1:#ffffff;--t2:rgba(255,255,255,.786);--t3:rgba(255,255,255,.5442);--link:#4cc2ff;
+  --indigo:#4cc2ff;--indigo2:#4cc2ff;--check:#4cc2ff;--check-border:#4cc2ff;
+  --green:#6ccb5f;--amber:#fce100;--red:#ff99a4;--blue:#4cc2ff;--pink:#ea7bd9;--purple:#b89cf0;
+  --r:4px;--rlg:8px;--rxl:8px;
+  --spring:cubic-bezier(.1,.9,.2,1);--out:cubic-bezier(.1,.9,.2,1);
+  --fw-regular:400;--fw-medium:400;--fw-strong:600;--fw-muted:400;
+  --field:rgba(255,255,255,.0605);--fieldb:rgba(255,255,255,.0933);--fieldb-h:rgba(255,255,255,.5442);--fieldh:rgba(255,255,255,.0419);
+  --wm-accent:#4cc2ff;--wm-accent-h:#6fd0ff;--wm-accent-p:#3aa8e0;
+  --wm-stroke-t:rgba(255,255,255,.0933);--wm-stroke-b:rgba(255,255,255,.1409);
+  --wm-card:rgba(255,255,255,.0512);--wm-card2:rgba(255,255,255,.0353);
+  --wm-fill-h:rgba(255,255,255,.0605);--wm-fill-p:rgba(255,255,255,.0419);
+  --wm-close:#c42b1c;--wm-close-h:#c42b1c;
+  --wm-shadow:0 2px 4px rgba(255,255,255,0.9),0 1px 2px rgba(255,255,255,0.9);
+  --wm-shadow-win:0 32px 64px rgba(255,255,255,0.9),0 2px 21px rgba(255,255,255,0.9);
+  --sw:248px;--th:48px;--bh:24px;
+}
+/* ── base surface: Mica (a soft, desaturated desktop tint) ───────────── */
+:root[data-theme="win11d"] body{
+  font-family:'Segoe UI Variable Text','Segoe UI',system-ui,-apple-system,'Inter',sans-serif;
+  font-size:14px;letter-spacing:0;background:
+    radial-gradient(1200px 620px at 12% -10%,#1b2a3a 0%,rgba(27,42,58,0) 62%),
+    radial-gradient(1000px 700px at 108% 6%,#2a2438 0%,rgba(42,36,56,0) 58%),
+    linear-gradient(160deg,#202020 0%,#1c1c1c 46%,#232323 100%);
+  background-attachment:fixed;color:var(--t1);
+  -webkit-font-smoothing:antialiased;
+}
+:root[data-theme="win11d"] .shell{
+  grid-template:"wm wm" 32px "tb tb" var(--th) "sb main" 1fr "bar bar" var(--bh) / var(--sw) 1fr;
+}
+/* ── WINDOW TITLE BAR (icon + title + caption buttons) ───────────────── */
+.wm-title{display:none}
+:root[data-theme="win11d"] .wm-title{
+  grid-area:wm;display:flex;align-items:center;gap:10px;height:32px;padding:0 0 0 12px;
+  background:rgba(32,32,32,.82);-webkit-backdrop-filter:blur(30px) saturate(160%);
+  backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(255,255,255,.0933);
+  -webkit-user-select:none;user-select:none;position:relative;z-index:300;overflow:hidden;
+}
+.wm-title-ico{width:16px;height:16px;flex-shrink:0;border-radius:4px;display:grid;place-items:center}
+.wm-title-txt{flex:1 1 auto;min-width:0;font-size:12px;font-weight:400;color:rgba(255,255,255,0.9);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wm-title-hint{flex:0 1 auto;min-width:0;padding:0 12px;font-size:11px;color:rgba(255,255,255,0.9);white-space:nowrap;overflow:hidden}
+/* caption buttons: 46x32, hover fill, red close — exactly the Win11 metrics */
+.wm-cap{display:flex;height:32px;margin-left:auto;flex:0 0 auto;align-self:flex-start}
+.wm-cap-btn{width:46px;height:32px;display:grid;place-items:center;border:0;background:transparent;color:#ffffff;cursor:default;padding:0;
+  transition:background .09s linear,color .09s linear;outline:none;-webkit-appearance:none;appearance:none}
+.wm-cap-btn svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:1}
+.wm-cap-btn:hover{background:rgba(255,255,255,0.9)}
+.wm-cap-btn:active{background:rgba(255,255,255,0.9)}
+.wm-cap-btn.wm-cap-close:hover{background:var(--wm-close);color:#fff}
+.wm-cap-btn.wm-cap-close:active{background:rgba(196,43,28,.9);color:#fff}
+.wm-cap-btn:focus-visible{outline:2px solid #ffffff;outline-offset:-4px;border-radius:2px}
+
+/* ── TOP BAR (command area) ──────────────────────────────────────────── */
+:root[data-theme="win11d"] .topbar{background:rgba(39,39,39,.72);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(255,255,255,0.9);padding:0 10px;gap:8px}
+:root[data-theme="win11d"] .brand-icon{width:26px;height:26px;border-radius:6px;background:linear-gradient(135deg,#4cc2ff,#4cc2ff);display:grid;place-items:center;box-shadow:none}
+:root[data-theme="win11d"] .brand-icon img{width:100%;height:100%;object-fit:contain;border-radius:6px}
+:root[data-theme="win11d"] .dv{background:rgba(255,255,255,0.9);height:20px}
+:root[data-theme="win11d"] .bc a{color:rgba(255,255,255,0.9);font-size:13px;border-radius:4px;padding:3px 6px;transition:background .1s,color .1s}
+:root[data-theme="win11d"] .bc a:hover{background:rgba(255,255,255,0.9);color:#ffffff}
+:root[data-theme="win11d"] .bc a.last{color:#ffffff;font-weight:600}
+:root[data-theme="win11d"] .bc-sep{color:rgba(255,255,255,0.9);font-size:12px}
+:root[data-theme="win11d"] .tsearch{height:32px;background:rgba(255,255,255,.0512);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;box-shadow:none;padding:0 4px 0 9px}
+:root[data-theme="win11d"] .tsearch:focus-within{background:#2b2b2b;border-bottom:2px solid var(--wm-accent);border-color:var(--wm-accent);box-shadow:none;padding-bottom:0}
+:root[data-theme="win11d"] .tsearch svg{stroke:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .tsearch input{color:#ffffff;font-size:13px}
+:root[data-theme="win11d"] .tsearch input::placeholder{color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .tsearch-panel{background:#2b2b2b;border:1px solid rgba(255,255,255,0.9);border-bottom-color:rgba(255,255,255,0.9);border-radius:8px;box-shadow:var(--wm-shadow-win);padding:4px}
+:root[data-theme="win11d"] .tb-right {gap:4px}
+:root[data-theme="win11d"] .topbar .tb-right .btn-icon,.topbar .btn-icon{width:32px;min-width:32px;height:32px;border-radius:4px}
+
+/* ── SIDEBAR (NavigationView pane) ───────────────────────────────────── */
+:root[data-theme="win11d"] .sidebar{background:transparent;border-right:1px solid rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .sb-sec{padding:0}
+:root[data-theme="win11d"] .sb-label{font-size:12px;font-weight:600;text-transform:none;letter-spacing:0;color:rgba(255,255,255,0.9);padding:14px 16px 6px}
+:root[data-theme="win11d"] .sb-item{
+  position:relative;min-height:36px;padding:0 12px;margin:2px 6px;border-radius:4px;border:0;
+  color:#ffffff;font-size:14px;font-weight:400;gap:14px;background:transparent;transition:background .1s linear;
+}
+:root[data-theme="win11d"] .sb-item svg{width:16px;height:16px;stroke:#ffffff;stroke-width:1.5;transition:none}
+:root[data-theme="win11d"] .sb-item:hover{background:rgba(255,255,255,0.9);color:#ffffff;transform:none}
+:root[data-theme="win11d"] .sb-item:hover svg{transform:none}
+:root[data-theme="win11d"] .sb-item:active{background:rgba(255,255,255,0.9);transform:none;color:rgba(255,255,255,0.9)}
+/* the Windows 11 selection pill: a 3px accent bar hugging the left edge */
+:root[data-theme="win11d"] .sb-item.sb-active{background:rgba(255,255,255,0.9);font-weight:600}
+:root[data-theme="win11d"] .sb-item.sb-active::before{content:'';position:absolute;left:-6px;top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:2px;background:var(--wm-accent)}
+:root[data-theme="win11d"] .sb-div{height:1px;background:rgba(255,255,255,0.9);margin:8px 12px}
+:root[data-theme="win11d"] .sb-flink{border-radius:4px;font-size:13px;color:#ffffff;padding:0 10px;min-height:32px}
+:root[data-theme="win11d"] .sb-flink svg{stroke:#ffffff;stroke-width:1.5}
+:root[data-theme="win11d"] .sb-flink:hover{background:rgba(255,255,255,0.9);color:#ffffff;transform:none}
+:root[data-theme="win11d"] .sb-empty{color:rgba(255,255,255,0.9);font-style:normal;font-size:12px}
+:root[data-theme="win11d"] .sb-footer{border-top:1px solid rgba(255,255,255,0.9);background:transparent}
+:root[data-theme="win11d"] .disk-lbl{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;color:rgba(255,255,255,0.9);font-size:11px}
+:root[data-theme="win11d"] .disk-tr{background:rgba(255,255,255,0.9);height:3px;border-radius:2px}
+:root[data-theme="win11d"] .disk-fi{background:var(--wm-accent);border-radius:2px}
+:root[data-theme="win11d"] .disk-fi.warn{background:#9d5d00}
+:root[data-theme="win11d"] .disk-fi.crit{background:var(--wm-close)}
+:root[data-theme="win11d"] .sb-item .eb,:root[data-theme="win11d"] .sb-tool-name{font-size:13px}
+
+/* ── MAIN AREA + COMMAND BAR ─────────────────────────────────────────── */
+:root[data-theme="win11d"] .main{background:rgba(255,255,255,.0512)}
+:root[data-theme="win11d"] .toolbar{background:transparent;border-bottom:1px solid rgba(255,255,255,0.9);padding:8px 12px}
+:root[data-theme="win11d"] .content{padding:8px 12px 12px}
+:root[data-theme="win11d"] .content::-webkit-scrollbar{width:12px}
+:root[data-theme="win11d"] .content::-webkit-scrollbar-track{background:transparent}
+:root[data-theme="win11d"] .content::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.9);border:4px solid transparent;background-clip:content-box;border-radius:6px;min-height:34px}
+:root[data-theme="win11d"] .content::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.9);background-clip:content-box}
+
+/* ── FILE LIST (Details view) ────────────────────────────────────────── */
+:root[data-theme="win11d"] .ft{border-collapse:separate;border-spacing:0;border:1px solid rgba(255,255,255,.0933);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.0512)}
+:root[data-theme="win11d"] .ft thead tr{background:rgba(255,255,255,.0512);border-bottom:1px solid rgba(255,255,255,.0933)}
+:root[data-theme="win11d"] .ft th{
+  padding:6px 10px;font-size:12px;font-weight:400;text-transform:none;letter-spacing:0;
+  color:rgba(255,255,255,0.9);border-right:1px solid rgba(255,255,255,0.9);
+}
+:root[data-theme="win11d"] .ft th:last-child{border-right:0}
+:root[data-theme="win11d"] .ft th:hover{background:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .ft tbody tr{border-bottom:0;animation:none;background:transparent}
+:root[data-theme="win11d"] .ft tbody tr:hover{background:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .ft tbody tr.selected{background:rgba(0,103,192,.09);box-shadow:inset 0 0 0 1px rgba(0,103,192,.4)}
+:root[data-theme="win11d"] .ft tbody tr:focus{outline:1px solid var(--wm-accent);outline-offset:-1px}
+:root[data-theme="win11d"] .ft td{padding:5px 10px;border-right:1px solid rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .ft td:last-child{border-right:0}
+:root[data-theme="win11d"] .nt{font-size:14px;font-weight:400;color:#ffffff;max-width:260px}
+:root[data-theme="win11d"] a.nt:hover{color:#ffffff;text-decoration:underline}
+:root[data-theme="win11d"] .mt,:root[data-theme="win11d"] .sz{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:12px;color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .mono{font-family:'Cascadia Mono',ui-monospace,'Consolas',monospace;font-size:11.5px;background:transparent;color:rgba(255,255,255,0.9);padding:0}
+:root[data-theme="win11d"] .eb{background:rgba(255,255,255,0.9);color:rgba(255,255,255,0.9);border-radius:3px;font-family:'Segoe UI Variable Text','Segoe UI',sans-serif;font-size:10px;font-weight:600}
+:root[data-theme="win11d"] .own-name{color:rgba(255,255,255,0.9);font-size:12px}
+:root[data-theme="win11d"] .own-cell{background:transparent;border:0;padding:0}
+:root[data-theme="win11d"] .own-me{background:rgba(0,103,192,.1);color:#4cc2ff}
+:root[data-theme="win11d"] .tag-dot{border-radius:50%;box-shadow:0 0 0 1px rgba(255,255,255,0.9)}
+/* file "icon tile": Win11 shows a bare, large glyph — no tinted square */
+:root[data-theme="win11d"] .ib,:root[data-theme="win11d"] .gi-ic{
+  background:transparent!important;border-radius:0;width:24px;height:24px;
+}
+:root[data-theme="win11d"] .ib .ti,:root[data-theme="win11d"] .gi-ic .ti{width:22px;height:22px}
+:root[data-theme="win11d"] .ft tbody tr:hover .ib{transform:none}
+:root[data-theme="win11d"] .nc{gap:10px}
+:root[data-theme="win11d"] .gi-ic{width:48px;height:48px}
+:root[data-theme="win11d"] .gi-ic .ti{width:44px;height:44px}
+:root[data-theme="win11d"] .gi-th{width:44px;height:44px;border-radius:4px;box-shadow:0 0 0 1px rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .gi{border-radius:4px;border:1px solid transparent}
+:root[data-theme="win11d"] .gi:hover{background:rgba(255,255,255,0.9);border-color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .gi-n{font-size:13px;color:#ffffff}
+:root[data-theme="win11d"] .gi-m{font-size:11px;color:rgba(255,255,255,0.9)}
+
+/* ── CHECK BOXES / RADIOS (WinUI glyph metrics) ──────────────────────── */
+:root[data-theme="win11d"] .rck,:root[data-theme="win11d"] input[type=checkbox],:root[data-theme="win11d"] input[type=radio]{
+  border-radius:3px;border:1px solid rgba(255,255,255,0.9);background:rgba(255,255,255,.0512);
+}
+:root[data-theme="win11d"] .rck:hover{border-color:rgba(255,255,255,0.9);background:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .rck:checked,:root[data-theme="win11d"] input[type=checkbox]:checked{background:var(--wm-accent);border-color:var(--wm-accent)}
+:root[data-theme="win11d"] .rck:checked::after{left:3px;top:0;width:5px;height:8px;border-width:0 1.6px 1.6px 0;border-color:#fff}
+:root[data-theme="win11d"] input[type=radio]{border-radius:50%}
+:root[data-theme="win11d"] input[type=checkbox]:focus,:root[data-theme="win11d"] input[type=radio]:focus{box-shadow:0 0 0 3px rgba(255,255,255,0.9)}
+
+/* ── BUTTONS (StandardButton / AccentButton) ─────────────────────────── */
+:root[data-theme="win11d"] .btn{
+  border-radius:4px;font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
+  font-size:13px;font-weight:400;padding:6px 12px;min-height:30px;
+  background:rgba(255,255,255,.0512);color:#ffffff;
+  border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
+  box-shadow:none;transition:background .1s linear;
+}
+:root[data-theme="win11d"] .btn svg{stroke:currentColor;stroke-width:1.4}
+:root[data-theme="win11d"] .btn:hover{background:rgba(249,249,249,.5);color:#ffffff;transform:none;box-shadow:none;border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .btn:active{background:rgba(249,249,249,.3);color:rgba(255,255,255,0.9);transform:none!important}
+:root[data-theme="win11d"] .btn-g,:root[data-theme="win11d"] .btn-blue,:root[data-theme="win11d"] .btn-purp{
+  background:rgba(255,255,255,.0512);color:#ffffff;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
+}
+:root[data-theme="win11d"] .btn-g:hover,:root[data-theme="win11d"] .btn-blue:hover,:root[data-theme="win11d"] .btn-purp:hover{background:rgba(249,249,249,.5);color:#ffffff;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .btn-p{background:var(--wm-accent);color:#fff;border-color:rgba(255,255,255,0.9);border-bottom-color:rgba(255,255,255,0.9);box-shadow:none}
+:root[data-theme="win11d"] .btn-p:hover{background:var(--wm-accent-h);color:#fff;box-shadow:none}
+:root[data-theme="win11d"] .btn-p:active{background:var(--wm-accent-p);color:rgba(255,255,255,.7)}
+:root[data-theme="win11d"] .btn-red{background:rgba(255,255,255,.0512);color:var(--wm-close);border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .btn-red:hover{background:rgba(196,43,28,.08);color:var(--wm-close)}
+:root[data-theme="win11d"] .btn-green{background:rgba(255,255,255,.0512);color:#0f7b0f;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .btn-green:hover{background:rgba(15,123,15,.08);color:#0f7b0f}
+:root[data-theme="win11d"] .btn-amb,:root[data-theme="win11d"] .btn-star{background:rgba(255,255,255,.0512);color:#9d5d00;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .btn-amb:hover,:root[data-theme="win11d"] .btn-star:hover{background:rgba(157,93,0,.1);color:#9d5d00}
+:root[data-theme="win11d"] .btn-icon{min-height:0;padding:0;border-radius:4px}
+:root[data-theme="win11d"] .btn-xs{min-height:24px;padding:3px 8px;font-size:12px;border-radius:4px}
+:root[data-theme="win11d"] .btn-sm{min-height:28px;padding:4px 10px;font-size:12.5px;border-radius:4px}
+:root[data-theme="win11d"] .tb-right .btn-icon{width:32px;height:32px}
+
+/* ── INPUTS (TextBox) ────────────────────────────────────────────────── */
+:root[data-theme="win11d"] .inp,:root[data-theme="win11d"] select.inp,:root[data-theme="win11d"] textarea{
+  background:rgba(255,255,255,.0512);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
+  border-radius:4px;color:#ffffff;font-size:13px;font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
+  padding:6px 10px;height:32px;box-shadow:none;
+}
+:root[data-theme="win11d"] .inp:hover{background:rgba(249,249,249,.5)}
+:root[data-theme="win11d"] .inp:focus{
+  background:#2b2b2b;border-color:var(--wm-accent);border-bottom:2px solid var(--wm-accent);
+  box-shadow:none;outline:none;
+}
+:root[data-theme="win11d"] .inp::placeholder{color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] select.inp{color-scheme:light;padding-right:26px}
+:root[data-theme="win11d"] .upl-lbl{
+  border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;
+  background:rgba(255,255,255,.0512);color:#ffffff;font-size:13px;font-weight:400;min-height:30px;
+}
+:root[data-theme="win11d"] .upl-lbl:hover{background:rgba(249,249,249,.5);border-color:var(--wm-stroke-t);color:#ffffff;transform:none}
+
+/* ── STATUS BAR (thin, Mica) ─────────────────────────────────────────── */
+:root[data-theme="win11d"] .bar{
+  background:rgba(249,249,249,.68);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);
+  border-top:1px solid rgba(255,255,255,.0933);padding:0 12px;gap:14px;
+}
+:root[data-theme="win11d"] .bs{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:11.5px;color:rgba(255,255,255,0.9);gap:5px}
+:root[data-theme="win11d"] .bs svg{width:12px;height:12px;stroke:rgba(255,255,255,0.9);stroke-width:1.4}
+:root[data-theme="win11d"] .bs strong{color:#ffffff;font-weight:600}
+
+/* ── DIALOGS = real Windows 11 windows ───────────────────────────────── */
+:root[data-theme="win11d"] .ov{background:rgba(255,255,255,0.9);-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="win11d"] .mod-ov{
+  background:rgba(255,255,255,0.9);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);padding:24px;
+}
+:root[data-theme="win11d"] .mod{
+  background:#2b2b2b;border:1px solid rgba(255,255,255,0.9);border-bottom-color:rgba(255,255,255,0.9);
+  border-radius:8px;box-shadow:var(--wm-shadow-win);overflow:hidden;max-height:88vh;padding:0;
+  animation:wm11WinIn .18s cubic-bezier(.1,.9,.2,1) both;
+}
+@keyframes wm11WinIn{from{opacity:0;transform:scale(.96) translateY(8px)}to{opacity:1;transform:none}}
+:root[data-theme="win11d"] .mod-head{
+  display:flex;align-items:center;gap:10px;min-height:32px;padding:0 0 0 12px;
+  background:transparent;border-bottom:1px solid rgba(255,255,255,0.9);flex-shrink:0;
+}
+:root[data-theme="win11d"] .mod-icon{width:16px;height:16px;border-radius:0;background:transparent!important;display:grid;place-items:center}
+:root[data-theme="win11d"] .mod-icon svg{width:16px;height:16px;stroke:#ffffff;stroke-width:1.5}
+:root[data-theme="win11d"] .mod-title{font-size:12px;font-weight:400;color:rgba(255,255,255,0.9);letter-spacing:0}
+:root[data-theme="win11d"] .mod-head > .btn-icon{display:none} /* the caption close button replaces it */
+:root[data-theme="win11d"] .mod-head .wm-cap{margin-left:auto}
+:root[data-theme="win11d"] .mod-body{padding:16px;background:#2b2b2b;font-size:13.5px;color:#ffffff}
+:root[data-theme="win11d"] .mod-body::-webkit-scrollbar{width:12px}
+:root[data-theme="win11d"] .mod-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.9);border:4px solid transparent;background-clip:content-box;border-radius:6px}
+:root[data-theme="win11d"] .file-info-row{border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;background:rgba(255,255,255,.0512)}
+:root[data-theme="win11d"] .file-info-label{font-size:11px;text-transform:none;letter-spacing:0;color:rgba(255,255,255,0.9);font-weight:400}
+:root[data-theme="win11d"] .file-info-value{font-size:13px;color:#ffffff}
+:root[data-theme="win11d"] .file-info-open{background:rgba(255,255,255,.0512);border-top:1px solid rgba(255,255,255,.0933);font-size:13px;color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .file-info-open a{color:var(--wm-accent);font-weight:400}
+:root[data-theme="win11d"] .mod.mod-max{width:min(1180px,96vw)!important;height:94vh;max-height:94vh}
+
+/* generic content that other tools render inside dialogs */
+:root[data-theme="win11d"] .cms-install-section,:root[data-theme="win11d"] .card,:root[data-theme="win11d"] .info-g,
+:root[data-theme="win11d"] .threat-toolbar{border-radius:4px;border-color:var(--wm-stroke-t);background:rgba(255,255,255,.0512)}
+:root[data-theme="win11d"] .threat-toolbar{background:rgba(255,255,255,.0512);border-bottom:1px solid rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .threat-row,:root[data-theme="win11d"] .threat-user-grid{border-bottom:1px solid rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .threat-row:hover,:root[data-theme="win11d"] .threat-user-grid:hover{background:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .log-t th{text-transform:none;letter-spacing:0;font-weight:600;color:rgba(255,255,255,0.9);background:rgba(255,255,255,.0512)}
+:root[data-theme="win11d"] .log-t td{border-bottom:1px solid rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .empty{color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .alerts .alert{border-radius:4px;background:rgba(255,255,255,.0512);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+
+/* ── TOASTS (Win11 InfoBar) ──────────────────────────────────────────── */
+:root[data-theme="win11d"] .toast,:root[data-theme="win11d"] #toast{
+  border-radius:4px;background:rgba(249,249,249,.92);-webkit-backdrop-filter:blur(30px);backdrop-filter:blur(30px);
+  border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
+  color:#ffffff;font-size:13px;box-shadow:var(--wm-shadow-win);
+}
+
+/* ── MFM THEME gallery (the tool itself) ─────────────────────────────── */
+.mfm-theme-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.mfm-theme-card{
+  position:relative;border:1px solid rgba(255,255,255,0.9);border-bottom-color:rgba(255,255,255,0.9);border-radius:6px;
+  background:rgba(255,255,255,.0512);padding:10px;cursor:pointer;text-align:left;font-family:inherit;
+  transition:background .1s linear,box-shadow .1s linear;display:flex;flex-direction:column;gap:9px;
+}
+.mfm-theme-card:hover{background:rgba(249,249,249,.9);box-shadow:0 2px 8px rgba(255,255,255,0.9)}
+.mfm-theme-card:focus-visible{outline:2px solid #4cc2ff;outline-offset:2px}
+.mfm-theme-card.is-on{border-color:#4cc2ff;box-shadow:inset 0 0 0 1px #4cc2ff}
+.mfm-theme-shot{height:104px;border-radius:4px;overflow:hidden;position:relative;border:1px solid rgba(255,255,255,0.9)}
+.mfm-theme-shot .t-bar{height:14px;display:flex;align-items:center;gap:3px;padding:0 5px}
+.mfm-theme-shot .t-body{display:flex;height:calc(100% - 14px)}
+.mfm-theme-shot .t-side{width:34px}
+.mfm-theme-shot .t-lines{flex:1;padding:6px;display:flex;flex-direction:column;gap:5px}
+.mfm-theme-shot .t-line{height:6px;border-radius:2px}
+.mfm-theme-dot{width:5px;height:5px;border-radius:50%}
+.mfm-theme-name{font-size:13px;font-weight:600;color:#ffffff;display:flex;align-items:center;gap:7px}
+.mfm-theme-desc{font-size:11.5px;color:rgba(255,255,255,0.9);line-height:1.45}
+.mfm-theme-badge{margin-left:auto;font-size:10px;font-weight:600;color:#4cc2ff;background:rgba(0,103,192,.1);border-radius:3px;padding:2px 6px}
+.mfm-theme-foot{margin-top:14px;padding-top:10px;border-top:1px solid rgba(255,255,255,.0933);font-size:11.5px;color:rgba(255,255,255,0.9);line-height:1.6}
+.mfm-theme-gallery{display:none}
+:root[data-theme="win11d"] .mfm-theme-card{border-radius:6px}
+@media(max-width:640px){.mfm-theme-grid{grid-template-columns:1fr}}
+/* the gallery dialog must look the same whichever theme is active */
+.mod-ov#mfmThemeOv .mod{background:#2b2b2b;border:1px solid rgba(255,255,255,0.9);border-bottom-color:rgba(255,255,255,0.9);border-radius:8px;box-shadow:0 32px 64px rgba(255,255,255,0.9),0 2px 21px rgba(255,255,255,0.9);color:#ffffff}
+.mod-ov#mfmThemeOv .mod-head{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 0 0 14px;border-bottom:1px solid rgba(255,255,255,0.9);background:transparent}
+.mod-ov#mfmThemeOv .mod-title{font-size:13px;font-weight:600;color:#ffffff}
+.mod-ov#mfmThemeOv .mod-icon{background:transparent}
+.mod-ov#mfmThemeOv .mod-icon svg{stroke:#4cc2ff}
+.mod-ov#mfmThemeOv .mod-body{padding:0;background:#2b2b2b}
+.mod-ov#mfmThemeOv .mfm-theme-head{padding:16px 16px 0}
+.mod-ov#mfmThemeOv .mod-head .wm-cap{margin-left:auto}
+
+/* ── RESPONSIVE: keep the title bar row on small screens ─────────────── */
+@media(max-width:860px){
+  :root[data-theme="win11d"] .shell{
+    grid-template:"wm" 32px "tb" var(--th) "main" 1fr "bar" var(--bh) / 1fr;
+  }
+  :root[data-theme="win11d"] .wm-title-hint{display:none}
+  :root[data-theme="win11d"] .wm-title{gap:8px;padding-left:10px}
+  :root[data-theme="win11d"] .wm-title-txt{font-size:11.5px}
+  :root[data-theme="win11d"] .wm-cap-btn{width:44px}
+}
+.TESTX{color:red}
+:root[data-theme="win11"] .TESTMARK{color:green}
 </style>
 </head>
 <body class="<?=$terminalStandalone?'term-standalone':''?>">
@@ -33877,10 +34561,27 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <svg id="themeIcoSun" viewBox="0 0 24 24" style="display:none"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
       <svg id="themeIcoMoon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
     </button>
-    <button type="button" class="btn btn-icon btn-g" id="viewBtn" title="Toggle view">
-      <svg id="vIcoGrid" viewBox="0 0 24 24" style="display:none"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-      <svg id="vIcoList" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+    <div class="viewmenu-wrap">
+    <button type="button" class="btn btn-icon btn-g" id="viewBtn" title="View" aria-haspopup="menu" aria-expanded="false">
+      <svg id="vIcoGrid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+      <svg id="vIcoList" viewBox="0 0 24 24" style="display:none"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
     </button>
+    <div class="viewmenu" id="viewMenu" role="menu">
+      <div class="vm-head">Layout</div>
+      <button type="button" class="vm-item" data-v="xlarge" role="menuitem"><span class="vm-ic"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg></span>Extra large icons</button>
+      <button type="button" class="vm-item" data-v="large" role="menuitem"><span class="vm-ic"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>Large icons</button>
+      <button type="button" class="vm-item" data-v="medium" role="menuitem"><span class="vm-ic"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="5.5" height="5.5" rx="1"/><rect x="14.5" y="5" width="5.5" height="5.5" rx="1"/><rect x="4" y="14.5" width="5.5" height="5.5" rx="1"/><rect x="14.5" y="14.5" width="5.5" height="5.5" rx="1"/></svg></span>Medium icons</button>
+      <button type="button" class="vm-item" data-v="small" role="menuitem"><span class="vm-ic"><svg viewBox="0 0 24 24"><rect x="4" y="6" width="4" height="4" rx="1"/><rect x="14" y="6" width="4" height="4" rx="1"/><rect x="4" y="14" width="4" height="4" rx="1"/><rect x="14" y="14" width="4" height="4" rx="1"/></svg></span>Small icons</button>
+      <div class="vm-sep"></div>
+      <button type="button" class="vm-item" data-v="list" role="menuitem"><span class="vm-ic"><svg viewBox="0 0 24 24"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><line x1="4" y1="6" x2="4.01" y2="6"/><line x1="4" y1="12" x2="4.01" y2="12"/><line x1="4" y1="18" x2="4.01" y2="18"/></svg></span>List</button>
+      <button type="button" class="vm-item" data-v="details" role="menuitem"><span class="vm-ic"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="9" x2="9" y2="20"/></svg></span>Details</button>
+      <button type="button" class="vm-item" data-v="tiles" role="menuitem"><span class="vm-ic"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="8" height="7" rx="1"/><line x1="13.5" y1="6" x2="21" y2="6"/><line x1="13.5" y1="9" x2="18" y2="9"/><rect x="3" y="13" width="8" height="7" rx="1"/><line x1="13.5" y1="15" x2="21" y2="15"/><line x1="13.5" y1="18" x2="18" y2="18"/></svg></span>Tiles</button>
+      <button type="button" class="vm-item" data-v="content" role="menuitem"><span class="vm-ic"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="6" height="16" rx="1"/><line x1="12" y1="7" x2="21" y2="7"/><line x1="12" y1="12" x2="21" y2="12"/><line x1="12" y1="17" x2="17" y2="17"/></svg></span>Content</button>
+      <div class="vm-sep"></div>
+      <button type="button" class="vm-item" data-pane="details" role="menuitem"><span class="vm-ic"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="15" y1="4" x2="15" y2="20"/></svg></span>Details pane</button>
+      <button type="button" class="vm-item" data-pane="preview" role="menuitem"><span class="vm-ic"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="15" x2="21" y2="15"/><circle cx="8.5" cy="9" r="1.5"/></svg></span>Preview pane</button>
+    </div>
+    </div>
     <a href="?dir=<?=urlencode(dirname($fm->getCwd()))?>" class="btn btn-sm btn-g top-up"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg><span>Up</span></a>
     <a href="?<?=http_build_query(array_merge($_GET,['_r'=>time()]))?>" class="btn btn-icon btn-g" title="Refresh">
       <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
@@ -34374,7 +35075,10 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     </div>
 
     <?php endif;?>
-  </div><!-- .content -->
+  </div>
+    </div>
+    <aside class="filepane" id="filePane" aria-live="polite"></aside>
+<!-- .content -->
 </main>
 
 <!-- STATUS BAR -->
@@ -34503,6 +35207,26 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
             </div>
             <div class="mfm-theme-name">Windows 11 <span class="mfm-theme-badge" data-on-badge="win11" hidden>In use</span></div>
             <div class="mfm-theme-desc">Mica surfaces, a real title bar with minimize / maximize / close, Fluent buttons, WinUI check boxes and Windows 11 file and folder icons.</div>
+          </button>
+          <button type="button" class="mfm-theme-card" data-theme-pick="win11d">
+            <div class="mfm-theme-shot" style="background:linear-gradient(160deg,#1b2a3a,#202020 50%,#232323)">
+              <div class="t-bar" style="background:rgba(32,32,32,.9);border-bottom:1px solid rgba(255,255,255,.09)">
+                <span style="width:6px;height:6px;border-radius:2px;background:#4cc2ff"></span>
+                <span style="flex:1;height:4px;margin-left:2px;border-radius:2px;background:rgba(255,255,255,.18)"></span>
+                <span class="mfm-theme-dot" style="background:rgba(255,255,255,.28)"></span><span class="mfm-theme-dot" style="background:rgba(255,255,255,.28)"></span><span class="mfm-theme-dot" style="background:#c42b1c"></span>
+              </div>
+              <div class="t-body">
+                <div class="t-side" style="background:rgba(255,255,255,.05);border-right:1px solid rgba(255,255,255,.09)"></div>
+                <div class="t-lines">
+                  <div class="t-line" style="background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.12);width:100%;height:12px;border-radius:3px"></div>
+                  <div class="t-line" style="background:rgba(255,255,255,.07);width:88%"></div>
+                  <div class="t-line" style="background:rgba(255,255,255,.07);width:94%"></div>
+                  <div class="t-line" style="background:#4cc2ff;width:40%;opacity:.7"></div>
+                </div>
+              </div>
+            </div>
+            <div class="mfm-theme-name">Windows 11 Dark <span class="mfm-theme-badge" data-on-badge="win11d" hidden>In use</span></div>
+            <div class="mfm-theme-desc">The same Windows 11 pack in the real dark palette: #202020 surfaces, #4cc2ff accent, dark Mica and dark Fluent controls.</div>
           </button>
           <button type="button" class="mfm-theme-card" data-theme-pick="light">
             <div class="mfm-theme-shot" style="background:#f1f1f1">
@@ -36022,7 +36746,6 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <div class="mod-icon upd-mod-icon"><svg viewBox="0 0 24 24"><path d="M12 3v10.5"/><path d="m7.2 9.2 4.8 4.8 4.8-4.8"/><path d="M4 20.5h16"/><circle cx="18.6" cy="5.4" r="2.1"/></svg></div>
       <div style="min-width:0;flex:1">
         <span class="mod-title" id="updTitle">Check Updates</span>
-        <div class="upd-sub">The version installed here, the version offered, and the decision to install it</div>
       </div>
       <button class="btn btn-icon btn-g" id="updClose" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
@@ -38445,12 +39168,132 @@ document.getElementById('rcDisable')?.addEventListener('click',()=>rcSubmit('dis
 /* ═══════════════════════════════════════
    VIEW TOGGLE
 ═══════════════════════════════════════ */
-let isGrid=localStorage.getItem('fm_view')==='grid';
+/* ═══════════════════════════════════════════════════════════════════════
+   VIEW MODES - the Windows 11 View menu: Extra large / Large / Medium /
+   Small icons, List, Details, Tiles, Content, plus the Details and
+   Preview panes. The mode lives on <html data-view="…"> so CSS decides
+   everything; this block only remembers it and repaints the menu.
+   ═══════════════════════════════════════════════════════════════════════ */
+const VIEW_GRID={'xlarge':1,'large':1,'medium':1,'small':1,'tiles':1,'list':0,'details':0,'content':1};
+let isGrid=VIEW_GRID[(localStorage.getItem('fm_viewmode')||'details')]?true:false;
+if(!localStorage.getItem('fm_viewmode')&&localStorage.getItem('fm_view')==='grid')isGrid=true;
+let viewMode=localStorage.getItem('fm_viewmode')||(isGrid?'medium':'details');
+if(!(viewMode in VIEW_GRID))viewMode='details';
 const lv=document.getElementById('lvw'),gv=document.getElementById('gvw');
 const vbl=document.getElementById('vIcoList'),vbg=document.getElementById('vIcoGrid');
-function applyView(){if(isGrid){lv&&(lv.style.display='none');gv&&(gv.style.display='block');if(vbl)vbl.style.display='block';if(vbg)vbg.style.display='none';}else{lv&&(lv.style.display='block');gv&&(gv.style.display='none');if(vbl)vbl.style.display='none';if(vbg)vbg.style.display='block';}}
+function applyView(){
+  /* Tiles and Content are grid layouts; List and Details are tables. */
+  isGrid=!!VIEW_GRID[viewMode];
+  document.documentElement.setAttribute('data-view',viewMode);
+  if(isGrid){lv&&(lv.style.display='none');gv&&(gv.style.display='block');if(vbl)vbl.style.display='block';if(vbg)vbg.style.display='none';}
+  else{lv&&(lv.style.display='block');gv&&(gv.style.display='none');if(vbl)vbl.style.display='none';if(vbg)vbg.style.display='block';}
+  document.querySelectorAll('.vm-item[data-v]').forEach(b=>b.classList.toggle('on',b.dataset.v===viewMode));
+  document.querySelectorAll('.vm-item[data-pane]').forEach(b=>{
+    const k=b.dataset.pane;
+    b.classList.toggle('on',document.documentElement.getAttribute('data-pane-'+k)==='1');
+  });
+  applyPanes();
+}
+function applyPanes(){
+  const det=document.documentElement.getAttribute('data-pane-details')==='1';
+  const pre=document.documentElement.getAttribute('data-pane-preview')==='1';
+  const pane=document.getElementById('filePane');
+  if(pane){
+    pane.classList.toggle('open',det||pre);
+    pane.setAttribute('data-preview',pre?'1':'0');
+    if(!det&&!pre)pane.innerHTML='';
+  }
+  const host=document.querySelector('.content-split');
+  if(host)host.classList.toggle('has-pane',det||pre);
+}
 applyView();
-document.getElementById('viewBtn')?.addEventListener('click',()=>{isGrid=!isGrid;localStorage.setItem('fm_view',isGrid?'grid':'list');applyView();});
+/* ── menu open / close ─────────────────────────────────────────────────── */
+const viewMenu=document.getElementById('viewMenu'),viewBtn=document.getElementById('viewBtn');
+function closeViewMenu(){if(!viewMenu)return;viewMenu.classList.remove('open');viewBtn&&viewBtn.setAttribute('aria-expanded','false');}
+viewBtn?.addEventListener('click',e=>{
+  e.stopPropagation();
+  const open=viewMenu&&viewMenu.classList.contains('open');
+  if(open){closeViewMenu();return;}
+  viewMenu&&viewMenu.classList.add('open');viewBtn.setAttribute('aria-expanded','true');
+});
+document.addEventListener('click',e=>{
+  if(!viewMenu)return;
+  if(viewMenu.contains(e.target)||(viewBtn&&viewBtn.contains(e.target)))return;
+  closeViewMenu();
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeViewMenu();});
+viewMenu?.querySelectorAll('.vm-item[data-v]').forEach(b=>{
+  b.addEventListener('click',()=>{
+    viewMode=b.dataset.v;
+    localStorage.setItem('fm_viewmode',viewMode);
+    localStorage.setItem('fm_view',VIEW_GRID[viewMode]?'grid':'list');
+    applyView();closeViewMenu();renderSelPane();
+  });
+});
+viewMenu?.querySelectorAll('.vm-item[data-pane]').forEach(b=>{
+  b.addEventListener('click',()=>{
+    const k='data-pane-'+b.dataset.pane;
+    const on=document.documentElement.getAttribute(k)==='1';
+    document.documentElement.setAttribute(k,on?'0':'1');
+    try{localStorage.setItem('fm_pane_'+b.dataset.pane,on?'0':'1');}catch(e){}
+    applyView();closeViewMenu();renderSelPane();
+  });
+});
+['details','preview'].forEach(k=>{
+  try{const v=localStorage.getItem('fm_pane_'+k);if(v!==null)document.documentElement.setAttribute('data-pane-'+k,v);}catch(e){}
+});
+applyPanes();
+
+/* ── the pane paints the selected row (or the single open folder) ─────── */
+function currentItemInfo(){
+  const row=document.querySelector('#fileTable tbody tr.selected[data-name]')
+    ||document.querySelector('#fileTable tbody tr[data-name]')
+    ||document.querySelector('.gi.selected[data-name]')
+    ||document.querySelector('.gi[data-name]');
+  return row||null;
+}
+function renderSelPane(){
+  const pane=document.getElementById('filePane');
+  if(!pane||!pane.classList.contains('open'))return;
+  const det=document.documentElement.getAttribute('data-pane-details')==='1';
+  const pre=document.documentElement.getAttribute('data-pane-preview')==='1';
+  const node=currentItemInfo();
+  if(!node){pane.innerHTML='<h4>'+(det?'Details':'Preview')+'</h4><div style="color:var(--t3)">Select a file or folder.</div>';return;}
+  const name=node.dataset.name||node.dataset.fname||'';
+  const info=(()=>{try{return JSON.parse(node.dataset.info||'{}');}catch(e){return {};}})();
+  const isDir=node.dataset.isdir==='1';
+  let html='<h4>'+(det?'Details':'Preview')+'</h4>';
+  if(pre){
+    const raw=info.raw||node.dataset.ctxRaw||'';
+    const type=node.dataset.type||'';
+    if(!isDir&&/^image\//.test(info.mime||'')||(!isDir&&['image'].includes(type)))html+='<div class="fp-ic"><img src="'+raw+'" alt=""></div>';
+    else if(!isDir&&type==='video')html+='<div class="fp-ic"><video src="'+raw+'" controls style="max-width:100%;max-height:100%"></video></div>';
+    else html+='<div class="fp-ic">'+(node.querySelector('.ib .ti')?node.querySelector('.ib .ti').outerHTML:'')+'</div>';
+  }
+  html+='<div class="fp-name">'+name+'</div><dl>';
+  const add=(k,v)=>{if(v!==undefined&&v!==null&&v!=='')html+='<dt>'+k+'</dt><dd>'+v+'</dd>';};
+  add('Type',isDir?'File folder':(info.type||node.dataset.type||''));
+  add('Size',info.size_h||info.size||'');
+  add('Modified',info.mtime||'');
+  add('Permissions',info.perms||node.dataset.ctxPerm||'');
+  add('Owner',info.owner||'');
+  add('Path',info.path||'');
+  html+='</dl>';
+  pane.innerHTML=html;
+}
+document.getElementById('fileTable')?.addEventListener('click',e=>{
+  const tr=e.target.closest('tr[data-name]');
+  if(!tr)return;
+  document.querySelectorAll('#fileTable tbody tr.selected').forEach(r=>r!==tr&&r.classList.remove('selected'));
+  tr.classList.add('selected');renderSelPane();
+});
+document.getElementById('gvw')?.addEventListener('click',e=>{
+  const gi=e.target.closest('.gi[data-name]');
+  if(!gi)return;
+  document.querySelectorAll('.gi.selected').forEach(r=>r!==gi&&r.classList.remove('selected'));
+  gi.classList.add('selected');renderSelPane();
+});
+renderSelPane();
 if(FM_FOCUS){
   setTimeout(()=>{
     const row=Array.from(document.querySelectorAll('tr[data-name]')).find(x=>x.dataset.name===FM_FOCUS);
@@ -40337,6 +41180,8 @@ function updRender(s){
   h+='<div class="upd-actions">'
     +'<button class="btn btn-g" id="updCheckNow">Check Now</button>'
     +'<button class="btn btn-amb" id="updForce" title="Fetch the newest file from the link above and install it now, whatever its size or date"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/><path d="M20.2 3.2 22 5m-1.8-1.8L18.4 5"/></svg>Force update</button>'
+    +'<button class="btn btn-amb" id="updForce" title="Fetch the newest file from the link above and install it now, whatever its size or date"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/><path d="M20.2 3.2 22 5m-1.8-1.8L18.4 5"/></svg>Force update</button>'
+    +'<button class="btn btn-g" id="updFixPerm" title="Check and repair the file/folder permissions and clear the PHP cache - press this first if an install does nothing"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.4M12 18.6V21M3 12h2.4M18.6 12H21M5.6 5.6l1.7 1.7M16.7 16.7l1.7 1.7M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7"/></svg>Fix permissions</button>'
     +(avail?'<button class="btn btn-p" id="updInstall"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/></svg>Download &amp; install</button>':'')
     +'<span class="spacer"></span>'
     +'<button class="btn btn-g" id="updGuardian">File Guardian</button>'
@@ -40361,6 +41206,22 @@ function updWire(s){
   document.getElementById('updInstall')?.addEventListener('click',()=>updInstall(true));
   document.getElementById('updForce')?.addEventListener('click',()=>updForce(false));
   document.getElementById('updForceRun')?.addEventListener('click',()=>updForce(true));
+  document.getElementById('updFixPerm')?.addEventListener('click',async(e)=>{
+    const btn=e.currentTarget;const box=document.getElementById('updMsg');
+    const put=(k,v)=>{if(box){box.className='upd-msg is-info';box.innerHTML='<b>'+esc(k)+':</b> '+esc(v);}};
+    if(btn){btn.disabled=true;btn.style.opacity='.6';}
+    try{
+      const fd=new FormData();fd.append('csrf_token',CSRF);
+      const r=await fetch('?x=guardian_fix_permissions',{method:'POST',body:fd}).then(r=>r.json());
+      const rows=(r.steps||[]).map(s=>esc(s.what)+' → '+esc(String(s.value))).join(' · ');
+      if(box){
+        box.className='upd-msg '+(r.ok?'is-ok':'is-warn');
+        box.innerHTML='<b>'+(r.ok?'Permissions are ready - press Download &amp; install (or Force update) now.':'Something still blocks writing')+'</b><br>'+rows
+          +((r.problems&&r.problems.length)?'<br><b>'+r.problems.map(esc).join('<br>')+'</b>':'');
+      }
+    }catch(err){if(box){box.className='upd-msg is-warn';box.textContent='The check could not run: '+err;}}
+    finally{if(btn){btn.disabled=false;btn.style.opacity='';}}
+  });
   document.getElementById('updGuardian')?.addEventListener('click',()=>{closeMod('updOv');openMod('guardOv');guardLoad();});
   const paused=document.getElementById('updPaused');
   paused?.addEventListener('change',async e=>{
@@ -50496,7 +51357,7 @@ if(btn)btn.addEventListener('click',boot);
    ═══════════════════════════════════════════════════════════════════════ */
 (function(){
   const root=document.documentElement;
-  const PACKS=['win11'];
+  const PACKS=['win11','win11d'];
   const cur=()=>root.getAttribute('data-theme')||'dark';
 
   /* ── caption buttons of every dialog become real Win11 caption buttons ── */
@@ -50516,7 +51377,7 @@ if(btn)btn.addEventListener('click',boot);
   document.querySelectorAll('.mod-ov .mod').forEach(buildCaps);
 
   /* ── keep the theme name in the window title bar truthful ─────────────── */
-  const hints={win11:'MFM Theme \u00b7 Windows 11',dark:'Default dark',light:'Default light'};
+  const hints={win11:'MFM Theme \u00b7 Windows 11',win11d:'MFM Theme \u00b7 Windows 11 Dark',dark:'Default dark',light:'Default light'};
   function syncChrome(t){
     document.querySelectorAll('[data-on-badge]').forEach(b=>{b.hidden=(b.getAttribute('data-on-badge')!==t);});
     document.querySelectorAll('[data-theme-pick]').forEach(c=>{
@@ -50535,7 +51396,7 @@ if(btn)btn.addEventListener('click',boot);
      the page was built with. Switching into or out of the Windows 11 pack
      therefore finishes with one reload: colours change instantly, the icons
      arrive with the rebuilt page a moment later. */
-  const ICONSET={win11:'win11',dark:'default',light:'default'};
+  const ICONSET={win11:'win11',win11d:'win11',dark:'default',light:'default'};
   async function pick(t){
     const before=cur();
     if(typeof window.fmApplyTheme==='function')window.fmApplyTheme(t);
