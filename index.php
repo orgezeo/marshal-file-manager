@@ -537,7 +537,11 @@ header('Expires: 0');
 $scriptName = basename(__FILE__);
 $usersFile  = __DIR__ . '/.users.php';
 $themeFile  = __DIR__ . '/.theme.json';
-function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);return (is_array($d)&&isset($d['theme'])&&$d['theme']==='light')?'light':'dark';}
+/* Installed theme packs. One pack today: Windows 11. */
+function fm_theme_packs(){return ['win11'=>['name'=>'Windows 11','author'=>'mfm']];}
+function fm_theme_allowed($t){return in_array($t,['light','dark'],true)||isset(fm_theme_packs()[$t]);}
+function fm_theme_active($t){global $currentTheme;return isset($currentTheme)&&$currentTheme===(string)$t;}
+function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);$t=(is_array($d)&&isset($d['theme']))?(string)$d['theme']:'';return fm_theme_allowed($t)?$t:'dark';}
 /* One owner cell: the account name, its home directory, and a soft green
    tint when the account is the one running this manager. */
 function fm_owner_cell($info){
@@ -576,7 +580,7 @@ fm_store_migrate(__DIR__.'/.shares.php',__DIR__.'/.shares.json');
 fm_store_migrate(__DIR__.'/.cms_pw_vault.php',__DIR__.'/.cms_pw_vault.json');
 fm_store_migrate(__DIR__.'/.cms_vault_key.php',__DIR__.'/.cms_vault_key');
 fm_store_migrate(__DIR__.'/.guardian_update_state.php',__DIR__.'/.guardian_update_state.json');
-function fm_save_theme($f,$t){$t=($t==='light')?'light':'dark';@file_put_contents($f,json_encode(['theme'=>$t]));return $t;}
+function fm_save_theme($f,$t){$t=fm_theme_allowed((string)$t)?(string)$t:'dark';@file_put_contents($f,json_encode(['theme'=>$t]),LOCK_EX);return $t;}
 $currentTheme = fm_get_theme($themeFile);
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -1144,8 +1148,8 @@ function fm_ensure_terminal_font(){
    thing an admin can pause is the fully-automatic remote update check
    (see FM_UPDATE_PAUSED below), which is ON by default and resumes the
    moment the pause is lifted. */
-if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/index.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
-if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // automatic update checks are enabled by default; the Guardian panel can pause them temporarily
+if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', ''); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
+if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', true); // automatic update checks are enabled by default; the Guardian panel can pause them temporarily
 
 /* Prefer the database the project already uses. Replit and most modern PHP
    deployments expose it as DATABASE_URL; the old fmguardian@127.0.0.1:3307
@@ -2671,6 +2675,93 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
     @fm_guardian_install_watchdog();
     return ['ok'=>true,'changed'=>true];
 }
+/* ═══════════════════════════════════════════════════════════════════════
+   FORCED UPDATE - fetch the newest file from the update link and install it
+   no matter what the comparison says. "Check Updates" normally refuses a
+   file that is not bigger and not newer, because a hash cannot order two
+   builds and a smaller/older offer used to be a silent downgrade. That
+   refusal is correct for an automatic tick, but an admin who can see the
+   source has moved on needs a way to say "install it anyway". This is that
+   way - and it is the only place where the size/date rule is skipped, so
+   every automatic path keeps its guard.
+   Safety, in order: the offer must be reachable, start with <?php and pass
+   the same tokenizer lint as a normal update; a full copy of the current
+   file is written beside it before anything is replaced; and if the copy
+   back fails at any point the old bytes are restored and the call says so.
+   ═══════════════════════════════════════════════════════════════════════ */
+function fm_force_update_download($url){
+    $url=trim((string)$url);
+    if($url===''||!preg_match('#^https?://#i',$url))
+        return ['ok'=>false,'error'=>'The update link is empty or is not an http(s) address, so there is nothing to fetch.'];
+    @set_time_limit(60);@ignore_user_abort(true);
+    $data=false;$httpCode=0;$err='';
+    if(function_exists('curl_init')){
+        $ch=curl_init($url);
+        curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,
+            CURLOPT_CONNECTTIMEOUT=>8,CURLOPT_TIMEOUT=>30,CURLOPT_SSL_VERIFYPEER=>true,
+            CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
+            CURLOPT_HTTPHEADER=>['User-Agent: FileManager-Guardian/1.0','Cache-Control: no-cache','Pragma: no-cache']]);
+        $data=curl_exec($ch);$err=(string)curl_error($ch);$httpCode=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if($data===false||$err!=='')return ['ok'=>false,'error'=>'The download failed: '.($err!==''?$err:'cURL error').'.'];
+        if($httpCode>=400)return ['ok'=>false,'error'=>'The source answered HTTP '.$httpCode.' for that link.'];
+    }else{
+        $ctx=stream_context_create(['http'=>['timeout'=>25,'header'=>"User-Agent: FileManager-Guardian/1.0\r\nCache-Control: no-cache\r\n"],
+                                     'https'=>['timeout'=>25]]);
+        $data=@file_get_contents($url,false,$ctx);
+        if($data===false)return ['ok'=>false,'error'=>'The download failed (file_get_contents).'];
+    }
+    if(!is_string($data)||strlen($data)<20)return ['ok'=>false,'error'=>'The source returned an empty or unreadably short answer.'];
+    if(strpos(ltrim($data),'<?php')!==0)
+        return ['ok'=>false,'error'=>'What came back is not a PHP file (it does not start with <?php), so it was not installed. A repository page or an error page looks exactly like this.'];
+    return ['ok'=>true,'data'=>$data,'size'=>strlen($data),'sha256'=>hash('sha256',$data),'http'=>$httpCode,'url'=>$url];
+}
+function fm_force_update_install($url){
+    $g=fm_force_update_download($url);
+    if(empty($g['ok']))return $g;
+    $data=$g['data'];
+    /* lint before touching anything - the same check a normal update runs */
+    $tmp=__FILE__.'.forcetmp.'.getmypid();
+    if(@file_put_contents($tmp,$data,LOCK_EX)===false)return ['ok'=>false,'error'=>'The downloaded file could not be staged next to index.php (folder not writable).'];
+    $lint=fm_php_lint($tmp);
+    if($lint['ran']&&!$lint['ok']){@unlink($tmp);
+        return ['ok'=>false,'error'=>'The downloaded file failed the PHP syntax check, so it was not installed. '.($lint['out']!==''?'('.$lint['out'].')':'')];}
+    @unlink($tmp);
+    $old=@file_get_contents(__FILE__);
+    if($old===false)return ['ok'=>false,'error'=>'The installed file could not be read, so no backup could be taken; nothing was replaced.'];
+    $oldHash=hash('sha256',$old);
+    if($oldHash===$g['sha256']){
+        @fm_guardian_touch_check();
+        return ['ok'=>true,'changed'=>false,'forced'=>true,'reason'=>'already-identical',
+            'current_hash'=>$oldHash,'remote_hash'=>$g['sha256'],'size'=>$g['size'],
+            'note'=>'The file on this server is already byte-for-byte the one the link offers; nothing was written.'];
+    }
+    /* a full copy of the previous file, beside it - this is the way back */
+    $bakName='.index.php.forced-backup-'.date('Ymd-His').'.bak';
+    $bak=__DIR__.'/'.$bakName;
+    $bakOk=@file_put_contents($bak,$old,LOCK_EX)!==false;
+    if($bakOk)@chmod($bak,0644);
+    $commit=fm_guardian_commit_source(__FILE__,$data,$old);
+    if(!$commit){
+        if($bakOk)@unlink($bak);
+        return ['ok'=>false,'error'=>'The new file could not be written (rename and direct write both failed). The installed file is unchanged.'];
+    }
+    @fm_guardian_touch_check();
+    /* record what the source offers now, so the panel stops calling it "available" */
+    @file_put_contents(__DIR__.'/.guardian_update_state.php',
+        fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$g['sha256'],'current_hash'=>$g['sha256'],
+            'checked_at'=>time(),'fetched_at'=>time(),'available'=>false,'relation'=>'forced',
+            'forced_at'=>time(),'size'=>$g['size']],JSON_UNESCAPED_SLASHES)),LOCK_EX);
+    /* keep the Guardian copy and the watchdog quote in step with the new bytes */
+    if(function_exists('fm_guardian_sync'))@fm_guardian_sync($data);
+    if(function_exists('fm_guardian_install_watchdog'))@fm_guardian_install_watchdog();
+    return ['ok'=>true,'changed'=>true,'forced'=>true,
+        'old_hash'=>$oldHash,'new_hash'=>$g['sha256'],
+        'old_size'=>strlen($old),'size'=>$g['size'],'http'=>$g['http'],
+        'backup'=>$bakOk?$bakName:'',
+        'note'=>'Installed the file the link offers, whatever its size or date. The previous version was kept as '.($bakOk?$bakName:'a Guardian copy').'.'];
+}
+
 
 /* Turns a raw mysqli connect/select-db error into a plain-English explanation
    of WHICH of the two real causes it is - the Guardian DB user/database not
@@ -28998,8 +29089,15 @@ if(isset($_GET['x'])){
     }
     if($xop==='set_theme'){
         global $themeFile;
+        /* MFM Theme sends the CSRF token; the old top-bar toggle sends the
+           same token too. A request without one is refused. */
+        $tok=(string)($_POST['csrf_token']??($_GET['csrf_token']??''));
+        if($tok===''||!hash_equals((string)($_SESSION['csrf_token']??''),$tok)){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
         $t=isset($_POST['theme'])?$_POST['theme']:(isset($_GET['theme'])?$_GET['theme']:'');
-        echo json_encode(['ok'=>true,'theme'=>fm_save_theme($themeFile,$t)]);exit;
+        $saved=fm_save_theme($themeFile,$t);
+        echo json_encode(['ok'=>true,'theme'=>$saved,'pack'=>isset(fm_theme_packs()[$saved])?$saved:null]);exit;
     }
     if($xop==='agent_history'){
         $threadError='';$threadId=fm_agent_resolve_requested_thread($_GET['thread_id']??'',$threadError);
@@ -30286,6 +30384,30 @@ if(isset($_GET['x'])){
         }
         echo json_encode($r);exit;
     }
+    if($xop==='guardian_force_install_now'){
+        /* MFM FORCED UPDATE. The one action that installs the file the link
+           offers even when it is not bigger and not newer - which is exactly
+           the case this build can hit, because the installed file may carry
+           local work that the public source does not. Admins only, CSRF
+           required, and it still refuses anything that is not a valid PHP
+           file. A link typed in the panel is used for this one request only;
+           the saved link is never rewritten here. */
+        if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
+        $forceUrl=isset($_POST['update_url'])?trim((string)$_POST['update_url']):'';
+        if($forceUrl!==''&&!preg_match('#^https?://#i',$forceUrl)){echo json_encode(['ok'=>false,'error'=>'That link must start with http:// or https://']);exit;}
+        if($forceUrl==='')$forceUrl=(string)FM_UPDATE_URL;
+        session_write_close();
+        $r=fm_force_update_install($forceUrl);
+        if(!empty($r['ok'])&&!empty($r['changed'])){
+            @session_start();
+            if(isset($fm)&&is_object($fm))$fm->log('forced_update','Installed the file the link offers from '.$forceUrl.' ('.(int)($r['old_size']??0).' -> '.(int)($r['size']??0).' bytes)');
+            @session_write_close();
+        }
+        echo json_encode($r);exit;
+    }
     if($xop==='guardian_sync_now'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
@@ -30732,6 +30854,48 @@ $fmLoginTransition=!empty($_SESSION['fm_login_transition']);unset($_SESSION['fm_
 
 function svgFolder(){return '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="#85898C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="rgba(133,137,140,.15)"/></svg>';}
 function svgFile($t='file'){global $fm;$color=$fm->getColor($t);$p=['image'=>'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>','video'=>'<rect x="2" y="5" width="14" height="14" rx="2"/><path d="M16 10l6-4v12l-6-4z"/>','audio'=>'<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>','archive'=>'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v18M14 8h2M14 12h2M14 16h2"/>','pdf'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><text x="12" y="18" font-size="6" text-anchor="middle" fill="currentColor" stroke="none" font-weight="700">PDF</text>','word'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/>','excel'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><path d="M9.5 13l5 6M14.5 13l-5 6"/>','code'=>'<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>','data'=>'<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>','text'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>','config'=>'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82V9a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9z"/>','file'=>'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>'];$inner=isset($p[$t])?$p[$t]:$p['file'];return '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="'.$color.'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'.$inner.'</svg>';}
+/* ── Windows 11 (Fluent) icon set for the "Windows 11" theme pack ────────
+   These are colour glyphs, drawn as inline SVG in the same 20x20 Fluent
+   grid Microsoft uses in File Explorer: a soft graded body, a darker fold
+   and a fully round outline. They are only emitted for the win11 theme,
+   so the stock outline set stays exactly as it was. */
+function svgFolderWindows11($empty=false){
+    $body='<linearGradient id="wfA" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE7A9"/><stop offset="1" stop-color="#FFC83D"/></linearGradient>';
+    $lip ='<linearGradient id="wfB" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFD87A"/><stop offset="1" stop-color="#F5A623"/></linearGradient>';
+    return '<svg class="ti ti-w11" viewBox="0 0 20 20" fill="none" aria-hidden="true">'
+        .'<defs>'.$body.$lip.'</defs>'
+        .'<path d="M2.5 5.2A1.7 1.7 0 0 1 4.2 3.5h3.05c.45 0 .88.18 1.2.5l1.1 1.1h5.25A1.7 1.7 0 0 1 16.5 6.8v.7H2.5z" fill="url(#wfB)"/>'
+        .'<path d="M2.5 8.05c0-.94.76-1.7 1.7-1.7h11.6c.94 0 1.7.76 1.7 1.7v6.25a1.7 1.7 0 0 1-1.7 1.7H4.2a1.7 1.7 0 0 1-1.7-1.7z" fill="url(#wfA)"/>'
+        .'<path d="M2.5 8.05c0-.94.76-1.7 1.7-1.7h11.6c.94 0 1.7.76 1.7 1.7v.35H2.5z" fill="#FFD87A" opacity=".85"/>'
+        .($empty?'':'')
+        .'</svg>';
+}
+function svgFileWindows11($t='file'){
+    $c=['image'=>['#B3E0A2','#5BA82F','IMG'],'video'=>['#C7B6F5','#7357C9','VID'],'audio'=>['#F7C0E4','#B84B93','AUD'],
+        'archive'=>['#FFD79A','#D9822B','ZIP'],'pdf'=>['#FFB3AD','#C42B1C','PDF'],'word'=>['#B7D4FB','#2B579A','DOC'],
+        'excel'=>['#B0E5BE','#1E6B3A','XLS'],'code'=>['#C3D2F7','#3B5BA5','&lt;/&gt;'],'data'=>['#ADE3EC','#0E7490','DB'],
+        'text'=>['#D5D9DD','#5A6470','TXT'],'config'=>['#F6C2BF','#A4342B','CFG'],'markdown'=>['#BCE2F7','#0B6FA4','MD'],
+        'file'=>['#D5D9DD','#5A6470','']];
+    $v=isset($c[$t])?$c[$t]:$c['file'];
+    $lbl=$v[2];
+    $txt='';
+    if($lbl!==''){
+        $n=mb_strlen(html_entity_decode($lbl,ENT_QUOTES),'UTF-8');
+        $fs=$n>=4?3.9:($n===3?4.7:($n===2?5.5:6.8));
+        $txt='<text x="9.3" y="15.6" text-anchor="middle" font-family="Segoe UI Variable Text,Segoe UI,system-ui,sans-serif" '
+            .'font-size="'.$fs.'" font-weight="700" letter-spacing="0" fill="#fff" stroke="none">'.htmlspecialchars($lbl,ENT_QUOTES).'</text>';
+    }
+    return '<svg class="ti ti-w11" viewBox="0 0 20 20" fill="none" aria-hidden="true">'
+        .'<defs><linearGradient id="wfp'.md5($t).'" x1="0" y1="0" x2="1" y2="1">'
+        .'<stop offset="0" stop-color="'.$v[0].'"/><stop offset="1" stop-color="'.$v[1].'"/></linearGradient></defs>'
+        .'<path d="M4.6 1.9h6.15L15.4 6.6v11.5c0 .83-.67 1.5-1.5 1.5H4.6a1.5 1.5 0 0 1-1.5-1.5V3.4c0-.83.67-1.5 1.5-1.5z" fill="url(#wfp'.md5($t).')"/>'
+        .'<path d="M10.75 1.9 15.4 6.6h-3.15a1.5 1.5 0 0 1-1.5-1.5z" fill="#fff" opacity=".55"/>'
+        .$txt
+        .'</svg>';
+}
+function svgFolderRendered(){return fm_theme_active('win11')?svgFolderWindows11():svgFolder();}
+function svgFileRendered($t='file'){return fm_theme_active('win11')?svgFileWindows11($t):svgFile($t);}
+
 ?>
 <!DOCTYPE html>
 <html lang="en" data-theme="<?=htmlspecialchars($currentTheme)?>">
@@ -33339,10 +33503,341 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .wfc-choose .pie-site-dir{font-size:12.5px}
 .wfc-choose .pie-site-missing{display:block;font-size:11px;color:var(--amber);margin-top:3px}
 .wfc-sitebar .pie-site-badge{width:auto}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   MFM THEME by mfm - "Windows 11" theme pack
+   Everything below is scoped to [data-theme="win11"], so the two built-in
+   themes (dark / light) are byte-for-byte untouched when this one is not
+   selected. No @import, no font file, no image, no CDN: the whole look is
+   rebuilt from Fluent colours, borders, corner radii and inline SVG.
+   Design tokens follow the WinUI 3 / Windows 11 control strokes:
+   top stroke rgba(0,0,0,.0578), bottom stroke rgba(0,0,0,.16),
+   accent #0067c0, close-button red #c42b1c, Segoe UI Variable.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root[data-theme="win11"]{
+  --bg:#f3f3f3;--panel:#f3f3f3;--surf:#f9f9f9;--raised:rgba(255,255,255,.7);--hov:rgba(0,0,0,.0373);--act:rgba(0,0,0,.0605);
+  --border:rgba(0,0,0,.0578);--border2:rgba(0,0,0,.16);
+  --t1:#1b1b1b;--t2:rgba(0,0,0,.6063);--t3:rgba(0,0,0,.4458);--link:#0067c0;
+  --indigo:#0067c0;--indigo2:#0067c0;--check:#0067c0;--check-border:#0067c0;
+  --green:#0f7b0f;--amber:#9d5d00;--red:#c42b1c;--blue:#0067c0;--pink:#c239b3;--purple:#8764b8;
+  --r:4px;--rlg:8px;--rxl:8px;
+  --spring:cubic-bezier(.1,.9,.2,1);--out:cubic-bezier(.1,.9,.2,1);
+  --fw-regular:400;--fw-medium:400;--fw-strong:600;--fw-muted:400;
+  --field:rgba(255,255,255,.7);--fieldb:rgba(0,0,0,.0578);--fieldb-h:rgba(0,0,0,.16);--fieldh:rgba(0,0,0,.0373);
+  --wm-accent:#0067c0;--wm-accent-h:#1983d5;--wm-accent-p:#005ba4;
+  --wm-stroke-t:rgba(0,0,0,.0578);--wm-stroke-b:rgba(0,0,0,.16);
+  --wm-card:rgba(255,255,255,.7);--wm-card2:rgba(255,255,255,.5);
+  --wm-fill-h:rgba(0,0,0,.0373);--wm-fill-p:rgba(0,0,0,.0241);
+  --wm-close:#c42b1c;--wm-close-h:#c42b1c;
+  --wm-shadow:0 2px 4px rgba(0,0,0,.04),0 1px 2px rgba(0,0,0,.06);
+  --wm-shadow-win:0 32px 64px rgba(0,0,0,.1876),0 2px 21px rgba(0,0,0,.1473);
+  --sw:248px;--th:48px;--bh:24px;
+}
+/* ── base surface: Mica (a soft, desaturated desktop tint) ───────────── */
+:root[data-theme="win11"] body{
+  font-family:'Segoe UI Variable Text','Segoe UI',system-ui,-apple-system,'Inter',sans-serif;
+  font-size:14px;letter-spacing:0;background:
+    radial-gradient(1200px 620px at 12% -10%,#dfeaf6 0%,rgba(223,234,246,0) 62%),
+    radial-gradient(1000px 700px at 108% 6%,#e8e3f5 0%,rgba(232,227,245,0) 58%),
+    linear-gradient(160deg,#eef3f9 0%,#f3f3f3 46%,#eceef1 100%);
+  background-attachment:fixed;color:var(--t1);
+  -webkit-font-smoothing:antialiased;
+}
+:root[data-theme="win11"] .shell{
+  grid-template:"wm wm" 32px "tb tb" var(--th) "sb main" 1fr "bar bar" var(--bh) / var(--sw) 1fr;
+}
+/* ── WINDOW TITLE BAR (icon + title + caption buttons) ───────────────── */
+.wm-title{display:none}
+:root[data-theme="win11"] .wm-title{
+  grid-area:wm;display:flex;align-items:center;gap:10px;height:32px;padding:0 0 0 12px;
+  background:rgba(243,243,243,.82);-webkit-backdrop-filter:blur(30px) saturate(160%);
+  backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(0,0,0,.0578);
+  -webkit-user-select:none;user-select:none;position:relative;z-index:300;overflow:hidden;
+}
+.wm-title-ico{width:16px;height:16px;flex-shrink:0;border-radius:4px;display:grid;place-items:center}
+.wm-title-txt{flex:1 1 auto;min-width:0;font-size:12px;font-weight:400;color:rgba(0,0,0,.6063);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wm-title-hint{flex:0 1 auto;min-width:0;padding:0 12px;font-size:11px;color:rgba(0,0,0,.4458);white-space:nowrap;overflow:hidden}
+/* caption buttons: 46x32, hover fill, red close — exactly the Win11 metrics */
+.wm-cap{display:flex;height:32px;margin-left:auto;flex:0 0 auto;align-self:flex-start}
+.wm-cap-btn{width:46px;height:32px;display:grid;place-items:center;border:0;background:transparent;color:#1b1b1b;cursor:default;padding:0;
+  transition:background .09s linear,color .09s linear;outline:none;-webkit-appearance:none;appearance:none}
+.wm-cap-btn svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:1}
+.wm-cap-btn:hover{background:rgba(0,0,0,.0605)}
+.wm-cap-btn:active{background:rgba(0,0,0,.0241)}
+.wm-cap-btn.wm-cap-close:hover{background:var(--wm-close);color:#fff}
+.wm-cap-btn.wm-cap-close:active{background:rgba(196,43,28,.9);color:#fff}
+.wm-cap-btn:focus-visible{outline:2px solid #1b1b1b;outline-offset:-4px;border-radius:2px}
+
+/* ── TOP BAR (command area) ──────────────────────────────────────────── */
+:root[data-theme="win11"] .topbar{background:rgba(249,249,249,.72);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(0,0,0,.0578);padding:0 10px;gap:8px}
+:root[data-theme="win11"] .brand-icon{width:26px;height:26px;border-radius:6px;background:linear-gradient(135deg,#4cc2ff,#0067c0);display:grid;place-items:center;box-shadow:none}
+:root[data-theme="win11"] .brand-icon img{width:100%;height:100%;object-fit:contain;border-radius:6px}
+:root[data-theme="win11"] .dv{background:rgba(0,0,0,.0803);height:20px}
+:root[data-theme="win11"] .bc a{color:rgba(0,0,0,.6063);font-size:13px;border-radius:4px;padding:3px 6px;transition:background .1s,color .1s}
+:root[data-theme="win11"] .bc a:hover{background:rgba(0,0,0,.0373);color:#1b1b1b}
+:root[data-theme="win11"] .bc a.last{color:#1b1b1b;font-weight:600}
+:root[data-theme="win11"] .bc-sep{color:rgba(0,0,0,.4458);font-size:12px}
+:root[data-theme="win11"] .tsearch{height:32px;background:rgba(255,255,255,.7);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;box-shadow:none;padding:0 4px 0 9px}
+:root[data-theme="win11"] .tsearch:focus-within{background:#fff;border-bottom:2px solid var(--wm-accent);border-color:var(--wm-accent);box-shadow:none;padding-bottom:0}
+:root[data-theme="win11"] .tsearch svg{stroke:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .tsearch input{color:#1b1b1b;font-size:13px}
+:root[data-theme="win11"] .tsearch input::placeholder{color:rgba(0,0,0,.4458)}
+:root[data-theme="win11"] .tsearch-panel{background:#f9f9f9;border:1px solid rgba(0,0,0,.0578);border-bottom-color:rgba(0,0,0,.16);border-radius:8px;box-shadow:var(--wm-shadow-win);padding:4px}
+:root[data-theme="win11"] .tb-right {gap:4px}
+:root[data-theme="win11"] .topbar .tb-right .btn-icon,.topbar .btn-icon{width:32px;min-width:32px;height:32px;border-radius:4px}
+
+/* ── SIDEBAR (NavigationView pane) ───────────────────────────────────── */
+:root[data-theme="win11"] .sidebar{background:transparent;border-right:1px solid rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .sb-sec{padding:0}
+:root[data-theme="win11"] .sb-label{font-size:12px;font-weight:600;text-transform:none;letter-spacing:0;color:rgba(0,0,0,.6063);padding:14px 16px 6px}
+:root[data-theme="win11"] .sb-item{
+  position:relative;min-height:36px;padding:0 12px;margin:2px 6px;border-radius:4px;border:0;
+  color:#1b1b1b;font-size:14px;font-weight:400;gap:14px;background:transparent;transition:background .1s linear;
+}
+:root[data-theme="win11"] .sb-item svg{width:16px;height:16px;stroke:#1b1b1b;stroke-width:1.5;transition:none}
+:root[data-theme="win11"] .sb-item:hover{background:rgba(0,0,0,.0373);color:#1b1b1b;transform:none}
+:root[data-theme="win11"] .sb-item:hover svg{transform:none}
+:root[data-theme="win11"] .sb-item:active{background:rgba(0,0,0,.0241);transform:none;color:rgba(0,0,0,.6063)}
+/* the Windows 11 selection pill: a 3px accent bar hugging the left edge */
+:root[data-theme="win11"] .sb-item.sb-active{background:rgba(0,0,0,.0373);font-weight:600}
+:root[data-theme="win11"] .sb-item.sb-active::before{content:'';position:absolute;left:-6px;top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:2px;background:var(--wm-accent)}
+:root[data-theme="win11"] .sb-div{height:1px;background:rgba(0,0,0,.0803);margin:8px 12px}
+:root[data-theme="win11"] .sb-flink{border-radius:4px;font-size:13px;color:#1b1b1b;padding:0 10px;min-height:32px}
+:root[data-theme="win11"] .sb-flink svg{stroke:#1b1b1b;stroke-width:1.5}
+:root[data-theme="win11"] .sb-flink:hover{background:rgba(0,0,0,.0373);color:#1b1b1b;transform:none}
+:root[data-theme="win11"] .sb-empty{color:rgba(0,0,0,.4458);font-style:normal;font-size:12px}
+:root[data-theme="win11"] .sb-footer{border-top:1px solid rgba(0,0,0,.0803);background:transparent}
+:root[data-theme="win11"] .disk-lbl{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;color:rgba(0,0,0,.6063);font-size:11px}
+:root[data-theme="win11"] .disk-tr{background:rgba(0,0,0,.0803);height:3px;border-radius:2px}
+:root[data-theme="win11"] .disk-fi{background:var(--wm-accent);border-radius:2px}
+:root[data-theme="win11"] .disk-fi.warn{background:#9d5d00}
+:root[data-theme="win11"] .disk-fi.crit{background:var(--wm-close)}
+:root[data-theme="win11"] .sb-item .eb,:root[data-theme="win11"] .sb-tool-name{font-size:13px}
+
+/* ── MAIN AREA + COMMAND BAR ─────────────────────────────────────────── */
+:root[data-theme="win11"] .main{background:rgba(255,255,255,.5)}
+:root[data-theme="win11"] .toolbar{background:transparent;border-bottom:1px solid rgba(0,0,0,.0578);padding:8px 12px}
+:root[data-theme="win11"] .content{padding:8px 12px 12px}
+:root[data-theme="win11"] .content::-webkit-scrollbar{width:12px}
+:root[data-theme="win11"] .content::-webkit-scrollbar-track{background:transparent}
+:root[data-theme="win11"] .content::-webkit-scrollbar-thumb{background:rgba(0,0,0,.2);border:4px solid transparent;background-clip:content-box;border-radius:6px;min-height:34px}
+:root[data-theme="win11"] .content::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.35);background-clip:content-box}
+
+/* ── FILE LIST (Details view) ────────────────────────────────────────── */
+:root[data-theme="win11"] .ft{border-collapse:separate;border-spacing:0;border:1px solid rgba(0,0,0,.0578);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.5)}
+:root[data-theme="win11"] .ft thead tr{background:rgba(255,255,255,.7);border-bottom:1px solid rgba(0,0,0,.0803)}
+:root[data-theme="win11"] .ft th{
+  padding:6px 10px;font-size:12px;font-weight:400;text-transform:none;letter-spacing:0;
+  color:rgba(0,0,0,.6063);border-right:1px solid rgba(0,0,0,.0578);
+}
+:root[data-theme="win11"] .ft th:last-child{border-right:0}
+:root[data-theme="win11"] .ft th:hover{background:rgba(0,0,0,.0373)}
+:root[data-theme="win11"] .ft tbody tr{border-bottom:0;animation:none;background:transparent}
+:root[data-theme="win11"] .ft tbody tr:hover{background:rgba(0,0,0,.0373)}
+:root[data-theme="win11"] .ft tbody tr.selected{background:rgba(0,103,192,.09);box-shadow:inset 0 0 0 1px rgba(0,103,192,.4)}
+:root[data-theme="win11"] .ft tbody tr:focus{outline:1px solid var(--wm-accent);outline-offset:-1px}
+:root[data-theme="win11"] .ft td{padding:5px 10px;border-right:1px solid rgba(0,0,0,.035)}
+:root[data-theme="win11"] .ft td:last-child{border-right:0}
+:root[data-theme="win11"] .nt{font-size:14px;font-weight:400;color:#1b1b1b;max-width:260px}
+:root[data-theme="win11"] a.nt:hover{color:#1b1b1b;text-decoration:underline}
+:root[data-theme="win11"] .mt,:root[data-theme="win11"] .sz{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:12px;color:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .mono{font-family:'Cascadia Mono',ui-monospace,'Consolas',monospace;font-size:11.5px;background:transparent;color:rgba(0,0,0,.6063);padding:0}
+:root[data-theme="win11"] .eb{background:rgba(0,0,0,.0605);color:rgba(0,0,0,.6063);border-radius:3px;font-family:'Segoe UI Variable Text','Segoe UI',sans-serif;font-size:10px;font-weight:600}
+:root[data-theme="win11"] .own-name{color:rgba(0,0,0,.6063);font-size:12px}
+:root[data-theme="win11"] .own-cell{background:transparent;border:0;padding:0}
+:root[data-theme="win11"] .own-me{background:rgba(0,103,192,.1);color:#0067c0}
+:root[data-theme="win11"] .tag-dot{border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.16)}
+/* file "icon tile": Win11 shows a bare, large glyph — no tinted square */
+:root[data-theme="win11"] .ib,:root[data-theme="win11"] .gi-ic{
+  background:transparent!important;border-radius:0;width:24px;height:24px;
+}
+:root[data-theme="win11"] .ib .ti,:root[data-theme="win11"] .gi-ic .ti{width:22px;height:22px}
+:root[data-theme="win11"] .ft tbody tr:hover .ib{transform:none}
+:root[data-theme="win11"] .nc{gap:10px}
+:root[data-theme="win11"] .gi-ic{width:48px;height:48px}
+:root[data-theme="win11"] .gi-ic .ti{width:44px;height:44px}
+:root[data-theme="win11"] .gi-th{width:44px;height:44px;border-radius:4px;box-shadow:0 0 0 1px rgba(0,0,0,.08)}
+:root[data-theme="win11"] .gi{border-radius:4px;border:1px solid transparent}
+:root[data-theme="win11"] .gi:hover{background:rgba(0,0,0,.0373);border-color:rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .gi-n{font-size:13px;color:#1b1b1b}
+:root[data-theme="win11"] .gi-m{font-size:11px;color:rgba(0,0,0,.4458)}
+
+/* ── CHECK BOXES / RADIOS (WinUI glyph metrics) ──────────────────────── */
+:root[data-theme="win11"] .rck,:root[data-theme="win11"] input[type=checkbox],:root[data-theme="win11"] input[type=radio]{
+  border-radius:3px;border:1px solid rgba(0,0,0,.4458);background:rgba(255,255,255,.7);
+}
+:root[data-theme="win11"] .rck:hover{border-color:rgba(0,0,0,.6);background:rgba(0,0,0,.0241)}
+:root[data-theme="win11"] .rck:checked,:root[data-theme="win11"] input[type=checkbox]:checked{background:var(--wm-accent);border-color:var(--wm-accent)}
+:root[data-theme="win11"] .rck:checked::after{left:3px;top:0;width:5px;height:8px;border-width:0 1.6px 1.6px 0;border-color:#fff}
+:root[data-theme="win11"] input[type=radio]{border-radius:50%}
+:root[data-theme="win11"] input[type=checkbox]:focus,:root[data-theme="win11"] input[type=radio]:focus{box-shadow:0 0 0 3px rgba(0,0,0,.0605)}
+
+/* ── BUTTONS (StandardButton / AccentButton) ─────────────────────────── */
+:root[data-theme="win11"] .btn{
+  border-radius:4px;font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
+  font-size:13px;font-weight:400;padding:6px 12px;min-height:30px;
+  background:rgba(255,255,255,.7);color:#1b1b1b;
+  border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
+  box-shadow:none;transition:background .1s linear;
+}
+:root[data-theme="win11"] .btn svg{stroke:currentColor;stroke-width:1.4}
+:root[data-theme="win11"] .btn:hover{background:rgba(249,249,249,.5);color:#1b1b1b;transform:none;box-shadow:none;border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11"] .btn:active{background:rgba(249,249,249,.3);color:rgba(0,0,0,.6063);transform:none!important}
+:root[data-theme="win11"] .btn-g,:root[data-theme="win11"] .btn-blue,:root[data-theme="win11"] .btn-purp{
+  background:rgba(255,255,255,.7);color:#1b1b1b;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
+}
+:root[data-theme="win11"] .btn-g:hover,:root[data-theme="win11"] .btn-blue:hover,:root[data-theme="win11"] .btn-purp:hover{background:rgba(249,249,249,.5);color:#1b1b1b;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11"] .btn-p{background:var(--wm-accent);color:#fff;border-color:rgba(0,0,0,.0578);border-bottom-color:rgba(0,0,0,.28);box-shadow:none}
+:root[data-theme="win11"] .btn-p:hover{background:var(--wm-accent-h);color:#fff;box-shadow:none}
+:root[data-theme="win11"] .btn-p:active{background:var(--wm-accent-p);color:rgba(255,255,255,.7)}
+:root[data-theme="win11"] .btn-red{background:rgba(255,255,255,.7);color:var(--wm-close);border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11"] .btn-red:hover{background:rgba(196,43,28,.08);color:var(--wm-close)}
+:root[data-theme="win11"] .btn-green{background:rgba(255,255,255,.7);color:#0f7b0f;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11"] .btn-green:hover{background:rgba(15,123,15,.08);color:#0f7b0f}
+:root[data-theme="win11"] .btn-amb,:root[data-theme="win11"] .btn-star{background:rgba(255,255,255,.7);color:#9d5d00;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11"] .btn-amb:hover,:root[data-theme="win11"] .btn-star:hover{background:rgba(157,93,0,.1);color:#9d5d00}
+:root[data-theme="win11"] .btn-icon{min-height:0;padding:0;border-radius:4px}
+:root[data-theme="win11"] .btn-xs{min-height:24px;padding:3px 8px;font-size:12px;border-radius:4px}
+:root[data-theme="win11"] .btn-sm{min-height:28px;padding:4px 10px;font-size:12.5px;border-radius:4px}
+:root[data-theme="win11"] .tb-right .btn-icon{width:32px;height:32px}
+
+/* ── INPUTS (TextBox) ────────────────────────────────────────────────── */
+:root[data-theme="win11"] .inp,:root[data-theme="win11"] select.inp,:root[data-theme="win11"] textarea{
+  background:rgba(255,255,255,.7);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
+  border-radius:4px;color:#1b1b1b;font-size:13px;font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
+  padding:6px 10px;height:32px;box-shadow:none;
+}
+:root[data-theme="win11"] .inp:hover{background:rgba(249,249,249,.5)}
+:root[data-theme="win11"] .inp:focus{
+  background:#fff;border-color:var(--wm-accent);border-bottom:2px solid var(--wm-accent);
+  box-shadow:none;outline:none;
+}
+:root[data-theme="win11"] .inp::placeholder{color:rgba(0,0,0,.4458)}
+:root[data-theme="win11"] select.inp{color-scheme:light;padding-right:26px}
+:root[data-theme="win11"] .upl-lbl{
+  border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;
+  background:rgba(255,255,255,.7);color:#1b1b1b;font-size:13px;font-weight:400;min-height:30px;
+}
+:root[data-theme="win11"] .upl-lbl:hover{background:rgba(249,249,249,.5);border-color:var(--wm-stroke-t);color:#1b1b1b;transform:none}
+
+/* ── STATUS BAR (thin, Mica) ─────────────────────────────────────────── */
+:root[data-theme="win11"] .bar{
+  background:rgba(249,249,249,.68);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);
+  border-top:1px solid rgba(0,0,0,.0578);padding:0 12px;gap:14px;
+}
+:root[data-theme="win11"] .bs{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:11.5px;color:rgba(0,0,0,.6063);gap:5px}
+:root[data-theme="win11"] .bs svg{width:12px;height:12px;stroke:rgba(0,0,0,.6063);stroke-width:1.4}
+:root[data-theme="win11"] .bs strong{color:#1b1b1b;font-weight:600}
+
+/* ── DIALOGS = real Windows 11 windows ───────────────────────────────── */
+:root[data-theme="win11"] .ov{background:rgba(0,0,0,.18);-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="win11"] .mod-ov{
+  background:rgba(0,0,0,.25);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);padding:24px;
+}
+:root[data-theme="win11"] .mod{
+  background:#f9f9f9;border:1px solid rgba(0,0,0,.0578);border-bottom-color:rgba(0,0,0,.16);
+  border-radius:8px;box-shadow:var(--wm-shadow-win);overflow:hidden;max-height:88vh;padding:0;
+  animation:wm11WinIn .18s cubic-bezier(.1,.9,.2,1) both;
+}
+@keyframes wm11WinIn{from{opacity:0;transform:scale(.96) translateY(8px)}to{opacity:1;transform:none}}
+:root[data-theme="win11"] .mod-head{
+  display:flex;align-items:center;gap:10px;min-height:32px;padding:0 0 0 12px;
+  background:transparent;border-bottom:1px solid rgba(0,0,0,.0578);flex-shrink:0;
+}
+:root[data-theme="win11"] .mod-icon{width:16px;height:16px;border-radius:0;background:transparent!important;display:grid;place-items:center}
+:root[data-theme="win11"] .mod-icon svg{width:16px;height:16px;stroke:#1b1b1b;stroke-width:1.5}
+:root[data-theme="win11"] .mod-title{font-size:12px;font-weight:400;color:rgba(0,0,0,.6063);letter-spacing:0}
+:root[data-theme="win11"] .mod-head > .btn-icon{display:none} /* the caption close button replaces it */
+:root[data-theme="win11"] .mod-head .wm-cap{margin-left:auto}
+:root[data-theme="win11"] .mod-body{padding:16px;background:#f9f9f9;font-size:13.5px;color:#1b1b1b}
+:root[data-theme="win11"] .mod-body::-webkit-scrollbar{width:12px}
+:root[data-theme="win11"] .mod-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.2);border:4px solid transparent;background-clip:content-box;border-radius:6px}
+:root[data-theme="win11"] .file-info-row{border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;background:rgba(255,255,255,.7)}
+:root[data-theme="win11"] .file-info-label{font-size:11px;text-transform:none;letter-spacing:0;color:rgba(0,0,0,.6063);font-weight:400}
+:root[data-theme="win11"] .file-info-value{font-size:13px;color:#1b1b1b}
+:root[data-theme="win11"] .file-info-open{background:rgba(255,255,255,.7);border-top:1px solid rgba(0,0,0,.0578);font-size:13px;color:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .file-info-open a{color:var(--wm-accent);font-weight:400}
+:root[data-theme="win11"] .mod.mod-max{width:min(1180px,96vw)!important;height:94vh;max-height:94vh}
+
+/* generic content that other tools render inside dialogs */
+:root[data-theme="win11"] .cms-install-section,:root[data-theme="win11"] .card,:root[data-theme="win11"] .info-g,
+:root[data-theme="win11"] .threat-toolbar{border-radius:4px;border-color:var(--wm-stroke-t);background:rgba(255,255,255,.7)}
+:root[data-theme="win11"] .threat-toolbar{background:rgba(255,255,255,.7);border-bottom:1px solid rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .threat-row,:root[data-theme="win11"] .threat-user-grid{border-bottom:1px solid rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .threat-row:hover,:root[data-theme="win11"] .threat-user-grid:hover{background:rgba(0,0,0,.0241)}
+:root[data-theme="win11"] .log-t th{text-transform:none;letter-spacing:0;font-weight:600;color:rgba(0,0,0,.6063);background:rgba(255,255,255,.7)}
+:root[data-theme="win11"] .log-t td{border-bottom:1px solid rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .empty{color:rgba(0,0,0,.4458)}
+:root[data-theme="win11"] .alerts .alert{border-radius:4px;background:rgba(255,255,255,.7);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+
+/* ── TOASTS (Win11 InfoBar) ──────────────────────────────────────────── */
+:root[data-theme="win11"] .toast,:root[data-theme="win11"] #toast{
+  border-radius:4px;background:rgba(249,249,249,.92);-webkit-backdrop-filter:blur(30px);backdrop-filter:blur(30px);
+  border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
+  color:#1b1b1b;font-size:13px;box-shadow:var(--wm-shadow-win);
+}
+
+/* ── MFM THEME gallery (the tool itself) ─────────────────────────────── */
+.mfm-theme-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.mfm-theme-card{
+  position:relative;border:1px solid rgba(0,0,0,.0578);border-bottom-color:rgba(0,0,0,.16);border-radius:6px;
+  background:rgba(255,255,255,.7);padding:10px;cursor:pointer;text-align:left;font-family:inherit;
+  transition:background .1s linear,box-shadow .1s linear;display:flex;flex-direction:column;gap:9px;
+}
+.mfm-theme-card:hover{background:rgba(249,249,249,.9);box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.mfm-theme-card:focus-visible{outline:2px solid #0067c0;outline-offset:2px}
+.mfm-theme-card.is-on{border-color:#0067c0;box-shadow:inset 0 0 0 1px #0067c0}
+.mfm-theme-shot{height:104px;border-radius:4px;overflow:hidden;position:relative;border:1px solid rgba(0,0,0,.08)}
+.mfm-theme-shot .t-bar{height:14px;display:flex;align-items:center;gap:3px;padding:0 5px}
+.mfm-theme-shot .t-body{display:flex;height:calc(100% - 14px)}
+.mfm-theme-shot .t-side{width:34px}
+.mfm-theme-shot .t-lines{flex:1;padding:6px;display:flex;flex-direction:column;gap:5px}
+.mfm-theme-shot .t-line{height:6px;border-radius:2px}
+.mfm-theme-dot{width:5px;height:5px;border-radius:50%}
+.mfm-theme-name{font-size:13px;font-weight:600;color:#1b1b1b;display:flex;align-items:center;gap:7px}
+.mfm-theme-desc{font-size:11.5px;color:rgba(0,0,0,.6063);line-height:1.45}
+.mfm-theme-badge{margin-left:auto;font-size:10px;font-weight:600;color:#0067c0;background:rgba(0,103,192,.1);border-radius:3px;padding:2px 6px}
+.mfm-theme-foot{margin-top:14px;padding-top:10px;border-top:1px solid rgba(0,0,0,.0578);font-size:11.5px;color:rgba(0,0,0,.4458);line-height:1.6}
+.mfm-theme-gallery{display:none}
+:root[data-theme="win11"] .mfm-theme-card{border-radius:6px}
+@media(max-width:640px){.mfm-theme-grid{grid-template-columns:1fr}}
+/* the gallery dialog must look the same whichever theme is active */
+.mod-ov#mfmThemeOv .mod{background:#f9f9f9;border:1px solid rgba(0,0,0,.08);border-bottom-color:rgba(0,0,0,.16);border-radius:8px;box-shadow:0 32px 64px rgba(0,0,0,.19),0 2px 21px rgba(0,0,0,.15);color:#1b1b1b}
+.mod-ov#mfmThemeOv .mod-head{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 0 0 14px;border-bottom:1px solid rgba(0,0,0,.06);background:transparent}
+.mod-ov#mfmThemeOv .mod-title{font-size:13px;font-weight:600;color:#1b1b1b}
+.mod-ov#mfmThemeOv .mod-icon{background:transparent}
+.mod-ov#mfmThemeOv .mod-icon svg{stroke:#0067c0}
+.mod-ov#mfmThemeOv .mod-body{padding:0;background:#f9f9f9}
+.mod-ov#mfmThemeOv .mfm-theme-head{padding:16px 16px 0}
+.mod-ov#mfmThemeOv .mod-head .wm-cap{margin-left:auto}
+
+/* ── RESPONSIVE: keep the title bar row on small screens ─────────────── */
+@media(max-width:860px){
+  :root[data-theme="win11"] .shell{
+    grid-template:"wm" 32px "tb" var(--th) "main" 1fr "bar" var(--bh) / 1fr;
+  }
+  :root[data-theme="win11"] .wm-title-hint{display:none}
+  :root[data-theme="win11"] .wm-title{gap:8px;padding-left:10px}
+  :root[data-theme="win11"] .wm-title-txt{font-size:11.5px}
+  :root[data-theme="win11"] .wm-cap-btn{width:44px}
+}
 </style>
 </head>
 <body class="<?=$terminalStandalone?'term-standalone':''?>">
 <div class="shell">
+
+<!-- WINDOW TITLE BAR (the Windows 11 theme pack paints this row; the two
+     built-in themes hide it, so nothing about them changes) -->
+<div class="wm-title" id="wmTitle">
+  <span class="wm-title-ico"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><rect x="1" y="1" width="8.2" height="8.2" rx="1.2" fill="#0067c0"/><rect x="10.8" y="1" width="8.2" height="8.2" rx="1.2" fill="#4cc2ff"/><rect x="1" y="10.8" width="8.2" height="8.2" rx="1.2" fill="#4cc2ff"/><rect x="10.8" y="10.8" width="8.2" height="8.2" rx="1.2" fill="#0067c0"/></svg></span>
+  <span class="wm-title-txt">Marshal FM &mdash; <?=htmlspecialchars($fm->getCwd())?></span>
+  <span class="wm-title-hint">MFM Theme &middot; Windows 11</span>
+  <div class="wm-cap">
+    <button type="button" class="wm-cap-btn" id="wmCapMin" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 10 10"><line x1="0" y1="5" x2="10" y2="5"/></svg></button>
+    <button type="button" class="wm-cap-btn" id="wmCapMax" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" rx="1"/></svg></button>
+    <button type="button" class="wm-cap-btn wm-cap-close" id="wmCapClose" title="Close" aria-label="Close"><svg viewBox="0 0 10 10"><line x1="0.7" y1="0.7" x2="9.3" y2="9.3"/><line x1="9.3" y1="0.7" x2="0.7" y2="9.3"/></svg></button>
+  </div>
+</div>
 
 <!-- TOPBAR -->
 <header class="topbar">
@@ -33432,6 +33927,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
        <?php $pmNow=$fm->privMode();$pmShort=['server'=>'server','auto'=>'','wordpress'=>'WP','joomla'=>'Joomla'][$pmNow]??'';$pmLabel=['server'=>'Server account only','auto'=>'Automatic','wordpress'=>'WordPress','joomla'=>'Joomla'][$pmNow]??$pmNow;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(fm_can('privmode')):?><button class="sb-item" id="privModeBtn" title="File changes are performed by: <?=htmlspecialchars($pmLabel)?> - click to change"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>Privilege Mode<span id="privModeBadge" style="margin-left:6px;font-size:10px;opacity:.8"><?=trim((string)$pmShort)===''?'':'· '.htmlspecialchars($pmShort)?></span></button><?php endif;?><?php endif;?><?php endif;?>
        <button class="sb-item" id="actBtn" title="Everything this tool has done on this server, newest first"><svg viewBox="0 0 24 24"><path d="M2.5 12h4l2.5-6.5 4 13 2.5-6.5h6"/></svg></svg>Activity Log</button>
+       <button class="sb-item" id="mfmThemeBtn" title="MFM Theme - pick a look for this file manager"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="16" rx="2.5"/><path d="M2 8h20"/><circle cx="5.5" cy="5.5" r=".9"/><circle cx="8.3" cy="5.5" r=".9"/><path d="M6 13l2.6 4 2.4-3 2 2.4"/></svg><span class="sb-tool-name">MFM Theme</span></button>
        <button class="sb-item" id="agentBtn" title="Open Assistant Agent"><svg viewBox="0 0 24 24"><path d="M20.5 12.4a7.5 7.5 0 0 1-10.9 6.7L4.2 20.6l1.5-5.1a7.5 7.5 0 1 1 14.8-3.1z"/><path d="M8.6 11.2h.01M12 11.2h.01M15.4 11.2h.01"/></svg></svg>Assistant Agent
        </button>
        <?php if(!$fm->isRO()):?><button class="sb-item" id="brBtn" title="Rename many selected files at once with a pattern, a number series or a find-and-replace"><svg viewBox="0 0 24 24"><path d="M4 7V4.5h16V7"/><path d="M12 4.5v15"/><path d="M8.5 19.5h7"/><path d="m18.5 12-2-2"/><path d="m16.5 10 2 2"/></svg></svg>Batch Rename</button>
@@ -33765,7 +34261,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
             <td class="cc"><input type="checkbox" class="rck item-ck" value="<?=he($f['name'])?>"></td>
             <td><div class="nc" onclick="location.href='?dir=<?=urlencode($fm->getCwd().'/'.$f['name'])?>'"
               data-ctx-name="<?=he($f['name'])?>" data-ctx-isdir="1" data-ctx-perm="<?=he($perms)?>">
-               <div class="ib" style="background:rgba(133,137,140,.1)"><?=svgFolder()?></div>
+               <div class="ib" style="background:rgba(133,137,140,.1)"><?=svgFolderRendered()?></div>
               <div class="nm"><?php if(isset($tags[$f['name']])):?><span class="tag-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:<?=he($tags[$f['name']]['color'])?>;flex-shrink:0" title="<?=he($tags[$f['name']]['label'])?>"></span><?php endif;?><span class="nt"><?=htmlspecialchars($f['name'])?></span><?php if(!empty($tags[$f['name']]['label'])):?><span class="eb" style="background:<?=he($tags[$f['name']]['color'])?>22;color:<?=he($tags[$f['name']]['color'])?>"><?=he($tags[$f['name']]['label'])?></span><?php endif;?><span class="eb">DIR</span></div>
             </div></td>
             <td class="col-perms col-perms-td"><span class="mono"><?=he($perms)?></span></td>
@@ -33807,7 +34303,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
               <div class="ib <?=$type==='audio'?'fm-audio-file-icon':''?>" style="background:<?=$color?>18">
                 <?php if($type==='audio'):?><img class="fm-track-art" src="<?=he($audioArt)?>" <?php if($audioSidecar):?>data-fallback="<?=he($audioSidecar)?>"<?php endif;?> alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=''}else{this.style.display='none'}"><?php endif;?>
                 <?php if($type==='image'):?><img src="<?=$rawUrl?>" style="width:34px;height:34px;border-radius:9px;object-fit:cover" loading="lazy" onerror="this.style.display='none';this.nextSibling&&(this.nextSibling.style.display='block')"><?php endif;?>
-                <?=svgFile($type)?>
+                <?=svgFileRendered($type)?>
               </div>
               <div class="nm"><?php if(isset($tags[$f['name']])):?><span class="tag-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:<?=he($tags[$f['name']]['color'])?>;flex-shrink:0" title="<?=he($tags[$f['name']]['label'])?>"></span><?php endif;?><span class="nt"><?=htmlspecialchars($f['name'])?></span><?php if(!empty($tags[$f['name']]['label'])):?><span class="eb" style="background:<?=he($tags[$f['name']]['color'])?>22;color:<?=he($tags[$f['name']]['color'])?>"><?=he($tags[$f['name']]['label'])?></span><?php endif;?><?php if($ext):?><span class="eb"><?=strtoupper($ext)?></span><?php endif;?></div>
             </div></td>
@@ -33868,7 +34364,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
           data-ctx-name="<?=he($item['name'])?>" data-ctx-isdir="<?=$isDir?1:0?>" data-ctx-raw="<?=$isDir?'':he($rawUrl)?>">
           <input type="checkbox" class="rck item-ck gi-ck" value="<?=he($item['name'])?>" onclick="event.stopPropagation()">
           <div class="gi-ic" style="background:<?=$color?>18">
-            <?php if(!$isDir&&$type==='image'):?><img src="<?=$rawUrl?>" class="gi-th" loading="lazy" onerror="this.style.display='none'"><?php elseif(!$isDir&&$type==='audio'):?><img src="<?=he($audioArt)?>" class="gi-th fm-track-art" <?php if($audioSidecar):?>data-fallback="<?=he($audioSidecar)?>"<?php endif;?> alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=''}else{this.style.display='none'}"><?php elseif($isDir):?><?=svgFolder()?><?php else:?><?=svgFile($type)?><?php endif;?>
+            <?php if(!$isDir&&$type==='image'):?><img src="<?=$rawUrl?>" class="gi-th" loading="lazy" onerror="this.style.display='none'"><?php elseif(!$isDir&&$type==='audio'):?><img src="<?=he($audioArt)?>" class="gi-th fm-track-art" <?php if($audioSidecar):?>data-fallback="<?=he($audioSidecar)?>"<?php endif;?> alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=''}else{this.style.display='none'}"><?php elseif($isDir):?><?=svgFolderRendered()?><?php else:?><?=svgFileRendered($type)?><?php endif;?>
           </div>
           <div class="gi-n"><?=htmlspecialchars($item['name'])?></div>
           <div class="gi-m"><?=$isDir?'DIR':fmtSz($item['size'])?></div>
@@ -33954,6 +34450,86 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   <div style="height:8px"></div>
 </div>
 
+<!-- MFM THEME (theme gallery) -->
+<div class="mod-ov" id="mfmThemeOv">
+  <div class="mod mod-lg" id="mfmThemeMod">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="16" rx="2.5"/><path d="M2 8h20"/></svg></div>
+      <span class="mod-title">MFM Theme</span>
+      <button type="button" class="btn btn-icon btn-g" id="mfmThemeClose" aria-label="Close MFM Theme"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      <div class="wm-cap" id="mfmThemeCap"></div>
+    </div>
+    <div class="mod-body">
+      <div class="mfm-theme-head">
+        <div style="font-size:13px;font-weight:600;margin-bottom:2px">Choose a look</div>
+        <div style="font-size:11.5px;color:rgba(0,0,0,.6);line-height:1.5;margin-bottom:14px">Switching is instant and remembered for everyone who signs in to this file manager.</div>
+      </div>
+      <div style="padding:0 16px 16px">
+        <div class="mfm-theme-grid" id="mfmThemeGrid">
+          <button type="button" class="mfm-theme-card" data-theme-pick="dark">
+            <div class="mfm-theme-shot" style="background:#101010">
+              <div class="t-bar" style="background:#151515;border-bottom:1px solid rgba(125,129,132,.2)">
+                <span class="mfm-theme-dot" style="background:#3a3a3a"></span><span class="mfm-theme-dot" style="background:#3a3a3a"></span>
+              </div>
+              <div class="t-body">
+                <div class="t-side" style="background:#151515;border-right:1px solid rgba(125,129,132,.17)"></div>
+                <div class="t-lines">
+                  <div class="t-line" style="background:#202020;width:100%"></div>
+                  <div class="t-line" style="background:#202020;width:88%"></div>
+                  <div class="t-line" style="background:#202020;width:94%"></div>
+                  <div class="t-line" style="background:#202020;width:70%"></div>
+                </div>
+              </div>
+            </div>
+            <div class="mfm-theme-name">Default dark <span class="mfm-theme-badge" data-on-badge="dark" hidden>In use</span></div>
+            <div class="mfm-theme-desc">The original Marshal FM look: near-black panes and the neutral warm-grey icon set.</div>
+          </button>
+          <button type="button" class="mfm-theme-card" data-theme-pick="win11">
+            <div class="mfm-theme-shot" style="background:linear-gradient(160deg,#eef3f9,#f3f3f3 50%,#eceef1)">
+              <div class="t-bar" style="background:rgba(243,243,243,.9);border-bottom:1px solid rgba(0,0,0,.08)">
+                <span style="width:6px;height:6px;border-radius:2px;background:#0067c0"></span>
+                <span style="flex:1;height:4px;margin-left:2px;border-radius:2px;background:rgba(0,0,0,.14)"></span>
+                <span class="mfm-theme-dot" style="background:rgba(0,0,0,.2)"></span><span class="mfm-theme-dot" style="background:rgba(0,0,0,.2)"></span><span class="mfm-theme-dot" style="background:#c42b1c"></span>
+              </div>
+              <div class="t-body">
+                <div class="t-side" style="background:rgba(255,255,255,.55);border-right:1px solid rgba(0,0,0,.06)"></div>
+                <div class="t-lines">
+                  <div class="t-line" style="background:#fff;border:1px solid rgba(0,0,0,.08);width:100%;height:12px;border-radius:3px"></div>
+                  <div class="t-line" style="background:rgba(255,255,255,.8);width:88%"></div>
+                  <div class="t-line" style="background:rgba(255,255,255,.8);width:94%"></div>
+                  <div class="t-line" style="background:rgba(255,255,255,.8);width:70%"></div>
+                </div>
+              </div>
+            </div>
+            <div class="mfm-theme-name">Windows 11 <span class="mfm-theme-badge" data-on-badge="win11" hidden>In use</span></div>
+            <div class="mfm-theme-desc">Mica surfaces, a real title bar with minimize / maximize / close, Fluent buttons, WinUI check boxes and Windows 11 file and folder icons.</div>
+          </button>
+          <button type="button" class="mfm-theme-card" data-theme-pick="light">
+            <div class="mfm-theme-shot" style="background:#f1f1f1">
+              <div class="t-bar" style="background:#fff;border-bottom:1px solid rgba(99,100,95,.2)">
+                <span class="mfm-theme-dot" style="background:#d2d2d2"></span><span class="mfm-theme-dot" style="background:#d2d2d2"></span>
+              </div>
+              <div class="t-body">
+                <div class="t-side" style="background:#fff;border-right:1px solid rgba(99,100,95,.2)"></div>
+                <div class="t-lines">
+                  <div class="t-line" style="background:#e5e5e5;width:100%"></div>
+                  <div class="t-line" style="background:#e5e5e5;width:88%"></div>
+                  <div class="t-line" style="background:#e5e5e5;width:94%"></div>
+                  <div class="t-line" style="background:#e5e5e5;width:70%"></div>
+                </div>
+              </div>
+            </div>
+            <div class="mfm-theme-name">Default light <span class="mfm-theme-badge" data-on-badge="light" hidden>In use</span></div>
+            <div class="mfm-theme-desc">The original light variant of Marshal FM: white panes, grey raised rows, same icons.</div>
+          </button>
+        </div>
+        <div class="mfm-theme-foot">
+          Theme packs are stored in <span class="mono" style="color:inherit">.theme.json</span> beside this file. Everything you see is generated inside <span class="mono" style="color:inherit">index.php</span> &mdash; no stylesheet, icon file, font file or CDN is loaded from anywhere else.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 <!-- FILE INFORMATION MODAL -->
 <div class="mod-ov" id="fileInfoOv">
   <div class="mod mod-md">
@@ -38109,15 +38685,27 @@ if(FM_FOCUS){
     else{sunIco.style.display='none';moonIco.style.display='';}
   }
   applyThemeIcon(document.documentElement.getAttribute('data-theme')||'dark');
+  /* The top-bar toggle still flips dark <-> light, and when a theme pack
+     (MFM Theme) is active it drops back to the pack's light/dark pair so a
+     user can never get stuck in a pack they did not open. */
+  window.fmApplyTheme=function(next){
+    document.documentElement.setAttribute('data-theme',next);
+    applyThemeIcon(next);
+  };
+  window.fmSaveTheme=async function(next){
+    try{
+      const fd=new FormData();fd.append('theme',next);
+      fd.append('csrf_token',document.querySelector('input[name=csrf_token]')?.value||'');
+      const r=await fetch('?x=set_theme',{method:'POST',body:fd});
+      const d=await r.json();
+      return d&&d.ok?d.theme:null;
+    }catch(e){return null;}
+  };
   document.getElementById('themeBtn')?.addEventListener('click',async()=>{
     const cur=document.documentElement.getAttribute('data-theme')||'dark';
     const next=cur==='light'?'dark':'light';
-    document.documentElement.setAttribute('data-theme',next);
-    applyThemeIcon(next);
-    try{
-      const fd=new FormData();fd.append('theme',next);
-      await fetch('?x=set_theme',{method:'POST',body:fd});
-    }catch(e){}
+    fmApplyTheme(next);
+    await fmSaveTheme(next);
   });
 })();
 
@@ -39748,10 +40336,13 @@ function updRender(s){
   /* actions */
   h+='<div class="upd-actions">'
     +'<button class="btn btn-g" id="updCheckNow">Check Now</button>'
+    +'<button class="btn btn-amb" id="updForce" title="Fetch the newest file from the link above and install it now, whatever its size or date"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/><path d="M20.2 3.2 22 5m-1.8-1.8L18.4 5"/></svg>Force update</button>'
     +(avail?'<button class="btn btn-p" id="updInstall"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/></svg>Download &amp; install</button>':'')
     +'<span class="spacer"></span>'
     +'<button class="btn btn-g" id="updGuardian">File Guardian</button>'
     +'</div>'
+    +'<div class="upd-note" style="margin-top:8px"><b>Force update</b> downloads the file the link points at and installs it even when it is the same size, smaller, older, or when automatic updates are paused. It still refuses anything that is not a valid PHP file, and it keeps the current file beside this one as <span class="mono">.index.php.forced-backup-*.bak</span> before replacing it.</div>'
+    +'<div class="upd-url" style="margin-top:8px"><input class="inp" id="updForceUrl" placeholder="Leave empty to use the link above, or paste another raw .php link"><button class="btn btn-amb btn-sm" id="updForceRun">Install this file now</button></div>'
     +'<div class="upd-bar" id="updBar"><i></i></div><div class="upd-prog-txt" id="updProgTxt"></div>'
     +'<div class="upd-auto" id="updAuto" style="display:none"></div>'
     +'<div class="upd-msg is-info" id="updMsg"></div>'
@@ -39768,6 +40359,8 @@ function updWire(s){
   document.getElementById('updSaveUrl')?.addEventListener('click',updSaveUrl);
   document.getElementById('updCheckNow')?.addEventListener('click',()=>updCheckNow(true));
   document.getElementById('updInstall')?.addEventListener('click',()=>updInstall(true));
+  document.getElementById('updForce')?.addEventListener('click',()=>updForce(false));
+  document.getElementById('updForceRun')?.addEventListener('click',()=>updForce(true));
   document.getElementById('updGuardian')?.addEventListener('click',()=>{closeMod('updOv');openMod('guardOv');guardLoad();});
   const paused=document.getElementById('updPaused');
   paused?.addEventListener('change',async e=>{
@@ -39896,6 +40489,65 @@ async function updInstall(fromPanel){
     updFlash('The install failed: '+String(e.message||e)+'. The previous file is in place and unchanged.','bad');
   }finally{
     UPD_BUSY=false;
+    setTimeout(()=>{if(bar)bar.classList.remove('is-on');if(txt)txt.classList.remove('is-on');},1800);
+  }
+}
+/* ── MFM FORCED UPDATE ─────────────────────────────────────────────────
+   A normal check refuses a file that is not bigger and not newer, and an
+   install is refused while automatic updates are paused. Both rules exist
+   to stop the panel from quietly downgrading a local build - but they also
+   mean that when the source really had moved on, there was no way to say
+   "take it anyway". This is that way, and only this way: it asks once,
+   then posts to guardian_force_install_now, which fetches the newest file,
+   lints it, copies the current one beside itself and replaces it. */
+async function updForce(theUrl){
+  if(UPD_BUSY)return;
+  const typed=(theUrl?(document.getElementById('updForceUrl')||{}).value||'':'').trim();
+  const st=UPD_STATE||{};
+  const url=typed||(st.remote&&st.remote.url)||'';
+  if(!url){updFlash('There is no link to fetch from. Save an update link first.','bad');return;}
+  const ok=window.confirm(
+    'Force update?\n\n'+
+    'The newest file will be downloaded from:\n'+url+'\n\n'+
+    'and installed over this file even if it is the same size, smaller, older, '+
+    'or automatic updates are paused.\n\n'+
+    'The file that is here now is kept beside it as .index.php.forced-backup-….bak '+
+    'before anything is replaced. Anything added to the installed file locally is '+
+    'lost from the live file (the backup keeps it).\n\n'+
+    'Continue?');
+  if(!ok)return;
+  UPD_BUSY=true;
+  clearInterval(UPD_TIMER);
+  const bar=document.getElementById('updBar'),txt=document.getElementById('updProgTxt'),b=bar?bar.querySelector('i'):null;
+  if(bar&&txt){bar.classList.add('is-on');txt.classList.add('is-on');}
+  let v=8;
+  const t=setInterval(()=>{
+    if(!b)return;
+    v=Math.min(v+Math.max(2,Math.round((95-v)*.12)),95);
+    b.style.width=v+'%';
+    if(txt)txt.textContent=v<45?'Downloading the newest file from the link…':v<75?'Checking it is valid PHP…':'Backing up the current file, then installing…';
+  },260);
+  updFlash('Forcing the update…','info');
+  try{
+    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('update_url',url);
+    const d=await fetch('?x=guardian_force_install_now',{method:'POST',body:fd}).then(r=>r.json());
+    clearInterval(t);
+    if(!d||!d.ok||d.error)throw new Error((d&&d.error)||'The forced update did not complete.');
+    if(b)b.style.width='100%';
+    if(d.changed){
+      updFlash('Forced update installed: '+formatBytes(d.old_size||0)+' → '+formatBytes(d.size||0)+
+        (d.backup?' · previous file kept as '+d.backup:'')+'. Reloading…','good');
+      setTimeout(()=>location.reload(),1200);
+    }else{
+      updFlash(d.note||'The file on this server is already the one the link offers. Nothing was written.','good');
+      UPD_BUSY=false;
+    }
+  }catch(e){
+    clearInterval(t);
+    if(b)b.style.width='0%';
+    updFlash('The forced update failed: '+String(e.message||e)+'. The installed file is unchanged.','bad');
+    UPD_BUSY=false;
+  }finally{
     setTimeout(()=>{if(bar)bar.classList.remove('is-on');if(txt)txt.classList.remove('is-on');},1800);
   }
 }
@@ -49835,6 +50487,104 @@ const btn=el('wfcBtn');
 if(btn)btn.addEventListener('click',boot);
 
 })(); // end Wordfence Controller
+</script>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════
+   MFM THEME - theme pack gallery + the Windows 11 window chrome
+   Everything here is inline: no external script, no CDN, no image file.
+   ═══════════════════════════════════════════════════════════════════════ */
+(function(){
+  const root=document.documentElement;
+  const PACKS=['win11'];
+  const cur=()=>root.getAttribute('data-theme')||'dark';
+
+  /* ── caption buttons of every dialog become real Win11 caption buttons ── */
+  function buildCaps(mod){
+    const head=mod.querySelector('.mod-head');
+    if(!head||head.querySelector('.wm-cap'))return;
+    const src=head.querySelector('.btn-icon');
+    const cap=document.createElement('div');
+    cap.className='wm-cap';
+    cap.innerHTML='<button type="button" class="wm-cap-btn wm-cap-close" aria-label="Close">'
+      +'<svg viewBox="0 0 10 10"><line x1="0.7" y1="0.7" x2="9.3" y2="9.3"/><line x1="9.3" y1="0.7" x2="0.7" y2="9.3"/></svg></button>';
+    cap.querySelector('button').addEventListener('click',()=>{
+      if(src)src.click();else mod.parentElement.classList.remove('open');
+    });
+    head.appendChild(cap);
+  }
+  document.querySelectorAll('.mod-ov .mod').forEach(buildCaps);
+
+  /* ── keep the theme name in the window title bar truthful ─────────────── */
+  const hints={win11:'MFM Theme \u00b7 Windows 11',dark:'Default dark',light:'Default light'};
+  function syncChrome(t){
+    document.querySelectorAll('[data-on-badge]').forEach(b=>{b.hidden=(b.getAttribute('data-on-badge')!==t);});
+    document.querySelectorAll('[data-theme-pick]').forEach(c=>{
+      c.classList.toggle('is-on',c.getAttribute('data-theme-pick')===t);
+      c.setAttribute('aria-pressed',c.getAttribute('data-theme-pick')===t?'true':'false');
+    });
+    const hint=document.querySelector('.wm-title-hint');
+    if(hint)hint.textContent=hints[t]||hints.dark;
+    /* Windows 11 draws its dialogs as real windows: keep the caption row
+       visible in packs, hide it with the packs. */
+    document.querySelectorAll('.mod-ov .wm-cap').forEach(c=>{c.style.display=PACKS.includes(t)?'':'none';});
+  }
+
+  /* ── picking a theme ─────────────────────────────────────────────────── */
+  /* The file and folder icons are drawn by PHP, so they belong to the theme
+     the page was built with. Switching into or out of the Windows 11 pack
+     therefore finishes with one reload: colours change instantly, the icons
+     arrive with the rebuilt page a moment later. */
+  const ICONSET={win11:'win11',dark:'default',light:'default'};
+  async function pick(t){
+    const before=cur();
+    if(typeof window.fmApplyTheme==='function')window.fmApplyTheme(t);
+    else root.setAttribute('data-theme',t);
+    syncChrome(t);
+    const saved=(typeof window.fmSaveTheme==='function')?await window.fmSaveTheme(t):null;
+    if(saved!==t){if(typeof window.toast==='function')window.toast('The theme could not be saved.');return;}
+    if(ICONSET[t]!==ICONSET[before]){
+      if(typeof window.toast==='function')window.toast('Theme: '+(hints[t]||t));
+      const keep=window.scrollY;
+      setTimeout(()=>{try{sessionStorage.setItem('fmThemeScroll',String(keep));}catch(e){}location.reload();},420);
+    }
+  }
+  document.querySelectorAll('[data-theme-pick]').forEach(card=>{
+    card.addEventListener('click',()=>pick(card.getAttribute('data-theme-pick')));
+  });
+
+  /* ── open / close the gallery ────────────────────────────────────────── */
+  const ov=document.getElementById('mfmThemeOv');
+  function open(){if(!ov)return;ov.classList.add('open');syncChrome(cur());
+    if(typeof window.closeSheet==='function')window.closeSheet();}
+  function close(){ov&&ov.classList.remove('open');}
+  document.getElementById('mfmThemeBtn')?.addEventListener('click',open);
+  document.getElementById('mfmThemeClose')?.addEventListener('click',close);
+  ov?.addEventListener('click',e=>{if(e.target===ov)close();});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')close();});
+
+  /* ── window chrome buttons ───────────────────────────────────────────── */
+  document.getElementById('wmCapMin')?.addEventListener('click',()=>{
+    if(typeof window.toast==='function')window.toast('The browser window cannot be minimized by a page.');
+  });
+  document.getElementById('wmCapMax')?.addEventListener('click',async()=>{
+    try{
+      if(!document.fullscreenElement)await document.documentElement.requestFullscreen();
+      else await document.exitFullscreen();
+    }catch(e){if(typeof window.toast==='function')window.toast('Full screen is blocked by this browser.');}
+  });
+  document.getElementById('wmCapClose')?.addEventListener('click',()=>{
+    /* Closing the window means leaving the manager - exactly the behaviour a
+       user expects from a title bar, with the browser in charge of the rest. */
+    window.location.href='?logout=1';
+  });
+
+  syncChrome(cur());
+  try{const y=sessionStorage.getItem('fmThemeScroll');
+    if(y!==null){sessionStorage.removeItem('fmThemeScroll');const v=parseInt(y,10);
+      if(!isNaN(v))requestAnimationFrame(()=>{const c=document.querySelector('.content');if(c)c.scrollTop=v;});}
+  }catch(e){}
+})();
 </script>
 </body>
 </html>
