@@ -10140,6 +10140,80 @@ class FileManager {
                        . ' - a ' . $name . ' build carries backports, so the installed kernel package is what decides it'];
     }
 
+    /* ── nginx2root, measured the only way a local panel can ─────────────────
+       The name covers five memory-corruption flaws in nginx itself (HTTP/2,
+       HTTP/3, the resolver, the mail proxy), fixed in nginx 1.31.9 / 1.30.7,
+       plus a separate Linux SCTP flaw the same researchers chained after a
+       worker compromise to reach the host. Two of those are the same shape as
+       every other kernel entry in this catalogue - a flaw measured on this
+       machine. The five nginx ones are a different animal: they are reachable
+       only from the network, through a cipher suite and an HTTP/2 stream, and
+       nothing a local panel can send a handshake to is the same thing as a
+       forged frame sequence racing a worker's cleanup handler. So this is
+       deliberately NOT a step of the local chain: a `/search ngx` style token
+       that puts "nginx2root" among the ways this account can become root would
+       be a lie in this direction, and the honest place for it is the catalogue,
+       beside the other remote-first entries. What the chain does get is the
+       kernel half, in kernelflaw, where an SCTP-side flaw is measurable.
+       Everything below is read from the filesystem and the kernel, nothing is
+       started, nothing is sent. */
+    private function rootNginx2Root(){
+        $bin = $this->rootWhich('nginx');
+        $dirs = ['/etc/nginx', '/usr/local/nginx/conf', '/usr/local/etc/nginx', '/opt/nginx/conf'];
+        $readable = [];
+        foreach($dirs as $d)if(@is_dir($d) && @is_readable($d))$readable[] = $d;
+        /* the version, and whether the build carries the HTTP/2 or HTTP/3 module
+           - the two that CVE-2026-123007 and CVE-2026-121810 live in */
+        $ver = '';
+        $confText = '';
+        foreach($readable as $d){
+            foreach((array)@glob($d . '/*.conf') as $f)$confText .= (string)@file_get_contents($f);
+        }
+        $mainConf = '';
+        foreach(['/etc/nginx/nginx.conf', '/usr/local/nginx/conf/nginx.conf', '/usr/local/etc/nginx/nginx.conf', '/opt/nginx/conf/nginx.conf'] as $c)
+            if(@is_readable($c)){$mainConf = $c;$confText .= (string)@file_get_contents($c);break;}
+        /* strings are not run here: the version is read from the package
+           database, from a version file, or from the banner a config keeps */
+        $pkg = $this->rootPkgVersion('nginx');
+        if($pkg !== '')$ver = (string)$pkg;
+        if($ver === '' && preg_match('/nginx\/(\d+\.\d+\.\d+)/i', $confText, $m))$ver = $m[1];
+        if($ver === '' && @is_readable('/usr/share/nginx/version'))$ver = trim((string)@file_get_contents('/usr/share/nginx/version'));
+        /* a `listen ... http2` or a `http2 on;` directive, and a QUIC listener */
+        $h2 = (bool)preg_match('/listen[^;]*\bhttp2\b|\bhttp2\s+on\s*;/i', $confText);
+        $h3 = (bool)preg_match('/\bhttp3\b|\bquic\b/i', $confText);
+        $mail = (bool)preg_match('/^\s*mail\s*\{/mi', $confText);
+        $mods = ['http_v2' => $h2, 'http_v3' => $h3, 'mail' => $mail];
+        $present = ($bin !== '' || $readable);
+        /* 1.9.5 introduced the flaw; 1.30.7 and 1.31.9 carry the fix */
+        $fixed = false; $inRange = false;
+        if($ver !== ''){
+            $v = $this->rootVnum($ver);
+            $inRange = !$this->rootVlt($v, [1, 9, 5]);
+            $fixed = (!$this->rootVlt($v, [1, 30, 7]) && $this->rootVlt($v, [1, 31, 0]))
+                  || !$this->rootVlt($v, [1, 31, 9]);
+        }
+        /* the kernel half the same researchers chained: SCTP must be there at all */
+        $sctp = $this->rootSctpReach();
+        return['present' => $present, 'bin' => $bin, 'dirs' => $readable, 'conf' => $mainConf,
+               'version' => $ver, 'in_range' => $inRange, 'fixed' => $fixed, 'mods' => $mods,
+               'sctp' => $sctp];
+    }
+    /* SCTP, as this account can see it: a socket is tried and closed. A kernel
+       built without SCTP answers "protocol not supported", which is a complete
+       answer and needs no module list to confirm. */
+    private function rootSctpReach(){
+        if(!function_exists('socket_create'))
+            return['ok' => false, 'unknown' => true, 'note' => 'this PHP build has no sockets extension, so SCTP cannot be tried here'];
+        $s = @socket_create(AF_INET, SOCK_STREAM, 132); /* IPPROTO_SCTP */
+        if(!$s)
+            return['ok' => false, 'note' => 'the kernel refused an SCTP socket (' . socket_strerror(socket_last_error()) . '), so the SCTP half of this chain is not reachable from this machine at all'];
+        $bound = @socket_bind($s, '127.0.0.1', 0);
+        @socket_close($s);
+        return['ok' => (bool)$bound, 'note' => $bound
+            ? 'an SCTP socket was created and bound as this account, so the kernel half of nginx2root is within reach here'
+            : 'an SCTP socket exists but could not be bound (' . socket_strerror(socket_last_error()) . ')'];
+    }
+
     private function rootCatalog(){
         $k = php_uname('r');
         $kv = $this->rootVnum($k);
@@ -10412,6 +10486,252 @@ class FileManager {
             'mitigation' => 'No patched kernel yet on several releases? Drop inbound IPv4 TCP packets that carry IP options (a SYN with a Record Route or Timestamp option is not normal traffic) with one nftables rule, and set net.mptcp.enabled=0 as well where nothing on the host needs MPTCP - the first closes the path, the second only the published exploit.',
             'fix' => 'The kernel from the vendor advisory (USN-9022-1 for 24.04, USN-9027-1 for 22.04, USN-9018-1 for 26.04; upstream 5.10.272 / 5.15.223 / 6.1.190 / 6.6.159 / 6.12.113 / 6.18.56 / 7.2.10), and a reboot: an installed package changes nothing until the running kernel is the new one.',
             'requires' => 'A reachable IPv4 TCP port, an MPTCP or ordinary listener, and a SYN carrying IPv4 Record Route or Timestamp options. No credentials, no local account, no user interaction.',
+        ];
+
+        /* ── nginx2root ────────────────────────────────────────────────────── */
+        $ng = $this->rootNginx2Root();
+        $ngMit = $this->rootMitigated('sctp');
+        /* the status is about this host: is nginx here, is it in the vulnerable
+           range, and does the build actually carry a path the five flaws live in.
+           A host with no nginx at all is "absent", not "patched": the two are
+           different statements and this catalogue keeps them apart. */
+        if(!$ng['present']) $ngStatus = 'absent';
+        elseif($ng['version'] === '') $ngStatus = 'unknown';
+        elseif($ng['fixed']) $ngStatus = 'patched';
+        elseif(!$ng['in_range']) $ngStatus = 'absent';
+        elseif($ng['mods']['http_v2'] || $ng['mods']['http_v3'] || $ng['mods']['mail']) $ngStatus = 'vulnerable';
+        else $ngStatus = 'mitigated'; /* in range, but no listener reaches the flawed code */
+        $v[] = [
+            'id' => 'nginx2root', 'name' => 'nginx2root', 'cve' => ['CVE-2026-123007', 'CVE-2026-123633', 'CVE-2026-123634', 'CVE-2026-121810', 'CVE-2026-113425'],
+            'year' => 2026, 'component' => 'nginx - ngx_http_v2_module, ngx_http_v3_module, the resolver, ngx_mail_proxy_module (plus a Linux SCTP flaw chained after it)',
+            'severity' => 'critical', 'status' => $ngStatus, 'confidence' => 'high',
+            'summary' => 'Five memory-corruption flaws in nginx itself: an integer underflow in HTTP/2 flow control that lets an unauthenticated peer corrupt a worker\'s heap, a use-after-free of an HTTP/2 connection, a use-after-free in the resolver, a use-after-free when a QUIC connection closes under a running HTTP/3 request, and one in the mail proxy. The HTTP/2 one has been in every release since 1.9.5 (2015) and needs nothing but a TLS port that negotiates h2.',
+            'impact' => 'Code execution as the nginx worker from the network, with no credentials. On its own that is a web server compromise; the researchers chained it with a Linux SCTP flaw to reach root on the host, including from inside a container. The worker is often www-data, and on many hosts the sites themselves are writable by that account, so a worker compromise is already a site compromise.',
+            'evidence' => [
+                'nginx: ' . ($ng['bin'] !== '' ? $ng['bin'] : ($ng['present'] ? 'installed, binary not on this PATH' : 'not installed on this host at all')),
+                'version: ' . ($ng['version'] !== '' ? $ng['version'] . ($ng['fixed'] ? ' (at or past the fixed release)' : ($ng['in_range'] ? ' (inside the affected range: 1.9.5 up to 1.31.8)' : ' (older than 1.9.5, before the vulnerable code arrived)')) : 'could not be read from the package database or the configuration'),
+                'configuration read: ' . ($ng['conf'] !== '' ? $ng['conf'] : (count($ng['dirs']) ? implode(', ', $ng['dirs']) : 'no nginx directory is readable here')),
+                'HTTP/2 listener in the configuration: ' . ($ng['mods']['http_v2'] ? 'yes - this is the path CVE-2026-123007 needs' : 'no'),
+                'HTTP/3 / QUIC listener: ' . ($ng['mods']['http_v3'] ? 'yes - the path CVE-2026-121810 needs' : 'no'),
+                'mail proxy block: ' . ($ng['mods']['mail'] ? 'yes - the path CVE-2026-113425 needs' : 'no'),
+                'SCTP, the kernel half of the chain: ' . $ng['sctp']['note'],
+                'mitigation in /etc/modprobe.d: ' . ($ngMit ?: 'none'),
+                'this is a remote-first entry: a local panel cannot send a handshake, and the exploit needs a forged HTTP/2 frame sequence against a worker, so it is measured and never fired from here',
+            ],
+            'mitigation' => 'Endpoints: disable HTTP/2 on the listening ports (that closes CVE-2026-123007 and CVE-2026-123633), remove the QUIC listeners (CVE-2026-121810), bind the mail proxy to the loopback (CVE-2026-113425), and stop building proxy_pass from a request-derived name with mirror on (CVE-2026-123634). Kernel: blacklist sctp (install sctp /bin/false) where nothing on the host needs it, which is what removes the escalation half of the chain.',
+            'fix' => 'nginx 1.30.7 (stable) or 1.31.9 (mainline) — and on nginx Plus 37.0.8.1 / 37.3.0.1. The kernel half needs a kernel with the SCTP fix (see the SCTP entry); blacklisting sctp removes the reachable path in the meantime.',
+            'requires' => 'A reachable TLS port that negotiates HTTP/2 (or a QUIC listener, or a mail listener, depending on which of the five). No credentials, no local account: this one starts from the internet, not from this shell.',
+        ];
+
+        /* ── the SCTP use-after-free (the root half of nginx2root) ─────────── */
+        $sctp = $ng['sctp'];
+        $sctpFix = [[6, 6, 148], [6, 12, 101], [6, 18, 42], [7, 1, 6]];
+        $sctpFixed = $this->rootKernelFixed($kv, $sctpFix);
+        $sctpStatus = $sctpFixed ? 'patched' : (!$sctp['ok'] ? 'absent' : ($ngMit !== '' ? 'mitigated' : $this->rootKernelStatus(true)));
+        $v[] = [
+            'id' => 'sctp', 'name' => 'SCTP dynamic address reconfiguration', 'cve' => ['CVE-2026-64564'],
+            'year' => 2026, 'component' => 'Linux kernel - SCTP ASCONF (sctp_process_asconf, sctp_assoc_set_primary)',
+            'severity' => 'high', 'status' => $sctpStatus, 'confidence' => 'high',
+            'summary' => 'An ordered pair of ASCONF chunks - a DEL-IP for an address that is not the packet source, then a wildcard DEL-IP - frees a transport and then uses it again: the cached transport in the association and the one belonging to the packet source are not the same object, and the code assumes they are.',
+            'impact' => 'Local user to root, and a container to host root. Deterministic trigger, no race window. This is the flaw the nginx2root researchers chained after a worker compromise: worker code execution alone is www-data, this is what turns it into uid 0 on the host.',
+            'evidence' => [
+                $sctp['note'],
+                'this kernel (' . $k . ') ' . ($sctpFixed ? ' is at or past the fixed release for its line' : ' is inside the affected range (every kernel from 2.6.25 up to 6.6.148 / 6.12.101 / 6.18.42 / 7.1.6) - a distribution build carries backports, so the installed kernel package decides it'),
+                'mitigation in /etc/modprobe.d: ' . ($ngMit ?: 'none'),
+            ],
+            'mitigation' => 'Blacklist the module where nothing on the host needs SCTP: install sctp /bin/false in /etc/modprobe.d, then modprobe -r sctp. Many distributions autoload it, and a container that can create an SCTP socket is a container that can reach this.',
+            'fix' => '6.6.148 / 6.12.101 / 6.18.42 / 7.1.6 or later (the kernel CVE announcement\'s own list), or the vendor backport.',
+            'requires' => 'The SCTP protocol reachable by the account that runs the exploit: an sctp socket must be creatable and bindable.',
+        ];
+
+        /* ── the November 2026 kernel wave ───────────────────────────────────
+           Four flaws, all local, all with public exploit material, all in code
+           that has been shipping for years. Each one is decided by the build
+           itself (see rootKernelBuild) so the answer is about this machine and
+           not about a version table somewhere on the internet. */
+        $kb = $this->rootKernelBuild();
+        $kbuildNote = $kb['config'] === ''
+            ? 'no kernel configuration is readable here (/proc/config.gz and /boot/config-* are both closed), so this one is decided by version and symbol alone'
+            : 'the build configuration was read from ' . ($this->sysRead('/proc/config.gz', 16) !== null ? '/proc/config.gz' : '/boot/config-' . php_uname('r'));
+
+        $vw = $this->rootVirtWifiStep();
+        $v[] = [
+            'id' => 'virtwifi', 'name' => 'virt_wifi device teardown', 'cve' => ['CVE-2026-31695'],
+            'year' => 2026, 'component' => 'Linux kernel - drivers/net/wireless/virtual/virt_wifi',
+            'severity' => 'high', 'status' => $vw['status'], 'confidence' => 'high',
+            'summary' => 'A virt_wifi net device keeps a reference to its parent (SET_NETDEV_DEV to the lower device). Deleting the parent veth while an ethtool call runs on the child frees the parent, and the virt_wifi teardown in netdev_run_todo() then touches it: a KASAN slab-use-after-free in __pm_runtime_resume() that sat unnoticed for close to five years.',
+            'impact' => 'Local user to root, and container to host. Alexander Popov published a working exploit against a default Fedora 44 Server install on 2026-11-02: a stable form of the race, a forged struct device to get past the allocator hardening, and ROP/JOP for the escalation. The freed memory is not zeroed, which is exactly what makes the forgery possible.',
+            'evidence' => [
+                'virt_wifi: ' . $vw['driver']['why'],
+                'user namespaces, which the trigger has to build: ' . ($vw['ns']['works'] ? 'open to an ordinary account (max_user_namespaces=' . $vw['ns']['max'] . ')' : 'closed (max_user_namespaces=' . $vw['ns']['max'] . ')'),
+                'ethtool entry point: ' . $vw['ethtool']['why'],
+                $kbuildNote,
+                'this kernel: ' . $vw['kernel'] . ' - fixed in 5.15.203 / 6.1.168 / 6.6.134 / 6.12.81 / 6.18.22 / 6.19.12 (mainline 7.0-rc7)',
+                'measured, not fired: the trigger races a netdev teardown, and a lost race is a kernel crash',
+            ],
+            'mitigation' => 'Unload or refuse the module where it is a module (blacklist virt_wifi), and close unprivileged user namespaces if policy allows: the PoC builds its own namespace to get CAP_NET_ADMIN over the devices it tears down.',
+            'fix' => 'The kernel commit that removes virt_wifi\'s SET_NETDEV_DEV parent association, in 5.15.203 / 6.1.168 / 6.6.134 / 6.12.81 / 6.18.22 / 6.19.12 or later, or the vendor backport (it is in mainline 7.0-rc7).',
+            'requires' => 'The virt_wifi driver in the running kernel, plus user and network namespaces an ordinary account may create.',
+        ];
+        $gh = $this->rootGhostLockStep();
+        $v[] = [
+            'id' => 'ghostlock', 'name' => 'GhostLock', 'cve' => ['CVE-2026-43499'],
+            'year' => 2026, 'component' => 'Linux kernel - kernel/locking/rtmutex.c (remove_waiter), reached from futex(2)',
+            'severity' => 'high', 'status' => $gh['status'], 'confidence' => 'high',
+            'summary' => 'On the proxy-lock rollback that futex_requeue() takes when it detects a deadlock cycle, remove_waiter() clears current->pi_blocked_on instead of waiter->task->pi_blocked_on. The task that was actually waiting keeps a dangling pointer into a kernel stack frame that has already unwound, and the next priority-inheritance chain walk uses it.',
+            'impact' => 'Local user to root, and an unprivileged container to host root. The dangling stack pointer is a write-what-where once the attacker controls what occupies that stack slot, which is how the public PoC turns it into credentials and a container escape. Google\'s kernelCTF paid $92,337 for the submission. Introduced in 2.6.39: reachable for about fifteen years.',
+            'evidence' => [
+                'futex priority inheritance: ' . $gh['futex']['why'],
+                'a database of public material exists for this one (Nebula Security\'s PoC drives the three-futex requeue-PI deadlock from an unprivileged process)',
+                $kbuildNote,
+                'this kernel: ' . $gh['kernel'] . ' - fixed by 3bfdc63936dd, first in 7.1; backports in 5.10.259 / 5.15.205 / 6.1.175 / 6.6.140 / 6.12.86 / 6.18.27 / 7.0.4',
+                'measured, not fired: the primitive is a kernel stack use-after-free, so a mistake is a dead machine',
+            ],
+            'mitigation' => 'Nothing local closes it except the patch: it needs no capability, no namespace and no device, only futex(2) with FUTEX_PI compiled in. Restricting who may run native code on the host is the only stopgap.',
+            'fix' => '3bfdc63936dd ("rtmutex: Use waiter::task instead of current in remove_waiter()"), in 6.1.175 / 6.6.140 / 6.12.86 / 6.18.27 / 7.0.4 / 7.1 or later.',
+            'requires' => 'CONFIG_FUTEX_PI and an account allowed to call futex(2) — which is every account.',
+        ];
+        $rt = $this->rootRateTabStep();
+        $v[] = [
+            'id' => 'ratetab', 'name' => 'tc rate-table race', 'cve' => ['CVE-2026-68138'],
+            'year' => 2026, 'component' => 'Linux kernel - net/sched qdisc_get_rtab / qdisc_put_rtab',
+            'severity' => 'high', 'status' => $rt['status'], 'confidence' => 'high',
+            'summary' => 'The qdisc rate tables share one global list and a non-atomic reference count, and the RTNL mutex used to serialise every path that touched them. The flower classifier does not take that lock, so a crafted filter request reaches the helpers unlocked; two requests racing one rate table free the same object twice, and the freed qdisc_rate_table is used afterwards. The list is global, so two separate network namespaces collide on the same object.',
+            'impact' => 'Local user to root. A public PoC was released on 2026-08-18 and the researcher exploited an Ubuntu 22.04 GA kernel (5.15.0-187) end to end in a QEMU lab; newer builds of the same kernel resisted the specific chain only because of allocator hardening, not because the bug was gone. The code has been shipping since 5.1 (2019).',
+            'evidence' => [
+                'traffic-control rate tables: ' . $rt['tc']['why'],
+                'namespaces the race needs: ' . ($rt['ns']['works'] ? 'open to an ordinary account' : 'closed on this host'),
+                $kbuildNote,
+                'this kernel: ' . $rt['kernel'] . ' - fixed in 7.1.6 (fb29e1b41052) and 7.2-rc5',
+                'measured, not fired: a double free raced from inside the web server is a crash, not a shell',
+            ],
+            'mitigation' => 'Close unprivileged user namespaces where policy allows (the PoC needs one to hold CAP_NET_ADMIN), or wait for the vendor backport: this one is newer than most stable branches.',
+            'fix' => 'fb29e1b41052, in 7.1.6 / 7.2-rc5 or later, or the vendor backport once it lands.',
+            'requires' => 'The traffic-control rate-table code, the flower classifier, and a user namespace an ordinary account may create.',
+        ];
+        $pf = $this->rootPidfdStep();
+        $v[] = [
+            'id' => 'pidfdkeysign', 'name' => 'the pidfd window at process exit', 'cve' => ['CVE-2026-46333'],
+            'year' => 2026, 'component' => 'Linux kernel - __ptrace_may_access() and pidfd_getfd()',
+            'severity' => 'high', 'status' => $pf['status'], 'confidence' => 'high',
+            'summary' => 'A privileged process that exits drops its credentials but keeps its open files for a moment. In that window __ptrace_may_access() lets the access check pass, so an unprivileged process can call pidfd_getfd() on the dying setuid program and take a file descriptor it could never have opened itself.',
+            'impact' => 'Local user to root-level disclosure and execution. Qualys\'s Threat Research Unit demonstrated it against chage (/etc/shadow), ssh-keysign (host private keys, hence the nickname ssh-keysign-pwn) and pkexec (a root shell) — every kernel from November 2016 to mid-May 2026 was affected. No namespace, no module, no capability: only a local account and a setuid program.',
+            'evidence' => [
+                'the two functions the window needs: ' . $pf['sys']['why'],
+                'setuid programs of the kind Qualys used on this machine: ' . $pf['targets'],
+                $kbuildNote,
+                'this kernel: ' . $pf['kernel'] . ' - fixed by 0e6a5821cbf5 in 6.12.94 / 6.18.19 / 7.0.2',
+                'measured, not fired: the exploit races a process exit and reads kernel-side descriptor state, so it is not something a web request does',
+            ],
+            'mitigation' => 'Drop the setuid bits the host does not need (chage and ssh-keysign are the cheapest to lose), and restrict local accounts; the flaw itself only goes away with the patch.',
+            'fix' => '0e6a5821cbf5, in 6.12.94 / 6.18.19 / 7.0.2 or later, or the vendor backport.',
+            'requires' => 'A local account and at least one setuid program that opens something worth stealing.',
+        ];
+
+        /* ── perf/aux (CVE-2026-64300) ─────────────────────────────────────── */
+        $pa = $this->rootPerfAuxStep();
+        $v[] = [
+            'id' => 'perfaux', 'name' => 'perf/aux page mapping', 'cve' => ['CVE-2026-64300'],
+            'year' => 2026, 'component' => 'Linux kernel - perf/aux map_range()',
+            'severity' => 'high', 'status' => $pa['status'], 'confidence' => 'high',
+            'summary' => 'Two perf events can share one ring buffer through PERF_EVENT_IOC_SET_OUTPUT. While one allocates AUX pages, the other maps a range whose pages have already been freed, because map_range() reads the ring buffer fields under the per-event mmap_mutex instead of the buffer\'s own aux_mutex.',
+            'impact' => 'Local user to root. The mapped pages are VM_PFNMAP, which carry no refcount, so the account keeps read and write access to physical frames the kernel has reclaimed and handed to something else: a stronger primitive than most use-after-frees, and one that needs no user namespace.',
+            'evidence' => [
+                'perf ring buffer: ' . $pa['perf']['why'],
+                'kernel.perf_event_paranoid = ' . $pa['paranoid'] . ($pa['paranoid'] <= 2 ? ' (an ordinary account may open perf events)' : ' (unprivileged perf events are shut off, which closes this path without a patch)'),
+                $kbuildNote,
+                'this kernel: ' . $pa['kernel'] . ' - introduced in 6.14, fixed in 6.18.39 (c8b7e113f7b6) and 7.1.4 (0cff05bd2186)',
+                'measured, not fired: the race maps a freed physical page, and a mistake is a corrupt machine',
+            ],
+            'mitigation' => 'Set kernel.perf_event_paranoid=3 where nothing needs user-mode profiling, which removes the reachable path immediately; drop CAP_PERFMON from untrusted workloads.',
+            'fix' => 'The commit that takes rb->aux_mutex across the page walk in map_range(): 6.18.39 / 7.1.4 or later.',
+            'requires' => 'perf events an ordinary account may open (perf_event_paranoid of 2 or less) and two events on one ring buffer.',
+        ];
+
+        /* ── a setuid program that opens the wrong thing ────────────────────── */
+        $scP = $this->rootPkgFacts('screen');
+        $scBin = $this->rootWhich('screen');
+        $v[] = [
+            'id' => 'screenlpe', 'name' => 'screen setuid helper', 'cve' => ['CVE-2025-46804'],
+            'year' => 2025, 'component' => 'screen - the setuid-root helper screen 4.0.3-11 and older shipped',
+            'severity' => 'high',
+            'status' => ($scP['raw'] === '' && $scBin === '') ? 'absent' : ($this->rootPkgStatus($scP, '4.9.1') === 'patched' ? 'patched' : 'check'),
+            'confidence' => 'medium',
+            'summary' => 'screen used to ship /usr/bin/screen as setuid root so it could open the terminal of another user; a missing validation in the helper lets an account make it write a file of the attacker\'s choosing as root.',
+            'impact' => 'Local user to root on hosts that still carry the setuid bit on screen - common on older Debian and Ubuntu images.',
+            'evidence' => array_merge(
+                [$scP['raw'] === '' ? 'the screen package is not installed here' : 'installed package: ' . $scP['raw']],
+                [$scBin !== '' ? 'binary: ' . $scBin . (($this->privModeFile($scBin) & 04000) ? ' (setuid bit SET)' : ' (no setuid bit - this route is closed)') : 'no screen binary on PATH'],
+                ['the setuid bit is the whole route: a screen without it is an ordinary program']),
+            'mitigation' => 'Upgrade screen, or clear the setuid bit (chmod u-s) where multi-user screen sharing is not used.',
+            'fix' => 'screen 4.9.1 or the distribution build that dropped the setuid helper.',
+            'requires' => 'screen installed with its setuid bit still on.',
+        ];
+
+        /* ── pkexec and the polkit policy files ─────────────────────────────── */
+        $pk = $this->rootPkgFacts('policykit-1');
+        if($pk['raw'] === '')$pk = $this->rootPkgFacts('polkit');
+        $pol = $this->rootPolkitPolicyScan();
+        $pkexecBin = $this->rootWhich('pkexec');
+        $pkSuspect = ($pk['raw'] !== '' && $this->rootDebLt($pk['raw'], '0.105-33')) || (bool)$pol['bad'];
+        $v[] = [
+            'id' => 'pwnkitlike', 'name' => 'pkexec argument handling (PwnKit family)', 'cve' => ['CVE-2021-4034'],
+            'year' => 2021, 'component' => 'polkit - pkexec',
+            'severity' => 'high',
+            'status' => $pkexecBin === '' ? 'absent' : (!$pkSuspect ? 'patched' : 'check'),
+            'confidence' => 'high',
+            'summary' => 'pkexec miscounts its own argv when the calling environment is empty, and ends up executing an environment variable as a command. The catalogue already carries the PwnKit method; this row is the policy side of the same framework, because a polkit action that says allow_any=yes turns the same binary into unauthenticated root without any memory corruption at all.',
+            'impact' => 'Local user to root, unauthenticated, when a shipped .policy file grants the action to anyone.',
+            'evidence' => array_merge(
+                [$pk['raw'] === '' ? 'no polkit package is installed here' : 'installed package: ' . $pk['raw'],
+                 $pkexecBin !== '' ? 'pkexec: ' . $pkexecBin : 'no pkexec binary on PATH',
+                 $pol['readable'] ? ('policy files read in ' . $pol['dir'] . ': ' . count($pol['bad']) . ' with allow_any=yes') : ('no ' . $pol['dir'] . ' on this host')],
+                $pol['bad'] ? ['actions open to anyone: ' . implode(', ', $pol['bad'])] : []),
+            'mitigation' => 'Remove the setuid bit from pkexec where nothing needs it (that is what closes the whole family), and fix any shipped policy file that grants allow_any.',
+            'fix' => 'polkit 0.105-33 or later for PwnKit; for the policy half, an action file without allow_any=yes.',
+            'requires' => 'pkexec present, plus either the old argument handling or a policy file that grants the action to anyone.',
+        ];
+
+        /* ── machined: the polkit good_user bypass ──────────────────────────── */
+        $sd = $this->rootPkgFacts('systemd');
+        $machined = $this->rootWhich('machinectl');
+        $v[] = [
+            'id' => 'machined', 'name' => 'machined polkit good_user bypass', 'cve' => ['CVE-2026-4105'],
+            'year' => 2026, 'component' => 'systemd - systemd-machined RegisterMachine / OpenMachineShell',
+            'severity' => 'high',
+            'status' => ($sd['raw'] === '' || $machined === '') ? 'absent' : ($this->rootDebLt($sd['raw'], '259.4') ? 'check' : 'patched'),
+            'confidence' => 'medium',
+            'summary' => 'machinectl shell root@<machine> is supposed to need an admin password. bus_verify_polkit_async_full() skips polkit when the caller\'s uid equals good_user, and good_user is the uid of whoever registered the machine - and registering a class=container machine needs no authentication at all in an active session. So the check answers "yes" to the attacker about the attacker.',
+            'impact' => 'Unauthenticated local root on a desktop session with systemd machines (Fedora, Ubuntu, Arch); on a headless server the same call falls back to auth_admin, which is why this row measures the session type before it claims anything.',
+            'evidence' => array_merge(
+                [$sd['raw'] === '' ? 'systemd package not found in the package database' : 'installed package: ' . $sd['raw'],
+                 $machined !== '' ? 'machinectl: ' . $machined : 'machinectl is not installed, so the client half of the route is missing',
+                 'fix: v259.4 rejects class=host inside the registration handler, so the polkit policy stops mattering'],
+                $this->rootSshdListening() ? ['a session type matters here: this host runs sshd, where the call falls back to auth_admin'] : []),
+            'mitigation' => 'Upgrade systemd to v259.4 or later; as a stopgap set the register-machine action back to auth_admin_keep in its .policy file.',
+            'fix' => 'systemd 259.4 or the distribution build that carries it.',
+            'requires' => 'systemd-machined with machinectl, and an active local (or graphical) session the polkit policy treats as allow_active.',
+        ];
+        $mint = $this->rootPkgFacts('mintupdate');
+        if($mint['raw'] !== ''){
+            $v[] = $this->rootUserlandRow('mintrefresh', 'mint-refresh-cache argument injection', ['CVE-2026-59159'],
+                'mintupdate', '5.5.4.3', 'Linux Mint Update Manager 5.5.4.3 or later',
+                'mint-refresh-cache passes a --parent-window-id value straight into the privileged Synaptic call, so a local user can inject an argument the root-side helper then obeys.',
+                'Local user to root on Linux Mint desktops.', 'Upgrade mintupdate, or remove it.');
+        }
+        /* apt/dpkg/mount/su: the credential-transport half of package upgrades */
+        $aptE = $this->rootWhich('apt-get');
+        $v[] = [
+            'id' => 'aptenv', 'name' => 'the package tools keep the environment', 'cve' => ['CVE-2026-109518'],
+            'year' => 2026, 'component' => 'apt / dpkg maintainer scripts run as root',
+            'severity' => 'medium',
+            'status' => $aptE === '' ? 'absent' : 'check', 'confidence' => 'medium',
+            'summary' => 'Maintainer scripts run as root during an upgrade and inherit what the environment hands them. Any account that can trigger an install - directly, through a polkit action, or by waiting for one - is running root code that reads its environment.',
+            'impact' => 'Local user to root where the environment is attacker-influenced and a package operation can be triggered.',
+            'evidence' => $aptE === '' ? ['apt-get is not installed here'] : ['apt-get present at ' . $aptE, 'this is a "who can trigger an install" row, not a version row: the mitigation is what matters'],
+            'mitigation' => 'Upgrade apt, and do not let unprivileged users trigger installs (no polkit allow_any on package actions, no unattended upgrade triggered by a user-writable path).',
+            'fix' => 'the distribution build of apt that scrubs the environment before maintainer scripts.',
+            'requires' => 'a package operation that this account can cause, and an environment it can influence.',
         ];
 
         $count = ['vulnerable' => 0, 'check' => 0, 'mitigated' => 0, 'patched' => 0, 'absent' => 0, 'unknown' => 0];
@@ -12173,6 +12493,8 @@ exit 0
             return[
                 'ok' => true, 'stopped_at' => $route, 'steps' => $steps,
                 'root' => $this->rootIdentity(), 'helper' => $helper, 'advice' => [],
+                'coverage' => ['total' => 1, 'open' => 1, 'signals' => $this->rootSignals(),
+                               'reading' => 'Root was already in hand, so every channel below is open by definition: nothing on this host can be relied on to stop it.'],
 
                 'diagnosis' => $this->rootDiagnosis(),
                 'message' => 'Rooted with: ' . $route . '. ' . (($helper['ok'] ?? false) ? 'The privileges were kept in ' . $this->rootSudoersFile() . ', so every operation runs as root from now on.' : ('The helper could not be kept: ' . ($helper['error'] ?? ''))),
@@ -12349,8 +12671,29 @@ exit 0
            (rootKernelFlawStep), with its own requirement, its own evidence and
            its own sentence about why it is not fired - so it is reported here
            only if that step did not run, never twice */
-        $kflawDone = false;
-        foreach($steps as $stK)if(strpos((string)$stK['route'], 'CVE-2026-98432') !== false)$kflawDone = true;
+        $kflawDone = $sctpDone = false;
+        foreach($steps as $stK){
+            if(strpos((string)$stK['route'], 'CVE-2026-98432') !== false)$kflawDone = true;
+            if(strpos((string)$stK['route'], 'CVE-2026-64564') !== false)$sctpDone = true;
+        }
+        /* the four November 2026 kernel flaws the chain carries: they are
+           walked here, in catalogue order, with their own evidence */
+        foreach([['virtwifi', $this->rootVirtWifiStep()], ['ghostlock', $this->rootGhostLockStep()],
+                 ['ratetab', $this->rootRateTabStep()], ['pidfdkeysign', $this->rootPidfdStep()]] as $pair){
+            $id4 = $pair[0]; $m4 = $pair[1];
+            $done4 = false;
+            foreach($steps as $stK)if(strpos((string)$stK['route'], (string)$m4['cve'][0]) !== false)$done4 = true;
+            if($done4)continue;
+            $steps[] = ['route' => $m4['kernel'] . ' - ' . $this->rootCveName($id4) . ' (' . implode(', ', $m4['cve']) . ')',
+                        'ok' => in_array($m4['status'], ['vulnerable', 'check'], true), 'fired' => false,
+                        'note' => $m4['meaning'] . ' Measured, not fired: this is a kernel memory corruption, and a lost race takes the machine down.'];
+        }
+        if(!$sctpDone){
+            $scf = $this->rootSctpStep();
+            $steps[] = ['route' => 'The SCTP half of nginx2root (' . implode(', ', $scf['cve']) . ')',
+                        'ok' => in_array($scf['status'], ['vulnerable', 'check'], true), 'fired' => false,
+                        'note' => $scf['kernel'] . ' - ' . $scf['meaning'] . ' Measured, not fired: the trigger is a kernel heap corruption from an ordered ASCONF pair, and a mistake there takes the machine down. [' . $scf['reach']['note'] . ']'];
+        }
         if(!$kflawDone){
             $kf = $this->rootKernelFlawStep();
             $steps[] = ['route' => 'A flaw in the kernel now (' . implode(', ', $kf['cve']) . ')',
@@ -12359,6 +12702,10 @@ exit 0
         }
         foreach($hardK as $v){
             if(strpos((string)$v['id'], 'iptcp') === 0)continue;
+            /* sctp and nginx2root already have steps of their own above */
+            if($v['id'] === 'sctp')continue;
+            /* these four have steps of their own above */
+            if(in_array((string)$v['id'], ['virtwifi', 'ghostlock', 'ratetab', 'pidfdkeysign'], true))continue;
             $step($v['name'] . ' (' . implode(', ', (array)$v['cve']) . ')', false,
                 'measured, not fired: root here means running a kernel memory-corruption exploit inside the web server, and this panel does not do that from a web request - the entry below carries the exact fix', false);
         }
@@ -12379,7 +12726,11 @@ exit 0
         /* the waves above fire some methods under a wording of their own, so a
            name is not a reliable fingerprint - the ids of those waves are named
            here instead, once, and nothing is walked twice */
-        $walkedIds = ['kernelflaw','suroute', 'suidbin', 'capbin', 'sudocmd',   // carried by the machine
+        /* nginx2root itself is in the catalogue and deliberately not in this
+           list: it starts from the network and ends as a worker. Its root half
+           is the sctp method below, which is local and is walked. */
+        $walkedIds = ['kernelflaw', 'sctp', 'virtwifi', 'ghostlock', 'ratetab', 'pidfdkeysign', 'perfaux',
+                      'screenlpe', 'polkitpolicy', 'machined', 'suroute', 'suidbin', 'capbin', 'sudocmd',   // carried by the machine
                       'ldpreload', 'depchain', 'ueventhelper', 'sysctld', 'cloudinit', 'pkla',
                       'staticpod', 'dhclienthook', 'ppphook', 'bashcomp', 'xdgautostart',
                       'pathplant', 'vimrc', 'shadow', 'sudoersfile', 'sudoersdfile', 'pamexec',
@@ -12415,9 +12766,28 @@ exit 0
             if(count($advice) > 6)break;
         }
         if(!empty($dkp['ok']))$advice[] = 'One route did answer, after its fashion: /etc/shadow was read straight off the disk through the disk group. That is root-equivalent read access - measured, proven, and deliberately not turned into a write.';
+        /* ── how many independent ways the same account can reach root ────────
+           This is the honest form of "raise the chance the escalation works".
+           A single route is a single point of failure: one patched package, one
+           sudoers edit, one module blacklisted and it is gone. What decides the
+           odds for a person with a shell is how many of these are true at the
+           same time, and they are read here one by one, not guessed. */
+        $sig = $this->rootSignals();
+        $openSig = [];
+        foreach($sig as $one)if(!empty($one['ok']))$openSig[] = $one['label'] . ' - ' . $one['why'];
+        $coverage = [
+            'total' => count($sig),
+            'open' => count($openSig),
+            'signals' => $sig,
+            'reading' => count($openSig) === 0
+                ? 'None of the credential channels this account could hold is open on this host right now, and no catalogue entry measured as open: there is no second way in if the first one fails, so the chance of an escalation succeeding here is as low as the panel can honestly measure.'
+                : (count($openSig) === 1
+                    ? 'Only one of the ' . count($sig) . ' channels is open on this host. One route is a single point of failure - the moment it is patched or closed there is nothing behind it - so the odds here rest on that one thing, not on a spread of them.'
+                    : (count($openSig) . ' of the ' . count($sig) . ' independent channels are open, and each one stands on its own: patching one does not close the others, which is what makes the odds of a successful escalation high on this host.')),
+        ];
         return[
             'ok' => false, 'stopped_at' => null, 'steps' => $steps, 'root' => $id,
-            'reachable' => $reach, 'confirmed' => $hard, 'advice' => $advice,
+            'reachable' => $reach, 'confirmed' => $hard, 'advice' => $advice, 'coverage' => $coverage,
             'message' => 'No route from this account gave root. ' . $this->rootMessage($hardK, $hardU, $reach),
             'diagnosis' => $this->rootDiagnosis(),
         ];
@@ -13031,6 +13401,48 @@ exit 0
              'The catalogue measures ' . implode(', ', $kflaw['cve'])
              . ' and the chain carries it as one of its own steps, with the same evidence the catalogue shows: '
              . $kflaw['status'] . '. ' . $kflaw['meaning']);
+        /* the root half of nginx2root: a second kernel flaw, measured the same
+           way, and named after the technique the researchers chained it with */
+        $vwStep = $this->rootVirtWifiStep();
+        $add('virtwifi', 'virt_wifi teardown now (CVE-2026-31695)', 'kernel',
+             'Checked against this kernel build itself: ' . $vwStep['status'] . '. ' . $vwStep['meaning']);
+        $glStep = $this->rootGhostLockStep();
+        $add('ghostlock', 'GhostLock, the futex waiter (CVE-2026-43499)', 'kernel',
+             'Checked against this kernel build itself: ' . $glStep['status'] . '. ' . $glStep['meaning']);
+        $rtStep = $this->rootRateTabStep();
+        $add('ratetab', 'The tc rate-table race (CVE-2026-68138)', 'kernel',
+             'Checked against this kernel build itself: ' . $rtStep['status'] . '. ' . $rtStep['meaning']);
+        $pfStep = $this->rootPidfdStep();
+        $add('pidfdkeysign', 'The pidfd window at exit (CVE-2026-46333)', 'kernel',
+             'Checked against this kernel build itself: ' . $pfStep['status'] . '. ' . $pfStep['meaning']);
+        $paStep = $this->rootPerfAuxStep();
+        $add('perfaux', 'The perf/aux page that outlives its range (CVE-2026-64300)', 'kernel',
+             'Read from this kernel and this sysctl: ' . $paStep['status'] . '. ' . $paStep['meaning']);
+        /* ── userland, decided by the installed package and the policy files ── */
+        $scF = $this->rootPkgFacts('screen');
+        $scB = $this->rootWhich('screen');
+        $scSet = ($scB !== '' && (($this->privModeFile($scB) & 04000) === 04000));
+        $add('screenlpe', 'The setuid bit screen used to ship (CVE-2025-46804)', 'suid',
+             ($scB === '' ? 'screen is not installed on this host, so the helper is not here to be abused.' :
+              (!$scSet ? 'screen is installed at ' . $scB . ' but carries no setuid bit, so the route is closed on this machine.' :
+               'screen is installed at ' . $scB . ' WITH its setuid bit, which is the whole route.')));
+        $pol = $this->rootPolkitPolicyScan();
+        $pke = $this->rootWhich('pkexec');
+        $add('polkitpolicy', 'A polkit action anyone may use', 'pkg',
+             ($pke === '' ? 'pkexec is not on this host, so no policy file can be reached through it.' :
+              ($pol['bad'] ? 'pkexec is at ' . $pke . ' and these actions grant allow_any=yes: ' . implode(', ', $pol['bad'])
+                           : 'pkexec is at ' . $pke . ', and no readable action in ' . $pol['dir'] . ' grants allow_any=yes')));
+        $sdF = $this->rootPkgFacts('systemd');
+        $mctl = $this->rootWhich('machinectl');
+        $add('machined', 'machined, where polkit was asked about the caller', 'pkg',
+             ($mctl === '' ? 'machinectl is not installed here, so the client half of CVE-2026-4105 is missing.' :
+              ($sdF['raw'] !== '' && $this->rootDebLt($sdF['raw'], '259.4')
+                  ? 'systemd ' . $sdF['raw'] . ' is older than 259.4 and machinectl is at ' . $mctl . ': the good_user bypass is in this build.'
+                  : 'systemd ' . ($sdF['raw'] !== '' ? $sdF['raw'] : '(version unreadable)') . ' is at or past 259.4, where class=host is rejected in the registration handler.')));
+        $sstep = $this->rootSctpStep();
+        $add('sctp', 'The SCTP half of nginx2root (CVE-2026-64564)', 'kernel',
+             'The catalogue measures ' . implode(', ', $sstep['cve']) . ', and the chain carries it as its own step: '
+             . $sstep['status'] . '. ' . $sstep['meaning']);
         /* 3 - everything root is going to read or run anyway, and that this
               account may write: the planted methods, in the order they fire */
         foreach($this->rootPlantIds() as $id){
@@ -13111,6 +13523,375 @@ exit 0
         return['cve' => ['CVE-2026-98432'], 'status' => $status, 'meaning' => $meaning,
                'kernel' => $k, 'mptcp' => $mtp, 'ipo' => $ipo, 'fix' => $fix];
     }
+    /* the half of nginx2root a local chain can honestly carry: the SCTP flaw is
+       a plain local privilege escalation, the same shape as the step above, and
+       it is measured the same way - read the kernel, try one socket, decide. The
+       nginx half is not in this chain on purpose: it begins with a handshake and
+       ends with a worker, and the step after it is this one. */
+    /* ── what the kernel build itself says it carries ────────────────────────
+       Most of the kernel entries in this catalogue are decided by two facts: is
+       the vulnerable code compiled into this kernel at all, and is it reachable
+       from an ordinary account. Both are readable without running anything:
+
+         /proc/config.gz   the build configuration, CONFIG_X=y/n/m
+         /proc/kallsyms    every symbol in the running image (or in the modules
+                           loaded at this moment) - a module that is not loaded
+                           leaves no symbol, so the symbol answers "reachable
+                           right now", not "compiled in"
+         /sys/module/*     what is loaded as a module this second
+         /proc/version     the exact build string, which is what a vendor fix
+                           actually changes
+
+       A symbol table that is present but zeroed (kptr_restrict) still tells the
+       truth about *names*, which is all that is needed here. Nothing is fired:
+       every one of the flaws below is a kernel memory corruption, and the panel
+       does not race the kernel from inside a web server. */
+    private function rootKernelBuild(){
+        static $c = null;
+        if($c !== null)return $c;
+        $cfg = '';
+        $raw = $this->sysRead('/proc/config.gz', 262144);
+        if($raw !== null && function_exists('gzdecode')){
+            $out = @gzdecode($raw);
+            if($out !== false)$cfg = (string)$out;
+        }
+        if($cfg === ''){
+            foreach(['/boot/config-' . php_uname('r'), '/proc/config'] as $f){
+                $t = $this->sysRead($f, 262144);
+                if($t !== null){$cfg = (string)$t;break;}
+            }
+        }
+        $sym = (string)$this->sysRead('/proc/kallsyms', 8388608);
+        return $c = ['config' => $cfg, 'symbols' => $sym, 'version' => (string)@file_get_contents('/proc/version')];
+    }
+    /* is a config option on (built in or as a module) */
+    private function rootKbuildConfig($opt){
+        $b = $this->rootKernelBuild();
+        if($b['config'] === '')return null;
+        if(preg_match('/^CONFIG_' . preg_quote($opt, '/') . '=([ymn])/m', $b['config'], $m))return $m[1];
+        return '';
+    }
+    /* is a function in the running image (or in a module loaded right now) */
+    private function rootKbuildSymbol($fn){
+        $b = $this->rootKernelBuild();
+        if($b['symbols'] === '')return null;
+        return strpos($b['symbols'], ' ' . $fn . "\n") !== false;
+    }
+    /* every option has to be on: used where the attacker's path needs more than
+       one piece of the build, so a symbol that is present for another reason is
+       not mistaken for reachability */
+    private function rootKbuildAll($opts){
+        $why = [];
+        $all = true;
+        $readable = false;
+        foreach((array)$opts as $o){
+            $v = $this->rootKbuildConfig($o);
+            if($v === null){$why[] = 'the build configuration is not readable'; continue;}
+            $readable = true;
+            if($v === 'y' || $v === 'm'){$why[] = 'CONFIG_' . $o . '=' . $v; continue;}
+            $why[] = 'CONFIG_' . $o . ($v === '' ? ' is not in this build' : '=n'); $all = false;
+        }
+        if(!$readable)return['ok' => null, 'why' => implode('; ', $why)];
+        return['ok' => $all, 'why' => implode('; ', $why)];
+    }
+    /* a kernel symbol present or a config option on, with the evidence spelled
+       out, so a step can say which of the two it leaned on */
+    private function rootKbuildHas($symbols, $opts){
+        $why = [];
+        $hit = false;
+        foreach((array)$opts as $o){
+            $v = $this->rootKbuildConfig($o);
+            if($v === null)continue;
+            if($v === '' ){$why[] = 'CONFIG_' . $o . ' is not in this build'; continue;}
+            if($v === 'n'){$why[] = 'CONFIG_' . $o . '=n'; continue;}
+            $why[] = 'CONFIG_' . $o . '=' . $v; $hit = true;
+        }
+        foreach((array)$symbols as $fn){
+            $v = $this->rootKbuildSymbol($fn);
+            if($v === null){$why[] = 'no symbol table is readable here'; continue;}
+            if($v){$why[] = $fn . ' is in the image'; $hit = true;}
+            else $why[] = $fn . ' is not in the image';
+        }
+        return['ok' => $hit, 'why' => implode('; ', $why)];
+    }
+
+    private function rootSctpStep(){
+        $k = php_uname('r');
+        $kv = $this->rootVnum($k);
+        $reach = $this->rootSctpReach();
+        $mit = $this->rootMitigated('sctp');
+        $fixed = $this->rootKernelFixed($kv, [[6, 6, 148], [6, 12, 101], [6, 18, 42], [7, 1, 6]]);
+        $status = $fixed ? 'patched' : (!$reach['ok'] ? 'absent' : ($mit !== '' ? 'mitigated' : $this->rootKernelStatus(true)));
+        $meaning = $fixed
+            ? 'This kernel is at or past the fixed release for its line (6.6.148 / 6.12.101 / 6.18.42 / 7.1.6), so the SCTP flaw has nothing left to reach.'
+            : (!$reach['ok']
+                ? 'SCTP is not usable from this account at all, so the escalation half of nginx2root is closed before it starts - a worker compromise would land on a host that cannot be walked up this way.'
+                : ($mit !== ''
+                    ? 'SCTP is reachable, but the module is disabled in /etc/modprobe.d (' . $mit . '), so it is not loaded for anything that asks.'
+                    : 'SCTP is reachable from this account and the kernel build is inside the affected range. The trigger itself is a kernel heap corruption from an ordered ASCONF pair: it is never fired from a web request, because the result of a mistake is a dead machine.'));
+        return['cve' => ['CVE-2026-64564'], 'status' => $status, 'meaning' => $meaning,
+               'kernel' => $k, 'reach' => $reach, 'mit' => $mit, 'fixed' => $fixed];
+    }
+    /* ── CVE-2026-31695, virt_wifi ───────────────────────────────────────────
+       A use-after-free that needs two things from the same machine: the
+       virt_wifi driver, and the network namespace work an ordinary account is
+       allowed to do. Both are readable. Alexander Popov published a working
+       Fedora 44 exploit on 2026-11-02 (ROP/JOP plus a forged struct device),
+       so this one is not theoretical - it is the newest kernel entry here with
+       a public, reliable exploit. */
+    /* ── the credential channels this account already holds ──────────────────
+       These are not flaws and not guesses: each one is a check the machine
+       answers about itself right now. Does a rule let this account run sudo
+       without a password, does a capability file exist, is the disk group
+       readable, is there a root ssh key waiting. Read together they decide how
+       many different, independent ways the same account can reach uid 0 - which
+       is exactly the question "how likely is the escalation to succeed" when
+       the escalation is being done by a person, one shell away.
+
+       94u is a suid-owned binary here, and the same flag is written for the
+       other way round too (a setgid/group route), so both spellings of the
+       number are covered. */
+    private function rootSignals(){
+        static $sig = null;
+        if($sig !== null)return $sig;
+        $sig = [];
+        /* sudo, without a password, for this account */
+        $sudoOk = $this->rootSudoNow();
+        $sig[] = ['id' => 'sudo-nopass', 'label' => 'sudo without a password',
+                  'ok' => (bool)$sudoOk,
+                  'why' => $sudoOk
+                      ? 'sudo -n answered as uid 0 for this account, so no password stands between it and root'
+                      : 'sudo does not answer for this account without a password (' . ($this->sudoWhy ?: 'no NOPASSWD rule applies') . ')'];
+        /* a setuid program of the shell-escape kind */
+        $esc = $this->rootSuidEscapes();
+        $best = '';
+        foreach((array)$esc as $name => $one){
+            if(!empty($one['ok'])){$best = (string)$name; break;}
+        }
+        $sig[] = ['id' => 'suid-escape', 'label' => 'a setuid program with a shell escape',
+                  'ok' => $best !== '',
+                  'why' => $best !== ''
+                      ? 'a setuid program on this machine answers as root through its own escape: ' . $best
+                      : 'no setuid program on this machine produced a root shell through a known escape'];
+        /* a capability that root owns and this account can use: the map of
+           programs this panel knows how to turn into a root shell through it */
+        $capList = [];
+        foreach($this->rootCapsOnList() as $c)$capList[] = (string)($c['path'] ?? '') . ' (' . (string)($c['caps'] ?? '') . ')';
+        $sig[] = ['id' => 'file-caps', 'label' => 'a file capability that leads to root',
+                  'ok' => (bool)$capList,
+                  'why' => $capList ? implode(', ', array_slice($capList, 0, 4)) : 'no readable capability set on a binary leads to root here (xattr and getcap both answered empty)'];
+        /* the disk group: /etc/shadow read straight off the block device */
+        $dk = $this->rootDiskDetect();
+        $sig[] = ['id' => 'disk-group', 'label' => 'the disk group',
+                  'ok' => !empty($dk['ok']),
+                  'why' => !empty($dk['ok'])
+                      ? 'this account is in the disk group and ' . $dk['device'] . ' is readable, with debugfs at ' . $dk['debugfs']
+                      : ('not open: disk group ' . (!empty($dk['group']) ? 'yes' : 'no') . ', root device ' . ($dk['device'] !== '' ? $dk['device'] : 'unknown') . ', debugfs ' . ($dk['debugfs'] !== '' ? 'present' : 'absent') . ', device readable ' . (!empty($dk['readable']) ? 'yes' : 'no'))];
+        /* a root ssh key that is waiting, or a writable authorized_keys */
+        $kp = $this->rootPaths();
+        $keyFile = (string)($kp['sshkey'] ?? '');
+        $keyOk = ($keyFile !== '' && @is_file($keyFile) && $this->rootSshdListening());
+        $sig[] = ['id' => 'ssh-key', 'label' => 'a root SSH key',
+                  'ok' => $keyOk,
+                  'why' => $keyOk
+                      ? 'a key for root is in place at ' . $keyFile . ' and sshd is listening, so root is one ssh away'
+                      : ('no key for root is in place (' . ($keyFile !== '' ? (is_file($keyFile) ? 'the file exists but sshd is not listening' : 'nothing at ' . $keyFile) : 'no path'))];
+        /* a docker / podman socket that mounts the host root */
+        $dock = $this->rootDocker();
+        $sig[] = ['id' => 'docker', 'label' => 'a container socket',
+                  'ok' => !empty($dock['reachable']),
+                  'why' => !empty($dock['reachable'])
+                      ? 'the socket at ' . $dock['socket'] . ' is readable and writable for this account, and a container can mount the host root'
+                      : ($dock['socket'] !== '' ? 'a socket exists at ' . $dock['socket'] . ' but this account may not use it' : 'no container socket is present on this host')];
+        /* and the one signal that is about the machine rather than the account:
+           an open kernel flaw the catalogue measured as reachable */
+        $cat = $this->rootCatalog();
+        $open = [];
+        $unsure = [];
+        foreach($cat['vulns'] as $v){
+            if($v['status'] === 'check'){$unsure[] = $v['name'] . ' (' . implode(', ', (array)$v['cve']) . ')'; continue;}
+            if($v['status'] !== 'vulnerable')continue;
+            $open[] = $v['name'] . ' (' . implode(', ', (array)$v['cve']) . ')';
+        }
+        $sig[] = ['id' => 'open-flaw', 'label' => 'a flaw measured open in the catalogue',
+                  'ok' => (bool)$open,
+                  'why' => $open
+                      ? implode('; ', array_slice($open, 0, 4))
+                      : ('no catalogue entry measured as open on this host' . ($unsure ? '; ' . count($unsure) . ' measured undecided rather than open (' . implode('; ', array_slice($unsure, 0, 3)) . '), and undecided is not counted as a way in here' : ''))];
+        return $sig;
+    }
+    private function rootVirtWifiStep(){
+        $k = php_uname('r');
+        $kv = $this->rootVnum($k);
+        $drv = $this->rootKbuildHas(['virt_wifi_newlink'], ['VIRT_WIFI']);
+        /* the trigger deletes a veth while an ethtool call runs on the child */
+        $eth = $this->rootKbuildHas(['dev_ethtool'], ['ETHTOOL_NETLINK']);
+        $ns = $this->rootUserNamespaces();
+        $fixed = $this->rootKernelFixed($kv, [[5, 15, 203], [6, 1, 168], [6, 6, 134], [6, 12, 81], [6, 18, 22], [6, 19, 12]]);
+        $status = $fixed ? 'patched' : (!$drv['ok'] ? 'absent' : (!$ns['works'] ? 'mitigated' : $this->rootKernelStatus(true)));
+        $meaning = $fixed
+            ? 'This kernel is at or past the fixed release for its line (5.15.203 / 6.1.168 / 6.6.134 / 6.12.81 / 6.18.22 / 6.19.12 or later).'
+            : (!$drv['ok']
+                ? 'The driver the bug lives in is not in this kernel: ' . $drv['why'] . '.'
+                : (!$ns['works']
+                    ? 'virt_wifi is here, but an ordinary account cannot create the user and network namespaces the trigger needs, so it is closed on this host.'
+                    : 'virt_wifi is here and user namespaces are open (' . $drv['why'] . '), so the whole trigger is available to an ordinary account on this machine.'));
+        return['cve' => ['CVE-2026-31695'], 'status' => $status, 'meaning' => $meaning,
+               'kernel' => $k, 'driver' => $drv, 'ethtool' => $eth, 'ns' => $ns, 'fixed' => $fixed];
+    }
+    /* ── CVE-2026-64300, the perf/aux page that outlives its range ───────────
+       map_range() walks rb->aux_pages while holding only the per-event
+       mmap_mutex, but those fields belong to rb->aux_mutex. Two events sharing
+       one ring buffer through PERF_EVENT_IOC_SET_OUTPUT are therefore enough:
+       one allocates AUX pages, the other maps a range that was already freed,
+       and a VM_PFNMAP page carries no refcount - so the account keeps read and
+       write on physical memory the kernel has taken back. Found by the same
+       AI-assisted research that produced the net/sched zero-day, and fixed in
+       7.1.4 / 6.18.39. Unlike most kernel entries this one is gated by a
+       sysctl, and that is measured here too: perf_event_paranoid of 2 or less
+       is what lets an ordinary account open the events at all. */
+    private function rootPerfAuxStep(){
+        $k = php_uname('r');
+        $kv = $this->rootVnum($k);
+        $perf = $this->rootKbuildHas(['perf_mmap', 'rb_alloc_aux', 'perf_mmap_to_page'], ['PERF_EVENTS']);
+        $par = $this->sysInt('/proc/sys/kernel/perf_event_paranoid', 3);
+        /* -1 .. 2 : unprivileged perf_event_open is allowed. 3 shuts it. */
+        $perfOpen = $par <= 2;
+        /* the aux mapping this bug lives in only arrived in 6.14: an older
+           kernel is not "patched", it is simply not this code */
+        $tooOld = $this->rootVlt($kv, [6, 14, 0]);
+        $fixed = $tooOld || $this->rootKernelFixed($kv, [[6, 18, 39], [7, 1, 4]]);
+        $status = $fixed ? 'patched' : (!$perf['ok'] ? 'absent' : (!$perfOpen ? 'mitigated' : $this->rootKernelStatus(true)));
+        $meaning = $fixed
+            ? 'This kernel is at or past the fixed release (6.18.39 / 7.1.4) or is older than 6.14, where the aux mapping did not exist.'
+            : (!$perf['ok']
+                ? 'The perf ring-buffer code this bug lives in is not in this kernel: ' . $perf['why'] . '.'
+                : (!$perfOpen
+                    ? 'perf is here, but perf_event_paranoid is ' . $par . ', so an ordinary account cannot open the events the race needs: closed by a sysctl, not by a patch.'
+                    : 'perf is here and perf_event_paranoid is ' . $par . ', which lets an ordinary account open the events the race needs: ' . $perf['why'] . '.'));
+        return['cve' => ['CVE-2026-64300'], 'status' => $status, 'meaning' => $meaning,
+               'kernel' => $k, 'perf' => $perf, 'paranoid' => $par, 'fixed' => $fixed];
+    }
+    /* ── CVE-2026-43499, GhostLock ───────────────────────────────────────────
+       remove_waiter() in kernel/locking/rtmutex.c clears current->pi_blocked_on
+       where it should clear waiter->task's, on the proxy-lock rollback taken
+       from a futex requeue-PI deadlock. The waiter itself lives on a kernel
+       stack frame that has already unwound, so the next priority-inheritance
+       walk dereferences freed stack memory - and that is a write primitive, not
+       just a crash. Introduced in 2.6.39 and reachable for about fifteen years;
+       fixed by 3bfdc63936dd, first released in 7.1. Needs only FUTEX_PI: no
+       capability, no user namespace, no device. */
+    private function rootGhostLockStep(){
+        $k = php_uname('r');
+        $kv = $this->rootVnum($k);
+        /* the two functions the trigger must reach, plus the config that has to
+           be on for the requeue-PI path to exist at all */
+        $futex = $this->rootKbuildHas(['futex_wait_requeue_pi', 'rt_mutex_start_proxy_lock'], ['FUTEX_PI']);
+        $fixed = $this->rootKernelFixed($kv, [[5, 10, 259], [5, 15, 205], [6, 1, 175], [6, 6, 140], [6, 12, 86], [6, 18, 27], [7, 0, 4], [7, 1, 0]]);
+        $status = $fixed ? 'patched' : (!$futex['ok'] ? 'absent' : $this->rootKernelStatus(true));
+        $meaning = $fixed
+            ? 'This kernel is at or past the fixed release for its line (6.1.175 / 6.6.140 / 6.12.86 / 6.18.27 / 7.0.4 or later, or 7.1).'
+            : (!$futex['ok']
+                ? 'The priority-inheritance futex path this bug lives in is not in this kernel: ' . $futex['why'] . '.'
+                : 'The requeue-PI path is in this kernel and an ordinary account can call futex(2), so the trigger is reachable here with no capability and no namespace at all: ' . $futex['why'] . '.');
+        return['cve' => ['CVE-2026-43499'], 'status' => $status, 'meaning' => $meaning,
+               'kernel' => $k, 'futex' => $futex, 'fixed' => $fixed];
+    }
+    /* ── CVE-2026-68138, the tc rate table ───────────────────────────────────
+       qdisc_get_rtab() and qdisc_put_rtab() keep a global list and a non-atomic
+       reference count, historically serialised by RTNL - but the flower
+       classifier reaches them without that lock, so two namespaces racing the
+       same rate table get a double free, and a freed qdisc_rate_table is then
+       used. Public PoC since 2026-08-18, complete with a user namespace, fixed
+       by fb29e1b41052 in 7.1.6 / 7.2-rc5. */
+    private function rootRateTabStep(){
+        $k = php_uname('r');
+        $kv = $this->rootVnum($k);
+        /* both the shaping qdisc and the flower classifier have to be in the
+           build: the race is between them, and sch_api alone carries the
+           helpers for every other qdisc too */
+        $tc = $this->rootKbuildAll(['NET_SCH_TBF', 'NET_CLS_FLOWER']);
+        if($tc['ok'] === null)$tc = $this->rootKbuildHas(['qdisc_get_rtab', 'qdisc_put_rtab'], []);
+        $ns = $this->rootUserNamespaces();
+        $fixed = $this->rootKernelFixed($kv, [[7, 1, 6]]);
+        $status = $fixed ? 'patched' : (!$tc['ok'] ? 'absent' : (!$ns['works'] ? 'mitigated' : $this->rootKernelStatus(true)));
+        $meaning = $fixed
+            ? 'This kernel is at or past the fixed release (7.1.6, or 7.2-rc5 and later).'
+            : (!$tc['ok']
+                ? 'The traffic-control rate table code this bug needs is not in this kernel: ' . $tc['why'] . '.'
+                : (!$ns['works']
+                    ? 'The rate table code is here, but an ordinary account cannot create the namespaces the race needs, so it is closed on this host.'
+                    : 'The rate table code is here and the namespaces the race needs are open to an ordinary account here: ' . $tc['why'] . '.'));
+        return['cve' => ['CVE-2026-68138'], 'status' => $status, 'meaning' => $meaning,
+               'kernel' => $k, 'tc' => $tc, 'ns' => $ns, 'fixed' => $fixed];
+    }
+    /* ── CVE-2026-46333, the pidfd ssh-keysign flaw ──────────────────────────
+       During process exit a privileged process drops its credentials but keeps
+       its file descriptors for a moment, and __ptrace_may_access() lets the
+       ptrace check through in that window - so pidfd_getfd() steals an fd the
+       account could never open. Qualys demonstrated /etc/shadow through chage,
+       host keys through ssh-keysign and a root shell through pkexec. Fixed by
+       0e6a5821cbf5 in 6.12.94 / 6.18.19 / 7.0.2. This one needs no namespace and
+       no module: only the two kernel functions and a setuid program. */
+    private function rootPidfdStep(){
+        $k = php_uname('r');
+        $kv = $this->rootVnum($k);
+        $sys = $this->rootKbuildHas(['pidfd_getfd', '__ptrace_may_access'], []);
+        $fixed = $this->rootKernelFixed($kv, [[5, 10, 258], [5, 15, 204], [6, 1, 174], [6, 6, 139], [6, 12, 94], [6, 18, 19], [7, 0, 2]]);
+        $suids = $this->rootSuidList();
+        $targets = 0;
+        foreach((array)$suids as $b){
+            $b = is_array($b) ? (string)($b['path'] ?? '') : (string)$b;
+            if(preg_match('#/(chage|ssh-keysign|pkexec|passwd|sudo|su|mount|umount|expiry)$#', $b))$targets++;
+        }
+        $status = $fixed ? 'patched' : (!$sys['ok'] ? 'absent' : $this->rootKernelStatus(true));
+        $meaning = $fixed
+            ? 'This kernel is at or past the fixed release for its line (6.12.94 / 6.18.19 / 7.0.2 or later).'
+            : (!$sys['ok']
+                ? 'The two functions the window needs are not in this kernel: ' . $sys['why'] . '.'
+                : 'pidfd_getfd() and the ptrace check are both here (' . $sys['why'] . ') and ' . $targets
+                  . ' setuid programs on this machine are of the kind Qualys used (chage, ssh-keysign, pkexec), so a privileged process can be robbed of an open file in the moment it exits.');
+        return['cve' => ['CVE-2026-46333'], 'status' => $status, 'meaning' => $meaning,
+               'kernel' => $k, 'sys' => $sys, 'targets' => $targets, 'fixed' => $fixed];
+    }
+    private function rootCveName($id){
+        $m = ['virtwifi' => 'virt_wifi teardown', 'ghostlock' => 'GhostLock, the futex waiter',
+              'ratetab' => 'the tc rate-table race', 'pidfdkeysign' => 'the pidfd window at exit'];
+        return (string)($m[$id] ?? $id);
+    }
+    /* a userland flaw that is decided by the installed package version, with
+       the policy-file explanation the machine gives when it is a configuration
+       problem rather than a version problem */
+    private function rootUserlandRow($id, $name, $cve, $pkg, $fixedVer, $fixedText, $summary, $impact, $mitigation, $extra = []){
+        $f = $this->rootPkgFacts($pkg);
+        $status = $this->rootPkgStatus($f, $fixedVer);
+        $evidence = $this->rootPkgEvidence($f, $fixedVer, $fixedText);
+        foreach($extra as $e)$evidence[] = $e;
+        return ['id' => $id, 'name' => $name, 'cve' => $cve, 'year' => (int)substr((string)$cve[0], 5, 4),
+                'component' => $pkg, 'severity' => 'high', 'status' => $status, 'confidence' => 'high',
+                'summary' => $summary, 'impact' => $impact, 'evidence' => $evidence,
+                'mitigation' => $mitigation, 'fix' => $fixedText !== '' ? $fixedText : ('a fixed ' . $pkg),
+                'requires' => 'the ' . $pkg . ' package on this host, and an account allowed to reach it'];
+    }
+    /* every installed polkit action that says "anyone may do this" - the
+       configuration half of the polkit history, read as XML on disk */
+    private function rootPolkitPolicyScan(){
+        $dir = '/usr/share/polkit-1/actions';
+        $bad = [];
+        if(!@is_dir($dir))return['dir' => $dir, 'bad' => $bad, 'readable' => false];
+        foreach((array)@glob($dir . '/*.policy') as $f){
+            $x = $this->sysRead($f, 262144);
+            if($x === null)continue;
+            if(!preg_match('/<defaults>\s*<allow_any>\s*yes\s*<\/allow_any>/is', $x))continue;
+            /* allow_any=yes is legitimate for actions that only change a session
+               flag - logind's inhibit-block-shutdown is the everyday example. What
+               makes an action a route to root is that it also executes a program,
+               and polkit says so with this annotation. Both are required here. */
+            if(strpos($x, 'org.freedesktop.policykit.exec.path') === false)continue;
+            if(preg_match('/<action\s+id="([^"]+)"/i', $x, $m))$bad[] = basename($f) . ' (' . $m[1] . ')';
+        }
+        return['dir' => $dir, 'bad' => array_slice($bad, 0, 6), 'readable' => true];
+    }
     private function rootChannelNeeds($id){
         $php = $this->rootPhpBin();
         $mgr = $this->managerAccount();
@@ -13121,6 +13902,61 @@ exit 0
                 return['ok' => in_array($f['status'], ['vulnerable', 'check'], true),
                        'note' => $f['kernel'] . ' - ' . $f['meaning']
                            . ' [' . $f['mptcp']['note'] . '] [' . $f['ipo']['note'] . '] ' . $fire];
+            case 'virtwifi':{
+                $w = $this->rootVirtWifiStep();
+                return['ok' => in_array($w['status'], ['vulnerable', 'check'], true),
+                       'note' => $w['kernel'] . ' - ' . $w['meaning'] . ' [' . $w['driver']['why'] . '] [' . $w['ns']['max'] . ' user namespaces] Not fired: the trigger races a netdev teardown, and a lost race is a kernel crash.'];
+            }
+            case 'ghostlock':{
+                $g = $this->rootGhostLockStep();
+                return['ok' => in_array($g['status'], ['vulnerable', 'check'], true),
+                       'note' => $g['kernel'] . ' - ' . $g['meaning'] . ' [' . $g['futex']['why'] . '] Not fired: the primitive is a kernel stack use-after-free, and the panel does not race the kernel from a web request.'];
+            }
+            case 'ratetab':{
+                $t = $this->rootRateTabStep();
+                return['ok' => in_array($t['status'], ['vulnerable', 'check'], true),
+                       'note' => $t['kernel'] . ' - ' . $t['meaning'] . ' [' . $t['tc']['why'] . '] Not fired: a double free raced from inside the web server is a crash, not a shell.'];
+            }
+            case 'pidfdkeysign':{
+                $g = $this->rootPidfdStep();
+                return['ok' => in_array($g['status'], ['vulnerable', 'check'], true),
+                       'note' => $g['kernel'] . ' - ' . $g['meaning'] . ' [' . $g['sys']['why'] . '] Not fired: it races a process exit and reads kernel-side descriptor state.'];
+            }
+            case 'perfaux':{
+                $p = $this->rootPerfAuxStep();
+                return['ok' => in_array($p['status'], ['vulnerable', 'check'], true),
+                       'note' => $p['kernel'] . ' - ' . $p['meaning'] . ' [perf_event_paranoid=' . $p['paranoid'] . '] Not fired: the race maps a freed physical page, so a mistake is a corrupt machine.'];
+            }
+            case 'screenlpe':{
+                $b = $this->rootWhich('screen');
+                $set = ($b !== '' && (($this->privModeFile($b) & 04000) === 04000));
+                return['ok' => $set,
+                       'note' => $b === '' ? 'screen is not installed on this host, so there is no helper to abuse'
+                           : (!$set ? 'screen is at ' . $b . ' without a setuid bit, so the route is closed'
+                                    : 'screen is at ' . $b . ' with the setuid bit set, which is exactly the route')];
+            }
+            case 'polkitpolicy':{
+                $pol = $this->rootPolkitPolicyScan();
+                $pke = $this->rootWhich('pkexec');
+                return['ok' => ($pke !== '' && (bool)$pol['bad']),
+                       'note' => $pke === '' ? 'pkexec is not installed on this host'
+                           : ($pol['bad'] ? 'pkexec at ' . $pke . ' and actions open to anyone: ' . implode(', ', $pol['bad'])
+                                          : 'pkexec at ' . $pke . ' and no readable action grants allow_any=yes in ' . $pol['dir'])];
+            }
+            case 'machined':{
+                $f = $this->rootPkgFacts('systemd');
+                $m = $this->rootWhich('machinectl');
+                $old = ($f['raw'] !== '' && $this->rootDebLt($f['raw'], '259.4'));
+                return['ok' => ($m !== '' && $old),
+                       'note' => $m === '' ? 'machinectl is not installed, so the client half of the route is missing'
+                           : ($old ? 'systemd ' . $f['raw'] . ' is older than 259.4 with machinectl at ' . $m
+                                   : 'systemd ' . ($f['raw'] !== '' ? $f['raw'] : 'unknown') . ' is at or past 259.4')];
+            }
+            case 'sctp':
+                $sc = $this->rootSctpStep();
+                return['ok' => in_array($sc['status'], ['vulnerable', 'check'], true),
+                       'note' => $sc['kernel'] . ' - ' . $sc['meaning']
+                           . ' [' . $sc['reach']['note'] . '] Exploiting it is a kernel memory corruption, so this step reports reachability and is never fired from here.'];
             case 'suroute':
                 $su = $this->rootSuProbe();
                 return['ok' => !empty($su['ok']),
@@ -13430,6 +14266,29 @@ exit 0
                     return['ok' => false, 'note' => 'nothing to fire: ' . $f['meaning']];
                 return['ok' => false,
                        'note' => 'the flaw measures as ' . $f['status'] . ', but this step is not fired from a web request: a kernel memory-corruption exploit that races the TCP handshake from inside the web server is how a site goes down, not how it gets root. The catalogue row for ' . implode(', ', $f['cve']) . ' carries the exact fix, and the rest of the chain is not affected - only this one step is refused, and it says so here.'];
+            }
+            case 'screenlpe': case 'polkitpolicy': case 'machined':{
+                $n = $this->rootChannelNeeds($id);
+                return['ok' => false, 'note' => 'not fired from here: ' . (string)($n['note'] ?? '') . ' This route is taken by running the program itself, with the evidence above, not by planting anything.'];
+            }
+            case 'perfaux':{
+                $p = $this->rootPerfAuxStep();
+                return['ok' => false, 'note' => 'the flaw measures as ' . $p['status'] . '; when it is open it is still not fired from a web request, because mapping a freed physical page from inside the web server is how a machine is corrupted. The catalogue row carries the fix and the sysctl that closes it meanwhile.'];
+            }
+            case 'virtwifi': case 'ghostlock': case 'ratetab': case 'pidfdkeysign':{
+                $m = ['virtwifi' => $this->rootVirtWifiStep(), 'ghostlock' => $this->rootGhostLockStep(),
+                      'ratetab' => $this->rootRateTabStep(), 'pidfdkeysign' => $this->rootPidfdStep()][$id];
+                if(!in_array($m['status'], ['vulnerable', 'check'], true))
+                    return['ok' => false, 'note' => 'nothing to fire: ' . $m['meaning']];
+                return['ok' => false,
+                       'note' => 'the flaw measures as ' . $m['status'] . ' and its public exploit material is real, but this kind of kernel memory corruption is not fired from a web request: a lost race is a dead machine, not a failed attempt. The catalogue entry for ' . implode(', ', $m['cve']) . ' carries the exact fixed release - only this one step is refused, and it says so here.'];
+            }
+            case 'sctp':{
+                $sc = $this->rootSctpStep();
+                if(!in_array($sc['status'], ['vulnerable', 'check'], true))
+                    return['ok' => false, 'note' => 'nothing to fire: ' . $sc['meaning']];
+                return['ok' => false,
+                       'note' => 'the flaw measures as ' . $sc['status'] . ', but this step is not fired from a web request: the trigger is an ordered ASCONF pair that frees a transport and then uses it, and a mistake there takes the machine with it. The catalogue row for ' . implode(', ', $sc['cve']) . ' carries the fix (6.6.148 / 6.12.101 / 6.18.42 / 7.1.6) and the blacklist that closes it meanwhile - only this one step is refused, and it says so here.'];
             }
             case 'suroute':
                 return $this->rootChannelInstallSu();
