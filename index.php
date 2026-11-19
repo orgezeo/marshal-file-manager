@@ -1148,7 +1148,7 @@ function fm_ensure_terminal_font(){
    thing an admin can pause is the fully-automatic remote update check
    (see FM_UPDATE_PAUSED below), which is ON by default and resumes the
    moment the pause is lifted. */
-if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', ''); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
+if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/index.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file; rewritten in place by the Guardian panel, never by anonymous requests
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', true); // automatic update checks are enabled by default; the Guardian panel can pause them temporarily
 
 /* Prefer the database the project already uses. Replit and most modern PHP
@@ -31296,6 +31296,7 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .upd-wrap{padding:16px 18px 20px}
 .upd-hero{position:relative;overflow:hidden;border-radius:16px;padding:16px 18px;border:1px solid rgba(255,255,255,.09);background:radial-gradient(420px 160px at 4% -40%,rgba(52,211,153,.22),rgba(52,211,153,0) 66%),linear-gradient(135deg,rgba(9,32,26,.85),rgba(8,17,20,.75));display:flex;align-items:center;gap:14px}
 .upd-hero.is-new{border-color:rgba(52,211,153,.42);box-shadow:0 14px 34px rgba(16,185,129,.16)}
+.upd-hero.is-diff{border-color:rgba(251,191,36,.42);box-shadow:0 14px 34px rgba(245,158,11,.14)}
 .upd-hero.is-current{border-color:rgba(148,163,184,.28)}
 .upd-hero.is-off{border-color:rgba(251,191,36,.34)}
 .upd-hero-icon{flex:0 0 auto;width:46px;height:46px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(145deg,#6ee7b7,#10b981 60%,#065f46);color:#052e23;box-shadow:0 10px 22px rgba(16,185,129,.3),inset 0 1px 0 rgba(255,255,255,.5)}
@@ -31807,18 +31808,6 @@ a.nt:hover{color:var(--link)}
 :root[data-theme="win11"] .ti-w11,:root[data-theme="win11d"] .ti-w11{overflow:visible}
 
 /* ── the content panel must read as a surface in the dark pack too ────── */
-:root[data-theme="win11"] .main,:root[data-theme="win11d"] .main{border:1px solid var(--border);border-radius:8px}
-:root[data-theme="win11d"] .main{background:rgba(255,255,255,.045)}
-:root[data-theme="win11d"] .ft{background:rgba(255,255,255,.035)}
-:root[data-theme="win11d"] .ft thead tr{background:rgba(255,255,255,.06)}
-:root[data-theme="win11d"] .ft tbody tr:hover{background:rgba(255,255,255,.06)}
-:root[data-theme="win11d"] .ft tbody tr.selected{background:rgba(76,194,255,.14)}
-:root[data-theme="win11d"] .gi{background:rgba(255,255,255,.045);border-color:transparent}
-:root[data-theme="win11d"] .gi:hover{background:rgba(255,255,255,.075);border-color:rgba(255,255,255,.09)}
-:root[data-theme="win11d"] .nc .nm,:root[data-theme="win11d"] .gi-n{color:#fff}
-:root[data-theme="win11d"] .btn-g{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12);color:#fff}
-:root[data-theme="win11d"] .btn-g:hover{background:rgba(255,255,255,.09)}
-
 /* ════════════════════════════════════════════════════════════════════════
    WINDOWS 11 PACK - LOGIN SCREEN (desktop widths only, ≥861px) + SPINNER
    The wallpaper picker, the account picture and every existing login
@@ -33887,18 +33876,16 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
    ═══════════════════════════════════════════════════════════════════════ */
 :root[data-theme="win11"]{
   --bg:#f3f3f3;--panel:#f3f3f3;--surf:#f9f9f9;--raised:rgba(255,255,255,.7);--hov:rgba(0,0,0,.0373);--act:rgba(0,0,0,.0605);
-  /* Win11 light uses ~14% for structure lines and 21% for control strokes;
-     the previous 5.8% made button edges and table rules almost invisible. */
-  --border:rgba(0,0,0,.14);--border2:rgba(0,0,0,.21);
-  --t1:#1b1b1b;--t2:rgba(0,0,0,.68);--t3:rgba(0,0,0,.52);--link:#0067c0;
+  --border:rgba(0,0,0,.0578);--border2:rgba(0,0,0,.16);
+  --t1:#1b1b1b;--t2:rgba(0,0,0,.6063);--t3:rgba(0,0,0,.4458);--link:#0067c0;
   --indigo:#0067c0;--indigo2:#0067c0;--check:#0067c0;--check-border:#0067c0;
   --green:#0f7b0f;--amber:#9d5d00;--red:#c42b1c;--blue:#0067c0;--pink:#c239b3;--purple:#8764b8;
   --r:4px;--rlg:8px;--rxl:8px;
   --spring:cubic-bezier(.1,.9,.2,1);--out:cubic-bezier(.1,.9,.2,1);
   --fw-regular:400;--fw-medium:400;--fw-strong:600;--fw-muted:400;
-  --field:rgba(255,255,255,.7);--fieldb:rgba(0,0,0,.14);--fieldb-h:rgba(0,0,0,.26);--fieldh:rgba(0,0,0,.0373);
+  --field:rgba(255,255,255,.7);--fieldb:rgba(0,0,0,.0578);--fieldb-h:rgba(0,0,0,.16);--fieldh:rgba(0,0,0,.0373);
   --wm-accent:#0067c0;--wm-accent-h:#1983d5;--wm-accent-p:#005ba4;
-  --wm-stroke-t:rgba(0,0,0,.14);--wm-stroke-b:rgba(0,0,0,.21);
+  --wm-stroke-t:rgba(0,0,0,.0578);--wm-stroke-b:rgba(0,0,0,.16);
   --wm-card:rgba(255,255,255,.7);--wm-card2:rgba(255,255,255,.5);
   --wm-fill-h:rgba(0,0,0,.0373);--wm-fill-p:rgba(0,0,0,.0241);
   --wm-close:#c42b1c;--wm-close-h:#c42b1c;
@@ -33924,22 +33911,22 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11"] .wm-title{
   grid-area:wm;display:flex;align-items:center;gap:10px;height:32px;padding:0 0 0 12px;
   background:rgba(243,243,243,.82);-webkit-backdrop-filter:blur(30px) saturate(160%);
-  backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(0,0,0,.12);
+  backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(0,0,0,.0578);
   -webkit-user-select:none;user-select:none;position:relative;z-index:300;overflow:hidden;
 }
 .wm-title-ico{width:16px;height:16px;flex-shrink:0;border-radius:4px;display:grid;place-items:center}
-.wm-title-txt{flex:1 1 auto;min-width:0;font-size:12px;font-weight:400;color:rgba(0,0,0,.6063);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.wm-title-hint{flex:0 1 auto;min-width:0;padding:0 12px;font-size:11px;color:rgba(0,0,0,.4458);white-space:nowrap;overflow:hidden}
+:root[data-theme="win11"] .wm-title-txt{flex:1 1 auto;min-width:0;font-size:12px;font-weight:400;color:rgba(0,0,0,.6063);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+:root[data-theme="win11"] .wm-title-hint{flex:0 1 auto;min-width:0;padding:0 12px;font-size:11px;color:rgba(0,0,0,.4458);white-space:nowrap;overflow:hidden}
 /* caption buttons: 46x32, hover fill, red close — exactly the Win11 metrics */
 .wm-cap{display:flex;height:32px;margin-left:auto;flex:0 0 auto;align-self:flex-start}
-.wm-cap-btn{width:46px;height:32px;display:grid;place-items:center;border:0;background:transparent;color:#1b1b1b;cursor:default;padding:0;
+:root[data-theme="win11"] .wm-cap-btn{width:46px;height:32px;display:grid;place-items:center;border:0;background:transparent;color:#1b1b1b;cursor:default;padding:0;
   transition:background .09s linear,color .09s linear;outline:none;-webkit-appearance:none;appearance:none}
 .wm-cap-btn svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:1}
-.wm-cap-btn:hover{background:rgba(0,0,0,.0605)}
-.wm-cap-btn:active{background:rgba(0,0,0,.0241)}
+:root[data-theme="win11"] .wm-cap-btn:hover{background:rgba(0,0,0,.0605)}
+:root[data-theme="win11"] .wm-cap-btn:active{background:rgba(0,0,0,.0241)}
 .wm-cap-btn.wm-cap-close:hover{background:var(--wm-close);color:#fff}
 .wm-cap-btn.wm-cap-close:active{background:rgba(196,43,28,.9);color:#fff}
-.wm-cap-btn:focus-visible{outline:2px solid #1b1b1b;outline-offset:-4px;border-radius:2px}
+:root[data-theme="win11"] .wm-cap-btn:focus-visible{outline:2px solid #1b1b1b;outline-offset:-4px;border-radius:2px}
 
 /* ── TOP BAR (command area) ──────────────────────────────────────────── */
 :root[data-theme="win11"] .topbar{background:rgba(249,249,249,.72);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(0,0,0,.0578);padding:0 10px;gap:8px}
@@ -33997,8 +33984,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11"] .content::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.35);background-clip:content-box}
 
 /* ── FILE LIST (Details view) ────────────────────────────────────────── */
-:root[data-theme="win11"] .ft{border-collapse:separate;border-spacing:0;border:1px solid rgba(0,0,0,.12);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.5)}
-:root[data-theme="win11"] .ft thead tr{background:rgba(255,255,255,.7);border-bottom:1px solid rgba(0,0,0,.14)}
+:root[data-theme="win11"] .ft{border-collapse:separate;border-spacing:0;border:1px solid rgba(0,0,0,.0578);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.5)}
+:root[data-theme="win11"] .ft thead tr{background:rgba(255,255,255,.7);border-bottom:1px solid rgba(0,0,0,.0803)}
 :root[data-theme="win11"] .ft th{
   padding:6px 10px;font-size:12px;font-weight:400;text-transform:none;letter-spacing:0;
   color:rgba(0,0,0,.6063);border-right:1px solid rgba(0,0,0,.0578);
@@ -34150,39 +34137,46 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   color:#1b1b1b;font-size:13px;box-shadow:var(--wm-shadow-win);
 }
 
-/* ── MFM THEME gallery (the tool itself) ─────────────────────────────── */
+/* gallery tokens - light */
+:root{--gal-surf:#f9f9f9;--gal-card:rgba(255,255,255,.7);--gal-card-h:rgba(249,249,249,.9);
+  --gal-line:rgba(0,0,0,.08);--gal-line2:rgba(0,0,0,.16);
+  --gal-t1:#1b1b1b;--gal-t2:rgba(0,0,0,.6063);--gal-accent:#0067c0;--gal-badge:rgba(0,103,192,.1);
+  --gal-shadow:rgba(0,0,0,.08);--gal-shadow-win:rgba(0,0,0,.19)}
+
+/* ── MFM THEME gallery ──────────────────────────────────────────────────
+   One block, not two. The colours come from the gal-* tokens above, so this
+   dialog reads the same in every theme and the packs only re-point tokens.
+   Writing it twice is exactly what let a light copy override the dark one. */
 .mfm-theme-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .mfm-theme-card{
-  position:relative;border:1px solid rgba(0,0,0,.0578);border-bottom-color:rgba(0,0,0,.16);border-radius:6px;
-  background:rgba(255,255,255,.7);padding:10px;cursor:pointer;text-align:left;font-family:inherit;
+  position:relative;border:1px solid var(--gal-line);border-bottom-color:var(--gal-line2);border-radius:6px;
+  background:var(--gal-card);padding:10px;cursor:pointer;text-align:left;font-family:inherit;
   transition:background .1s linear,box-shadow .1s linear;display:flex;flex-direction:column;gap:9px;
 }
-.mfm-theme-card:hover{background:rgba(249,249,249,.9);box-shadow:0 2px 8px rgba(0,0,0,.08)}
-.mfm-theme-card:focus-visible{outline:2px solid #0067c0;outline-offset:2px}
-.mfm-theme-card.is-on{border-color:#0067c0;box-shadow:inset 0 0 0 1px #0067c0}
-.mfm-theme-shot{height:104px;border-radius:4px;overflow:hidden;position:relative;border:1px solid rgba(0,0,0,.08)}
+.mfm-theme-card:hover{background:var(--gal-card-h);box-shadow:0 2px 8px var(--gal-shadow)}
+.mfm-theme-card:focus-visible{outline:2px solid var(--gal-accent);outline-offset:2px}
+.mfm-theme-card.is-on{border-color:var(--gal-accent);box-shadow:inset 0 0 0 1px var(--gal-accent)}
+.mfm-theme-shot{height:104px;border-radius:4px;overflow:hidden;position:relative;border:1px solid var(--gal-line)}
 .mfm-theme-shot .t-bar{height:14px;display:flex;align-items:center;gap:3px;padding:0 5px}
 .mfm-theme-shot .t-body{display:flex;height:calc(100% - 14px)}
 .mfm-theme-shot .t-side{width:34px}
 .mfm-theme-shot .t-lines{flex:1;padding:6px;display:flex;flex-direction:column;gap:5px}
 .mfm-theme-shot .t-line{height:6px;border-radius:2px}
 .mfm-theme-dot{width:5px;height:5px;border-radius:50%}
-.mfm-theme-name{font-size:13px;font-weight:600;color:#1b1b1b;display:flex;align-items:center;gap:7px}
-.mfm-theme-desc{font-size:11.5px;color:rgba(0,0,0,.6063);line-height:1.45}
-.mfm-theme-badge{margin-left:auto;font-size:10px;font-weight:600;color:#0067c0;background:rgba(0,103,192,.1);border-radius:3px;padding:2px 6px}
-.mfm-theme-foot{margin-top:14px;padding-top:10px;border-top:1px solid rgba(0,0,0,.0578);font-size:11.5px;color:rgba(0,0,0,.4458);line-height:1.6}
+.mfm-theme-name{font-size:13px;font-weight:600;color:var(--gal-t1);display:flex;align-items:center;gap:7px}
+.mfm-theme-desc{font-size:11.5px;color:var(--gal-t2);line-height:1.45}
+.mfm-theme-badge{margin-left:auto;font-size:10px;font-weight:600;color:var(--gal-accent);background:var(--gal-badge);border-radius:3px;padding:2px 6px}
+.mfm-theme-foot{margin-top:14px;padding-top:10px;border-top:1px solid var(--gal-line);font-size:11.5px;color:var(--gal-t2);line-height:1.6}
 .mfm-theme-gallery{display:none}
-:root[data-theme="win11"] .mfm-theme-card{border-radius:6px}
 @media(max-width:640px){.mfm-theme-grid{grid-template-columns:1fr}}
-/* the gallery dialog must look the same whichever theme is active */
-.mod-ov#mfmThemeOv .mod{background:#f9f9f9;border:1px solid rgba(0,0,0,.08);border-bottom-color:rgba(0,0,0,.16);border-radius:8px;box-shadow:0 32px 64px rgba(0,0,0,.19),0 2px 21px rgba(0,0,0,.15);color:#1b1b1b}
-.mod-ov#mfmThemeOv .mod-head{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 0 0 14px;border-bottom:1px solid rgba(0,0,0,.06);background:transparent}
-.mod-ov#mfmThemeOv .mod-title{font-size:13px;font-weight:600;color:#1b1b1b}
-.mod-ov#mfmThemeOv .mod-icon{background:transparent}
-.mod-ov#mfmThemeOv .mod-icon svg{stroke:#0067c0}
-.mod-ov#mfmThemeOv .mod-body{padding:0;background:#f9f9f9}
+.mod-ov#mfmThemeOv .mod{background:var(--gal-surf);border:1px solid var(--gal-line);border-bottom-color:var(--gal-line2);border-radius:8px;box-shadow:0 32px 64px var(--gal-shadow-win),0 2px 21px var(--gal-shadow);color:var(--gal-t1)}
+.mod-ov#mfmThemeOv .mod .mod-head{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 0 0 14px;border-bottom:1px solid rgba(0,0,0,.06);background:transparent}
+.mod-ov#mfmThemeOv .mod .mod-title{font-size:13px;font-weight:600;color:var(--gal-t1)}
+.mod-ov#mfmThemeOv .mod .mod-icon{background:transparent}
+.mod-ov#mfmThemeOv .mod .mod-icon svg{stroke:var(--gal-accent)}
+.mod-ov#mfmThemeOv .mod .mod-body{padding:0;background:var(--gal-surf);color:var(--gal-t1)}
 .mod-ov#mfmThemeOv .mfm-theme-head{padding:16px 16px 0}
-.mod-ov#mfmThemeOv .mod-head .wm-cap{margin-left:auto}
+.mod-ov#mfmThemeOv .mod .mod-head .wm-cap{margin-left:auto}
 
 /* ── RESPONSIVE: keep the title bar row on small screens ─────────────── */
 @media(max-width:860px){
@@ -34194,10 +34188,13 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   :root[data-theme="win11"] .wm-title-txt{font-size:11.5px}
   :root[data-theme="win11"] .wm-cap-btn{width:44px}
 }
+
+/* ── Windows 11 DARK ──────────────────────────────────────────────────
+   The light pack above, in Microsoft's dark palette. Every rule that follows
+   is the light rule with its surface and text polarity flipped: the geometry,
+   the radii, the spacing, the font sizes and the alpha steps are unchanged. */
 :root[data-theme="win11d"]{
-  --bg:#202020;--panel:#202020;--surf:#2b2b2b;--raised:rgba(255,255,255,.0512);--hov:rgba(255,255,255,.0605);--act:rgba(255,255,255,.0419);
-  /* Win11 light uses ~14% for structure lines and 21% for control strokes;
-     the previous 5.8% made button edges and table rules almost invisible. */
+  --bg:#202020;--panel:#202020;--surf:#2b2b2b;--raised:rgba(255,255,255,.0605);--hov:rgba(255,255,255,.0373);--act:rgba(255,255,255,.0605);
   --border:rgba(255,255,255,.0933);--border2:rgba(255,255,255,.1409);
   --t1:#ffffff;--t2:rgba(255,255,255,.786);--t3:rgba(255,255,255,.5442);--link:#4cc2ff;
   --indigo:#4cc2ff;--indigo2:#4cc2ff;--check:#4cc2ff;--check-border:#4cc2ff;
@@ -34205,14 +34202,14 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   --r:4px;--rlg:8px;--rxl:8px;
   --spring:cubic-bezier(.1,.9,.2,1);--out:cubic-bezier(.1,.9,.2,1);
   --fw-regular:400;--fw-medium:400;--fw-strong:600;--fw-muted:400;
-  --field:rgba(255,255,255,.0605);--fieldb:rgba(255,255,255,.0933);--fieldb-h:rgba(255,255,255,.5442);--fieldh:rgba(255,255,255,.0419);
+  --field:rgba(255,255,255,.0605);--fieldb:rgba(255,255,255,.0933);--fieldb-h:rgba(255,255,255,.5442);--fieldh:rgba(255,255,255,.0373);
   --wm-accent:#4cc2ff;--wm-accent-h:#6fd0ff;--wm-accent-p:#3aa8e0;
   --wm-stroke-t:rgba(255,255,255,.0933);--wm-stroke-b:rgba(255,255,255,.1409);
-  --wm-card:rgba(255,255,255,.0512);--wm-card2:rgba(255,255,255,.0353);
-  --wm-fill-h:rgba(255,255,255,.0605);--wm-fill-p:rgba(255,255,255,.0419);
+  --wm-card:rgba(255,255,255,.0605);--wm-card2:rgba(255,255,255,.0419);
+  --wm-fill-h:rgba(255,255,255,.0373);--wm-fill-p:rgba(255,255,255,.0241);
   --wm-close:#c42b1c;--wm-close-h:#c42b1c;
-  --wm-shadow:0 2px 4px rgba(255,255,255,0.9),0 1px 2px rgba(255,255,255,0.9);
-  --wm-shadow-win:0 32px 64px rgba(255,255,255,0.9),0 2px 21px rgba(255,255,255,0.9);
+  --wm-shadow:0 2px 4px rgba(0,0,0,.24),0 1px 2px rgba(0,0,0,.32);
+  --wm-shadow-win:0 32px 64px rgba(0,0,0,.56),0 2px 21px rgba(0,0,0,.4);
   --sw:248px;--th:48px;--bh:24px;
 }
 /* ── base surface: Mica (a soft, desaturated desktop tint) ───────────── */
@@ -34221,7 +34218,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   font-size:14px;letter-spacing:0;background:
     radial-gradient(1200px 620px at 12% -10%,#1b2a3a 0%,rgba(27,42,58,0) 62%),
     radial-gradient(1000px 700px at 108% 6%,#2a2438 0%,rgba(42,36,56,0) 58%),
-    linear-gradient(160deg,#202020 0%,#1c1c1c 46%,#232323 100%);
+    linear-gradient(160deg,#202020 0%,#202020 46%,#232323 100%);
   background-attachment:fixed;color:var(--t1);
   -webkit-font-smoothing:antialiased;
 }
@@ -34233,102 +34230,102 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11d"] .wm-title{
   grid-area:wm;display:flex;align-items:center;gap:10px;height:32px;padding:0 0 0 12px;
   background:rgba(32,32,32,.82);-webkit-backdrop-filter:blur(30px) saturate(160%);
-  backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(255,255,255,.0933);
+  backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(255,255,255,.0578);
   -webkit-user-select:none;user-select:none;position:relative;z-index:300;overflow:hidden;
 }
 .wm-title-ico{width:16px;height:16px;flex-shrink:0;border-radius:4px;display:grid;place-items:center}
-.wm-title-txt{flex:1 1 auto;min-width:0;font-size:12px;font-weight:400;color:rgba(255,255,255,0.9);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.wm-title-hint{flex:0 1 auto;min-width:0;padding:0 12px;font-size:11px;color:rgba(255,255,255,0.9);white-space:nowrap;overflow:hidden}
+:root[data-theme="win11d"] .wm-title-txt{flex:1 1 auto;min-width:0;font-size:12px;font-weight:400;color:rgba(255,255,255,.6063);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+:root[data-theme="win11d"] .wm-title-hint{flex:0 1 auto;min-width:0;padding:0 12px;font-size:11px;color:rgba(255,255,255,.4458);white-space:nowrap;overflow:hidden}
 /* caption buttons: 46x32, hover fill, red close — exactly the Win11 metrics */
 .wm-cap{display:flex;height:32px;margin-left:auto;flex:0 0 auto;align-self:flex-start}
-.wm-cap-btn{width:46px;height:32px;display:grid;place-items:center;border:0;background:transparent;color:#ffffff;cursor:default;padding:0;
+:root[data-theme="win11d"] .wm-cap-btn{width:46px;height:32px;display:grid;place-items:center;border:0;background:transparent;color:#ffffff;cursor:default;padding:0;
   transition:background .09s linear,color .09s linear;outline:none;-webkit-appearance:none;appearance:none}
 .wm-cap-btn svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:1}
-.wm-cap-btn:hover{background:rgba(255,255,255,0.9)}
-.wm-cap-btn:active{background:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .wm-cap-btn:hover{background:rgba(255,255,255,.0605)}
+:root[data-theme="win11d"] .wm-cap-btn:active{background:rgba(255,255,255,.0241)}
 .wm-cap-btn.wm-cap-close:hover{background:var(--wm-close);color:#fff}
 .wm-cap-btn.wm-cap-close:active{background:rgba(196,43,28,.9);color:#fff}
-.wm-cap-btn:focus-visible{outline:2px solid #ffffff;outline-offset:-4px;border-radius:2px}
+:root[data-theme="win11d"] .wm-cap-btn:focus-visible{outline:2px solid #ffffff;outline-offset:-4px;border-radius:2px}
 
 /* ── TOP BAR (command area) ──────────────────────────────────────────── */
-:root[data-theme="win11d"] .topbar{background:rgba(39,39,39,.72);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(255,255,255,0.9);padding:0 10px;gap:8px}
+:root[data-theme="win11d"] .topbar{background:rgba(32,32,32,.80);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(255,255,255,.0578);padding:0 10px;gap:8px}
 :root[data-theme="win11d"] .brand-icon{width:26px;height:26px;border-radius:6px;background:linear-gradient(135deg,#4cc2ff,#4cc2ff);display:grid;place-items:center;box-shadow:none}
 :root[data-theme="win11d"] .brand-icon img{width:100%;height:100%;object-fit:contain;border-radius:6px}
-:root[data-theme="win11d"] .dv{background:rgba(255,255,255,0.9);height:20px}
-:root[data-theme="win11d"] .bc a{color:rgba(255,255,255,0.9);font-size:13px;border-radius:4px;padding:3px 6px;transition:background .1s,color .1s}
-:root[data-theme="win11d"] .bc a:hover{background:rgba(255,255,255,0.9);color:#ffffff}
+:root[data-theme="win11d"] .dv{background:rgba(255,255,255,.0803);height:20px}
+:root[data-theme="win11d"] .bc a{color:rgba(255,255,255,.6063);font-size:13px;border-radius:4px;padding:3px 6px;transition:background .1s,color .1s}
+:root[data-theme="win11d"] .bc a:hover{background:rgba(255,255,255,.0373);color:#ffffff}
 :root[data-theme="win11d"] .bc a.last{color:#ffffff;font-weight:600}
-:root[data-theme="win11d"] .bc-sep{color:rgba(255,255,255,0.9);font-size:12px}
-:root[data-theme="win11d"] .tsearch{height:32px;background:rgba(255,255,255,.0512);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;box-shadow:none;padding:0 4px 0 9px}
-:root[data-theme="win11d"] .tsearch:focus-within{background:#2b2b2b;border-bottom:2px solid var(--wm-accent);border-color:var(--wm-accent);box-shadow:none;padding-bottom:0}
-:root[data-theme="win11d"] .tsearch svg{stroke:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .bc-sep{color:rgba(255,255,255,.4458);font-size:12px}
+:root[data-theme="win11d"] .tsearch{height:32px;background:rgba(255,255,255,.0605);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;box-shadow:none;padding:0 4px 0 9px}
+:root[data-theme="win11d"] .tsearch:focus-within{background:rgba(255,255,255,.0837);border-bottom:2px solid var(--wm-accent);border-color:var(--wm-accent);box-shadow:none;padding-bottom:0}
+:root[data-theme="win11d"] .tsearch svg{stroke:rgba(255,255,255,.6063)}
 :root[data-theme="win11d"] .tsearch input{color:#ffffff;font-size:13px}
-:root[data-theme="win11d"] .tsearch input::placeholder{color:rgba(255,255,255,0.9)}
-:root[data-theme="win11d"] .tsearch-panel{background:#2b2b2b;border:1px solid rgba(255,255,255,0.9);border-bottom-color:rgba(255,255,255,0.9);border-radius:8px;box-shadow:var(--wm-shadow-win);padding:4px}
+:root[data-theme="win11d"] .tsearch input::placeholder{color:rgba(255,255,255,.4458)}
+:root[data-theme="win11d"] .tsearch-panel{background:#2b2b2b;border:1px solid rgba(0,0,0,.0578);border-bottom-color:rgba(0,0,0,.16);border-radius:8px;box-shadow:var(--wm-shadow-win);padding:4px}
 :root[data-theme="win11d"] .tb-right {gap:4px}
 :root[data-theme="win11d"] .topbar .tb-right .btn-icon,.topbar .btn-icon{width:32px;min-width:32px;height:32px;border-radius:4px}
 
 /* ── SIDEBAR (NavigationView pane) ───────────────────────────────────── */
-:root[data-theme="win11d"] .sidebar{background:transparent;border-right:1px solid rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .sidebar{background:transparent;border-right:1px solid rgba(255,255,255,.0578)}
 :root[data-theme="win11d"] .sb-sec{padding:0}
-:root[data-theme="win11d"] .sb-label{font-size:12px;font-weight:600;text-transform:none;letter-spacing:0;color:rgba(255,255,255,0.9);padding:14px 16px 6px}
+:root[data-theme="win11d"] .sb-label{font-size:12px;font-weight:600;text-transform:none;letter-spacing:0;color:rgba(255,255,255,.6063);padding:14px 16px 6px}
 :root[data-theme="win11d"] .sb-item{
   position:relative;min-height:36px;padding:0 12px;margin:2px 6px;border-radius:4px;border:0;
   color:#ffffff;font-size:14px;font-weight:400;gap:14px;background:transparent;transition:background .1s linear;
 }
 :root[data-theme="win11d"] .sb-item svg{width:16px;height:16px;stroke:#ffffff;stroke-width:1.5;transition:none}
-:root[data-theme="win11d"] .sb-item:hover{background:rgba(255,255,255,0.9);color:#ffffff;transform:none}
+:root[data-theme="win11d"] .sb-item:hover{background:rgba(255,255,255,.0373);color:#ffffff;transform:none}
 :root[data-theme="win11d"] .sb-item:hover svg{transform:none}
-:root[data-theme="win11d"] .sb-item:active{background:rgba(255,255,255,0.9);transform:none;color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .sb-item:active{background:rgba(255,255,255,.0241);transform:none;color:rgba(255,255,255,.6063)}
 /* the Windows 11 selection pill: a 3px accent bar hugging the left edge */
-:root[data-theme="win11d"] .sb-item.sb-active{background:rgba(255,255,255,0.9);font-weight:600}
+:root[data-theme="win11d"] .sb-item.sb-active{background:rgba(255,255,255,.0373);font-weight:600}
 :root[data-theme="win11d"] .sb-item.sb-active::before{content:'';position:absolute;left:-6px;top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:2px;background:var(--wm-accent)}
-:root[data-theme="win11d"] .sb-div{height:1px;background:rgba(255,255,255,0.9);margin:8px 12px}
+:root[data-theme="win11d"] .sb-div{height:1px;background:rgba(255,255,255,.0803);margin:8px 12px}
 :root[data-theme="win11d"] .sb-flink{border-radius:4px;font-size:13px;color:#ffffff;padding:0 10px;min-height:32px}
 :root[data-theme="win11d"] .sb-flink svg{stroke:#ffffff;stroke-width:1.5}
-:root[data-theme="win11d"] .sb-flink:hover{background:rgba(255,255,255,0.9);color:#ffffff;transform:none}
-:root[data-theme="win11d"] .sb-empty{color:rgba(255,255,255,0.9);font-style:normal;font-size:12px}
-:root[data-theme="win11d"] .sb-footer{border-top:1px solid rgba(255,255,255,0.9);background:transparent}
-:root[data-theme="win11d"] .disk-lbl{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;color:rgba(255,255,255,0.9);font-size:11px}
-:root[data-theme="win11d"] .disk-tr{background:rgba(255,255,255,0.9);height:3px;border-radius:2px}
+:root[data-theme="win11d"] .sb-flink:hover{background:rgba(255,255,255,.0373);color:#ffffff;transform:none}
+:root[data-theme="win11d"] .sb-empty{color:rgba(255,255,255,.4458);font-style:normal;font-size:12px}
+:root[data-theme="win11d"] .sb-footer{border-top:1px solid rgba(255,255,255,.0803);background:transparent}
+:root[data-theme="win11d"] .disk-lbl{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;color:rgba(255,255,255,.6063);font-size:11px}
+:root[data-theme="win11d"] .disk-tr{background:rgba(255,255,255,.0803);height:3px;border-radius:2px}
 :root[data-theme="win11d"] .disk-fi{background:var(--wm-accent);border-radius:2px}
-:root[data-theme="win11d"] .disk-fi.warn{background:#9d5d00}
+:root[data-theme="win11d"] .disk-fi.warn{background:#fce100}
 :root[data-theme="win11d"] .disk-fi.crit{background:var(--wm-close)}
 :root[data-theme="win11d"] .sb-item .eb,:root[data-theme="win11d"] .sb-tool-name{font-size:13px}
 
 /* ── MAIN AREA + COMMAND BAR ─────────────────────────────────────────── */
-:root[data-theme="win11d"] .main{background:rgba(255,255,255,.0512)}
-:root[data-theme="win11d"] .toolbar{background:transparent;border-bottom:1px solid rgba(255,255,255,0.9);padding:8px 12px}
+:root[data-theme="win11d"] .main{background:rgba(255,255,255,.0419)}
+:root[data-theme="win11d"] .toolbar{background:transparent;border-bottom:1px solid rgba(255,255,255,.0578);padding:8px 12px}
 :root[data-theme="win11d"] .content{padding:8px 12px 12px}
 :root[data-theme="win11d"] .content::-webkit-scrollbar{width:12px}
 :root[data-theme="win11d"] .content::-webkit-scrollbar-track{background:transparent}
-:root[data-theme="win11d"] .content::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.9);border:4px solid transparent;background-clip:content-box;border-radius:6px;min-height:34px}
-:root[data-theme="win11d"] .content::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.9);background-clip:content-box}
+:root[data-theme="win11d"] .content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border:4px solid transparent;background-clip:content-box;border-radius:6px;min-height:34px}
+:root[data-theme="win11d"] .content::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.35);background-clip:content-box}
 
 /* ── FILE LIST (Details view) ────────────────────────────────────────── */
-:root[data-theme="win11d"] .ft{border-collapse:separate;border-spacing:0;border:1px solid rgba(255,255,255,.0933);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.0512)}
-:root[data-theme="win11d"] .ft thead tr{background:rgba(255,255,255,.0512);border-bottom:1px solid rgba(255,255,255,.0933)}
+:root[data-theme="win11d"] .ft{border-collapse:separate;border-spacing:0;border:1px solid rgba(255,255,255,.0578);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.0419)}
+:root[data-theme="win11d"] .ft thead tr{background:rgba(255,255,255,.0605);border-bottom:1px solid rgba(255,255,255,.0803)}
 :root[data-theme="win11d"] .ft th{
   padding:6px 10px;font-size:12px;font-weight:400;text-transform:none;letter-spacing:0;
-  color:rgba(255,255,255,0.9);border-right:1px solid rgba(255,255,255,0.9);
+  color:rgba(255,255,255,.6063);border-right:1px solid rgba(255,255,255,.0578);
 }
 :root[data-theme="win11d"] .ft th:last-child{border-right:0}
-:root[data-theme="win11d"] .ft th:hover{background:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .ft th:hover{background:rgba(255,255,255,.0373)}
 :root[data-theme="win11d"] .ft tbody tr{border-bottom:0;animation:none;background:transparent}
-:root[data-theme="win11d"] .ft tbody tr:hover{background:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .ft tbody tr:hover{background:rgba(255,255,255,.0373)}
 :root[data-theme="win11d"] .ft tbody tr.selected{background:rgba(0,103,192,.09);box-shadow:inset 0 0 0 1px rgba(0,103,192,.4)}
 :root[data-theme="win11d"] .ft tbody tr:focus{outline:1px solid var(--wm-accent);outline-offset:-1px}
-:root[data-theme="win11d"] .ft td{padding:5px 10px;border-right:1px solid rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .ft td{padding:5px 10px;border-right:1px solid rgba(255,255,255,.035)}
 :root[data-theme="win11d"] .ft td:last-child{border-right:0}
 :root[data-theme="win11d"] .nt{font-size:14px;font-weight:400;color:#ffffff;max-width:260px}
 :root[data-theme="win11d"] a.nt:hover{color:#ffffff;text-decoration:underline}
-:root[data-theme="win11d"] .mt,:root[data-theme="win11d"] .sz{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:12px;color:rgba(255,255,255,0.9)}
-:root[data-theme="win11d"] .mono{font-family:'Cascadia Mono',ui-monospace,'Consolas',monospace;font-size:11.5px;background:transparent;color:rgba(255,255,255,0.9);padding:0}
-:root[data-theme="win11d"] .eb{background:rgba(255,255,255,0.9);color:rgba(255,255,255,0.9);border-radius:3px;font-family:'Segoe UI Variable Text','Segoe UI',sans-serif;font-size:10px;font-weight:600}
-:root[data-theme="win11d"] .own-name{color:rgba(255,255,255,0.9);font-size:12px}
+:root[data-theme="win11d"] .mt,:root[data-theme="win11d"] .sz{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:12px;color:rgba(255,255,255,.6063)}
+:root[data-theme="win11d"] .mono{font-family:'Cascadia Mono',ui-monospace,'Consolas',monospace;font-size:11.5px;background:transparent;color:rgba(255,255,255,.6063);padding:0}
+:root[data-theme="win11d"] .eb{background:rgba(255,255,255,.0605);color:rgba(255,255,255,.6063);border-radius:3px;font-family:'Segoe UI Variable Text','Segoe UI',sans-serif;font-size:10px;font-weight:600}
+:root[data-theme="win11d"] .own-name{color:rgba(255,255,255,.6063);font-size:12px}
 :root[data-theme="win11d"] .own-cell{background:transparent;border:0;padding:0}
 :root[data-theme="win11d"] .own-me{background:rgba(0,103,192,.1);color:#4cc2ff}
-:root[data-theme="win11d"] .tag-dot{border-radius:50%;box-shadow:0 0 0 1px rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .tag-dot{border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.16)}
 /* file "icon tile": Win11 shows a bare, large glyph — no tinted square */
 :root[data-theme="win11d"] .ib,:root[data-theme="win11d"] .gi-ic{
   background:transparent!important;border-radius:0;width:24px;height:24px;
@@ -34338,46 +34335,46 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11d"] .nc{gap:10px}
 :root[data-theme="win11d"] .gi-ic{width:48px;height:48px}
 :root[data-theme="win11d"] .gi-ic .ti{width:44px;height:44px}
-:root[data-theme="win11d"] .gi-th{width:44px;height:44px;border-radius:4px;box-shadow:0 0 0 1px rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .gi-th{width:44px;height:44px;border-radius:4px;box-shadow:0 0 0 1px rgba(0,0,0,.08)}
 :root[data-theme="win11d"] .gi{border-radius:4px;border:1px solid transparent}
-:root[data-theme="win11d"] .gi:hover{background:rgba(255,255,255,0.9);border-color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .gi:hover{background:rgba(255,255,255,.0373);border-color:rgba(255,255,255,.0578)}
 :root[data-theme="win11d"] .gi-n{font-size:13px;color:#ffffff}
-:root[data-theme="win11d"] .gi-m{font-size:11px;color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .gi-m{font-size:11px;color:rgba(255,255,255,.4458)}
 
 /* ── CHECK BOXES / RADIOS (WinUI glyph metrics) ──────────────────────── */
 :root[data-theme="win11d"] .rck,:root[data-theme="win11d"] input[type=checkbox],:root[data-theme="win11d"] input[type=radio]{
-  border-radius:3px;border:1px solid rgba(255,255,255,0.9);background:rgba(255,255,255,.0512);
+  border-radius:3px;border:1px solid rgba(255,255,255,.4458);background:rgba(255,255,255,.0605);
 }
-:root[data-theme="win11d"] .rck:hover{border-color:rgba(255,255,255,0.9);background:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .rck:hover{border-color:rgba(255,255,255,.6);background:rgba(255,255,255,.0241)}
 :root[data-theme="win11d"] .rck:checked,:root[data-theme="win11d"] input[type=checkbox]:checked{background:var(--wm-accent);border-color:var(--wm-accent)}
 :root[data-theme="win11d"] .rck:checked::after{left:3px;top:0;width:5px;height:8px;border-width:0 1.6px 1.6px 0;border-color:#fff}
 :root[data-theme="win11d"] input[type=radio]{border-radius:50%}
-:root[data-theme="win11d"] input[type=checkbox]:focus,:root[data-theme="win11d"] input[type=radio]:focus{box-shadow:0 0 0 3px rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] input[type=checkbox]:focus,:root[data-theme="win11d"] input[type=radio]:focus{box-shadow:0 0 0 3px rgba(0,0,0,.0605)}
 
 /* ── BUTTONS (StandardButton / AccentButton) ─────────────────────────── */
 :root[data-theme="win11d"] .btn{
   border-radius:4px;font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
   font-size:13px;font-weight:400;padding:6px 12px;min-height:30px;
-  background:rgba(255,255,255,.0512);color:#ffffff;
+  background:rgba(255,255,255,.0605);color:#ffffff;
   border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
   box-shadow:none;transition:background .1s linear;
 }
 :root[data-theme="win11d"] .btn svg{stroke:currentColor;stroke-width:1.4}
-:root[data-theme="win11d"] .btn:hover{background:rgba(249,249,249,.5);color:#ffffff;transform:none;box-shadow:none;border-bottom-color:var(--wm-stroke-b)}
-:root[data-theme="win11d"] .btn:active{background:rgba(249,249,249,.3);color:rgba(255,255,255,0.9);transform:none!important}
+:root[data-theme="win11d"] .btn:hover{background:rgba(255,255,255,.0605);color:#ffffff;transform:none;box-shadow:none;border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .btn:active{background:rgba(255,255,255,.0419);color:rgba(255,255,255,.6063);transform:none!important}
 :root[data-theme="win11d"] .btn-g,:root[data-theme="win11d"] .btn-blue,:root[data-theme="win11d"] .btn-purp{
-  background:rgba(255,255,255,.0512);color:#ffffff;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
+  background:rgba(255,255,255,.0605);color:#ffffff;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
 }
-:root[data-theme="win11d"] .btn-g:hover,:root[data-theme="win11d"] .btn-blue:hover,:root[data-theme="win11d"] .btn-purp:hover{background:rgba(249,249,249,.5);color:#ffffff;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
-:root[data-theme="win11d"] .btn-p{background:var(--wm-accent);color:#fff;border-color:rgba(255,255,255,0.9);border-bottom-color:rgba(255,255,255,0.9);box-shadow:none}
+:root[data-theme="win11d"] .btn-g:hover,:root[data-theme="win11d"] .btn-blue:hover,:root[data-theme="win11d"] .btn-purp:hover{background:rgba(255,255,255,.0605);color:#ffffff;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .btn-p{background:var(--wm-accent);color:#fff;border-color:rgba(0,0,0,.0578);border-bottom-color:rgba(0,0,0,.28);box-shadow:none}
 :root[data-theme="win11d"] .btn-p:hover{background:var(--wm-accent-h);color:#fff;box-shadow:none}
-:root[data-theme="win11d"] .btn-p:active{background:var(--wm-accent-p);color:rgba(255,255,255,.7)}
-:root[data-theme="win11d"] .btn-red{background:rgba(255,255,255,.0512);color:var(--wm-close);border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
-:root[data-theme="win11d"] .btn-red:hover{background:rgba(196,43,28,.08);color:var(--wm-close)}
-:root[data-theme="win11d"] .btn-green{background:rgba(255,255,255,.0512);color:#0f7b0f;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
-:root[data-theme="win11d"] .btn-green:hover{background:rgba(15,123,15,.08);color:#0f7b0f}
-:root[data-theme="win11d"] .btn-amb,:root[data-theme="win11d"] .btn-star{background:rgba(255,255,255,.0512);color:#9d5d00;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
-:root[data-theme="win11d"] .btn-amb:hover,:root[data-theme="win11d"] .btn-star:hover{background:rgba(157,93,0,.1);color:#9d5d00}
+:root[data-theme="win11d"] .btn-p:active{background:var(--wm-accent-p);color:rgba(255,255,255,.0605)}
+:root[data-theme="win11d"] .btn-red{background:rgba(255,255,255,.0605);color:var(--wm-close);border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .btn-red:hover{background:rgba(255,153,164,.10);color:var(--wm-close)}
+:root[data-theme="win11d"] .btn-green{background:rgba(255,255,255,.0605);color:#6ccb5f;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .btn-green:hover{background:rgba(108,203,95,.10);color:#6ccb5f}
+:root[data-theme="win11d"] .btn-amb,:root[data-theme="win11d"] .btn-star{background:rgba(255,255,255,.0605);color:#fce100;border-color:var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .btn-amb:hover,:root[data-theme="win11d"] .btn-star:hover{background:rgba(252,225,0,.10);color:#fce100}
 :root[data-theme="win11d"] .btn-icon{min-height:0;padding:0;border-radius:4px}
 :root[data-theme="win11d"] .btn-xs{min-height:24px;padding:3px 8px;font-size:12px;border-radius:4px}
 :root[data-theme="win11d"] .btn-sm{min-height:28px;padding:4px 10px;font-size:12.5px;border-radius:4px}
@@ -34385,113 +34382,80 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 /* ── INPUTS (TextBox) ────────────────────────────────────────────────── */
 :root[data-theme="win11d"] .inp,:root[data-theme="win11d"] select.inp,:root[data-theme="win11d"] textarea{
-  background:rgba(255,255,255,.0512);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
+  background:rgba(255,255,255,.0605);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
   border-radius:4px;color:#ffffff;font-size:13px;font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
   padding:6px 10px;height:32px;box-shadow:none;
 }
-:root[data-theme="win11d"] .inp:hover{background:rgba(249,249,249,.5)}
+:root[data-theme="win11d"] .inp:hover{background:rgba(255,255,255,.0605)}
 :root[data-theme="win11d"] .inp:focus{
-  background:#2b2b2b;border-color:var(--wm-accent);border-bottom:2px solid var(--wm-accent);
+  background:rgba(255,255,255,.0837);border-color:var(--wm-accent);border-bottom:2px solid var(--wm-accent);
   box-shadow:none;outline:none;
 }
-:root[data-theme="win11d"] .inp::placeholder{color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .inp::placeholder{color:rgba(255,255,255,.4458)}
 :root[data-theme="win11d"] select.inp{color-scheme:light;padding-right:26px}
 :root[data-theme="win11d"] .upl-lbl{
   border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;
-  background:rgba(255,255,255,.0512);color:#ffffff;font-size:13px;font-weight:400;min-height:30px;
+  background:rgba(255,255,255,.0605);color:#ffffff;font-size:13px;font-weight:400;min-height:30px;
 }
-:root[data-theme="win11d"] .upl-lbl:hover{background:rgba(249,249,249,.5);border-color:var(--wm-stroke-t);color:#ffffff;transform:none}
+:root[data-theme="win11d"] .upl-lbl:hover{background:rgba(255,255,255,.0605);border-color:var(--wm-stroke-t);color:#ffffff;transform:none}
 
 /* ── STATUS BAR (thin, Mica) ─────────────────────────────────────────── */
 :root[data-theme="win11d"] .bar{
-  background:rgba(249,249,249,.68);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);
-  border-top:1px solid rgba(255,255,255,.0933);padding:0 12px;gap:14px;
+  background:rgba(32,32,32,.80);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);
+  border-top:1px solid rgba(255,255,255,.0578);padding:0 12px;gap:14px;
 }
-:root[data-theme="win11d"] .bs{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:11.5px;color:rgba(255,255,255,0.9);gap:5px}
-:root[data-theme="win11d"] .bs svg{width:12px;height:12px;stroke:rgba(255,255,255,0.9);stroke-width:1.4}
+:root[data-theme="win11d"] .bs{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:11.5px;color:rgba(255,255,255,.6063);gap:5px}
+:root[data-theme="win11d"] .bs svg{width:12px;height:12px;stroke:rgba(255,255,255,.6063);stroke-width:1.4}
 :root[data-theme="win11d"] .bs strong{color:#ffffff;font-weight:600}
 
 /* ── DIALOGS = real Windows 11 windows ───────────────────────────────── */
-:root[data-theme="win11d"] .ov{background:rgba(255,255,255,0.9);-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="win11d"] .ov{background:rgba(0,0,0,.18);-webkit-backdrop-filter:none;backdrop-filter:none}
 :root[data-theme="win11d"] .mod-ov{
-  background:rgba(255,255,255,0.9);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);padding:24px;
+  background:rgba(255,255,255,.25);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);padding:24px;
 }
 :root[data-theme="win11d"] .mod{
-  background:#2b2b2b;border:1px solid rgba(255,255,255,0.9);border-bottom-color:rgba(255,255,255,0.9);
+  background:#2b2b2b;border:1px solid rgba(255,255,255,.0578);border-bottom-color:rgba(255,255,255,.16);
   border-radius:8px;box-shadow:var(--wm-shadow-win);overflow:hidden;max-height:88vh;padding:0;
   animation:wm11WinIn .18s cubic-bezier(.1,.9,.2,1) both;
 }
 @keyframes wm11WinIn{from{opacity:0;transform:scale(.96) translateY(8px)}to{opacity:1;transform:none}}
 :root[data-theme="win11d"] .mod-head{
   display:flex;align-items:center;gap:10px;min-height:32px;padding:0 0 0 12px;
-  background:transparent;border-bottom:1px solid rgba(255,255,255,0.9);flex-shrink:0;
+  background:transparent;border-bottom:1px solid rgba(255,255,255,.0578);flex-shrink:0;
 }
 :root[data-theme="win11d"] .mod-icon{width:16px;height:16px;border-radius:0;background:transparent!important;display:grid;place-items:center}
 :root[data-theme="win11d"] .mod-icon svg{width:16px;height:16px;stroke:#ffffff;stroke-width:1.5}
-:root[data-theme="win11d"] .mod-title{font-size:12px;font-weight:400;color:rgba(255,255,255,0.9);letter-spacing:0}
+:root[data-theme="win11d"] .mod-title{font-size:12px;font-weight:400;color:rgba(255,255,255,.6063);letter-spacing:0}
 :root[data-theme="win11d"] .mod-head > .btn-icon{display:none} /* the caption close button replaces it */
 :root[data-theme="win11d"] .mod-head .wm-cap{margin-left:auto}
 :root[data-theme="win11d"] .mod-body{padding:16px;background:#2b2b2b;font-size:13.5px;color:#ffffff}
 :root[data-theme="win11d"] .mod-body::-webkit-scrollbar{width:12px}
-:root[data-theme="win11d"] .mod-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.9);border:4px solid transparent;background-clip:content-box;border-radius:6px}
-:root[data-theme="win11d"] .file-info-row{border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;background:rgba(255,255,255,.0512)}
-:root[data-theme="win11d"] .file-info-label{font-size:11px;text-transform:none;letter-spacing:0;color:rgba(255,255,255,0.9);font-weight:400}
+:root[data-theme="win11d"] .mod-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border:4px solid transparent;background-clip:content-box;border-radius:6px}
+:root[data-theme="win11d"] .file-info-row{border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;background:rgba(255,255,255,.0605)}
+:root[data-theme="win11d"] .file-info-label{font-size:11px;text-transform:none;letter-spacing:0;color:rgba(255,255,255,.6063);font-weight:400}
 :root[data-theme="win11d"] .file-info-value{font-size:13px;color:#ffffff}
-:root[data-theme="win11d"] .file-info-open{background:rgba(255,255,255,.0512);border-top:1px solid rgba(255,255,255,.0933);font-size:13px;color:rgba(255,255,255,0.9)}
+:root[data-theme="win11d"] .file-info-open{background:rgba(255,255,255,.0605);border-top:1px solid rgba(255,255,255,.0578);font-size:13px;color:rgba(255,255,255,.6063)}
 :root[data-theme="win11d"] .file-info-open a{color:var(--wm-accent);font-weight:400}
 :root[data-theme="win11d"] .mod.mod-max{width:min(1180px,96vw)!important;height:94vh;max-height:94vh}
 
 /* generic content that other tools render inside dialogs */
 :root[data-theme="win11d"] .cms-install-section,:root[data-theme="win11d"] .card,:root[data-theme="win11d"] .info-g,
-:root[data-theme="win11d"] .threat-toolbar{border-radius:4px;border-color:var(--wm-stroke-t);background:rgba(255,255,255,.0512)}
-:root[data-theme="win11d"] .threat-toolbar{background:rgba(255,255,255,.0512);border-bottom:1px solid rgba(255,255,255,0.9)}
-:root[data-theme="win11d"] .threat-row,:root[data-theme="win11d"] .threat-user-grid{border-bottom:1px solid rgba(255,255,255,0.9)}
-:root[data-theme="win11d"] .threat-row:hover,:root[data-theme="win11d"] .threat-user-grid:hover{background:rgba(255,255,255,0.9)}
-:root[data-theme="win11d"] .log-t th{text-transform:none;letter-spacing:0;font-weight:600;color:rgba(255,255,255,0.9);background:rgba(255,255,255,.0512)}
-:root[data-theme="win11d"] .log-t td{border-bottom:1px solid rgba(255,255,255,0.9)}
-:root[data-theme="win11d"] .empty{color:rgba(255,255,255,0.9)}
-:root[data-theme="win11d"] .alerts .alert{border-radius:4px;background:rgba(255,255,255,.0512);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
+:root[data-theme="win11d"] .threat-toolbar{border-radius:4px;border-color:var(--wm-stroke-t);background:rgba(255,255,255,.0605)}
+:root[data-theme="win11d"] .threat-toolbar{background:rgba(255,255,255,.0605);border-bottom:1px solid rgba(255,255,255,.0578)}
+:root[data-theme="win11d"] .threat-row,:root[data-theme="win11d"] .threat-user-grid{border-bottom:1px solid rgba(255,255,255,.0578)}
+:root[data-theme="win11d"] .threat-row:hover,:root[data-theme="win11d"] .threat-user-grid:hover{background:rgba(255,255,255,.0241)}
+:root[data-theme="win11d"] .log-t th{text-transform:none;letter-spacing:0;font-weight:600;color:rgba(255,255,255,.6063);background:rgba(255,255,255,.0605)}
+:root[data-theme="win11d"] .log-t td{border-bottom:1px solid rgba(255,255,255,.0578)}
+:root[data-theme="win11d"] .empty{color:rgba(255,255,255,.4458)}
+:root[data-theme="win11d"] .alerts .alert{border-radius:4px;background:rgba(255,255,255,.0605);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b)}
 
 /* ── TOASTS (Win11 InfoBar) ──────────────────────────────────────────── */
 :root[data-theme="win11d"] .toast,:root[data-theme="win11d"] #toast{
-  border-radius:4px;background:rgba(249,249,249,.92);-webkit-backdrop-filter:blur(30px);backdrop-filter:blur(30px);
+  border-radius:4px;background:rgba(43,43,43,.92);-webkit-backdrop-filter:blur(30px);backdrop-filter:blur(30px);
   border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
   color:#ffffff;font-size:13px;box-shadow:var(--wm-shadow-win);
 }
 
-/* ── MFM THEME gallery (the tool itself) ─────────────────────────────── */
-.mfm-theme-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
-.mfm-theme-card{
-  position:relative;border:1px solid rgba(255,255,255,0.9);border-bottom-color:rgba(255,255,255,0.9);border-radius:6px;
-  background:rgba(255,255,255,.0512);padding:10px;cursor:pointer;text-align:left;font-family:inherit;
-  transition:background .1s linear,box-shadow .1s linear;display:flex;flex-direction:column;gap:9px;
-}
-.mfm-theme-card:hover{background:rgba(249,249,249,.9);box-shadow:0 2px 8px rgba(255,255,255,0.9)}
-.mfm-theme-card:focus-visible{outline:2px solid #4cc2ff;outline-offset:2px}
-.mfm-theme-card.is-on{border-color:#4cc2ff;box-shadow:inset 0 0 0 1px #4cc2ff}
-.mfm-theme-shot{height:104px;border-radius:4px;overflow:hidden;position:relative;border:1px solid rgba(255,255,255,0.9)}
-.mfm-theme-shot .t-bar{height:14px;display:flex;align-items:center;gap:3px;padding:0 5px}
-.mfm-theme-shot .t-body{display:flex;height:calc(100% - 14px)}
-.mfm-theme-shot .t-side{width:34px}
-.mfm-theme-shot .t-lines{flex:1;padding:6px;display:flex;flex-direction:column;gap:5px}
-.mfm-theme-shot .t-line{height:6px;border-radius:2px}
-.mfm-theme-dot{width:5px;height:5px;border-radius:50%}
-.mfm-theme-name{font-size:13px;font-weight:600;color:#ffffff;display:flex;align-items:center;gap:7px}
-.mfm-theme-desc{font-size:11.5px;color:rgba(255,255,255,0.9);line-height:1.45}
-.mfm-theme-badge{margin-left:auto;font-size:10px;font-weight:600;color:#4cc2ff;background:rgba(0,103,192,.1);border-radius:3px;padding:2px 6px}
-.mfm-theme-foot{margin-top:14px;padding-top:10px;border-top:1px solid rgba(255,255,255,.0933);font-size:11.5px;color:rgba(255,255,255,0.9);line-height:1.6}
-.mfm-theme-gallery{display:none}
-:root[data-theme="win11d"] .mfm-theme-card{border-radius:6px}
-@media(max-width:640px){.mfm-theme-grid{grid-template-columns:1fr}}
-/* the gallery dialog must look the same whichever theme is active */
-.mod-ov#mfmThemeOv .mod{background:#2b2b2b;border:1px solid rgba(255,255,255,0.9);border-bottom-color:rgba(255,255,255,0.9);border-radius:8px;box-shadow:0 32px 64px rgba(255,255,255,0.9),0 2px 21px rgba(255,255,255,0.9);color:#ffffff}
-.mod-ov#mfmThemeOv .mod-head{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 0 0 14px;border-bottom:1px solid rgba(255,255,255,0.9);background:transparent}
-.mod-ov#mfmThemeOv .mod-title{font-size:13px;font-weight:600;color:#ffffff}
-.mod-ov#mfmThemeOv .mod-icon{background:transparent}
-.mod-ov#mfmThemeOv .mod-icon svg{stroke:#4cc2ff}
-.mod-ov#mfmThemeOv .mod-body{padding:0;background:#2b2b2b}
-.mod-ov#mfmThemeOv .mfm-theme-head{padding:16px 16px 0}
-.mod-ov#mfmThemeOv .mod-head .wm-cap{margin-left:auto}
 
 /* ── RESPONSIVE: keep the title bar row on small screens ─────────────── */
 @media(max-width:860px){
@@ -34503,8 +34467,6 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   :root[data-theme="win11d"] .wm-title-txt{font-size:11.5px}
   :root[data-theme="win11d"] .wm-cap-btn{width:44px}
 }
-.TESTX{color:red}
-:root[data-theme="win11"] .TESTMARK{color:green}
 </style>
 </head>
 <body class="<?=$terminalStandalone?'term-standalone':''?>">
@@ -35165,8 +35127,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     </div>
     <div class="mod-body">
       <div class="mfm-theme-head">
-        <div style="font-size:13px;font-weight:600;margin-bottom:2px">Choose a look</div>
-        <div style="font-size:11.5px;color:rgba(0,0,0,.6);line-height:1.5;margin-bottom:14px">Switching is instant and remembered for everyone who signs in to this file manager.</div>
+        <div style="font-size:13px;font-weight:600;margin-bottom:2px;color:var(--gal-t1)">Choose a look</div>
+        <div style="font-size:11.5px;color:var(--gal-t2);line-height:1.5;margin-bottom:14px">Switching is instant and remembered for everyone who signs in to this file manager.</div>
       </div>
       <div style="padding:0 16px 16px">
         <div class="mfm-theme-grid" id="mfmThemeGrid">
@@ -41126,13 +41088,25 @@ async function updLoad(announce){
 function updRender(s){
   const inst=s.installed||{},rem=s.remote||{},g=s.guardian||{};
   const avail=!!s.available,off=!rem.configured;
-  const heroCls=off?'is-off':(avail?'is-new':'is-current');
-  const heroTitle=off?'No update source is set':(avail?'A newer version is ready':'This file is the newest version');
+  /* A different hash does not mean "newer": the file offered by the source can
+     be an older or a smaller build than this one. The server already works out
+     the relation, so the panel says what is actually true instead of promising
+     an upgrade that would replace this build with something older. */
+  const rel=(s.relation||'').toLowerCase();
+  const newer=rel.indexOf('larger')>=0||rel.indexOf('newer')>=0;
+  const older=rel.indexOf('smaller')>=0||rel.indexOf('older')>=0;
+  const fmtB=b=>{if(!b)return '';const u=['B','KB','MB','GB'];let i=0,v=b;while(v>=1024&&i<3){v/=1024;i++;}return (v>=10||i===0?v.toFixed(0):v.toFixed(1))+' '+u[i];};
+  const heroCls=off?'is-off':(avail?(newer?'is-new':'is-diff'):'is-current');
+  const heroTitle=off?'No update source is set'
+    :(!avail?'Nothing to install'
+    :(newer?'The source offers a different build'
+    :'The source offers an older build'));
   const heroText=off
     ?'Without a source there is nothing to compare. Paste the raw link of the file you want to follow and the panel will do the rest.'
-    :(avail?'The offered file differs from the one installed here. Nothing changes until you press install, and the file is backed up first.'
-            :'The installed file matches the one the source offers, byte for byte. Nothing to do, and nothing was written.');
-  const badge=off?'Not set':(avail?'New release':'Up to date');
+    :(!avail?'The installed file matches the one the source offers, byte for byte. Nothing to do, and nothing was written.'
+    :(newer?'The file offered by the source is larger than this one ('+fmtB(rem.size)+' against '+fmtB(s.current_size)+'). A hash cannot tell an upgrade from a rewrite, so read the release date before installing. Nothing changes until you press install, and the file is backed up first.'
+    :'The file offered by the source is smaller than this one ('+fmtB(rem.size)+' against '+fmtB(s.current_size)+'), so it is most likely an older build. Installing it would replace this version with an older one.'));
+  const badge=off?'Not set':(!avail?'Up to date':(newer?'Differs':'Older'));
   const heroIco=off?'<path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/>':'<path d="M12 3v10.5"/><path d="m7.2 9.2 4.8 4.8 4.8-4.8"/><path d="M4 20.5h16"/>';
   let h='<div class="upd-wrap">';
   h+='<div class="upd-hero '+heroCls+'"><div class="upd-hero-icon '+(off?'is-off':'')+'"><svg viewBox="0 0 24 24">'+heroIco+'</svg></div>'
