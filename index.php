@@ -10030,6 +10030,88 @@ class FileManager {
         return false;
     }
 
+    /* ── the IPv4 path, measured instead of guessed ──────────────────────────
+       CVE-2026-98432 lives in the IPv4 TCP handshake: the IP options a SYN
+       carries are handed to the child socket without being copied, so another
+       CPU handling a retransmitted SYN can read them while they are freed - or
+       after. None of that can be read from a
+       version string alone, because every distribution backports, so what is
+       measured here is the two things the trigger actually needs: an MPTCP
+       listener this machine can open, and the ability to put IPv4 Record Route
+       or Timestamp options on a socket. Both are ordinary, non-destructive
+       socket calls - no packet is sent to anyone, nothing is corrupted, and the
+       listener is closed again immediately. When the two are there, the kernel
+       build is the only thing left to check, and that is reported as it is. */
+    private function rootMptcpListener(){
+        if(!function_exists('socket_create'))
+            return['ok' => false, 'note' => 'this PHP build has no sockets extension, so nothing about the network stack can be measured here'];
+        $proto = defined('IPPROTO_MPTCP') ? (int)constant('IPPROTO_MPTCP') : 262;
+        $srv = @socket_create(AF_INET, SOCK_STREAM, $proto);
+        if(!$srv)
+            return['ok' => false, 'note' => 'IPPROTO_MPTCP is refused here (' . socket_strerror(socket_last_error()) . '), which is what a kernel built without MPTCP answers'];
+        $bound = @socket_bind($srv, '127.0.0.1', 0) && @socket_listen($srv, 4);
+        $port = 0;
+        if($bound){
+            $addr = '';
+            @socket_getsockname($srv, $addr, $port);
+            $cli = @socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+            $ok = $cli ? @socket_connect($cli, '127.0.0.1', $port) : false;
+            $acc = $ok ? @socket_accept($srv) : false;
+            if($acc){@socket_close($acc);}
+            if($cli){@socket_close($cli);}
+            if(!$ok)
+                return['ok' => false, 'note' => 'an MPTCP listener was made on 127.0.0.1:' . $port . ' but nothing could connect to it (' . socket_strerror(socket_last_error()) . ')'];
+        }
+        @socket_close($srv);
+        if(!$bound)
+            return['ok' => false, 'note' => 'IPPROTO_MPTCP exists here but a listener could not be bound (' . socket_strerror(socket_last_error()) . ')'];
+        $enabled = $this->sysInt('/proc/sys/net/mptcp/enabled');
+        return['ok' => true, 'port' => $port,
+               'note' => 'an MPTCP listener was opened and torn down on 127.0.0.1:' . $port
+                       . ', and net.mptcp.enabled is ' . ($enabled === null ? 'not exposed by this kernel' : (string)$enabled)];
+    }
+    private function rootIpOptionsProbe(){
+        /* PHP's sockets extension accepts an IP_OPTIONS setting and then does
+           not put the option on the socket: an invalid option, a truncated one
+           and an empty one all report success. A "true" from it therefore proves
+           nothing, and this function refuses to read it as proof. The option is
+           read back instead; a kernel that really keeps it answers with the same
+           bytes, and one that dropped it answers with zero. When even that says
+           nothing, the answer is "not measured here" - never "blocked". */
+        if(!function_exists('socket_create'))
+            return['ok' => false, 'unknown' => true,
+                   'note' => 'this PHP build has no sockets extension, so IPv4 options cannot be tried from here at all'];
+        $opt = chr(7) . chr(7) . chr(4) . str_repeat(chr(0), 4) . chr(0);
+        $sk = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+        if(!$sk)
+            return['ok' => false, 'unknown' => true, 'note' => 'a UDP socket could not be created here (' . socket_strerror(socket_last_error()) . ')'];
+        /* 0 is IPPROTO_IP and 4 is IP_OPTIONS; this PHP build defines neither */
+        $set = @socket_set_option($sk, 0, 4, $opt);
+        $back = $set ? @socket_get_option($sk, 0, 4) : false;
+        @socket_close($sk);
+        if(is_string($back) && strlen($back) >= 4)
+            return['ok' => true, 'note' => 'IPv4 Record Route options survive on a socket here: the kernel kept the ' . strlen($back) . ' bytes that were set'];
+        return['ok' => false, 'unknown' => true,
+               'note' => 'this PHP build reports an IP_OPTIONS setting as accepted and then never puts it on the socket, so IPv4 options cannot be demonstrated from here - the kernel may accept them, and this panel does not guess'];
+    }
+    private function rootTcpFixKnown($kv, $os){
+        /* Every distribution ships its own kernel versions, and none of them can
+           be judged from the plain number: the fixed releases below are the
+           upstream stable lines the fix (e3f33b0a1d89) landed in. A build that is
+           not comparable with them - an Ubuntu 6.8.0-xx, for instance - is left
+           to the vendor's own advisory, and this says which one. */
+        $fixed = [[4, 19, 0], [5, 10, 272], [5, 15, 223], [6, 1, 190], [6, 6, 159],
+                  [6, 12, 113], [6, 18, 56], [7, 2, 10]];
+        $name = (string)($os['name'] ?? 'this distribution');
+        if($this->rootKernelFixed($kv, $fixed))
+            return['fixed' => true, 'note' => 'kernel ' . php_uname('r') . ' is at or past the fixed upstream release for its line'];
+        if($kv[0] < 4 || ($kv[0] === 4 && $kv[1] < 4))
+            return['fixed' => true, 'note' => 'kernel ' . php_uname('r') . ' is older than 4.4, where the flaw was introduced'];
+        return['fixed' => false,
+               'note' => 'kernel ' . php_uname('r') . ' is inside the affected range (every release from 4.4 up to the fixes: 5.10.272 / 5.15.223 / 6.1.190 / 6.6.159 / 6.12.113 / 6.18.56 / 7.2.10)'
+                       . ' - a ' . $name . ' build carries backports, so the installed kernel package is what decides it'];
+    }
+
     private function rootCatalog(){
         $k = php_uname('r');
         $kv = $this->rootVnum($k);
@@ -10271,6 +10353,38 @@ class FileManager {
             'note' => @is_writable('/etc/sudoers.d') ? 'writable, but sudo only trusts a rule owned by root' : 'root-only'];
         $findings[] = ['name' => '/etc/shadow readable', 'ok' => @is_readable('/etc/shadow'), 'good' => false,
             'note' => @is_readable('/etc/shadow') ? 'readable by this account, which is root already' : 'root-only, as it should be'];
+
+        /* ── the IPv4 handshake flaw of November 2026 ──────────────────────── */
+        $mtp = $this->rootMptcpListener();
+        $ipo = $this->rootIpOptionsProbe();
+        $fix = $this->rootTcpFixKnown($kv, $os);
+        /* the trigger exists only where a listener can be MPTCP and the IP
+           options survive the build; where either is missing the flaw is still
+           in the kernel, but not reachable from here, and that is said that way */
+        $iptStatus = $fix['fixed'] ? 'patched'
+            : (!$mtp['ok'] ? 'absent'
+            : ($ipo['ok'] ? $this->rootKernelStatus(true)
+            : (!empty($ipo['unknown']) ? 'check' : 'mitigated')));
+        $v[] = [
+            'id' => 'iptcp', 'name' => 'IPv4 handshake use-after-free', 'cve' => ['CVE-2026-98432'],
+            'year' => 2026, 'component' => 'Linux kernel - IPv4 TCP handshake (tcp_v4_syn_recv_sock, inet_sock_destruct, ip_options_build)',
+            'severity' => 'critical', 'status' => $iptStatus, 'confidence' => 'high',
+            'summary' => 'The IP options a SYN carries - Record Route or Timestamp - are handed to the child socket without being copied. A retransmitted SYN racing the teardown can therefore read, and in a second stage steer writes through, memory that was already freed: no login, no local account, nothing to interact with, only a TCP port the peer can reach.',
+            'impact' => 'Kernel heap disclosure first (which defeats KASLR), then kernel memory corruption and remote code execution as root - demonstrated against a host exposing a Multipath TCP listener, and the flaw itself is in plain IPv4 TCP, so a host without MPTCP is not out of scope. The same corruption is a remote panic whether or not the attacker gets root.',
+            'evidence' => [
+                $fix['note'],
+                'MPTCP listener: ' . $mtp['note'],
+                'IPv4 options: ' . $ipo['note'],
+                'the responder side, measured: ' . ($mtp['ok'] && $ipo['ok']
+                    ? 'both halves of the trigger are here - a listener and IPv4 options on it need no privilege'
+                    : ($mtp['ok'] ? 'MPTCP is here, but the IPv4 option half could not be measured from this PHP build, so the reachability is undecided rather than clear'
+                                  : 'there is no MPTCP listener to be had here')),
+                'the flaw needs the answer to come back with those options on it, which a web request to this panel never does, so this is measured and never fired',
+            ],
+            'mitigation' => 'No patched kernel yet on several releases? Drop inbound IPv4 TCP packets that carry IP options (a SYN with a Record Route or Timestamp option is not normal traffic) with one nftables rule, and set net.mptcp.enabled=0 as well where nothing on the host needs MPTCP - the first closes the path, the second only the published exploit.',
+            'fix' => 'The kernel from the vendor advisory (USN-9022-1 for 24.04, USN-9027-1 for 22.04, USN-9018-1 for 26.04; upstream 5.10.272 / 5.15.223 / 6.1.190 / 6.6.159 / 6.12.113 / 6.18.56 / 7.2.10), and a reboot: an installed package changes nothing until the running kernel is the new one.',
+            'requires' => 'A reachable IPv4 TCP port, an MPTCP or ordinary listener, and a SYN carrying IPv4 Record Route or Timestamp options. No credentials, no local account, no user interaction.',
+        ];
 
         $count = ['vulnerable' => 0, 'check' => 0, 'mitigated' => 0, 'patched' => 0, 'absent' => 0, 'unknown' => 0];
         foreach($v as $e){$count[$e['status']] = ($count[$e['status']] ?? 0) + 1;}
@@ -12438,7 +12552,8 @@ exit 0
                        'rootPolkitRule', 'rootStateFile', 'rootLogFile',
                        'rootGrants', 'rootGroups', 'rootDiskDetect', 'rootK8s', 'rootPrivContainer',
                        'rootNfsSquash', 'rootPathHijack', 'rootDepScan', 'rootSnapd', 'rootRootPwField', 'rootBinfmtDetect',
-                       'rootLibvirt', 'rootNoexecDirs', 'rootSudoersScan', 'rootHelperPresent', 'rootLibDirs', 'rootDiagnosis'];
+                       'rootLibvirt', 'rootNoexecDirs', 'rootSudoersScan', 'rootHelperPresent', 'rootLibDirs', 'rootDiagnosis',
+                       'rootMptcpListener', 'rootIpOptionsProbe', 'rootTcpFixKnown'];
         $routeFns = ['rootIdentity', 'rootSuidEscapes', 'rootCapEscape', 'rootFire', 'rootAs', 'rootInstallHelper',
                      'rootDaemonRun', 'rootDaemonStart', 'rootDaemonStop', 'rootChannelInstall', 'rootChannelVerify',
                      'rootChannelRemove', 'rootRun', 'rootingInstallRoot', 'rootingStep', 'rootingControl', 'rootingUninstall',
@@ -34146,7 +34261,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
         <div class="rr-sec">
           <h4>Every way this machine can be rooted <span class="n" id="rrMethodCount"></span></h4>
-          <div class="root-out" style="margin-bottom:7px">Eight methods, each one a different idea. The one that is installed is marked green; the rest say why they do not apply here.</div>
+          <div class="root-out" style="margin-bottom:7px">Every method here is a different idea. The one that is installed is marked green; the rest say why they do not apply here.</div>
           <div id="rrMethods" class="rr-methods"></div>
         </div>
       </div>
