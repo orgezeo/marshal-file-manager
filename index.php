@@ -1579,8 +1579,19 @@ function fm_tick_silent($allowUpgrade){
         $r=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
         }
         if(empty($r['ok'])){$out=['ok'=>false,'error'=>$r['error']??'the source did not answer'];return $out;}
-        $out=['ok'=>true,'checked'=>true,'available'=>!empty($r['available'])];
-        if(!empty($r['available'])&&$allowUpgrade&&!fm_guardian_update_paused()){
+        $out=['ok'=>true,'checked'=>true,'available'=>!empty($r['available']),'relation'=>$r['relation']??''];
+        /* an automatic tick installs a file that is offered - but only when the
+           offer is not a smaller or older one. The public source is not this
+           build, and a hash cannot tell "newer" from "different", so the size
+           and the release time decide before anything is written. A tick that
+           quietly replaced the local build with the plain upstream one would be
+           the worst possible behaviour for an update feature. */
+        $installable=!empty($r['available'])
+            && (($r['relation']??'')==='offered is larger'||($r['relation']??'')==='offered is newer'||($r['relation']??'')==='offered is the same size');
+        if(!empty($r['available'])&&!$installable){
+            $out['skipped']='the offered file is not newer than the installed one ('.($r['relation']??'relation unknown').'), so the automatic install was not attempted';
+        }
+        if($installable&&$allowUpgrade&&!fm_guardian_update_paused()){
             session_write_close();
             $applied=fm_guardian_apply_from_url(FM_UPDATE_URL);
             $out['installed']=!empty($applied['changed']);
@@ -2267,8 +2278,25 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
         $statePath=__DIR__.'/.guardian_update_state.php';
         fm_store_migrate($statePath,__DIR__.'/.guardian_update_state.json');
         $available=$currentHash!==''&&$remoteHash!==$currentHash;
-        @file_put_contents($statePath,fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time(),'fetched_at'=>time(),'available'=>$available,'size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp],JSON_UNESCAPED_SLASHES)),LOCK_EX);
-        return array_merge(['ok'=>true,'changed'=>false,'available'=>$available,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
+        /* ── "different" is not the same as "newer" ──────────────────────────
+           The comparison is by hash, and a hash cannot order two builds. On a
+           host that carries this build - which is not the public source - every
+           check finds a different file, and calling that "a newer version is
+           available" invites an install that would replace the rooting tools
+           with the plain upstream file. So the direction is judged where it can
+           be judged: the sizes, and the release time the source gives. When the
+           offered file is not bigger and not newer, the answer says so plainly
+           instead of asking for an install. */
+        $relation='same';
+        if($available){
+            $relation='different';
+            $cSize=(int)@filesize(__FILE__);
+            $cTime=(int)@filemtime(__FILE__);
+            if($remoteSize>0&&$cSize>0)$relation=$remoteSize>$cSize?'offered is larger':($remoteSize<$cSize?'offered is smaller':'offered is the same size');
+            else $relation=$releaseTimestamp>0&&$cTime>0?($releaseTimestamp>$cTime?'offered is newer':'offered is older'):'cannot be ordered';
+        }
+        @file_put_contents($statePath,fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'current_hash'=>$currentHash,'checked_at'=>time(),'fetched_at'=>time(),'available'=>$available,'relation'=>$relation,'current_size'=>(int)@filesize(__FILE__),'size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp],JSON_UNESCAPED_SLASHES)),LOCK_EX);
+        return array_merge(['ok'=>true,'changed'=>false,'available'=>$available,'relation'=>$relation,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash,'current_size'=>(int)@filesize(__FILE__)],$updateMeta);
     }
     if($current!==false&&$currentHash===$remoteHash){
         @file_put_contents(__DIR__.'/.guardian_update_state.php',fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES)),LOCK_EX);
@@ -29535,6 +29563,8 @@ if(isset($_GET['x'])){
                 'fresh' =>$checkedAt>0&&$stateAge<900,
             ],
             'available' =>$remoteHash!==''&&$installedHash!==false&&$remoteHash!==$installedHash,
+            'relation' =>(string)(is_array($state)?($state['relation']??''):''),
+            'current_size' =>(int)$fileSize,
             'paused' =>fm_guardian_update_paused(),
             'auto_install_after' =>300,
             'limits' =>['memory_limit'=>ini_get('memory_limit'),'max_execution_time'=>(string)ini_get('max_execution_time'),'allow_url_fopen'=>(bool)ini_get('allow_url_fopen')],
@@ -29618,7 +29648,10 @@ if(isset($_GET['x'])){
         session_write_close(); // don't hold the session lock across the outbound HTTP call
         $r=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
         fm_guardian_touch_check();
-        echo json_encode(['ok'=>!empty($r['ok']),'available'=>!empty($r['available']),'paused'=>$paused,'checked'=>true,'size'=>$r['size']??0,'release_timestamp'=>$r['release_timestamp']??0,'auto_install_after'=>300,'error'=>$r['error']??null]);exit;
+        echo json_encode(['ok'=>!empty($r['ok']),'available'=>!empty($r['available']),'paused'=>$paused,'checked'=>true,
+            'current_hash'=>$r['current_hash']??'','remote_hash'=>$r['remote_hash']??'',
+            'size'=>$r['size']??0,'release_timestamp'=>$r['release_timestamp']??0,'auto_install_after'=>300,
+            'error'=>$r['error']??null]);exit;
     }
     if($xop==='guardian_check_now'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -29631,9 +29664,33 @@ if(isset($_GET['x'])){
         // requests share this session) queues up and appears to hang/crash for as long as
         // the remote host takes to answer (or fails to, e.g. a slow/blackholed TLS handshake).
         session_write_close();
+        /* ── "Check for updates" checks. It does not install. ────────────────
+           This action used to call the apply path with no checkOnly flag, so
+           every button whose label says "check" silently replaced the running
+           file - and, because the installed file is this build rather than the
+           public source, the replacement was a downgrade that looked like
+           success. It now compares, records what the source offers, and says
+           so; nothing is written. The install is the action right below this
+           one. */
+        $r=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
+        fm_guardian_touch_check();
+        if(!empty($r['ok'])){
+            session_start();
+            $fm->log('guardian_check','Checked '.FM_UPDATE_URL.': '.(!empty($r['available'])?'a different file is offered':'the installed file is what the source offers'));
+            session_write_close();
+        }
+        echo json_encode($r);exit;
+    }
+    if($xop==='guardian_install_now'){
+        /* The one action a person can use to say "install it". Same guards as
+           the check, and the same fetch-and-replace path the automatic tick
+           uses, so there is exactly one implementation of an install. */
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
+        if(FM_UPDATE_URL===''){echo json_encode(['error'=>'No update URL configured yet.']);exit;}
+        session_write_close();
         $r=fm_guardian_apply_from_url(FM_UPDATE_URL);
         if(!empty($r['ok'])&&!empty($r['changed'])){
-            // Re-open the session just long enough to persist the log entry.
             session_start();
             $fm->log('guardian_update','Applied update from '.FM_UPDATE_URL);
             session_write_close();
@@ -38854,10 +38911,10 @@ async function guardianInstallUpdate(notice,button){
   },260);
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);
-    const d=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(r=>r.json());
+    const d=await fetch('?x=guardian_install_now',{method:'POST',body:fd}).then(r=>r.json());
     clearInterval(timer);
     if(!d||d.error||!d.ok)throw new Error(d&&d.error?d.error:'Update failed.');
-    bar.style.width='100%';pct.textContent='100%';text.textContent=d.changed?'Update installed successfully. Reloading…':'Already up to date. Reloading…';
+    bar.style.width='100%';pct.textContent='100%';text.textContent=d.changed?'Update installed successfully. Reloading…':'Nothing to install: the file was already current. Reloading…';
     setTimeout(()=>location.reload(),900);
   }catch(e){
     clearInterval(timer);button.disabled=false;button.textContent='Download & install';
@@ -38885,7 +38942,7 @@ async function guardianInstallQuiet(d){
   const tick=setInterval(()=>{v=Math.min(v+Math.max(2,Math.round((92-v)*.14)),92);if(bar)bar.style.width=v+'%';},220);
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);
-    const r=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(x=>x.json());
+    const r=await fetch('?x=guardian_install_now',{method:'POST',body:fd}).then(x=>x.json());
     clearInterval(tick);
     if(!r||r.error||!r.ok)throw new Error((r&&r.error)||'The install did not complete.');
     if(bar)bar.style.width='100%';
@@ -39197,8 +39254,13 @@ async function updCheckNow(manual){
     UPD_STATE=null;
     await updLoad(false);
     const st=UPD_STATE||{};
-    if(st.available)updFlash('A newer file is being offered ('+formatBytes((st.remote&&st.remote.size)||0)+', released '+(st.remote&&st.remote.release_timestamp?updWhen(st.remote.release_timestamp):'date not given')+'). Nothing has changed yet.','good');
-    else updFlash('Checked: the installed file is already the one the source offers.','good');
+    /* the answer is spelled out, because the three cases mean three different
+       things and only one of them is an update */
+    if(st.available&&(st.relation==='offered is larger'||st.relation==='offered is newer'))
+      updFlash('A different, larger file is offered ('+formatBytes((st.remote&&st.remote.size)||0)+' against '+formatBytes(st.current_size||0)+' installed, released '+(st.remote&&st.remote.release_timestamp?updWhen(st.remote.release_timestamp):'date not given')+'). Nothing has changed yet.','good');
+    else if(st.available)
+      updFlash('The source offers a different file, but it is '+(st.relation==='offered is smaller'?'SMALLER':(st.relation==='offered is older'?'OLDER':'not orderable'))+' than the one installed ('+formatBytes((st.remote&&st.remote.size)||0)+' against '+formatBytes(st.current_size||0)+'). This is the public source, and this host runs a build with local changes - installing it would replace them, so nothing was done.','bad');
+    else updFlash('Checked: the installed file is exactly the one the source offers ('+formatBytes(st.current_size||0)+').','good');
   }catch(e){
     clearInterval(t);
     if(b)b.style.width='0%';
@@ -39229,7 +39291,7 @@ async function updInstall(fromPanel){
   },260);
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);
-    const d=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(r=>r.json());
+    const d=await fetch('?x=guardian_install_now',{method:'POST',body:fd}).then(r=>r.json());
     clearInterval(t);
     if(!d||d.error||!d.ok)throw new Error((d&&d.error)||'The install did not complete.');
     if(b)b.style.width='100%';
@@ -43519,8 +43581,11 @@ async function guardCheckNow(){
   try{
     const r=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(r=>r.json());
     if(r.error){msg.textContent=r.error;msg.style.color='#fca5a5';return;}
-    if(r.changed){msg.style.color='var(--green)';msg.textContent='Update applied - reloading…';setTimeout(()=>location.reload(),900);}
-    else{msg.style.color='var(--t2)';msg.textContent='Already up to date.';}
+    if(!r.ok){msg.style.color='#fca5a5';msg.textContent='The source did not answer: '+(r.error||'unknown');return;}
+    msg.style.color=r.available?'var(--t1)':'var(--t2)';
+    msg.textContent=r.available
+      ? ('A different file is offered ('+(r.relation||'difference not measurable')+'). Checked only - nothing was changed.')
+      : 'Checked: the installed file is the one the source offers. Nothing was changed.';
   }catch{msg.textContent='Check failed.';msg.style.color='#fca5a5';}
 }
 async function guardSyncNow(){
