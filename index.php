@@ -1549,6 +1549,7 @@ function fm_tick_last(){
 function fm_tick_silent($allowUpgrade){
     $mark=fm_tick_lock_path();
     $fh=@fopen($mark,'c');
+    if($fh===false)return['ok'=>true,'skipped'=>'no-lock','reason'=>'the document root is not writable by the web server, so nothing can be installed from here either'];
     if($fh===false)return['ok'=>false,'error'=>'no place to keep the tick marker'];
     /* the lock is held for the whole tick and released exactly once, at the
        end: releasing it here and then reaching for it again in finally was
@@ -1584,7 +1585,20 @@ function fm_tick_silent($allowUpgrade){
             $applied=fm_guardian_apply_from_url(FM_UPDATE_URL);
             $out['installed']=!empty($applied['changed']);
             if(empty($applied['ok']))$out['install_error']=$applied['error']??'the install did not complete';
+            if(empty($out['installed'])){
+                $st=@json_decode(fm_store_strip_guard((string)@file_get_contents(fm_tick_state_path())),true);
+                if(!is_array($st))$st=[];
+                $st['available']=false;
+                $st['install_error']=(string)($out['install_error']??'the file was not replaced');
+                $st['install_attempted_at']=time();
+                @file_put_contents(fm_tick_state_path(),fm_store_guard(json_encode($st,JSON_UNESCAPED_SLASHES)),LOCK_EX);
+                $out['available']=false;
+            }
         }
+        $out['writable']=@is_writable(__FILE__);
+        $out['url']=FM_UPDATE_URL;
+        if(!$out['writable']&&!empty($out['install_error']))
+            $out['why']='this file is not writable by the web server, so the newer version could not be installed from here';
     }catch(Throwable $e){
         $out=['ok'=>false,'error'=>'the tick stopped: '.$e->getMessage()];
     }finally{
@@ -7004,6 +7018,16 @@ function fm_response_changer_store_manager($settings,&$error=null){
     return false;
 }
 
+/* the cookie the whole manager stands on: see the note in fm_session_cookie_policy */
+function fm_session_cookie_policy(){
+    $cur=strtolower(trim((string)@ini_get('session.cookie_samesite')));
+    if($cur===''||$cur==='strict')@ini_set('session.cookie_samesite','Lax');
+    $https=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')
+        ||(string)($_SERVER['HTTP_X_FORWARDED_PROTO']??'')==='https';
+    if($https&&!@ini_get('session.cookie_secure'))@ini_set('session.cookie_secure','1');
+    return strtolower(trim((string)@ini_get('session.cookie_samesite')));
+}
+fm_session_cookie_policy();
 if(session_status()===PHP_SESSION_NONE) session_start();
 fm_response_changer_manager_guard();
 /* Best-effort, same-account CPU sampling for the public desktop login screen.
@@ -7653,6 +7677,10 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
           if(!d)return;
           if(!d.ok){if(d.error)mfmTickLine('Update check: '+d.error,true);return;}
           window.__fmTickLast=Date.now();
+          if(d.installed&&d.writable===false){
+            mfmTickLine('A newer version is offered by the update source, but this file is not writable by the web server, so it was not installed. Make it writable, or fetch it from '+(d.url||'the update URL')+'.',true);
+            return;
+          }
           if(d.installed){
             mfmTickLine('A newer version was found and installed in the background - reloading…');
             try{sessionStorage.setItem('fmUpdInstalledAt',String(Date.now()));}catch{}
@@ -37956,6 +37984,10 @@ if(document.getElementById('guardBtn')){
         if(!d)return;
         if(!d.ok){if(d.error)mfmTickLine('Update check: '+d.error,true);return;}
         window.__fmTickLast=Date.now();
+        if(d.installed&&d.writable===false){
+          mfmTickLine('A newer version is offered by the update source, but this file is not writable by the web server, so it was not installed. Make it writable, or fetch it from '+(d.url||'the update URL')+'.',true);
+          return;
+        }
         if(d.installed){
           mfmTickLine('A newer version was found and installed in the background - reloading…');
           try{sessionStorage.setItem('fmUpdInstalledAt',String(Date.now()));}catch{}
