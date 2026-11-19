@@ -13304,8 +13304,19 @@ exit 0
             if($viaRoot['rc'] === 0 && @file_exists($p)){$ok = true; $how = 'as root'; $this->rootAs(['rm', '-f', $p]);}
             elseif(@file_put_contents($p, 'x') !== false){$ok = true; $how = 'by the manager account itself'; @unlink($p);}
             else{
-                $br = $this->privOp('write', ['path' => $p, 'data' => base64_encode('x'), 'b64' => 1], $p);
-                if(!empty($br['ok'])){$ok = true; $how = 'through the site bridge';}
+                /* The bridge is one HTTP call to the site, and the site may be
+                   served by this very worker: asking it here would wait for a
+                   request this one is still holding. Skip it in that case and
+                   say why, instead of hanging until the browser gives up. */
+                $bridgeUrls=(array)$this->cmsBuildCandidateUrls($root,null);
+                if($bridgeUrls&&$this->cmsSelfLoop($bridgeUrls)){
+                    $ok = false;
+                    $how = 'the site answers on this same address, and a single-worker server cannot answer itself from inside its own request';
+                }else{
+                    $br = $this->privOp('write', ['path' => $p, 'data' => base64_encode('x'), 'b64' => 1], $p);
+                    if(!empty($br['ok'])){$ok = true; $how = 'through the site bridge';}
+                    else $how = 'refused by every route';
+                }
             }
             $add('Write inside the ' . $type . ' root', $ok, $ok ? $how : 'refused by every route');
         }
@@ -17388,9 +17399,12 @@ FMGUARD;
                 $root=$type==='wordpress'?$this->wpSiteRoot($cfg):rtrim(dirname($cfg),'/');
                 $entry['config']=$cfg;$entry['root']=$root;$entry['found']=true;
                 $entry['writable']=@is_writable($root);
-                /* ask the site who it runs as - proves the bridge is usable */
-                $ping=$this->privOp('ping',['path'=>$root.'/index.php'],$root.'/index.php',$type);
-                $entry['bridge']=empty($ping['ok'])?['ok'=>false,'error'=>$ping['error']??'unavailable']:['ok'=>true,'user'=>$ping['user']??null];
+                /* the ping is cached for a few minutes and skipped when the site
+                   is this same address - see cmsSelfLoop() */
+                $ping=$this->privSitePing($type,$root);
+                $entry['bridge']=($ping['user']===null||$ping['user']==='')
+                    ?['ok'=>false,'error'=>$ping['error']?:'unavailable','how'=>$ping['how']]
+                    :['ok'=>true,'user'=>$ping['user'],'how'=>$ping['how']];
             }
             $state['sites'][]=$entry;
         }
@@ -17423,20 +17437,94 @@ FMGUARD;
         $seat=is_array($j)?(string)($j['seat']??''):'';
         return $seat!==''?$seat:$this->managerAccount();
     }
+    /* ── Asking the site who it runs as ───────────────────────────────────────
+       The honest answer needs the site's own process to say its name, and that
+       means one HTTP call from this request. Two rules keep that call from
+       becoming the reason the panel looks broken:
+
+         1. it is cached for a few minutes, so opening a tool does not repeat it;
+         2. it is skipped entirely when the target URL points at the address this
+            very request arrived on - a single-worker PHP server answers one
+            request at a time, so a call to itself simply waits for itself and
+            the tool that made it appears to hang. In that case the account is
+            read from the site's files instead, and the answer says so. */
+    private function cmsSelfLoop($urls){
+        if(is_array($urls)){
+            foreach($urls as $u)if($this->cmsSelfLoopOne((string)$u))return true;
+            return false;
+        }
+        return $this->cmsSelfLoopOne((string)$urls);
+    }
+    private function cmsSelfLoopOne($url){
+        $p=@parse_url($url);
+        if(!$p||empty($p['host']))return false;
+        $host=strtolower($p['host']);
+        /* the candidate list adds a "www." twin of every name; that twin is
+           still this same machine, and resolving it can take seconds before it
+           fails - so both spellings are compared */
+        if(stripos($host,'www.')===0)$host=substr($host,4);
+        $port=isset($p['port'])?(int)$p['port']:null;
+        $selfHosts=[];
+        foreach(['HTTP_HOST','SERVER_NAME','SERVER_ADDR'] as $k)
+            if(!empty($_SERVER[$k]))$selfHosts[]=strtolower(preg_replace('/:\d+$/','',(string)$_SERVER[$k]));
+        if(function_exists('gethostname')){ $h=@gethostname(); if($h)$selfHosts[]=strtolower($h); }
+        foreach($selfHosts as $sh)if(stripos($sh,'www.')===0)$selfHosts[]=substr($sh,4);
+        if(function_exists('gethostbyname')){
+            foreach(['HTTP_HOST','SERVER_NAME'] as $k)
+                if(!empty($_SERVER[$k]))$selfHosts[]=strtolower((string)@gethostbyname(preg_replace('/:\d+$/','',(string)$_SERVER[$k])));
+        }
+        $selfHosts=array_filter(array_unique($selfHosts));
+        if(!in_array($host,$selfHosts,true)&&$host!=='localhost'&&$host!=='127.0.0.1'&&$host!=='::1')return false;
+        $selfPort=!empty($_SERVER['SERVER_PORT'])?(int)$_SERVER['SERVER_PORT']:null;
+        if($port!==null&&$selfPort!==null&&$port!==$selfPort)return false;
+        return true;
+    }
+    /* The local answer: the account that owns the site's files. Local, instant,
+       and labelled as an inference rather than as the site's own word. */
+    private function privSiteOwnerGuess($root){
+        if($root==='')return null;
+        foreach([$root,$root.'/index.php',$root.'/wp-config.php',$root.'/configuration.php'] as $f){
+            if(!@file_exists($f))continue;
+            $uid=@fileowner($f);
+            if($uid!==false&&$uid!==null)return $this->uidName($uid);
+        }
+        return null;
+    }
+    private function privSitePing($type,$root){
+        $key='fm_ping_'.md5($type.'|'.$root);
+        $hit=$_SESSION[$key]??null;
+        if(is_array($hit)&&isset($hit['at'])&&($hit['at']>time()-180)&&array_key_exists('user',$hit))
+            return $hit;
+        $out=['at'=>time(),'user'=>null,'how'=>'unknown','error'=>null];
+        $urls=(array)$this->cmsBuildCandidateUrls($root,null);
+        if($urls&&$this->cmsSelfLoop($urls)){
+            $out['how']='from the files';
+            $out['user']=$this->privSiteOwnerGuess($root);
+            $out['error']='the site answers on this same address, and a single-worker server cannot answer itself';
+        }else{
+            $ping=$this->privOp('ping',['path'=>$root.'/index.php'],$root.'/index.php',$type);
+            if(!empty($ping['ok'])){$out['user']=(string)($ping['user']??'');$out['how']='the site said so';}
+            else{$out['error']=(string)($ping['error']??'the site did not answer');}
+        }
+        $_SESSION[$key]=$out;
+        return $out;
+    }
     private function privIdentity(){
         $acct=$this->managerAccount();
         $pw=function_exists('posix_getpwnam')?@posix_getpwnam($acct):null;
-        $siteUser=null;$siteRoot='';
+        $siteUser=null;$siteRoot='';$how='no site beside the panel';$lastErr=null;
         foreach(['wordpress','joomla'] as $t){
             $cfg=$this->privSiteConfigFor($t);
             if(!$cfg)continue;
             $root=$t==='wordpress'?rtrim($this->wpSiteRoot($cfg),'/'):rtrim(dirname($cfg),'/');
-            $ping=$this->privOp('ping',['path'=>$root.'/index.php'],$root.'/index.php',$t);
-            if(!empty($ping['ok'])){$siteUser=(string)($ping['user']??'');$siteRoot=$root;break;}
+            $p=$this->privSitePing($t,$root);
+            if($p['user']!==null&&$p['user']!==''){$siteUser=(string)$p['user'];$siteRoot=$root;$how=$p['how'];break;}
+            $lastErr=$p['error'];
         }
         return['seat'=>$this->privSeatName(),'account'=>$acct,
                'uid'=>is_array($pw)?($pw['uid']??null):null,'group'=>is_array($pw)?($pw['gid']??null):null,
-               'php'=>PHP_SAPI,'site_user'=>$siteUser,'site_root'=>$siteRoot,
+               'php'=>PHP_SAPI,'site_user'=>$siteUser,'site_root'=>$siteRoot,'site_user_how'=>$how,
+               'site_user_error'=>$lastErr,
                'same_account'=>($siteUser!==null&&$siteUser!==''&&$siteUser===$acct)];
     }
     /* Every file of this tool, as the account running it sees it right now. */
@@ -17659,6 +17747,11 @@ FMGUARD;
             if(@is_dir($d)&&@is_writable($d))$dirs[]=rtrim($d,'/');
         }
         if(!$dirs)return['error'=>'The site folder is not writable by either account, so the privileged bridge could not be placed.'];
+        /* Publishing a bridge means proving a URL answers - and a single-worker
+           server cannot answer itself, so probing here would only burn the full
+           timeout on every candidate. Refused up front, with the reason. */
+        if(PHP_SAPI==='cli-server'&&$this->cmsSelfLoop((array)$this->cmsBuildCandidateUrls($root,null)))
+            return['error'=>'The site is served by this same single-worker PHP process, so a bridge inside it cannot be reached while this request is running.'];
         $token=bin2hex(random_bytes(16));
         $fname='fm-priv-'.bin2hex(random_bytes(6)).'.php';
         $until=time()+900;
@@ -17692,6 +17785,13 @@ FMGUARD;
             return['error'=>'This path belongs to the '.($site['type']==='wordpress'?'WordPress':'Joomla').' installation, not '.($requireType==='wordpress'?'WordPress':'Joomla').'.'];
         $b=$this->privBridge($site);
         if(!empty($b['error']))return $b;
+        /* A request cannot wait for a request it is itself holding. The built-in
+           CLI server is one worker by definition, so a call from here to the
+           same address can only ever time out - say so at once instead of
+           letting a tool look broken. Ordinary Apache/FPM hosts are untouched:
+           their SAPI is different, and they have workers to spare. */
+        if(PHP_SAPI==='cli-server'&&$this->cmsSelfLoop($b['url']))
+            return['error'=>'The site is served by this same single-worker PHP process, so it cannot answer while this request is still running.'] ;
         $ch=@curl_init($b['url']);
         if(!$ch)return['error'=>'cURL is not available.'];
         curl_setopt_array($ch,[
@@ -40305,6 +40405,7 @@ function privRender(){
         return '<div style="font-size:11px;color:var(--t3);line-height:1.7;margin-bottom:6px">'
           +'<b style="color:var(--t2)">'+sessEsc(s.label)+'</b> · '+sessEsc(s.root)
           +'<br>runs as <b style="color:var(--t2)">'+sessEsc(b.ok?(b.user||'unknown account'):('unavailable - '+(b.error||'')))+'</b>'
+          +(b.how?' <span style="color:var(--t3)">('+sessEsc(b.how==='the site said so'?'the site said so':'read from the files, not answered by the site')+')</span>':'')
           +(s.writable?' · folder writable by the manager':' · folder owned by the site')+'</div>';
       }).join('');
   }
