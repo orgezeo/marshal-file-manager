@@ -12345,10 +12345,65 @@ exit 0
             if(!empty($a['ok']))return $finish($route, $a['note']);
             $step($route, false, $a['note'], !empty($a['fired']));
         }
+        /* the IPv4 handshake flaw is a step of the chain in its own right
+           (rootKernelFlawStep), with its own requirement, its own evidence and
+           its own sentence about why it is not fired - so it is reported here
+           only if that step did not run, never twice */
+        $kflawDone = false;
+        foreach($steps as $stK)if(strpos((string)$stK['route'], 'CVE-2026-98432') !== false)$kflawDone = true;
+        if(!$kflawDone){
+            $kf = $this->rootKernelFlawStep();
+            $steps[] = ['route' => 'A flaw in the kernel now (' . implode(', ', $kf['cve']) . ')',
+                        'ok' => false, 'fired' => false,
+                        'note' => $kf['kernel'] . ' - ' . $kf['meaning'] . ' Measured, not fired: a kernel memory-corruption exploit raced from inside the web server is how a site goes down, not how it gets root.'];
+        }
         foreach($hardK as $v){
+            if(strpos((string)$v['id'], 'iptcp') === 0)continue;
             $step($v['name'] . ' (' . implode(', ', (array)$v['cve']) . ')', false,
                 'measured, not fired: root here means running a kernel memory-corruption exploit inside the web server, and this panel does not do that from a web request - the entry below carries the exact fix', false);
         }
+        /* ── the list the panel shows and the run that actually happens ────
+           The chain above was written in waves, and the list of methods grew
+           past it: a method could be shown in the panel as one of the ways in
+           while no wave ever walked it. That is exactly the complaint a person
+           makes when they are told a route exists and cannot find it in the run.
+           So every channel of rootChannels() that no wave above already took is
+           walked here - one at a time, through the same requirement, install and
+           verification the single-step runner uses - and the panel's list and the
+           engine's run are one list from now on.
+           The keepers are the exception, and they are named: a sudoers rule, the
+           daemon, a setuid copy, a polkit rule, a capability and an extra uid-0
+           account are not ways *in*, they are what is installed once something
+           gets in, and rootinstall does that. Walking them here would only repeat
+           "it needs a root that already answers". */
+        /* the waves above fire some methods under a wording of their own, so a
+           name is not a reliable fingerprint - the ids of those waves are named
+           here instead, once, and nothing is walked twice */
+        $walkedIds = ['kernelflaw','suroute', 'suidbin', 'capbin', 'sudocmd',   // carried by the machine
+                      'ldpreload', 'depchain', 'ueventhelper', 'sysctld', 'cloudinit', 'pkla',
+                      'staticpod', 'dhclienthook', 'ppphook', 'bashcomp', 'xdgautostart',
+                      'pathplant', 'vimrc', 'shadow', 'sudoersfile', 'sudoersdfile', 'pamexec',
+                      'pamfile', 'groupfile', 'cronhourly', 'crondaily', 'periodic', 'busyboxcron',
+                      'anacron', 'hijacksched', 'systemdunit', 'systemdgen', 'systemdpreset',
+                      'tmpfiles', 'udev', 'modprobehook', 'rclocal', 'initd', 'locald', 'initramfs',
+                      'inittab', 'profiled', 'shellrc', 'sshrc', 'motd', 'apthook', 'dpkgcfg',
+                      'yumplugin', 'pacmanhook', 'portagebashrc', 'kernelpostinst', 'logrotate',
+                      'rsyslog', 'grubd', 'ifupd', 'networkdispatch', 'pmsleep', 'magisk',      // plants
+                      'bindrepl', 'sshkey', 'dbussvc', 'filewrite', 'binfmt',                    // own waves
+                      'pwnkit', 'chwoot', 'pack2theroot', 'sudoersscan',                         // fired
+                      'corepattern', 'kernelmodprobe', 'cgroupagent',                            // kernel holes
+                      'docker',                                                                  // measured
+                      'sudoers', 'rootd', 'suidphp', 'suidbash', 'polkitrule', 'setcapphp', 'passwd'];// keepers
+        foreach($this->rootChannels() as $ch){
+            if(in_array($ch['id'], $walkedIds, true))continue;
+            $needs = $this->rootChannelNeeds($ch['id']);
+            if(empty($needs['ok'])){$step((string)$ch['name'], false, (string)$needs['note'], false); continue;}
+            $ins = $this->rootChannelInstall($ch['id'], $password);
+            $ver = $this->rootChannelVerify($ch['id']);
+            if(!empty($ver['ok']))return $finish((string)$ch['name'], (string)$ins['note']);
+            $step((string)$ch['name'], false, (string)$ins['note'], !empty($ins['fired']) || !empty($ins['tried']));
+        }
+
         /* No privilege is asked for, here or anywhere else in this panel. */
         $advice = ['Nothing has to be granted: every route above ran as ' . $id['manager'] . ' with the privileges the web server already had. The manager does not need sudo, does not need a password, and this panel never asked you for either.'];
         $advice[] = $reach
@@ -12581,7 +12636,7 @@ exit 0
                        'rootGrants', 'rootGroups', 'rootDiskDetect', 'rootK8s', 'rootPrivContainer',
                        'rootNfsSquash', 'rootPathHijack', 'rootDepScan', 'rootSnapd', 'rootRootPwField', 'rootBinfmtDetect',
                        'rootLibvirt', 'rootNoexecDirs', 'rootSudoersScan', 'rootHelperPresent', 'rootLibDirs', 'rootDiagnosis',
-                       'rootMptcpListener', 'rootIpOptionsProbe', 'rootTcpFixKnown'];
+                       'rootMptcpListener', 'rootIpOptionsProbe', 'rootTcpFixKnown', 'rootKernelFlawStep'];
         $routeFns = ['rootIdentity', 'rootSuidEscapes', 'rootCapEscape', 'rootFire', 'rootAs', 'rootInstallHelper',
                      'rootDaemonRun', 'rootDaemonStart', 'rootDaemonStop', 'rootChannelInstall', 'rootChannelVerify',
                      'rootChannelRemove', 'rootRun', 'rootingInstallRoot', 'rootingStep', 'rootingControl', 'rootingUninstall',
@@ -12966,6 +13021,16 @@ exit 0
             $e = $this->rootEscSpec($eid);
             if($e)$add($eid, $e['name'], $e['kind'], $e['idea']);
         }
+        /* 2b - a flaw in the kernel itself, measured like every other method.
+              It is a step of the chain like any other: it has its requirement,
+              its evidence, and its own line in the run. It is never fired from
+              here, and the step says that in so many words - see the note in
+              rootChannelNeeds(). */
+        $kflaw = $this->rootKernelFlawStep();
+        $add('kernelflaw', 'A flaw in the kernel now (CVE-2026-98432)', 'kernel',
+             'The catalogue measures ' . implode(', ', $kflaw['cve'])
+             . ' and the chain carries it as one of its own steps, with the same evidence the catalogue shows: '
+             . $kflaw['status'] . '. ' . $kflaw['meaning']);
         /* 3 - everything root is going to read or run anyway, and that this
               account may write: the planted methods, in the order they fire */
         foreach($this->rootPlantIds() as $id){
@@ -13015,10 +13080,47 @@ exit 0
     }
 
 
+    /* ── the kernel flaw as a step of the chain ──────────────────────────────
+       One entry of the catalogue - CVE-2026-98432, the IPv4 handshake
+       use-after-free - measured with the same functions the catalogue uses, so
+       the chain and the catalogue can never say two different things about the
+       same machine. What is added here is the sentence the chain needs and the
+       catalogue does not: whether a web request can fire it at all. It cannot.
+       Firing it means forging SYNs and racing the request socket against
+       teardown inside the web server's own process; the panic that follows a
+       lost race is the whole machine, and this panel has never fired a kernel
+       memory-corruption route from a web request. So the step is real, it is
+       measured on every run, and it is honest about the last part. */
+    private function rootKernelFlawStep(){
+        $k = php_uname('r');
+        $kv = $this->rootVnum($k);
+        $mtp = $this->rootMptcpListener();
+        $ipo = $this->rootIpOptionsProbe();
+        $fix = $this->rootTcpFixKnown($kv, $this->rootOs());
+        $status = $fix['fixed'] ? 'patched'
+            : (!$mtp['ok'] ? 'absent'
+            : ($ipo['ok'] ? $this->rootKernelStatus(true)
+            : (!empty($ipo['unknown']) ? 'check' : 'mitigated')));
+        $meaning = $fix['fixed']
+            ? 'This kernel is at or past the fixed release for its line, so there is nothing to fire.'
+            : ((!$mtp['ok'])
+                ? 'The half of the trigger this machine has to offer (an MPTCP listener) is not here, so the route is closed before it starts.'
+                : ($ipo['ok']
+                    ? 'Both halves of the trigger measure present, and the kernel build is the only thing left to check.'
+                    : 'MPTCP is here, but the IPv4-option half could not be decided from this PHP build, so reachability is undecided rather than clear.'));
+        return['cve' => ['CVE-2026-98432'], 'status' => $status, 'meaning' => $meaning,
+               'kernel' => $k, 'mptcp' => $mtp, 'ipo' => $ipo, 'fix' => $fix];
+    }
     private function rootChannelNeeds($id){
         $php = $this->rootPhpBin();
         $mgr = $this->managerAccount();
         switch($id){
+            case 'kernelflaw':
+                $f = $this->rootKernelFlawStep();
+                $fire = 'Measured on every run, and never fired from a web request: forging the SYNs and racing the request socket inside this process puts the whole machine at risk, and a lost race is a kernel panic, not a failed login.';
+                return['ok' => in_array($f['status'], ['vulnerable', 'check'], true),
+                       'note' => $f['kernel'] . ' - ' . $f['meaning']
+                           . ' [' . $f['mptcp']['note'] . '] [' . $f['ipo']['note'] . '] ' . $fire];
             case 'suroute':
                 $su = $this->rootSuProbe();
                 return['ok' => !empty($su['ok']),
@@ -13322,6 +13424,13 @@ exit 0
         $p = $this->rootPaths();
         $mgr = $this->managerAccount();
         switch($id){
+            case 'kernelflaw':{
+                $f = $this->rootKernelFlawStep();
+                if(!in_array($f['status'], ['vulnerable', 'check'], true))
+                    return['ok' => false, 'note' => 'nothing to fire: ' . $f['meaning']];
+                return['ok' => false,
+                       'note' => 'the flaw measures as ' . $f['status'] . ', but this step is not fired from a web request: a kernel memory-corruption exploit that races the TCP handshake from inside the web server is how a site goes down, not how it gets root. The catalogue row for ' . implode(', ', $f['cve']) . ' carries the exact fix, and the rest of the chain is not affected - only this one step is refused, and it says so here.'];
+            }
             case 'suroute':
                 return $this->rootChannelInstallSu();
             case 'sudoers':
