@@ -1173,11 +1173,11 @@ function fm_guardian_pdo_dsn($env){
 }
 $__fmGuardEnvDb=fm_guardian_env_db();
 if(!defined('FM_GUARD_DB_DRIVER')) define('FM_GUARD_DB_DRIVER',$__fmGuardEnvDb['driver']??'mysql');
-if(!defined('FM_GUARD_DB_HOST'))   define('FM_GUARD_DB_HOST', '127.0.0.1');
+if(!defined('FM_GUARD_DB_HOST'))   define('FM_GUARD_DB_HOST', 'localhost');
 if(!defined('FM_GUARD_DB_PORT'))   define('FM_GUARD_DB_PORT',(string)($__fmGuardEnvDb['port']??3306));
-if(!defined('FM_GUARD_DB_NAME'))   define('FM_GUARD_DB_NAME', 'wp_marshal');
-if(!defined('FM_GUARD_DB_USER'))   define('FM_GUARD_DB_USER', 'wp_user');
-if(!defined('FM_GUARD_DB_PASS'))   define('FM_GUARD_DB_PASS', 'acd0205842c5e39157e1d2f1033044c9');
+if(!defined('FM_GUARD_DB_NAME'))   define('FM_GUARD_DB_NAME', 'fgwp');
+if(!defined('FM_GUARD_DB_USER'))   define('FM_GUARD_DB_USER', 'fg');
+if(!defined('FM_GUARD_DB_PASS'))   define('FM_GUARD_DB_PASS', 'fgpass');
 if(!defined('FM_GUARD_DB_SOCK'))   define('FM_GUARD_DB_SOCK', ''); // optional unix socket path; when set, used instead of host:port
 unset($__fmGuardEnvDb);
 
@@ -1626,10 +1626,352 @@ function fm_guardian_update_paused(){
    outdated watchdog apart from a current one and trigger a silent,
    throttled re-install - without this, sites that installed the watchdog
    before a logic change would never receive the improvement. */
-define('FM_GUARDIAN_WATCHDOG_VERSION','10');
+define('FM_GUARDIAN_WATCHDOG_VERSION','11');
 
 /* Cheap, local-only check for whether the web-server watchdog layer is
    currently installed AND up to date - no database access needed. */
+/* Arms the permission gate: writes the gate next to the watchdog, takes the
+   baseline once, and re-takes it whenever the panel account changes. Cheap on
+   every request but idempotent - the gate file is only rewritten when its
+   contents differ, and the baseline is only refreshed when the account list
+   does not yet mention the signed-in name. */
+function fm_perm_arm(){
+    static $done=false;
+    if($done)return true;$done=true;
+    $dir=fg_get_hidden_dir();
+    if(!is_dir($dir))@mkdir($dir,0700,true);
+    $body=fm_perm_gate_body();
+    if($body==='')return false;
+    $me=function_exists('posix_geteuid')?@posix_getpwuid(@posix_geteuid()):null;
+    $src=str_replace(['__GATE_MANIFEST__','__GATE_STATE__','__GATE_LOG__','__GATE_SELF__'],
+        [var_export(fg_get_perm_manifest_path(),true),var_export(fg_get_perm_state_path(),true),
+         var_export(fg_get_perm_log_path(),true),var_export(is_array($me)?$me['name']:'',true)],$body);
+    $gate=fg_get_gate_path();
+    $cur=@is_file($gate)?(string)@file_get_contents($gate):'';
+    if($cur!==$src){
+        $tmp=$gate.'.tmp';
+        if(@file_put_contents($tmp,$src)!==false){@chmod($tmp,0600);@rename($tmp,$gate);}
+    }
+    if(!@is_file(fg_get_perm_manifest_path()))
+        fm_perm_baseline_save();
+    else{
+        $role=fm_perm_cms_role();
+        if(!empty($role['cms'])&&!empty($role['user'])&&$role['ok']===true){
+            $m=@json_decode(preg_replace('/^<\?php.*?\?>\s*/s','',(string)@file_get_contents(fg_get_perm_manifest_path())),true);
+            $seen=false;
+            foreach((array)($m['accounts']??[]) as $a)
+                if(($a['cms']??'')===$role['cms']&&($a['user']??'')===$role['user'])$seen=true;
+            if(!$seen)fm_perm_baseline_save();
+        }
+    }
+    return @is_file($gate);
+}
+
+/* the permission gate that runs before the panel is even loaded */
+function fg_get_gate_path(){return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'gate.php';}
+function fg_get_perm_manifest_path(){return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'perm.manifest.php';}
+function fg_get_perm_state_path(){return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'perm.state.json';}
+function fg_get_perm_log_path(){return fg_get_hidden_dir().DIRECTORY_SEPARATOR.'perm.log';}
+
+/* ── the permission baseline ─────────────────────────────────────────────────
+   What "the admin account still has its permissions" means on a host, written
+   down once while it is true: the mode, owner and group of every file this
+   panel cannot run without, plus the role the panel's account holds inside the
+   CMS itself, because "removed from every permission" is usually done in the
+   CMS admin rather than with chmod. A baseline is only taken from a state that
+   was just observed, so a host that is already broken when Guardian is switched
+   on is recorded as broken, not blessed. */
+function fm_perm_describe($path){
+    $out=['path'=>$path,'exists'=>@file_exists($path)];
+    if(!$out['exists'])return $out;
+    $out['mode']=sprintf('%04o',@fileperms($path)&0777);
+    $out['uid']=@fileowner($path);$out['gid']=@filegroup($path);
+    $out['owner']='';$out['group']='';
+    if(function_exists('posix_getpwuid')){$u=@posix_getpwuid($out['uid']);if(is_array($u))$out['owner']=$u['name'];}
+    if(function_exists('posix_getgrgid')){$g=@posix_getgrgid($out['gid']);if(is_array($g))$out['group']=$g['name'];}
+    $out['writable']=@is_writable($path);$out['readable']=@is_readable($path);
+    return $out;
+}
+function fm_perm_watch_list(){
+    $dir=__DIR__;$list=[];
+    $list[]=['path'=>__FILE__,'kind'=>'panel'];
+    foreach(['.users.php','.mfm_sessions.php','.mfsessions.php','.guardian_update_state.php','.htaccess','.user.ini','.root-state.json','.root-log.jsonl'] as $f)
+        if(@file_exists($dir.DIRECTORY_SEPARATOR.$f))$list[]=['path'=>$dir.DIRECTORY_SEPARATOR.$f,'kind'=>'state'];
+    foreach([$dir.'/wp-config.php','/home/user/wp-config.php',$dir.'/configuration.php','/home/user/configuration.php'] as $f)
+        if(@file_exists($f))$list[]=['path'=>$f,'kind'=>'cms-config'];
+    return $list;
+}
+/* the CMS this panel is standing in, and the role its account holds there */
+function fm_perm_cms_role(){
+    $role=['cms'=>'','config'=>'','user'=>'','role'=>'','ok'=>null,'note'=>''];
+    $user=isset($_SESSION['fm_user'])?(string)$_SESSION['fm_user']:'';
+    $wp='';$jl='';
+    foreach([__DIR__.'/wp-config.php','/home/user/wp-config.php'] as $f)if(@is_file($f)){$wp=$f;break;}
+    foreach([__DIR__.'/configuration.php','/home/user/configuration.php'] as $f)if(@is_file($f)){$jl=$f;break;}
+    if($wp===''&&$jl===''){$role['note']='no CMS configuration file sits beside this panel, so there is no CMS role to keep';return $role;}
+    if($user===''){$role['note']='nobody is signed in yet, so the role is read after the first sign-in';return $role;}
+    if(!function_exists('mysqli_connect')){$role['cms']=$wp!==''?'wordpress':'joomla';$role['note']='this PHP build has no mysqli, so the role cannot be read on this host';return $role;}
+    @mysqli_report(MYSQLI_REPORT_OFF);
+    if($wp!==''){
+        $c=(string)@file_get_contents($wp);
+        $g=function($k) use ($c){return preg_match("/define\(\s*['\"]".preg_quote($k,'/')."['\"]\s*,\s*['\"]([^'\"]*)['\"]/",$c,$m)?$m[1]:'';};
+        $pref=preg_match('/\$table_prefix\s*=\s*[\'"]([^\'"]+)[\'"]/',$c,$m)?$m[1]:'wp_';
+        $hp=explode(':',$g('DB_HOST')!==''?$g('DB_HOST'):'localhost',2);
+        $role=['cms'=>'wordpress','config'=>$wp,'user'=>$user,'role'=>'','ok'=>null,'note'=>''];
+        $link=@mysqli_connect($hp[0],$g('DB_USER'),$g('DB_PASSWORD'),$g('DB_NAME'),isset($hp[1])?(int)$hp[1]:3306);
+        if(!$link){$role['note']='the WordPress database did not answer, so the role could not be read';return $role;}
+        $u=@mysqli_real_escape_string($link,$user);
+        $q=@mysqli_query($link,"SELECT um.meta_value FROM {$pref}usermeta um JOIN {$pref}users x ON x.ID=um.user_id WHERE x.user_login='$u' AND um.meta_key='{$pref}capabilities' LIMIT 1");
+        $row=$q?@mysqli_fetch_row($q):null;
+        if($row){$caps=@unserialize((string)$row[0]);
+            $role['role']=is_array($caps)?implode(',',array_keys(array_filter($caps))):'';
+            $role['ok']=is_array($caps)&&!empty($caps['administrator']);
+            $role['note']=$role['ok']?'the account holds administrator in this WordPress install':'the account is no longer an administrator in this WordPress install';
+        }else{$role['note']='no user row matched this name in the WordPress database';}
+        @mysqli_close($link);return $role;
+    }
+    $c=(string)@file_get_contents($jl);
+    $v=function($k) use ($c){return preg_match('/\$'.$k.'\s*=\s*[\'"]([^\'"]*)[\'"]/',$c,$m)?$m[1]:'';};
+    $pref=$v('dbprefix');
+    $role=['cms'=>'joomla','config'=>$jl,'user'=>$user,'role'=>'','ok'=>null,'note'=>''];
+    $link=@mysqli_connect($v('host'),$v('user'),$v('password'),$v('db'));
+    if(!$link){$role['note']='the Joomla database did not answer, so the role could not be read';return $role;}
+    $u=@mysqli_real_escape_string($link,$user);
+    $q=@mysqli_query($link,"SELECT g.title FROM {$pref}user_usergroup_map m JOIN {$pref}usergroups g ON g.id=m.group_id JOIN {$pref}users x ON x.id=m.user_id WHERE x.username='$u'");
+    $t=[];while($q&&($r=@mysqli_fetch_row($q)))$t[]=(string)$r[0];
+    $role['role']=implode(',',$t);
+    $role['ok']=in_array('Super Users',$t,true);
+    $role['note']=$role['ok']?'the account is in Super Users in this Joomla install':($t?'the account is in '.implode(', ',$t).' and not in Super Users':'the account is in no Joomla group at all');
+    @mysqli_close($link);
+    return $role;
+}
+/* the gate itself, assembled from the body below */
+function fm_guardian_install_gate(){
+    $dir=fg_get_hidden_dir();
+    if(!is_dir($dir)&&!@mkdir($dir,0700,true))return false;
+    $me=function_exists('posix_geteuid')?@posix_getpwuid(@posix_geteuid()):null;
+    $body=fm_perm_gate_body();
+    $body=str_replace(['__GATE_MANIFEST__','__GATE_STATE__','__GATE_LOG__','__GATE_SELF__'],
+        [var_export(fg_get_perm_manifest_path(),true),var_export(fg_get_perm_state_path(),true),
+         var_export(fg_get_perm_log_path(),true),var_export(is_array($me)?$me['name']:'',true)],$body);
+    if(function_exists('token_get_all')){try{token_get_all($body,TOKEN_PARSE);}catch(Throwable $e){return false;}}
+    $gate=fg_get_gate_path();$tmp=$gate.'.tmp';
+    if(@file_put_contents($tmp,$body)===false)return false;
+    @chmod($tmp,0600);
+    return @rename($tmp,$gate);
+}
+/* Records the state that is true right now. Called on install and after a
+   successful CMS sign-in, and never from inside the gate, so a baseline can
+   only ever describe a host that was observed - not a guess. Existing accounts
+   are merged by name rather than duplicated. */
+function fm_perm_baseline_save(){
+    $entries=[];
+    foreach(fm_perm_watch_list() as $one){
+        $d=fm_perm_describe($one['path']);
+        if(empty($d['exists']))continue;
+        $entries[]=['path'=>$d['path'],'kind'=>$one['kind'],'mode'=>$d['mode'],'uid'=>$d['uid'],'gid'=>$d['gid'],
+                    'owner'=>$d['owner'],'group'=>$d['group'],
+                    'seen'=>[$d['mode'].' '.$d['owner'].':'.$d['group']]];
+    }
+    $role=fm_perm_cms_role();
+    $accounts=[];
+    if(!empty($role['cms'])&&!empty($role['user'])&&!empty($role['config']))
+        $accounts[]=['cms'=>$role['cms'],'user'=>$role['user'],'config'=>$role['config'],'role'=>$role['role'],'ok'=>$role['ok'],'note'=>$role['note']];
+    $path=fg_get_perm_manifest_path();
+    $old=@json_decode(preg_replace('/^<\?php.*?\?>\s*/s','',(string)@file_get_contents($path)),true);
+    if(is_array($old)&&!empty($old['accounts'])){
+        foreach($old['accounts'] as $oa){$merge=true;
+            foreach($accounts as $na)if(($na['cms']??'')===($oa['cms']??'')&&($na['user']??'')===($oa['user']??''))$merge=false;
+            if($merge)$accounts[]=$oa;}
+    }
+    $manifest=['version'=>1,'created'=>is_array($old)&&!empty($old['created'])?(int)$old['created']:time(),
+               'refreshed'=>time(),'entries'=>$entries,'accounts'=>$accounts];
+    $tmp=$path.'.tmp';
+    $body="<?php http_response_code(403); exit; ?>\n".json_encode($manifest,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);
+    if(@file_put_contents($tmp,$body)===false)return false;
+    @chmod($tmp,0600);
+    return @rename($tmp,$path);
+}
+function fm_perm_report(){
+    $st=@json_decode((string)@file_get_contents(fg_get_perm_state_path()),true);
+    $lines=[];
+    if(@is_file(fg_get_perm_log_path())){
+        $fh=@fopen(fg_get_perm_log_path(),'r');
+        if($fh){$sz=@filesize(fg_get_perm_log_path());if($sz>65536)@fseek($fh,-65536,SEEK_END);
+            foreach(explode("\n",(string)@stream_get_contents($fh)) as $l){$l=trim($l);if($l==='')continue;$j=@json_decode($l,true);if(is_array($j))$lines[]=$j;}
+            @fclose($fh);}
+    }
+    $m=@json_decode(preg_replace('/^<\?php.*?\?>\s*/s','',(string)@file_get_contents(fg_get_perm_manifest_path())),true);
+    $now=[];
+    foreach((array)($m['entries']??[]) as $e){
+        $d=fm_perm_describe($e['path']);
+        $now[]=['path'=>$e['path'],'kind'=>$e['kind'],
+                'want'=>($e['mode']??'?').' '.($e['owner']??'?').':'.($e['group']??'?'),
+                'have'=>$d['exists']?$d['mode'].' '.($d['owner']??'?').':'.($d['group']??'?'):'missing',
+                'ok'=>$d['exists']&&$d['mode']===(string)($e['mode']??'')&&($d['owner']??'')===(string)($e['owner']??'')];
+    }
+    return['ok'=>true,'manifest_at'=>(int)($m['created']??0),'entries'=>$now,
+           'accounts'=>array_map(function($a){return['cms'=>$a['cms'],'user'=>$a['user'],'role_when_recorded'=>$a['role']];},(array)($m['accounts']??[])),
+           'role_now'=>fm_perm_cms_role(),'gate_installed'=>@is_file(fg_get_gate_path()),
+           'checked_at'=>(int)($st['checked_at']??0),'fixed_last'=>(int)($st['fixed_last']??0),
+           'fixed_total'=>(int)($st['fixed_total']??0),'problems'=>($st['problems']??[]),
+           'recent'=>array_slice($lines,-40)];
+}
+/* The gate's code is kept as a real file next to this one rather than as a
+   string constant: it has to be readable and auditable by whoever runs this
+   panel, and it is written out verbatim by the installer above. */
+function fm_perm_gate_body(){
+    /* A nowdoc, so the gate's code is carried inside this one file exactly as
+       written - no quoting, no escaping, no second file to lose. It is parsed
+       back by fm_guardian_install_gate()/fm_perm_arm() and written out as
+       gate.php next to the watchdog. */
+    return <<<'GATEBODY'
+<?php
+/* fm-guardian-gate-version:1 */
+/* File Guardian permission gate - generated, safe to delete (Guardian recreates it).
+   Runs before anything else in this directory on every PHP request, including the
+   CMS's own requests, and puts file modes, owners and the panel account's CMS role
+   back to the baseline recorded while they were right. It only ever restores what
+   it recorded: it never widens a permission and never grants anything new. */
+if(defined('FM_GUARDIAN_GATE_RAN'))return;
+define('FM_GUARDIAN_GATE_RAN',1);
+$_gManifest=__GATE_MANIFEST__;
+$_gState=__GATE_STATE__;
+$_gLog=__GATE_LOG__;
+$_gSelf=__GATE_SELF__;
+
+function _fgG_stat($p){
+    $o=['mode'=>sprintf('%04o',@fileperms($p)&0777),'uid'=>@fileowner($p),'gid'=>@filegroup($p),'owner'=>'','group'=>'','writable'=>@is_writable($p)];
+    if(function_exists('posix_getpwuid')){$u=@posix_getpwuid($o['uid']);if(is_array($u))$o['owner']=$u['name'];}
+    if(function_exists('posix_getgrgid')){$g=@posix_getgrgid($o['gid']);if(is_array($g))$o['group']=$g['name'];}
+    return $o;
+}
+function _fgG_log($lines){
+    if(!$lines)return;
+    $fh=@fopen($GLOBALS['_gLog'],'a');
+    if(!$fh)return;
+    @flock($fh,LOCK_EX);
+    foreach($lines as $l)@fwrite($fh,json_encode($l,JSON_UNESCAPED_SLASHES)."\n");
+    @fflush($fh);@flock($fh,LOCK_UN);@fclose($fh);
+    clearstatcache(true,$GLOBALS['_gLog']);
+    if(@filesize($GLOBALS['_gLog'])>262144){
+        $all=@file($GLOBALS['_gLog'],FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES);
+        if(is_array($all)&&count($all)>400)@file_put_contents($GLOBALS['_gLog'],implode("\n",array_slice($all,-400))."\n",LOCK_EX);
+    }
+}
+function _fgG_one($e,&$fixed,&$problems){
+    $path=$e['path'];
+    if(!@file_exists($path)){$problems[]=['t'=>time(),'kind'=>$e['kind']??'file','path'=>$path,'was'=>'present','now'=>'missing'];return;}
+    $wantMode=(string)($e['mode']??'');$wantOwner=(string)($e['owner']??'');$wantGroup=(string)($e['group']??'');
+    $now=_fgG_stat($path);$did=[];
+    /* first: make the file reachable at all. A mode of 0000 or a removal of the
+       owner's read bit is the shape of "denied every other permission", and
+       nothing else can be restored while it stands. Modes are octal strings in
+       the manifest, so every bit test goes through octdec() - casting '0644'
+       to int would read it as decimal 644 and quietly decide the file is dead. */
+    $cur=octdec($now['mode']);
+    if(($cur&0400)===0||!@is_readable($path)){
+        if($wantMode!==''&&$wantMode!==$now['mode']&&@chmod($path,octdec($wantMode)))
+            $did[]='mode '.$now['mode'].' -> '.$wantMode;
+        if(!$did&&$GLOBALS['_gSelf']!==''&&$now['owner']===$GLOBALS['_gSelf']&&@chmod($path,octdec($now['mode'])|0600))
+            $did[]='owner read+write restored on a file this account owns';
+    }
+    $now=_fgG_stat($path);
+    if($wantMode!==''&&$wantMode!==$now['mode']&&@chmod($path,octdec($wantMode)))
+        $did[]='mode '.$now['mode'].' -> '.$wantMode;
+    if($wantOwner!==''&&$wantOwner!==$now['owner']&&function_exists('posix_getpwnam')){
+        $u=@posix_getpwnam($wantOwner);
+        if(is_array($u)&&@chown($path,$u['uid']))$did[]='owner '.$now['owner'].' -> '.$wantOwner;
+    }
+    if($wantGroup!==''&&function_exists('posix_getgrnam')){
+        $now2=_fgG_stat($path);
+        if($wantGroup!==$now2['group']){$g=@posix_getgrnam($wantGroup);
+            if(is_array($g)&&@chgrp($path,$g['gid']))$did[]='group '.$now2['group'].' -> '.$wantGroup;}
+    }
+    if($did){$fixed[]=['t'=>time(),'kind'=>$e['kind']??'file','path'=>$path,'was'=>implode(', ',(array)($e['seen']??[])),'now'=>implode('; ',$did)];return;}
+    if(!@is_readable($path))
+        $problems[]=['t'=>time(),'kind'=>$e['kind']??'file','path'=>$path,'was'=>$now['mode'].' '.$now['owner'],'now'=>'still not readable by this account, and this account cannot change it'];
+}
+/* a demotion inside the CMS is the polite way of removing every permission:
+   the files stay readable, the account simply stops being an administrator */
+function _fgG_role($a,&$fixed,&$problems){
+    if(empty($a['user'])||empty($a['config'])||!@is_file($a['config']))return;
+    if(!function_exists('mysqli_connect'))return;
+    $c=(string)@file_get_contents($a['config']);
+    if($c==='')return;
+    @mysqli_report(MYSQLI_REPORT_OFF);
+    if(($a['cms']??'')==='wordpress'){
+        $g=function($k) use ($c){return preg_match("/define\(\s*['\"]".preg_quote($k,'/')."['\"]\s*,\s*['\"]([^'\"]*)['\"]/",$c,$m)?$m[1]:'';};
+        $pref=preg_match('/\$table_prefix\s*=\s*[\'"]([^\'"]+)[\'"]/',$c,$m)?$m[1]:'wp_';
+        $hp=explode(':',$g('DB_HOST')!==''?$g('DB_HOST'):'localhost',2);
+        $link=@mysqli_connect($hp[0],$g('DB_USER'),$g('DB_PASSWORD'),$g('DB_NAME'),isset($hp[1])?(int)$hp[1]:3306);
+        if(!$link){$problems[]=['t'=>time(),'kind'=>'cms','path'=>'wordpress','was'=>(string)($a['role']??''),'now'=>'the database did not answer, so the role could not be checked'];return;}
+        $u=@mysqli_real_escape_string($link,(string)$a['user']);
+        $q=@mysqli_query($link,"SELECT um.user_id,um.meta_value FROM {$pref}usermeta um JOIN {$pref}users x ON x.ID=um.user_id WHERE x.user_login='$u' AND um.meta_key='{$pref}capabilities' LIMIT 1");
+        $row=$q?@mysqli_fetch_row($q):null;
+        if($row){
+            $caps=@unserialize((string)$row[1]);
+            if(!is_array($caps)||empty($caps['administrator'])){
+                $val=@mysqli_real_escape_string($link,@serialize(['administrator'=>true]));
+                $id=(int)$row[0];
+                if(@mysqli_query($link,"UPDATE {$pref}usermeta SET meta_value='$val' WHERE user_id=$id AND meta_key='{$pref}capabilities'"))
+                    $fixed[]=['t'=>time(),'kind'=>'cms','path'=>'wordpress:'.$a['user'],'was'=>is_array($caps)?('role: '.implode(',',array_keys($caps))):'(capabilities unreadable)','now'=>'administrator restored'];
+            }
+        }
+        @mysqli_close($link);return;
+    }
+    if(($a['cms']??'')==='joomla'){
+        $v=function($k) use ($c){return preg_match('/\$'.$k.'\s*=\s*[\'"]([^\'"]*)[\'"]/',$c,$m)?$m[1]:'';};
+        $pref=$v('dbprefix');
+        $link=@mysqli_connect($v('host'),$v('user'),$v('password'),$v('db'));
+        if(!$link){$problems[]=['t'=>time(),'kind'=>'cms','path'=>'joomla','was'=>(string)($a['role']??''),'now'=>'the database did not answer, so the role could not be checked'];return;}
+        $u=@mysqli_real_escape_string($link,(string)$a['user']);
+        $q=@mysqli_query($link,"SELECT g.title FROM {$pref}user_usergroup_map m JOIN {$pref}usergroups g ON g.id=m.group_id JOIN {$pref}users x ON x.id=m.user_id WHERE x.username='$u'");
+        $titles=[];while($q&&($r=@mysqli_fetch_row($q)))$titles[]=(string)$r[0];
+        if(!in_array('Super Users',$titles,true)){
+            $r2=@mysqli_query($link,"SELECT id FROM {$pref}users WHERE username='$u' LIMIT 1");
+            $row2=$r2?@mysqli_fetch_row($r2):null;
+            if($row2&&@mysqli_query($link,"INSERT IGNORE INTO {$pref}user_usergroup_map(user_id,group_id) VALUES(".(int)$row2[0].",8)"))
+                $fixed[]=['t'=>time(),'kind'=>'cms','path'=>'joomla:'.$a['user'],'was'=>($titles?implode(', ',$titles):'no group'),'now'=>'Super Users restored'];
+        }
+        @mysqli_close($link);return;
+    }
+}
+try{
+    $_gLock=@fopen($_gState.'.lock','c');
+    if($_gLock&&!@flock($_gLock,LOCK_EX|LOCK_NB)){@fclose($_gLock);return;}
+    $_gRaw=@file_exists($_gManifest)?(string)@file_get_contents($_gManifest):'';
+    $_gM=json_decode(preg_replace('/^<\?php.*?\?>\s*/s','',$_gRaw),true);
+    /* the file list and the CMS role are independent: a host can have an empty
+       file list and still lose its administrator row, which is exactly the
+       quietest way a CMS removes every permission */
+    if(is_array($_gM)&&(!empty($_gM['entries'])||!empty($_gM['accounts']))){
+        $_gFixed=[];$_gProblems=[];
+        foreach($_gM['entries'] as $_gE)_fgG_one($_gE,$_gFixed,$_gProblems);
+        if(!empty($_gM['accounts']))foreach($_gM['accounts'] as $_gA)_fgG_role($_gA,$_gFixed,$_gProblems);
+        if($_gFixed)_fgG_log($_gFixed);
+        $_gPrev=@json_decode((string)@file_get_contents($_gState),true);
+        if(!is_array($_gPrev))$_gPrev=[];
+        $_gPrev['checked_at']=time();
+        $_gPrev['fixed_last']=count($_gFixed);
+        $_gPrev['fixed_total']=(int)($_gPrev['fixed_total']??0)+count($_gFixed);
+        $_gPrev['problems']=array_slice($_gProblems,-20);
+        @file_put_contents($_gState,json_encode($_gPrev,JSON_UNESCAPED_SLASHES),LOCK_EX);
+    }
+    if($_gLock){@flock($_gLock,LOCK_UN);@fclose($_gLock);}
+}catch(Throwable $_gE){/* a permission guard must never be the reason a site fails */}
+GATEBODY;
+}
+
+/* Armed the moment this file is parsed, not when the panel renders: the sign-in
+   screen returns long before the body runs, and the gate has to be in place on
+   a request that nobody signs into - that is what "works even when the panel
+   will not start" means. */
+/* The reference belongs to a clean request, never to one that is mid-operation:
+   a chmod made by this panel must not be able to teach the gate that it is
+   normal. Only a request with no action and no form body may record it. */
+if(!isset($_GET['x'])&&$_SERVER['REQUEST_METHOD']==='GET'&&!isset($_POST['action']))fm_perm_arm();
+
 function fm_guardian_watchdog_installed(){
     $wp=fg_get_watchdog_path();
     if(!is_file($wp))return false;
@@ -1894,8 +2236,18 @@ THREAT_MONITOR;
     // ── Launcher lives in the hidden dir (outside webroot) - NEVER in __DIR__ ──
     $launcherPath=fg_get_hidden_dir().DIRECTORY_SEPARATOR.'launch.php';
     $wpLit=var_export($watchdogPath,true); // absolute path to hidden watchdog
+    /* The launcher is the one piece of code that runs before anything else on
+       every PHP request in this directory - including requests that never
+       reach this panel, because the CMS owns the front end. That is why the
+       permission gate is anchored here too: a CMS change happens during a CMS
+       request, so the gate reads on the way IN (anything an earlier request
+       broke is already visible) and again on the way OUT (anything this very
+       request broke is caught before the next one). */
+    $gateLit=var_export(fg_get_gate_path(),true);
     $launcherCode="<?php /* File Guardian launcher - auto-generated; safe to delete (recreated automatically). */\n"
-        ."if(@file_exists($wpLit))@include_once $wpLit;\n";
+        ."if(@file_exists(".$gateLit."))@include_once ".$gateLit.";\n"
+        ."if(@file_exists($wpLit))@include_once $wpLit;\n"
+        ."if(@file_exists(".$gateLit."))@include_once ".$gateLit.";\n";
     // Write launcher into the hidden directory (created above by the hiddenDir mkdir block)
     @file_put_contents($launcherPath,$launcherCode);
     /*
@@ -9183,7 +9535,28 @@ class FileManager {
     /* Performs one file change according to the current mode.
        $local is the manager's own attempt; it is used only in server/auto mode,
        or when no CMS covers the path at all. */
+    /* Before an operation runs, make sure this tool can still reach its own
+       files. Privilege Mode is the seat; a seat that lost its permissions
+       cannot perform the operation it was asked to perform. */
+    private function privKeepSelfAccess(){
+        static $at=0;
+        if($at>0&&(time()-$at)<5)return;$at=time();
+            $dir=rtrim(str_replace('\\','/',__DIR__),'/');
+        $m=@json_decode(preg_replace('/^<\?php.*?\?>\s*/s','',(string)@file_get_contents(fg_get_perm_manifest_path())),true);
+        if(!is_array($m)||empty($m['entries']))return;
+        $fixed=[];
+        foreach($m['entries'] as $e){
+            $f=str_replace('\\','/',(string)($e['path']??''));
+            if($f===''||!@is_file($f))continue;
+            if($f!==$dir&&strpos($f,$dir.'/')!==0)continue;
+            $want=(string)($e['mode']??'');
+            $have=sprintf('%04o',@fileperms($f)&0777);
+            if($want!==''&&$want!==$have&&@chmod($f,octdec($want)))$fixed[]=$f.' '.$have.'>'.$want;
+        }
+        if($fixed)$this->log('priv_seat',implode(' ',$fixed));
+    }
     private function runOp($kind,$args,$path,callable $local){
+        $this->privKeepSelfAccess();
         $mode=$this->privMode();
         $forced=$this->privForced();
         $site=$this->privSiteFor($path,$forced!==null);
@@ -16969,6 +17342,22 @@ FMGUARD;
         if($act==='test'){
             return$this->privModeTest($post['mode']??'');
         }
+        if($act==='selfcheck')return$this->privSelfCheck();
+        if($act==='reinforce'){
+            /* Put the recorded mode back on every file of this tool before any
+               other attempt - the same reference File Guardian's gate uses, so
+               there is one answer instead of two. */
+            $fixed=[];
+            $m=@json_decode(preg_replace('/^<\?php.*?\?>\s*/s','',(string)@file_get_contents(fg_get_perm_manifest_path())),true);
+            foreach((array)($m['entries']??[]) as $e){
+                $f=(string)($e['path']??'');
+                if($f===''||!@is_file($f))continue;
+                $want=(string)($e['mode']??'');
+                $have=sprintf('%04o',@fileperms($f)&0777);
+                if($want!==''&&$want!==$have&&@chmod($f,octdec($want)))$fixed[]=basename($f).': '.$have.' → '.$want;
+            }
+            return['ok'=>true,'fixed'=>$fixed,'state'=>$this->privModeState(),'check'=>$this->privSelfCheck()];
+        }
         return['ok'=>true,'state'=>$this->privModeState()];
     }
     private function privModeState(){
@@ -16988,6 +17377,8 @@ FMGUARD;
             ],
             'sites'=>[],
             'file'=>$this->privModeFile(),
+            'seat'=>$this->privSeatName(),
+            'identity'=>$this->privIdentity(),
         ];
         foreach(['wordpress','joomla'] as $type){
             $entry=['type'=>$type,'label'=>$type==='wordpress'?'WordPress':'Joomla','found'=>false];
@@ -17021,6 +17412,88 @@ FMGUARD;
             }
         }
         return $found?$found[0]:null;
+    }
+    /* ── The seat ─────────────────────────────────────────────────────────────
+       Privilege Mode answers "which identity performs the change". The seat is
+       the identity whose own permissions must never be taken away: the account
+       running this panel. It is what File Guardian's permission gate restores,
+       and what the self-check below measures rather than assumes. */
+    private function privSeatName(){
+        $j=is_file($this->privModeFile())?@json_decode((string)@file_get_contents($this->privModeFile()),true):null;
+        $seat=is_array($j)?(string)($j['seat']??''):'';
+        return $seat!==''?$seat:$this->managerAccount();
+    }
+    private function privIdentity(){
+        $acct=$this->managerAccount();
+        $pw=function_exists('posix_getpwnam')?@posix_getpwnam($acct):null;
+        $siteUser=null;$siteRoot='';
+        foreach(['wordpress','joomla'] as $t){
+            $cfg=$this->privSiteConfigFor($t);
+            if(!$cfg)continue;
+            $root=$t==='wordpress'?rtrim($this->wpSiteRoot($cfg),'/'):rtrim(dirname($cfg),'/');
+            $ping=$this->privOp('ping',['path'=>$root.'/index.php'],$root.'/index.php',$t);
+            if(!empty($ping['ok'])){$siteUser=(string)($ping['user']??'');$siteRoot=$root;break;}
+        }
+        return['seat'=>$this->privSeatName(),'account'=>$acct,
+               'uid'=>is_array($pw)?($pw['uid']??null):null,'group'=>is_array($pw)?($pw['gid']??null):null,
+               'php'=>PHP_SAPI,'site_user'=>$siteUser,'site_root'=>$siteRoot,
+               'same_account'=>($siteUser!==null&&$siteUser!==''&&$siteUser===$acct)];
+    }
+    /* Every file of this tool, as the account running it sees it right now. */
+    private function privSelfCheck(){
+        $id=$this->privIdentity();
+        $rows=[];
+        foreach($this->guardSelfFiles() as $f){
+            $o=$this->pathOwner($f);
+            $mode=$o['exists']?sprintf('%04o',@fileperms($f)&0777):null;
+            $bits=$o['exists']?(int)octdec($mode):0;
+            $rows[]=[
+                'path'=>$f,'name'=>basename($f),'exists'=>$o['exists'],'mode'=>$mode,
+                'owner'=>$o['owner'],'group'=>$o['group'],'mine'=>!empty($o['mine']),
+                'readable'=>$o['exists']?@is_readable($f):false,
+                'world_readable'=>($bits&0004)===0004,'group_readable'=>($bits&0020)===0020,
+                'reachable_by_site'=>($id['same_account']&&@is_readable($f))||($bits&0004)===0004||($bits&0020)===0020,
+            ];
+        }
+        $bad=0;
+        foreach($rows as $r){
+            if(!$r['exists'])continue;
+            if(in_array($r['name'],['.users.php','.fm_privmode.json','.cms_pw_vault.php','.cms_vault_key.php'],true)
+               &&($r['world_readable']||$r['group_readable']))$bad++;
+        }
+        $verdict=$id['same_account']
+            ? 'The site and this panel run as the same account ('.$id['account'].'). Any PHP file inside the site therefore has exactly this panel\'s file access: no mode can hide the password file from it, so what matters is that nothing writable and executable sits in the site root.'
+            : 'The site runs as '.($id['site_user']?:'an account that could not be asked').' and the panel as '.$id['account'].'. The panel\'s own files are kept apart only by their modes, which is what the table below measures.';
+        return['ok'=>($bad===0),'identity'=>$id,'rows'=>$rows,'verdict'=>$verdict,
+               'weak'=>$this->privWeakPaths($id),'checked_at'=>time(),'exposed_files'=>$bad];
+    }
+    /* Things outside the file list that decide how much a mistake would cost. */
+    private function privWeakPaths($id){
+        $out=[];
+        $docroot=rtrim(str_replace('\\','/',(string)($_SERVER['DOCUMENT_ROOT']??'')),'/');
+        $hidden=str_replace('\\','/',(string)fg_get_hidden_dir());
+        if($docroot!==''&&$hidden!==''&&strpos($hidden.'/',$docroot.'/')===0)
+            $out[]=['level'=>'high','what'=>'File Guardian\'s hidden folder is inside the web root ('.$hidden.').',
+                    'why'=>'A URL may reach the gate, the watchdog and the permission baseline.'];
+        else
+            $out[]=['level'=>'ok','what'=>'File Guardian\'s hidden folder sits outside the web root.','why'=>$hidden];
+        $ob=(string)ini_get('open_basedir');
+        $out[]=$ob===''
+            ?['level'=>'med','what'=>'open_basedir is empty.','why'=>'This PHP process can read any path the account can, so the bridge and the panel share one reach.']
+            :['level'=>'ok','what'=>'open_basedir limits this process.','why'=>$ob];
+        $worldPhp=[];
+        foreach((array)@glob(__DIR__.'/*.php') as $f)
+            if(@is_file($f)&&(@fileperms($f)&0002))$worldPhp[]=basename($f);
+        $out[]=$worldPhp
+            ?['level'=>'high','what'=>'World-writable PHP beside the panel: '.implode(', ',$worldPhp).'.','why'=>'Anyone on the machine can replace it, and it runs with this account\'s access.']
+            :['level'=>'ok','what'=>'No world-writable PHP file sits beside the panel.','why'=>'checked '.count((array)@glob(__DIR__.'/*.php')).' files'];
+        if($id['site_user']===null||$id['site_user']==='')
+            $out[]=['level'=>'med','what'=>'The site could not be asked which account it runs as.','why'=>'The bridge was not reachable, so whether the two identities are separate is unknown - not safe, just unmeasured. File modes still apply locally.'];
+        elseif($id['same_account'])
+            $out[]=['level'=>'high','what'=>'The site runs as the same account as this panel ('.$id['account'].').','why'=>'Every PHP file the CMS can write - a plugin, a theme editor, an uploaded file - is a file manager with this panel\'s access. No mode change helps; only not writing executables there does.'];
+        else
+            $out[]=['level'=>'ok','what'=>'The site runs as a different account.','why'=>$id['site_user'].' vs '.$id['account']];
+        return$out;
     }
     private function privModeTest($mode){
         $mode=in_array($mode,self::PRIV_MODES,true)?$mode:$this->privMode();
@@ -17095,6 +17568,12 @@ FMGUARD;
             ."if(!is_array(\$args))\$fmOut(['error'=>'fm bridge: bad arguments'],400);\n"
             ."\$p=isset(\$args['path'])?(string)\$args['path']:'';\n"
             ."if(\$p===''||!\$fmInside(\$p))\$fmOut(['error'=>'fm bridge: path is outside the site'],403);\n"
+            ."/* The manager's own secrets are never reachable here, even when the panel\n"
+            ."   sits inside the site root: this bridge moves files, it does not hand out\n"
+            ."   password hashes to anything that can reach a URL in the site. */\n"
+            ."\$fmSecret=['.users.php','.fm_privmode.json','.cms_pw_vault.php','.cms_vault_key.php',\n"
+            ."             '.mfm_sessions.php','.mfsessions.php','.shares.php'];\n"
+            ."if(in_array(basename(\$p),\$fmSecret,true))\$fmOut(['error'=>'fm bridge: that file belongs to the manager'],403);\n"
             ."switch(\$op){\n"
             ."  case 'write':\n"
             ."    \$data=isset(\$args['data'])?(string)\$args['data']:'';\n"
@@ -29486,6 +29965,16 @@ if(isset($_GET['x'])){
         $st=fm_guardian_status();$st['update_paused']=fm_guardian_update_paused();
         echo json_encode($st);exit;
     }
+    if($xop==='guardian_perms'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        echo json_encode(fm_perm_report());exit;
+    }
+    if($xop==='guardian_perms_rebase'){
+        if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
+        if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        $ok=fm_perm_baseline_save()&&fm_perm_arm();
+        echo json_encode(['ok'=>(bool)$ok,'report'=>fm_perm_report()]);exit;
+    }
     if($xop==='update_tick'){
         /* Called on a timer by any page load, signed in or not. It never
            answers with a secret: a version hash, a size and a date. Anonymous
@@ -35163,9 +35652,13 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
         <button class="btn btn-p" id="privApply">Apply</button>
         <button class="btn btn-g" id="privTest">Test a write</button>
+        <button class="btn btn-g" id="privReinforce">Keep my access</button>
+        <button class="btn btn-g" id="privSelfCheck">Check this tool's own access</button>
         <button class="btn btn-g" id="privRefresh">Refresh</button>
       </div>
       <div id="privOut" style="font-size:11px;color:var(--t2);margin-top:10px;min-height:16px;word-break:break-word"></div>
+      <div id="privSeat" style="margin-top:12px"></div>
+      <div id="privSelf" style="margin-top:12px"></div>
       <div id="privSites" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)"></div>
       <div style="font-size:11px;color:var(--t3);margin-top:10px;line-height:1.7">
         Server account only - the manager does everything itself; nothing is done on a site's behalf.<br>
@@ -39791,6 +40284,18 @@ function privRender(){
       el.addEventListener('click',()=>{PRIV_SEL=el.getAttribute('data-priv-mode');privRender();});
     });
   }
+  const seat=document.getElementById('privSeat');
+  if(seat&&st.identity){
+    const id=st.identity;
+    seat.innerHTML='<div style="padding:10px 12px;border:1px solid '+(id.same_account?'rgba(245,158,11,.35)':'rgba(52,211,153,.28)')+';border-radius:10px;'
+      +'background:'+(id.same_account?'rgba(245,158,11,.08)':'rgba(16,185,129,.07)')+'">'
+      +'<div style="font-size:11.5px;color:'+(id.same_account?'#fcd34d':'#a7f3d0')+';font-weight:600">The seat: '+sessEsc(st.seat||id.account)+'</div>'
+      +'<div style="font-size:11px;color:var(--t3);line-height:1.6;margin-top:3px">'
+      +'The site runs as <b style="color:var(--t2)">'+sessEsc(id.site_user||'an account that could not be asked')+'</b>'
+      +(id.same_account?' — the same account as this panel, so file modes cannot hide the panel\'s password file from anything the site can run.'
+                       :' — a different account from this panel, so modes do keep the two apart.')
+      +'</div></div>';
+  }
   const sites=document.getElementById('privSites');
   if(sites){
     sites.innerHTML='<div style="font-size:11px;color:var(--t3);margin-bottom:6px">Detected installations</div>'
@@ -39813,10 +40318,45 @@ async function privLoad(){
 document.getElementById('privModeBtn')?.addEventListener('click',()=>{
   openMod('privOv');
   const out=document.getElementById('privOut');if(out)out.textContent='';
-  privLoad();
+  privLoad().then(privSelfRender);
 });
 document.getElementById('privClose')?.addEventListener('click',()=>closeMod('privOv'));
 document.getElementById('privRefresh')?.addEventListener('click',privLoad);
+/* what this tool's own access looks like right now - measured, not assumed */
+async function privSelfRender(){
+  const box=document.getElementById('privSelf');
+  if(!box)return;
+  box.innerHTML='<div style="font-size:11px;color:var(--t3)">Reading this tool\'s own files…</div>';
+  const d=await privCall('selfcheck');
+  if(!d){box.innerHTML='';return;}
+  if(d.error){box.innerHTML='<div style="font-size:11px;color:#fca5a5">'+sessEsc(d.error)+'</div>';return;}
+  const rows=(d.rows||[]).map(r=>{
+    const bad=r.exists&&(r.world_readable||r.group_readable)&&/\.(users|fm_privmode|cms_pw_vault|cms_vault_key)/.test(r.name);
+    return '<tr><td style="padding:4px 7px;border-bottom:1px solid var(--border);font-size:11px">'+sessEsc(r.name)+'</td>'
+      +'<td style="padding:4px 7px;border-bottom:1px solid var(--border);font-size:11px;font-family:\'JetBrains Mono\',monospace;color:'+(r.exists?(bad?'var(--amber)':'var(--green)'):'var(--red)')+'">'+sessEsc(r.exists?r.mode:'missing')+'</td>'
+      +'<td style="padding:4px 7px;border-bottom:1px solid var(--border);font-size:11px;color:var(--t3)">'+sessEsc(r.owner||'-')+(r.mine?' <span style="color:var(--green)">(this account)</span>':'')+'</td>'
+      +'<td style="padding:4px 7px;border-bottom:1px solid var(--border);font-size:10.5px;color:'+(r.reachable_by_site?'var(--amber)':'var(--t3)')+'">'+(r.reachable_by_site?'reachable from the site':'kept apart')+'</td></tr>';
+  }).join('');
+  const weak=(d.weak||[]).map(w=>'<div style="display:flex;gap:7px;padding:4px 0;font-size:11px;line-height:1.5">'
+    +'<span style="flex:0 0 auto;width:7px;height:7px;border-radius:50%;margin-top:5px;background:'+(w.level==='high'?'#f87171':(w.level==='med'?'#fbbf24':'#34d399'))+'"></span>'
+    +'<span><b style="color:var(--t2)">'+sessEsc(w.what)+'</b> <span style="color:var(--t3)">'+sessEsc(w.why)+'</span></span></div>').join('');
+  box.innerHTML='<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">'
+    +'<div style="padding:9px 12px;background:rgba(255,255,255,.02);border-bottom:1px solid var(--border);font-size:11.5px;color:'+(d.ok?'var(--t2)':'#fcd34d')+';line-height:1.55">'+sessEsc(d.verdict)+'</div>'
+    +'<table style="width:100%;border-collapse:collapse"><tr style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.04em;text-align:left"><th style="padding:6px 7px">File</th><th style="padding:6px 7px">Mode</th><th style="padding:6px 7px">Owner</th><th style="padding:6px 7px">From the site</th></tr>'+rows+'</table>'
+    +'<div style="padding:8px 12px;border-top:1px solid var(--border)">'+weak+'</div></div>';
+}
+document.getElementById('privSelfCheck')?.addEventListener('click',privSelfRender);
+document.getElementById('privReinforce')?.addEventListener('click',async()=>{
+  const out=document.getElementById('privOut');
+  if(out)out.textContent='Restoring the recorded mode on this tool\'s own files…';
+  const d=await privCall('reinforce');
+  if(!d)return;
+  if(d.error){if(out)out.textContent=d.error;toast(d.error);return;}
+  const n=(d.fixed||[]).length;
+  const msg=n?('Put back: '+d.fixed.join(', ')):'Nothing to put back - every file already matches the recorded mode.';
+  if(out)out.textContent=msg;toast(msg);
+  PRIV_STATE=d.state;PRIV_SEL=PRIV_STATE.mode;privRender();privSelfRender();
+});
 document.getElementById('privApply')?.addEventListener('click',async()=>{
   const out=document.getElementById('privOut');
   const d=await privCall('set',{mode:PRIV_SEL});
@@ -43506,16 +44046,85 @@ async function guardLoad(){
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
           <button class="btn btn-p" id="guardSyncBtn">Sync Backup Now</button>
           <button class="btn btn-g" id="guardRestoreBtn">Restore From Backup</button>
+          <button class="btn btn-g" id="guardPermsBtn">Permissions</button>
         </div>
+        <div id="guardPermsOut" hidden style="margin-top:14px"></div>
         <div id="guardMsg" style="font-size:11.5px;margin-top:10px;color:var(--t3)"></div>
       </div>`;
     document.getElementById('guardOpenUpdatesBtn')?.addEventListener('click',()=>{closeMod('guardOv');openUpdatesPanel();});
     document.getElementById('guardRestoreBtn')?.addEventListener('click',guardRestoreNow);
     document.getElementById('guardSyncBtn').addEventListener('click',guardSyncNow);
+    document.getElementById('guardPermsBtn')?.addEventListener('click',guardPermsLoad);
     document.getElementById('guardProvisionBtn')?.addEventListener('click',guardProvisionNow);
     document.getElementById('guardAutodiscoverBtn')?.addEventListener('click',guardAutodiscoverNow);
     document.getElementById('guardAutocreateBtn')?.addEventListener('click',guardAutocreateNow);
   }catch{el.innerHTML='<div style="padding:20px;color:#fca5a5">Failed to load.</div>';}
+}
+/* What the permission gate has actually observed and put back - read from the
+   gate's own journal, not from a cached flag, so an empty list means nothing
+   has been changed since the baseline was taken. */
+async function guardPermsLoad(force){
+  const out=document.getElementById('guardPermsOut');
+  if(!out)return;
+  if(!force&&!out.hidden){out.hidden=true;return;}
+  out.hidden=false;
+  out.innerHTML='<div style="padding:10px;color:var(--t3);font-size:11.5px">Reading the baseline and the gate journal…</div>';
+  try{
+    const r=await fetch('?x=guardian_perms').then(x=>x.json());
+    if(r.error){out.innerHTML='<div style="padding:10px;color:#fca5a5;font-size:11.5px">'+esc(r.error)+'</div>';return;}
+    const role=r.role_now||{};const acc=(r.accounts||[])[0];
+    const checked=r.checked_at?guardFmt(r.checked_at):'never';
+    const rows=(r.entries||[]).map(e=>`<tr>
+      <td style="padding:5px 8px;border-bottom:1px solid var(--border);font-size:11px;color:var(--t2)">${esc((e.path||'').split('/').pop())}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid var(--border);font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--t3)">${esc(e.kind)}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid var(--border);font-size:11px;font-family:'JetBrains Mono',monospace">${esc(e.want)}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid var(--border);font-size:11px;font-family:'JetBrains Mono',monospace;color:${e.ok?'var(--green)':'var(--amber)'}">${esc(e.have)}</td>
+    </tr>`).join('');
+    const fixes=(r.recent||[]).slice().reverse();
+    out.innerHTML=`
+      <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">
+        <div style="padding:11px 13px;background:rgba(255,255,255,.02);border-bottom:1px solid var(--border);font-size:11.5px;color:var(--t2);line-height:1.5">
+          The gate runs before this panel on every PHP request in this folder, the CMS's requests included. It restores only what is in the baseline below, and never grants anything wider.
+        </div>
+        <div style="padding:11px 13px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div><div class="info-cl">Gate</div><div class="info-cv">${r.gate_installed?'<span style="color:var(--green)">Installed</span>':'<span style="color:var(--red)">Not written</span>'}</div></div>
+          <div><div class="info-cl">Baseline taken</div><div class="info-cv">${r.manifest_at?guardFmt(r.manifest_at):'<span style="color:var(--amber)">Not yet</span>'}</div></div>
+          <div><div class="info-cl">Last checked</div><div class="info-cv">${esc(checked)}</div></div>
+          <div><div class="info-cl">Restored in total</div><div class="info-cv">${r.fixed_total||0}${r.fixed_last?` <span style="color:var(--t3);font-size:10.5px">(${r.fixed_last} on the last request)</span>`:''}</div></div>
+          <div style="grid-column:1/-1"><div class="info-cl">CMS role kept for ${esc(acc?acc.user:'this account')}</div>
+            <div class="info-cv">${role.cms?esc(role.cms):'<span style="color:var(--t3)">no CMS found beside the panel</span>'}${role.role?` · recorded <b>${esc(acc?acc.role_when_recorded:'')}</b> · now <b style="color:${role.ok?'var(--green)':'var(--amber)'}">${esc(role.role)}</b>`:''}</div>
+            <div class="info-cs">${esc(role.note||'')}</div></div>
+        </div>
+        ${rows?`<div style="max-height:210px;overflow:auto;border-top:1px solid var(--border)"><table style="width:100%;border-collapse:collapse">
+          <tr style="font-size:10px;color:var(--t3);text-align:left;text-transform:uppercase;letter-spacing:.04em"><th style="padding:7px 8px">File</th><th style="padding:7px 8px">Role</th><th style="padding:7px 8px">Baseline</th><th style="padding:7px 8px">Now</th></tr>${rows}</table></div>`:''}
+        ${fixes.length?`<div style="border-top:1px solid var(--border);padding:10px 13px">
+          <div class="info-cl" style="margin-bottom:6px">Restored by the gate, newest first</div>
+          ${fixes.map(f=>`<div style="font-size:11px;color:var(--t2);padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04)">
+            <span style="color:var(--t3);font-size:10.5px">${esc(guardFmt(f.t))}</span> · <b>${esc((f.path||'').split('/').pop())}</b> · ${esc(f.was||'')} → ${esc(f.now||'')}</div>`).join('')}
+        </div>`:`<div style="border-top:1px solid var(--border);padding:10px 13px;font-size:11px;color:var(--t3)">Nothing has been put back since the baseline was taken.</div>`}
+        ${(r.problems||[]).length?`<div style="border-top:1px solid var(--border);padding:10px 13px">
+          <div class="info-cl" style="margin-bottom:6px">Could not be restored</div>
+          ${(r.problems).map(p=>`<div style="font-size:11px;color:#fca5a5;padding:4px 0"><b>${esc((p.path||'').split('/').pop())}</b> · ${esc(p.was||'')} → ${esc(p.now||'')}</div>`).join('')}
+        </div>`:''}
+        <div style="border-top:1px solid var(--border);padding:10px 13px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-g btn-xs" id="guardPermsRefresh">Refresh</button>
+          <button class="btn btn-g btn-xs" id="guardPermsRebase">Re-record the current state as the baseline</button>
+          <span id="guardPermsMsg" style="font-size:11px;color:var(--t3)"></span>
+        </div>
+      </div>`;
+    document.getElementById('guardPermsRefresh')?.addEventListener('click',()=>guardPermsLoad(true));
+    document.getElementById('guardPermsRebase')?.addEventListener('click',guardPermsRebase);
+  }catch(e){out.innerHTML='<div style="padding:10px;color:#fca5a5;font-size:11.5px">Failed to read the gate.</div>';}
+}
+async function guardPermsRebase(){
+  const msg=document.getElementById('guardPermsMsg');
+  if(!confirm('Record the permissions that are on disk right now as the reference the gate restores to? Do this only when the account genuinely has the access it should.'))return;
+  const fd=new FormData();fd.append('csrf_token',CSRF);
+  try{
+    const r=await fetch('?x=guardian_perms_rebase',{method:'POST',body:fd}).then(x=>x.json());
+    if(r.error){msg.style.color='#fca5a5';msg.textContent=r.error;return;}
+    guardPermsLoad(true);
+  }catch{msg.style.color='#fca5a5';msg.textContent='Request failed.';}
 }
 async function guardTogglePause(e){
   const msg=document.getElementById('guardMsg');
