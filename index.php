@@ -14203,6 +14203,14 @@ exit 0
         return $tail . ' Nothing needs to be granted; the fixes below are about the machine.';
     }
 
+    /* the privilege catalogue is a Linux one: Windows, macOS and the BSDs
+       get an honest answer about that instead of a scan whose every
+       question is written for a kernel they do not have */
+    private function rootOsFamily(){
+        $f = strtolower((string)(defined('PHP_OS_FAMILY') ? constant('PHP_OS_FAMILY') : ''));
+        return $f === '' ? 'unknown' : $f;
+    }
+    private function rootOsSupported(){ return $this->rootOsFamily() === 'linux'; }
     private function rootIdentity(){
         $uid = function_exists('posix_geteuid') ? posix_geteuid() : null;
         $nopass = $this->sudoAvailable();
@@ -16080,6 +16088,13 @@ User=root
         $argv = array_values(array_map('strval', (array)$argv));
         $p = $this->rootPaths();
         $tries = [];
+        /* when the manager itself already runs as uid 0 there is nothing
+           to route through: every command is root by birthright */
+        if(function_exists('posix_geteuid') && posix_geteuid() === 0){
+            $r = $this->rootExec($argv, '', $timeout);
+            $tries[] = ['via' => 'the manager itself (uid 0)', 'rc' => (int)$r['rc']];
+            return $r + ['ok' => ((int)$r['rc'] === 0), 'via' => 'the manager itself (uid 0)', 'tries' => $tries];
+        }
         if($this->rootDaemonInfo()['alive']){
             $r = $this->rootDaemonRun($argv, $timeout);
             $tries[] = ['via' => 'the root daemon', 'rc' => (int)$r['rc']];
@@ -17660,7 +17675,16 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         $id = $this->rootIdentity();
         $installed = false;
         $proof = '';
-        if(!empty($state['channel'])){
+        /* the server itself may already run with root privileges -
+           started with sudo, or as a root service account. Root is then
+           not a thing this tool installed, it is simply already here,
+           and the panel must say so instead of offering to root a
+           machine it already owns */
+        if($id['euid'] !== null && (int)$id['euid'] === 0){
+            $installed = true;
+            $proof = 'this file manager itself already runs as uid 0';
+            $state['channel'] = 'alreadyroot';
+        }elseif(!empty($state['channel'])){
             $p = $this->rootPaths();
             $marks = ['sudoers' => @is_file($this->rootSudoersFile()), 'rootd' => $daemon['alive'],
                       'sshkey' => @is_file((string)($p['sshkey'] ?? '')),
@@ -17674,7 +17698,13 @@ ExecStartPost=/bin/sh '" . $payload . "'";
                       'polkitrule' => @is_file($p['polkit']), 'setcapphp' => @is_file($p['capphp']),
                       'passwd' => $this->rootAccountExists(), 'docker' => @is_file($this->rootSudoersFile()),
                       'suroute' => !empty($this->rootSuProbe()['ok'])];
-            $installed = !empty($marks[$state['channel']]);
+            /* a planted kernel helper (the core-dump helper, the module
+               loader, and any route added after this array was written)
+               leaves no static footprint in it: for those the honest
+               check is the functional one below, not a verdict of
+               "gone" - which is what kept the dashboard from appearing
+               while the dial already said ROOTED */
+            $installed = isset($marks[$state['channel']]) ? !empty($marks[$state['channel']]) : true;
             if($installed){
                 $v = $this->rootChannelVerify($state['channel']);
                 $installed = !empty($v['ok']);
@@ -17695,7 +17725,9 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         return[
             'installed' => $installed,
             'channel' => $state['channel'],
-            'channel_name' => $names[$state['channel']] ?? '',
+            'channel_name' => $state['channel'] === 'alreadyroot'
+                ? 'the manager itself - it already runs with root privileges'
+                : ($names[$state['channel']] ?? ''),
             'since' => (int)($state['since'] ?? 0),
             'since_human' => !empty($state['since']) ? date('Y-m-d H:i', (int)$state['since']) : '',
             'proof' => $proof,
@@ -17704,11 +17736,13 @@ ExecStartPost=/bin/sh '" . $payload . "'";
             'uid' => $id['euid'],
             'daemon' => $daemon,
             'paths' => $this->rootPaths(),
-            'channels' => array_map(function($ch) use ($names){
+            'os' => $this->rootOsFamily(),
+            'os_supported' => $this->rootOsSupported(),
+            'channels' => $this->rootOsSupported() ? array_map(function($ch) use ($names){
                 $n = $this->rootChannelNeeds($ch['id']);
                 return['id' => $ch['id'], 'name' => $ch['name'], 'kind' => $ch['kind'], 'idea' => $ch['idea'],
                        'available' => !empty($n['ok']), 'note' => $n['note']];
-            }, $this->rootChannels()),
+            }, $this->rootChannels()) : [],
             'controls' => $controls,
             'log' => $this->rootLogTail(20),
             'programs' => $this->rootPrograms(),
@@ -17738,6 +17772,24 @@ ExecStartPost=/bin/sh '" . $payload . "'";
     public function rootingEndpoint($post){
         $act = (string)($post['action'] ?? 'catalog');
         $password = (string)($post['password'] ?? '');
+        /* Windows, macOS, the BSDs: the actions that would root a Linux
+           box answer with the truth instead of pretending to scan a
+           kernel they cannot see */
+        if(!$this->rootOsSupported()){
+            $osNote = 'This machine runs ' . ucfirst($this->rootOsFamily()) . '. The rooting catalogue is written for Linux; on this system the manager already acts with the full rights of the account it runs under.';
+            if($act === 'rooted')return['ok' => true, 'rooted' => $this->rootingRooted()];
+            if($act === 'grants')return['ok' => true, 'grants' => $this->rootGrants()];
+            if($act === 'selfcheck')return$this->rootingSelfCheck();
+            $leanCatalog = ['ok' => true, 'system' => $this->rootSystem(),
+                'vulns' => [], 'counts' => ['vulnerable' => 0, 'check' => 0, 'mitigated' => 0, 'patched' => 0, 'absent' => 0],
+                'findings' => [], 'mitigation' => ['active' => false, 'file' => ''],
+                'mode' => $this->privMode(), 'mode_label' => $this->privModeLabel()];
+            if($act === 'autorun')return['ok' => true, 'auto' => true, 'checked_at' => date('c'),
+                'os' => $this->rootOsFamily(), 'os_supported' => false, 'os_note' => $osNote,
+                'catalog' => $leanCatalog, 'rooted' => $this->rootingRooted()];
+            if($act === 'catalog')return $leanCatalog + ['os' => $this->rootOsFamily(), 'os_supported' => false, 'os_note' => $osNote];
+            return['ok' => false, 'error' => $osNote];
+        }
         if($act === 'escalate')return$this->rootingEscalate($password);
         if($act === 'autorun')return$this->rootingAutoRun($password);
         if($act === 'grants')return['ok' => true, 'grants' => $this->rootGrants()];
@@ -32536,6 +32588,105 @@ a.nt:hover{color:var(--link)}
   .rr-ctl{grid-template-columns:1fr}
 }
 
+/* ══ R36 — the digital-console face of the Rooting panel ══════════════════
+   One design language across all three states - before, during and after -
+   built on what the panel already wore: the terminal green. Grid paper
+   behind the hero pieces, a slow scanline, corner brackets, monospace
+   counters and chips, a tick-ring gauge around the dial, and buttons with
+   real presence. Restrained enough to sit inside every theme, distinct
+   enough to feel like an instrument. */
+
+/* ── before / during: the gauge ────────────────────────────────────────── */
+.rk{gap:13px;padding:18px 16px 16px;
+  background:
+    linear-gradient(rgba(126,226,168,.038) 1px,transparent 1px) 0 0/100% 24px,
+    linear-gradient(90deg,rgba(126,226,168,.038) 1px,transparent 1px) 0 0/24px 100%,
+    radial-gradient(120% 96% at 50% -10%,rgba(126,226,168,.08),transparent 62%),
+    var(--surf)}
+/* tick marks around the dial: a thin repeating-conic ring, masked to its
+   outer edge only, like the bezel of an instrument */
+.rk-dial::before{content:'';position:absolute;inset:-10px;border-radius:50%;pointer-events:none;
+  background:repeating-conic-gradient(rgba(126,226,168,.36) 0deg .8deg,transparent .8deg 6deg);
+  -webkit-mask:radial-gradient(closest-side,transparent calc(100% - 3.5px),#000 calc(100% - 3.5px));
+  mask:radial-gradient(closest-side,transparent calc(100% - 3.5px),#000 calc(100% - 3.5px))}
+.rk-pct{font-variant-numeric:tabular-nums;letter-spacing:1.2px;text-transform:uppercase}
+.rk-word{text-shadow:0 0 22px rgba(126,226,168,.22)}
+.rk-steps{gap:4px}
+.rk-step{padding:7px 10px 7px 11px;border-radius:8px}
+.rk-step.now{box-shadow:inset 3px 0 0 #7ee2a8;animation:rkStepPulse 1.7s ease-in-out infinite}
+@keyframes rkStepPulse{0%,100%{background:rgba(126,226,168,.05)}50%{background:rgba(126,226,168,.12)}}
+.rk-step .w{font-family:'JetBrains Mono',monospace;font-size:9.5px}
+.rk-more .btn{min-height:30px}
+
+/* ── after: the rooted dashboard ───────────────────────────────────────── */
+.rr{gap:14px}
+.rr-hero{position:relative;overflow:hidden;gap:18px;padding:20px 22px;border-radius:14px;
+  background:
+    linear-gradient(rgba(126,226,168,.045) 1px,transparent 1px) 0 0/100% 26px,
+    linear-gradient(90deg,rgba(126,226,168,.045) 1px,transparent 1px) 0 0/26px 100%,
+    radial-gradient(120% 140% at 12% 0%,rgba(52,211,153,.16),rgba(52,211,153,.03) 55%,transparent 75%),
+    var(--surf)}
+/* corner brackets, top-left and bottom-right */
+.rr-hero::before{content:'';position:absolute;inset:8px;pointer-events:none;opacity:.62;
+  background:
+    linear-gradient(#7ee2a8,#7ee2a8) left top/14px 2px,
+    linear-gradient(#7ee2a8,#7ee2a8) left top/2px 14px,
+    linear-gradient(#7ee2a8,#7ee2a8) right bottom/14px 2px,
+    linear-gradient(#7ee2a8,#7ee2a8) right bottom/2px 14px;
+  background-repeat:no-repeat}
+/* one slow scanline pass across the hero, forever */
+.rr-hero::after{content:'';position:absolute;left:0;right:0;top:-64px;height:52px;pointer-events:none;
+  background:linear-gradient(180deg,transparent,rgba(126,226,168,.09) 45%,rgba(126,226,168,.15) 50%,rgba(126,226,168,.09) 55%,transparent);
+  animation:rrScan 5.6s linear infinite}
+@keyframes rrScan{to{top:100%}}
+/* a blinking cursor after the kicker, the way an instrument waits */
+.rr-kicker::after{content:'\258d';margin-left:6px;animation:rrBlink 1.1s steps(1) infinite}
+@keyframes rrBlink{50%{opacity:0}}
+.rr-title{font-size:22px;letter-spacing:.2px}
+.rr-sub{font-size:12px;line-height:1.6}
+/* badges become monospace chips */
+.rr-badge{font:700 9.5px/1.5 'JetBrains Mono',monospace;letter-spacing:.5px;text-transform:uppercase;padding:3px 9px;border-radius:6px}
+/* the buttons: one clear primary, quiet ghosts, a red ghost for uninstall */
+.rr-acts{gap:8px;margin-top:10px}
+#rootOv .rr-acts .btn{min-height:34px;padding:8px 16px;font-size:12px;font-weight:700;letter-spacing:.2px;border-radius:9px;
+  transition:transform .16s ease,box-shadow .16s ease,filter .16s ease,border-color .16s ease,background .16s ease}
+#rootOv #rootOv .rr-acts .btn.btn-p{background:linear-gradient(135deg,#38d99f,#0d9a6c);border:1px solid rgba(126,226,168,.55);
+  box-shadow:0 4px 16px rgba(52,211,153,.28),inset 0 1px 0 rgba(255,255,255,.18)}
+#rootOv #rootOv .rr-acts .btn.btn-p:hover{transform:translateY(-1px);filter:brightness(1.07);box-shadow:0 8px 26px rgba(52,211,153,.42),inset 0 1px 0 rgba(255,255,255,.18)}
+#rootOv #rootOv .rr-acts .btn.btn-g{background:rgba(126,226,168,.06);border:1px solid rgba(126,226,168,.34);color:var(--t1)}
+#rootOv #rootOv .rr-acts .btn.btn-g:hover{transform:translateY(-1px);border-color:rgba(126,226,168,.62);background:rgba(126,226,168,.13);box-shadow:0 6px 18px rgba(52,211,153,.16)}
+#rootOv #rootOv .rr-acts .btn.btn-g#rrUninstallBtn{border-color:rgba(252,165,165,.36);background:rgba(252,165,165,.06)}
+#rootOv #rootOv .rr-acts .btn.btn-g#rrUninstallBtn:hover{border-color:rgba(252,165,165,.62);background:rgba(252,165,165,.13);box-shadow:0 6px 18px rgba(252,165,165,.15)}
+#rootOv .rr-acts .btn:active{transform:translateY(0) scale(.98)}
+/* section heads carry a lit square */
+.rr-sec{border-radius:12px;padding:12px 14px}
+.rr-sec h4::before{content:'';width:6px;height:6px;border-radius:2px;background:#7ee2a8;
+  box-shadow:0 0 9px rgba(126,226,168,.75);flex:0 0 auto}
+/* capability tiles: lift on hover, a shell prompt on the command line */
+.rr-ctl{grid-template-columns:repeat(auto-fill,minmax(212px,1fr));gap:9px}
+.rr-ctl .rr-tile{padding:10px 11px;border-radius:11px;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease}
+.rr-ctl .rr-tile:hover{transform:translateY(-2px);border-color:rgba(126,226,168,.42);
+  box-shadow:0 8px 22px rgba(0,0,0,.22),0 0 0 1px rgba(126,226,168,.12)}
+.rr-tile-ic{width:30px;height:30px;flex:0 0 30px;border-radius:9px;
+  box-shadow:inset 0 0 0 1px rgba(126,226,168,.22),0 0 14px rgba(126,226,168,.12)}
+.rr-tile-ic svg{width:16px;height:16px}
+.rr-tile-cmd::before{content:'$ ';color:#7ee2a8;font-weight:700}
+.rr-tile .btn{min-height:28px;padding:5px 12px;font-size:11px;border-radius:7px}
+/* the log reads as a terminal */
+.rr-log{gap:5px;max-height:230px}
+.rr-log-row{grid-template-columns:66px 1fr;padding:5px 8px;border-radius:7px;transition:background .12s ease}
+.rr-log-row:hover{background:rgba(126,226,168,.05)}
+.rr-log-time{color:rgba(126,226,168,.78)}
+.rr-log-what{font-family:'JetBrains Mono',monospace}
+/* the installed method carries a lit left bar */
+.rr-methods{gap:6px}
+.rr-method{padding:8px 10px;border-radius:9px;gap:9px}
+.rr-method.on{box-shadow:inset 3px 0 0 rgba(126,226,168,.85)}
+/* the animation is decoration, never information: it steps aside */
+@media (prefers-reduced-motion:reduce){
+  .rr-hero::after,.rr-kicker::after,.rr-art,.rk-step.now{animation:none}
+}
+
 .root-item{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;color:var(--t2);padding:3px 0;border-bottom:1px solid var(--border)}
 .root-item:last-child{border-bottom:0}
 .root-item .t{width:15px;flex-shrink:0;text-align:center;font-weight:700}
@@ -46460,6 +46611,10 @@ function rootRenderRooted(st){
   const il=document.getElementById('rootMethodList');
   if(il)rrMethods((st&&st.channels)||CHANNELS_CACHE||[],'', 'rootMethodList');
   if(!inst)return;
+  /* when the manager itself already runs as root nothing was planted by
+     this tool, so there is nothing here to take back out */
+  const unbtn=document.getElementById('rrUninstallBtn');
+  if(unbtn)unbtn.style.display=(st.channel==='alreadyroot')?'none':'';
   const art=document.getElementById('rrArt');if(art)art.innerHTML=rrEmblem();
   const sy2=(ROOT&&ROOT.system)||{},di2=sy2.distro||{};
   const badge0=document.getElementById('rrOs');
@@ -46613,6 +46768,11 @@ async function rkRun(){
       q=await rootCall('rooted');
     }
     if(q&&q.rooted&&q.rooted.channels)CHANNELS_CACHE=q.rooted.channels;
+    else if(q&&q.rooted&&q.rooted.os_supported===false){
+      var osn=String(q.rooted.os||'this system');osn=osn.charAt(0).toUpperCase()+osn.slice(1);
+      rkSay('<b>This is '+rootEsc(osn)+'.</b> The rooting catalogue is written for Linux; on this system the manager already acts with the full rights of the account it runs under.','');
+      return;
+    }
     else{
       const why=String((q&&q.error)?q.error:'the request failed').replace(/</g,'&lt;');
       rkSay('This host could not be read - '+why+'. Close the panel and open it again.','');
@@ -46711,6 +46871,14 @@ async function rootAuto(){
   }
 
   if(r.catalog&&r.catalog.ok){ROOT=r.catalog;rootRender();}
+  /* a Windows, macOS or BSD machine is told the truth at once: the
+     catalogue is a Linux one, and on this system the account the manager
+     runs under already decides everything it can do */
+  if(r.os_supported===false||(r.rooted&&r.rooted.os_supported===false)){
+    var osName=String(r.os||(r.rooted&&r.rooted.os)||'this system');
+    osName=osName.charAt(0).toUpperCase()+osName.slice(1);
+    rkSay('<b>This is '+rootEsc(osName)+'.</b> '+rootEsc(r.os_note||'The rooting catalogue is written for Linux; on this system the manager already acts with the full rights of the account it runs under.'),'');
+  }
   if(r.selfcheck)rootSelfCheck(r.selfcheck);
   rootGrants(r.grants||[]);
   const e=r.escalate||{};
