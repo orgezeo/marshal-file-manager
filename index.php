@@ -1313,6 +1313,46 @@ function fm_guardian_sync($content=null){
     return $ok;
 }
 
+/* ──── Official changes tell the Guardian BEFORE they touch the file ─────────────────────────────────────────────────────────────────
+   The watchdog layer restores whatever the Guardian store describes the
+   moment the file on disk stops matching it. Updates used to swap the file
+   first and re-baseline the store second, so any request served in between
+   (or a store update that silently failed - a dropped connection or a packet
+   limit on a multi-megabyte upload is a classic shared-host flake) made the
+   watchdog treat the fresh official build as an attack and put the old one
+   back. The order is now the other way around: the store learns the new
+   bytes FIRST, then the file is replaced. Anything that fires inside that
+   window only ever writes the same new bytes the update was about to write.
+   And when the store cannot be updated at all, the change is refused with an
+   honest error instead of being installed and silently reverted - which is
+   exactly what the admin asked the Guardian to understand: an official
+   update is not someone else tampering with the file. */
+function fm_guardian_presync($content){
+    if(!fm_guardian_conn())return 'noguardian'; // nothing watches this file
+    if(fm_guardian_sync($content))return 'ok';
+    usleep(400000);                             // one retry: large LOB uploads flake
+    return fm_guardian_sync($content)?'ok':'failed';
+}
+/* After the swap: the store already describes these bytes (presync wrote
+   them), so the only remaining job is catching a filesystem that said
+   "written" while the bytes on disk are not the bytes we stored. */
+function fm_guardian_postverify($data){
+    $want=hash('sha256',$data);
+    $live=@hash_file('sha256',__FILE__);
+    if($live===false||!hash_equals($want,(string)$live))@fm_guardian_sync($data);
+    return true;
+}
+/* Lint update bytes without needing a writable folder: a throwaway copy in
+   the system temp directory, checked exactly like a staged file. */
+function fm_php_lint_bytes($data){
+    $t=@tempnam(sys_get_temp_dir(),'fmlint');
+    if($t===false)return ['ran'=>false,'ok'=>true,'out'=>'','why'=>'no temp file available'];
+    @file_put_contents($t,$data);
+    $r=fm_php_lint($t);
+    @unlink($t);
+    return $r;
+}
+
 /* First-run seed: safe to call on every authenticated page load, but only
    ever WRITES once (checked via "row id=1 exists?"). This is the piece
    the admin asked to have added automatically the first time they open
@@ -2542,10 +2582,11 @@ function fm_guardian_commit_source($path,$newSrc,$oldSrc){
         /* The folder may not allow creating files while the file itself is
            writable (shared hosts). Write in place instead of giving up. */
         $direct=@file_put_contents($path,$newSrc,LOCK_EX);
-        if($direct===false)return false;
+        if($direct===false){@fm_guardian_sync($oldSrc); /* the file never changed; the store must not keep describing the new bytes */ return false;}
         $actual=@file_get_contents($path);
         if($actual!==false&&hash('sha256',$actual)===hash('sha256',$newSrc)){fm_guardian_invalidate_opcache($path);return true;}
         @file_put_contents($path,$oldSrc,LOCK_EX);
+        @fm_guardian_sync($oldSrc); /* keep the store in step with the bytes actually on disk */
         return false;
     }
     @chmod($tmp,$mode);
@@ -2555,6 +2596,7 @@ function fm_guardian_commit_source($path,$newSrc,$oldSrc){
         // A successful rename should be exact, but do not leave a bad file
         // behind if a filesystem reports success while returning stale bytes.
         @file_put_contents($path,$oldSrc,LOCK_EX);
+        @fm_guardian_sync($oldSrc); /* keep the store in step with the bytes actually on disk */
         return false;
     }
     @unlink($tmp);
@@ -2569,6 +2611,7 @@ function fm_guardian_commit_source($path,$newSrc,$oldSrc){
     // Best-effort rollback keeps a failed settings update from leaving a
     // truncated manager file.
     @file_put_contents($path,$oldSrc,LOCK_EX);
+    @fm_guardian_sync($oldSrc); /* keep the store in step with the bytes actually on disk */
     return false;
 }
 
@@ -2608,8 +2651,12 @@ function fm_guardian_rewrite_constant($name,$newValue,$isBool=false){
     if($lintRun['ran']&&!$lintRun['ok'])$lintOk=false;
     if(!$lintOk){@unlink($tmp);return false;}
     @unlink($tmp);
+    /* the Guardian store learns the rewritten bytes before the file is touched -
+       an official change it does not know about would only be reverted (see fm_guardian_presync()) */
+    $pre=fm_guardian_presync($newSrc);
+    if($pre==='failed')return false;
     $ok=fm_guardian_commit_source(__FILE__,$newSrc,$src);
-    if($ok)fm_guardian_sync($newSrc);
+    if($ok&&$pre==='noguardian')@fm_guardian_sync($newSrc);
     return $ok;
 }
 
@@ -2849,8 +2896,14 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
     $tmp=__FILE__.'.guardtmp.'.getmypid().'.'.substr(hash('sha256',uniqid('',true)),0,8);
     if(@file_put_contents($tmp,$data)===false){
         /* folder not writable for new files: try in place, keep the backup path */
+        $lintIp=fm_php_lint_bytes($data);
+        if($lintIp['ran']&&!$lintIp['ok'])return ['ok'=>false,'error'=>'Downloaded file failed a PHP syntax check - not applied. '.($lintIp['out']!==''?'('.$lintIp['out'].')':'')];
+        /* the Guardian store must learn the new bytes before the file is touched - see fm_guardian_presync() */
+        $pre=fm_guardian_presync($data);
+        if($pre==='failed')return ['ok'=>false,'error'=>'The new version was NOT installed: the Guardian copy that watches this file could not be updated first, and an update the Guardian does not know about would only be undone by its restore on the next request. Nothing was changed - try again in a moment.'];
         if(!fm_guardian_commit_source(__FILE__,$data,$current))return ['ok'=>false,'error'=>'Could not replace the file: the folder is not writable and writing the file in place failed too. In the file manager set index.php to 0644 and its folder to 0755, then press install again.'];
-        fm_guardian_sync($data);@fm_guardian_install_watchdog();
+        if($pre==='noguardian')@fm_guardian_sync($data);else fm_guardian_postverify($data);
+        @fm_guardian_install_watchdog();
         return ['ok'=>true,'changed'=>true,'method'=>'in-place'];
     }
     @chmod($tmp,@fileperms(__FILE__)&0777);
@@ -2861,12 +2914,19 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
             . ($lintDownload['out']!=='' ? '(' . $lintDownload['out'] . ')' : '')
             . ($lintDownload['why']!=='' ? ' [checked by: ' . $lintDownload['why'] . ']' : '')];
     }
+    /* the Guardian store learns the new bytes BEFORE the file is swapped, so
+       its restore can never mistake this official update for tampering */
+    $pre=fm_guardian_presync($data);
+    if($pre==='failed'){
+        @unlink($tmp);
+        return ['ok'=>false,'error'=>'The new version was NOT installed: the Guardian copy that watches this file could not be updated first, and an update the Guardian does not know about would only be undone by its restore on the next request. Nothing was changed - try again in a moment.'];
+    }
     if(!@rename($tmp,__FILE__)){
         @unlink($tmp);
         if(!fm_guardian_commit_source(__FILE__,$data,$current))return ['ok'=>false,'error'=>'Could not replace the file: rename failed and the in-place write failed as well. In the file manager set index.php to 0644 and its folder to 0755, then press install again.'];
     }
     fm_guardian_invalidate_opcache(__FILE__);
-    fm_guardian_sync($data);
+    if($pre==='noguardian')@fm_guardian_sync($data);else fm_guardian_postverify($data);
     // The watchdog embeds this file's own restore logic + the expected-size
     // marker; refresh it right away so a site that installed the watchdog
     // before this update doesn't wait for the next throttled autoheal pass.
@@ -2951,6 +3011,12 @@ function fm_force_update_install($url){
     $bak=__DIR__.'/'.$bakName;
     $bakOk=@file_put_contents($bak,$old,LOCK_EX)!==false;
     if($bakOk)@chmod($bak,0644);
+    /* same order rule as a normal update: the Guardian store first, the file second */
+    $pre=fm_guardian_presync($data);
+    if($pre==='failed'){
+        if($bakOk)@unlink($bak);
+        return ['ok'=>false,'error'=>'The new file was NOT installed: the Guardian copy that watches this file could not be updated first, and an update the Guardian does not know about would only be undone by its restore on the next request. Nothing was changed - try again in a moment.'];
+    }
     $commit=fm_guardian_commit_source(__FILE__,$data,$old);
     if(!$commit){
         if($bakOk)@unlink($bak);
@@ -2963,7 +3029,8 @@ function fm_force_update_install($url){
             'checked_at'=>time(),'fetched_at'=>time(),'available'=>false,'relation'=>'forced',
             'forced_at'=>time(),'size'=>$g['size']],JSON_UNESCAPED_SLASHES)),LOCK_EX);
     /* keep the Guardian copy and the watchdog quote in step with the new bytes */
-    if(function_exists('fm_guardian_sync'))@fm_guardian_sync($data);
+    if($pre==='noguardian'){if(function_exists('fm_guardian_sync'))@fm_guardian_sync($data);}
+    elseif(function_exists('fm_guardian_postverify'))@fm_guardian_postverify($data);
     if(function_exists('fm_guardian_install_watchdog'))@fm_guardian_install_watchdog();
     return ['ok'=>true,'changed'=>true,'forced'=>true,
         'old_hash'=>$oldHash,'new_hash'=>$g['sha256'],
@@ -32591,7 +32658,7 @@ a.nt:hover{color:var(--link)}
 /* ══ R36 — the digital-console face of the Rooting panel ══════════════════
    One design language across all three states - before, during and after -
    built on what the panel already wore: the terminal green. Grid paper
-   behind the hero pieces, a slow scanline, corner brackets, monospace
+   behind the hero pieces, corner brackets, monospace
    counters and chips, a tick-ring gauge around the dial, and buttons with
    real presence. Restrained enough to sit inside every theme, distinct
    enough to feel like an instrument. */
@@ -32634,11 +32701,6 @@ a.nt:hover{color:var(--link)}
     linear-gradient(#7ee2a8,#7ee2a8) right bottom/14px 2px,
     linear-gradient(#7ee2a8,#7ee2a8) right bottom/2px 14px;
   background-repeat:no-repeat}
-/* one slow scanline pass across the hero, forever */
-.rr-hero::after{content:'';position:absolute;left:0;right:0;top:-64px;height:52px;pointer-events:none;
-  background:linear-gradient(180deg,transparent,rgba(126,226,168,.09) 45%,rgba(126,226,168,.15) 50%,rgba(126,226,168,.09) 55%,transparent);
-  animation:rrScan 5.6s linear infinite}
-@keyframes rrScan{to{top:100%}}
 /* a blinking cursor after the kicker, the way an instrument waits */
 .rr-kicker::after{content:'\258d';margin-left:6px;animation:rrBlink 1.1s steps(1) infinite}
 @keyframes rrBlink{50%{opacity:0}}
@@ -32684,7 +32746,7 @@ a.nt:hover{color:var(--link)}
 .rr-method.on{box-shadow:inset 3px 0 0 rgba(126,226,168,.85)}
 /* the animation is decoration, never information: it steps aside */
 @media (prefers-reduced-motion:reduce){
-  .rr-hero::after,.rr-kicker::after,.rr-art,.rk-step.now{animation:none}
+  .rr-kicker::after,.rr-art,.rk-step.now{animation:none}
 }
 
 .root-item{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;color:var(--t2);padding:3px 0;border-bottom:1px solid var(--border)}
