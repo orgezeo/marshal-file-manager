@@ -36645,8 +36645,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 /* ── TOP BAR (command area) ──────────────────────────────────────────── */
 :root[data-theme="win11d"] .topbar{background:rgba(32,32,32,.80);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(255,255,255,.0578);padding:0 10px;gap:8px}
-:root[data-theme="win11d"] .brand-icon{width:26px;height:26px;border-radius:6px;background:linear-gradient(135deg,#4cc2ff,#0067c0);display:grid;place-items:center;box-shadow:none}
-:root[data-theme="win11d"] .brand-icon img{width:100%;height:100%;object-fit:contain;border-radius:6px}
+:root[data-theme="win11d"] .brand-icon{width:30px;height:30px;background:transparent;box-shadow:none;display:grid;place-items:center}
+:root[data-theme="win11d"] .brand-icon img{width:100%;height:100%;object-fit:contain}
 :root[data-theme="win11d"] .dv{background:rgba(255,255,255,.0803);height:20px}
 :root[data-theme="win11d"] .bc a{color:rgba(255,255,255,.6063);font-size:13px;border-radius:4px;padding:3px 6px;transition:background .1s,color .1s}
 :root[data-theme="win11d"] .bc a:hover{background:rgba(255,255,255,.0373);color:#ffffff}
