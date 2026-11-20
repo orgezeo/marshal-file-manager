@@ -1593,7 +1593,22 @@ function fm_tick_silent($allowUpgrade){
         }else{
         $r=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
         }
-        if(empty($r['ok'])){$out=['ok'=>false,'error'=>$r['error']??'the source did not answer'];return $out;}
+        /* A silent tick never nags about traffic: a timeout on the way to the
+           source is weather, not news. The last known state answers instead
+           (fresh for half an hour), and the panel's Check button keeps
+           reporting the real network error when a person asks for it. */
+        if(empty($r['ok'])){
+            $st=@json_decode(fm_store_strip_guard((string)@file_get_contents(fm_tick_state_path())),true);
+            $cur=@hash_file('sha256',__FILE__);
+            $cached=is_array($st)&&($st['url']??'')===FM_UPDATE_URL&&(time()-(int)($st['fetched_at']??0))<1800&&!empty($st['remote_hash']);
+            $out=['ok'=>true,'checked'=>false,'offline'=>true];
+            if($cached){
+                $out['cached']=true;
+                $out['available']=$cur!==false&&$st['remote_hash']!==$cur;
+                $out['paused']=fm_guardian_update_paused();
+            }
+            return $out;
+        }
         $out=['ok'=>true,'checked'=>true,'available'=>!empty($r['available']),'relation'=>$r['relation']??''];
         /* The source of this tool is its owner's repository: whatever it offers -
            larger, smaller or the same size - is the version the owner pushed, so
@@ -2717,20 +2732,34 @@ function fm_update_min_bytes(){return 20000;}
    if this file is ever missing, would be the source used to recreate it. */
 function fm_guardian_apply_from_url($url,$checkOnly=false){
     if(!$url||!preg_match('#^https?://#i',$url))return ['ok'=>false,'error'=>'Invalid URL.'];
-    @set_time_limit(30);@ignore_user_abort(true);
+    @set_time_limit(300);@ignore_user_abort(true);
     $remoteSize=0;$releaseTimestamp=0;$responseHeaders=[];
     // Prefer cURL (reliable timeouts); fall back to file_get_contents only when unavailable
+    /* ETag bookkeeping, check mode only: when the source still serves the
+       very file it served last time, the conditional request below comes
+       back as a 304 with no body at all - a few hundred bytes instead of
+       this multi-megabyte file, so even a slow link never has to move the
+       whole build just to learn that nothing changed. */
+    $sp=__DIR__.'/.guardian_update_state.php';
+    $prev=null;$etag='';
+    if($checkOnly){
+        fm_store_migrate($sp,__DIR__.'/.guardian_update_state.json');
+        $prev=@json_decode(fm_store_strip_guard((string)@file_get_contents($sp)),true);
+        if(is_array($prev)&&($prev['url']??'')===$url&&!empty($prev['etag']))$etag=(string)$prev['etag'];
+    }
     if(function_exists('curl_init')){
+        $reqHeaders=['User-Agent:FileManager-Guardian/1.0'];
+        if($etag!=='')$reqHeaders[]='If-None-Match: '.$etag;
         $ch=curl_init($url);
         curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,
-            CURLOPT_CONNECTTIMEOUT=>5,CURLOPT_TIMEOUT=>10,CURLOPT_SSL_VERIFYPEER=>true,
+            CURLOPT_CONNECTTIMEOUT=>15,CURLOPT_TIMEOUT=>240,CURLOPT_LOW_SPEED_LIMIT=>1024,CURLOPT_LOW_SPEED_TIME=>60,CURLOPT_SSL_VERIFYPEER=>true,
             // Force IPv4: on some hosts a broken/unreachable IPv6 route to the target is the
             // actual cause of a "hung" TLS handshake that eventually surfaces as an SSL/connect
             // timeout - trying IPv6 first burns most of the timeout budget before falling back.
             CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
             CURLOPT_FILETIME=>true,
             CURLOPT_HEADER=>true,
-            CURLOPT_HTTPHEADER=>['User-Agent: FileManager-Guardian/1.0']]);
+            CURLOPT_HTTPHEADER=>$reqHeaders]);
         $data=curl_exec($ch);$curlErr=curl_error($ch);$curlInfo=curl_getinfo($ch);$httpCode=(int)($curlInfo['http_code']??0);
         $remoteSize=(int)($curlInfo['download_content_length']??0);
         $releaseTimestamp=(int)($curlInfo['filetime']??0);
@@ -2746,12 +2775,35 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
         $data=@file_get_contents($url,false,$ctx);
         if(isset($http_response_header)&&is_array($http_response_header))$responseHeaders=$http_response_header;
     }
+    /* the source said "not modified": nothing but headers crossed the wire,
+       so the answer is computed from what was recorded last time */
+    if($checkOnly&&isset($httpCode)&&(int)$httpCode===304&&$etag!==''){
+        $cur=@file_get_contents(__FILE__);
+        $curHash=$cur===false?'':hash('sha256',$cur);
+        $remHash=is_array($prev)?(string)($prev['remote_hash']??''):'';
+        $available=$curHash!==''&&$remHash!==''&&$remHash!==$curHash;
+        $relation='same';
+        if($available){
+            $rSize=is_array($prev)?(int)($prev['size']??0):0;
+            $cSize=(int)@filesize(__FILE__);
+            $relation=$rSize>0&&$cSize>0?($rSize>$cSize?'larger':($rSize<$cSize?'smaller':'same-size')):'different';
+        }
+        if(is_array($prev)){$prev['checked_at']=time();$prev['fetched_at']=time();
+            @file_put_contents($sp,fm_store_guard(json_encode($prev,JSON_UNESCAPED_SLASHES)),LOCK_EX);}
+        return ['ok'=>true,'changed'=>false,'available'=>$available,'relation'=>$relation,
+            'relation_phrase'=>fm_update_relation_phrase($relation),'compared'=>true,'not_modified'=>true,
+            'current_hash'=>$curHash,'remote_hash'=>$remHash,'current_size'=>(int)@filesize(__FILE__),
+            'size'=>is_array($prev)?(int)($prev['size']??0):0,
+            'release_timestamp'=>is_array($prev)?(int)($prev['release_timestamp']??0):0];
+    }
     if($data===false||strlen($data)<20)return ['ok'=>false,'error'=>'Could not download the update URL.'];
     if(strpos(ltrim($data),'<?php')!==0)return ['ok'=>false,'error'=>'The fetched file does not look like a valid PHP file.'];
     /* a 30-byte "<?php echo 1;" passes every other check and would erase this
        tool; a real build of it is never this small */
     if(strlen($data)<fm_update_min_bytes())return ['ok'=>false,'error'=>'What came back is only '.strlen($data).' bytes, far too small to be this tool, so it was not installed.'];
     if(!$remoteSize)$remoteSize=strlen($data);
+    $etagNew='';
+    foreach($responseHeaders as $hh){if(stripos($hh,'etag:')===0){$etagNew=trim((string)substr($hh,5));break;}}
     if(!$releaseTimestamp)$releaseTimestamp=fm_guardian_release_timestamp($url,$responseHeaders);
     $updateMeta=['size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp];
     $current=@file_get_contents(__FILE__);
@@ -2785,13 +2837,13 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
             elseif($releaseTimestamp>0&&$cTime>0)$relation=$releaseTimestamp>$cTime?'newer':'older';
             else $relation='unknown';
         }
-        @file_put_contents($statePath,fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'current_hash'=>$currentHash,'checked_at'=>time(),'fetched_at'=>time(),'available'=>$available,'relation'=>$relation,'current_size'=>(int)@filesize(__FILE__),'size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp],JSON_UNESCAPED_SLASHES)),LOCK_EX);
+        @file_put_contents($statePath,fm_store_guard(json_encode(['url'=>$url,'etag'=>$etagNew,'remote_hash'=>$remoteHash,'current_hash'=>$currentHash,'checked_at'=>time(),'fetched_at'=>time(),'available'=>$available,'relation'=>$relation,'current_size'=>(int)@filesize(__FILE__),'size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp],JSON_UNESCAPED_SLASHES)),LOCK_EX);
         return array_merge(['ok'=>true,'changed'=>false,'available'=>$available,'relation'=>$relation,
             'relation_phrase'=>fm_update_relation_phrase($relation),'compared'=>true,
             'current_hash'=>$currentHash,'remote_hash'=>$remoteHash,'current_size'=>(int)@filesize(__FILE__)],$updateMeta);
     }
     if($current!==false&&$currentHash===$remoteHash){
-        @file_put_contents(__DIR__.'/.guardian_update_state.php',fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES)),LOCK_EX);
+        @file_put_contents(__DIR__.'/.guardian_update_state.php',fm_store_guard(json_encode(['url'=>$url,'etag'=>$etagNew,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES)),LOCK_EX);
         return array_merge(['ok'=>true,'changed'=>false,'available'=>false,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash],$updateMeta);
     }
     $tmp=__FILE__.'.guardtmp.'.getmypid().'.'.substr(hash('sha256',uniqid('',true)),0,8);
@@ -8577,6 +8629,37 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
   :root[data-theme="kali"] .login-action:hover svg,
   :root[data-theme="kalil"] .login-action:hover svg{stroke:#ffffff}
 }
+/* ══ THE QUIET UPDATE TOAST (fm-tick line) - themed, not hard-coded ══ */
+.fm-toast{
+  position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:99999;
+  padding:9px 16px;max-width:92vw;font:12.5px/1.5 'Inter',system-ui,sans-serif;text-align:center;
+  background:#191b1f;color:#e6e8ea;border:1px solid rgba(255,255,255,.14);border-radius:10px;
+  box-shadow:0 10px 30px rgba(0,0,0,.45);animation:fmToastIn .18s ease;
+}
+.fm-toast.is-good{border-color:rgba(52,211,153,.5)}
+.fm-toast.is-bad{border-color:rgba(248,113,113,.55)}
+@keyframes fmToastIn{from{opacity:0;transform:translateX(-50%) translateY(8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+:root[data-theme="light"] .fm-toast{background:#ffffff;color:#1c1c1c;border-color:rgba(0,0,0,.12);box-shadow:0 10px 30px rgba(0,0,0,.16)}
+:root[data-theme="light"] .fm-toast.is-good{border-color:rgba(22,163,74,.55)}
+:root[data-theme="light"] .fm-toast.is-bad{border-color:rgba(220,38,38,.55)}
+:root[data-theme="win11"] .fm-toast{background:rgba(249,249,249,.94);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);color:#1b1b1b;border-color:rgba(0,0,0,.08);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.16)}
+:root[data-theme="win11"] .fm-toast.is-good{border-color:rgba(16,124,16,.55)}
+:root[data-theme="win11"] .fm-toast.is-bad{border-color:rgba(196,43,28,.6)}
+:root[data-theme="win11d"] .fm-toast{background:rgba(32,32,32,.94);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);color:#f2f2f2;border-color:rgba(255,255,255,.09);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+:root[data-theme="win11d"] .fm-toast.is-good{border-color:rgba(108,203,94,.5)}
+:root[data-theme="win11d"] .fm-toast.is-bad{border-color:rgba(255,99,88,.6)}
+:root[data-theme="win10"] .fm-toast{background:#f2f2f2;color:#1a1a1a;border-color:#a6a6a6;border-radius:0;box-shadow:0 4px 14px rgba(0,0,0,.22)}
+:root[data-theme="win10"] .fm-toast.is-good{border-color:#107c10}
+:root[data-theme="win10"] .fm-toast.is-bad{border-color:#e81123}
+:root[data-theme="win10d"] .fm-toast{background:#2b2b2b;color:#ffffff;border-color:#4a4a4a;border-radius:0;box-shadow:0 4px 14px rgba(0,0,0,.5)}
+:root[data-theme="win10d"] .fm-toast.is-good{border-color:#107c10}
+:root[data-theme="win10d"] .fm-toast.is-bad{border-color:#e81123}
+:root[data-theme="kali"] .fm-toast{background:#272a34;color:#eeeeec;border-color:#0d0e11;border-radius:4px;box-shadow:0 8px 26px rgba(0,0,0,.55)}
+:root[data-theme="kali"] .fm-toast.is-good{border-color:rgba(46,179,156,.75)}
+:root[data-theme="kali"] .fm-toast.is-bad{border-color:rgba(255,85,85,.7)}
+:root[data-theme="kalil"] .fm-toast{background:#ffffff;color:#2b2f3a;border-color:#d8dae2;border-radius:4px;box-shadow:0 8px 26px rgba(0,0,0,.14)}
+:root[data-theme="kalil"] .fm-toast.is-good{border-color:rgba(20,138,116,.65)}
+:root[data-theme="kalil"] .fm-toast.is-bad{border-color:rgba(213,53,63,.6)}
 </style></head><body>
 <div class="login-wallpaper is-visible" id="loginWallpaperA" aria-hidden="true" style="background-image:url('https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/wallpapers/default_home.jpg')"></div>
 <div class="login-wallpaper" id="loginWallpaperB" aria-hidden="true"></div>
@@ -8889,7 +8972,7 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
      or a page that keeps opening its eyes - this is the second one. */
   (function(){
     const period=10000;
-    let stopped=false,busy=false,failures=0;
+    let stopped=false,busy=false,failures=0,errStreak=0;
     function note(text){mfmTickLine(text);}
     function tick(){
       if(stopped||busy)return;
@@ -8906,9 +8989,14 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
         .then(r=>r.text())
         .then(t=>{const i=t.indexOf('fm-tick ');return i<0?null:JSON.parse(t.slice(i+8));})
         .then(d=>{
-          busy=false;failures=0;
+          busy=false;failures=0;errStreak=0;
           if(!d)return;
-          if(!d.ok){if(d.error)mfmTickLine('Update check: '+d.error,true);return;}
+          if(!d.ok){
+            errStreak++;
+            /* only a persistent problem gets a line, and only once per streak */
+            if(d.error&&errStreak>=3){mfmTickLine('Update check: '+d.error,true);errStreak=0;}
+            return;
+          }
           window.__fmTickLast=Date.now();
           if(d.installed&&d.writable===false){
             mfmTickLine('A newer version is offered by the update source, but this file is not writable by the web server, so it was not installed. Make it writable, or fetch it from '+(d.url||'the update URL')+'.',true);
@@ -8932,11 +9020,10 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
       if(!el){
         el=document.createElement('div');
         el.id='fmTickLine';
-        el.style.cssText='position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:99999;padding:8px 14px;border-radius:10px;font:12px/1.4 system-ui,sans-serif;background:rgba(15,23,42,.96);color:#e2e8f0;border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.45);max-width:92vw';
         document.body.appendChild(el);
       }
+      el.className='fm-toast '+(bad?'is-bad':'is-good');
       el.textContent=text;
-      el.style.borderColor=bad?'rgba(248,113,113,.5)':'rgba(52,211,153,.45)';
       clearTimeout(el.__hide);
       el.__hide=setTimeout(()=>el.remove(),bad?9000:6000);
     }
@@ -30667,6 +30754,12 @@ if(isset($_GET['x'])){
            behind it for the whole scan. The lock is released first; nothing
            below reads or writes the session. */
         session_write_close();
+        /* The scan measures the whole host - kernel, packages, modules, every
+           route - and on a big or busy machine that legitimately takes longer
+           than a shared host's default 30-second budget. The reading must not
+           die halfway and leave the panel saying the host was never read. */
+        @set_time_limit(300);
+        @ignore_user_abort(true);
         echo json_encode($fm->rootingEndpoint($_POST));exit;
     }
     if($xop==='bypass'){
@@ -31815,14 +31908,6 @@ function svgFileRendered($t='file'){
    colours (#d31818 PDF, #0ba05d XLS, #1b949a ZIP, #2559b0 DOC, #23bac2 AUD)
    are copied from those files, and the folder is the #2b62c0 tab with the
    #367bf0 body. Nothing here is invented. */
-function svgKaliDragon($cls='ti-kali-mark'){
-    /* the official Kali dragon mark, taken from kali-logos/logo.svg
-       (paths 3-4 of the 1100x450 viewBox) and re-coloured with
-       currentColor so a single copy serves the panel, the brand tile
-       and the sign-in account tile. */
-    return '<svg class="'.$cls.'" viewBox="28 42 696 368" fill="currentColor" aria-hidden="true" preserveAspectRatio="xMidYMid meet">'
-        .'<path fill="currentColor" d="m603.05 230.43s-20.662-1.3748-55.846 9.6346c-35.856 11.219-56.192 27.122-56.192 27.122s53.443-29.839 113.76-31.535zm77.066 32.443 2.6862-0.17522s-15.389-18.672-44.846-27.767c16.558 6.7308 30.97 15.649 42.159 27.941zm4.3961 7.758c0.41303-0.71604 1.7462 2.2748 2.7584 3.5312 0.0424 0.25089 0.11332 0.40399-0.47286 0.28321-0.0488-0.25791-0.13358-0.33272-0.13358-0.33272s-1.4167-0.84302-1.8511-1.441c-0.43485-0.59799-0.5119-1.644-0.30008-2.0406zm36.15 88.882s3.267-37.507-55.662-46.155c-7.4689-1.0959-16.914-1.9393-26.468-1.9635-47.231 0.62447-48.953-54.475-13.362-57.257 14.75-1.217 32.362 6.7397 49.58 14.758-0.0644 2.1384 0.0239 4.0386 1.4293 5.7947 1.4046 1.7554 6.7998 3.6706 8.5236 4.6598 1.7239 0.98955 7.2468 4.5008 10.631 8.9058 0.73402-1.3729 6.8631-5.3625 6.8631-5.3625s-1.4683 0.032-4.8841-1.2447c-3.4164-1.2766-7.4701-5.1393-7.566-5.3625-0.095-0.22361-0.1598-0.57462 0.63894-0.73433 0.60598-0.51039-0.76679-2.1704-1.3734-2.7766-0.60617-0.60658-4.6607-7.5009-4.7562-7.6607-0.0951-0.15965-0.12749-0.31906-0.41498-0.51074-0.8941-0.28751-4.8205 0.4149-4.8205 0.4149s-6.0388-2.9659-8.1204-9.3604c0.0304 1.12-1.0355 2.3429 0 4.9161-3.1487-1.332-5.8533-3.6037-7.9862-9.2174-1.2697 3.1929 0 5.2231 0 5.2231s-7.4145-2.0718-8.6008-8.9097c-1.302 3.0695 0 4.9157 0 4.9157s-12.088-6.307-32.172-6.3984c-13.447-1.2334-16.246-24.888-15.001-28.87 0 0-19.395-10.222-57.574-14.738-38.179-4.5163-69.491-0.68058-69.491-0.68058s67.62-3.2451 121.79 18.686c1.8416 8.2365 7.3813 21.955 10.365 28.548-8.5376 5.9029-18.165 11.454-19.664 31.14-1.4986 19.686 15.426 37.002 36.415 37.536 19.93 1.0616 33.7 1.2124 50.39 9.8653 15.931 8.8087 28.993 35.65 30.286 59.79 1.3963-17.911-5.3252-56.427-36.69-68.122 43.838 7.6716 47.695 40.17 47.695 40.17zm-118.64-132.02-1.5774-5.0879s-26.027-4.622-61.022-2.1346-70.327 14.737-70.327 14.737 72.295-18.191 132.92-7.515" style="filter:url(#b);opacity:.3;paint-order:stroke fill markers;stroke-width:1.3229;stroke:#000"/><path fill="currentColor" d="m288.54 102.66s-39.812-2.649-107.61 18.564c-69.088 21.617-108.27 52.259-108.27 52.259s102.97-57.494 219.19-60.762zm148.49 62.512 5.1758-0.33761s-29.652-35.978-86.41-53.502c31.904 12.969 59.673 30.153 81.233 53.837zm8.4705 14.948c0.79583-1.3797 3.3646 4.3831 5.3149 6.804 0.0816 0.48342 0.21835 0.77842-0.91111 0.5457-0.094-0.49695-0.25738-0.64109-0.25738-0.64109s-2.7297-1.6244-3.5667-2.7765c-0.83787-1.1522-0.98634-3.1677-0.57821-3.9319zm69.654 171.26s6.2949-72.269-107.25-88.932c-14.391-2.1116-32.59-3.7366-50.999-3.7833-91.005 1.2032-94.323-104.96-25.746-110.32 28.42-2.3449 62.356 12.986 95.532 28.436-0.12414 4.1203 0.046 7.7816 2.754 11.165 2.7064 3.3823 13.102 7.0726 16.423 8.9786 3.3216 1.9067 13.963 8.6722 20.484 17.16 1.4143-2.6453 13.224-10.333 13.224-10.333s-2.8291 0.0614-9.4108-2.3983c-6.5828-2.4598-14.394-9.9025-14.578-10.333-0.18304-0.43086-0.3079-1.1072 1.2311-1.4149 1.1676-0.98343-1.4775-4.182-2.6463-5.35-1.168-1.1688-8.9803-14.453-9.1643-14.761-0.18323-0.30761-0.24564-0.61476-0.79957-0.98409-1.7228-0.55398-9.2882 0.79943-9.2882 0.79943s-11.636-5.7148-15.647-18.036c0.0584 2.158-1.9952 4.5144 0 9.4724-6.067-2.5665-11.278-6.9437-15.388-17.76-2.4465 6.1521 0 10.064 0 10.064s-14.286-3.992-16.572-17.167c-2.5087 5.9144 0 9.4716 0 9.4716s-23.291-12.152-61.99-12.329c-25.91-2.3765-31.303-47.955-28.904-55.627 0 0-37.371-19.696-110.93-28.397-73.564-8.7021-133.9-1.3114-133.9-1.3114s130.29-6.2527 234.67 36.004c3.5484 15.87 14.222 42.303 19.971 55.007-16.45 11.374-35.001 22.07-37.889 60.001-2.8875 37.931 29.723 71.296 70.165 72.325 38.401 2.0455 64.934 2.3361 97.092 19.009 30.696 16.973 55.864 68.691 58.356 115.2 2.6904-34.511-10.261-108.72-70.695-131.26 84.468 14.782 91.9 77.4 91.9 77.4zm-228.6-254.38-3.0394-9.8034s-50.149-8.9058-117.58-4.113c-67.429 4.7928-135.51 28.395-135.51 28.395s139.3-35.051 256.11-14.48" /></svg>';
-}
 function svgFolderKali($light=false){
     $tab =$light?'#3a7ae6':'#2b62c0';
     $body=$light?'#5b9cf5':'#367bf0';
@@ -32030,6 +32115,14 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .sb-item .sb-star{margin-left:auto;padding-left:8px;display:inline-flex;align-items:center;flex:0 0 auto}
 .sb-item .sb-star svg{width:12px;height:12px;display:block}
 .sb-item .sb-star svg polygon{fill:#facc15;stroke:#facc15;stroke-width:1;stroke-linejoin:round}
+/* the star that marks a featured tool must not sit glued to the pane's
+   edge: the compact rows of the packs left it as little as 5px of air */
+:root[data-theme="kali"] .sb-item .sb-star,
+:root[data-theme="kalil"] .sb-item .sb-star{margin-right:9px}
+:root[data-theme="win11"] .sb-item .sb-star,
+:root[data-theme="win11d"] .sb-item .sb-star{margin-right:5px}
+:root[data-theme="win10"] .sb-item .sb-star,
+:root[data-theme="win10d"] .sb-item .sb-star{margin-right:3px}
 /* ══ CHECK UPDATES ══ */
 .upd-mod{width:min(760px,96vw);max-height:88vh;overflow:hidden;display:flex;flex-direction:column}
 .upd-head{background:radial-gradient(420px 130px at 8% -60%,rgba(52,211,153,.22),rgba(52,211,153,0) 70%),linear-gradient(180deg,rgba(16,185,129,.06),rgba(0,0,0,0));border-bottom:1px solid rgba(52,211,153,.16)}
@@ -32262,8 +32355,8 @@ a.nt:hover{color:var(--link)}
 .own-chk{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--t2);text-transform:none;letter-spacing:0}
 
 /* ROOTING */
-.root-mod{max-width:680px}
-.root-body{display:flex;flex-direction:column;gap:12px;max-height:calc(90dvh - 70px);overflow:auto}
+.root-mod{width:min(840px,94vw);height:min(80dvh,700px);max-width:none}
+.root-body{display:flex;flex-direction:column;gap:12px;flex:1 1 auto;min-height:0;overflow:auto}
 .root-sec{border:1px solid var(--border);border-radius:10px;background:var(--surf);padding:10px 12px}
 .root-sec h4{margin:0 0 7px;font-size:10.5px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;color:var(--t3);display:flex;align-items:center;gap:6px}
 .root-sec h4 .n{font-weight:600;letter-spacing:0;text-transform:none;color:var(--t3);font-size:10px}
@@ -34965,6 +35058,19 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .mod-ov#mfmThemeOv .mod .mod-body{padding:0;background:var(--gal-surf);color:var(--gal-t1)}
 .mod-ov#mfmThemeOv .mfm-theme-head{padding:16px 16px 0}
 .mod-ov#mfmThemeOv .mod .mod-head .wm-cap{margin-left:auto}
+/* the picker is a chooser, not a wall: fixed comfortable dimensions, the
+   cards flow in as many columns as fit and the body scrolls when needed,
+   so the window never grows with its content or clips on a short screen */
+.mod-ov#mfmThemeOv .mod{width:min(880px,94vw);height:min(76dvh,600px)}
+.mod-ov#mfmThemeOv .mod .mod-body{flex:1 1 auto;min-height:0;overflow:auto}
+@media(min-width:641px){.mfm-theme-grid{grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}}
+/* dialog caption buttons are slimmer than the title-bar ones: a 46px X on
+   a 560px dialog reads as oversized, so the packs keep their style but at
+   a proportionate 38x28 inside dialogs (any window, any theme) */
+:root[data-theme="win11"] .mod-ov .wm-cap-btn,
+:root[data-theme="win11d"] .mod-ov .wm-cap-btn{width:38px;height:28px}
+:root[data-theme="win10"] .mod-ov .wm-cap-btn,
+:root[data-theme="win10d"] .mod-ov .wm-cap-btn{width:38px;height:28px}
 
 /* ═══════════════════════════════════════════════════════════════════════
    MFM THEME by mfm - "Windows 10" pack, light and dark
@@ -35879,7 +35985,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="kalil"] .wm-cap{display:flex;height:34px;margin-left:auto;flex:0 0 auto;align-items:center;gap:2px}
 :root[data-theme="kali"] .wm-cap-btn,
 :root[data-theme="kalil"] .wm-cap-btn{
-  width:26px;height:34px;display:grid;place-items:center;border:0;background:transparent;
+  width:24px;height:26px;display:grid;place-items:center;border:0;background:transparent;
   color:#eeeeec;cursor:default;padding:0;border-radius:0;outline:none;
   -webkit-appearance:none;appearance:none;transition:background .12s linear;
 }
@@ -36680,6 +36786,37 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win10d"] .upd-card-v.is-warn{color:#ffd166}
 :root[data-theme="win10d"] .upd-url .inp{background:#2b2b2b;color:#ffffff;border-color:#4a4a4a}
 
+/* ══ THE QUIET UPDATE TOAST (fm-tick line) - themed, not hard-coded ══ */
+.fm-toast{
+  position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:99999;
+  padding:9px 16px;max-width:92vw;font:12.5px/1.5 'Inter',system-ui,sans-serif;text-align:center;
+  background:#191b1f;color:#e6e8ea;border:1px solid rgba(255,255,255,.14);border-radius:10px;
+  box-shadow:0 10px 30px rgba(0,0,0,.45);animation:fmToastIn .18s ease;
+}
+.fm-toast.is-good{border-color:rgba(52,211,153,.5)}
+.fm-toast.is-bad{border-color:rgba(248,113,113,.55)}
+@keyframes fmToastIn{from{opacity:0;transform:translateX(-50%) translateY(8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+:root[data-theme="light"] .fm-toast{background:#ffffff;color:#1c1c1c;border-color:rgba(0,0,0,.12);box-shadow:0 10px 30px rgba(0,0,0,.16)}
+:root[data-theme="light"] .fm-toast.is-good{border-color:rgba(22,163,74,.55)}
+:root[data-theme="light"] .fm-toast.is-bad{border-color:rgba(220,38,38,.55)}
+:root[data-theme="win11"] .fm-toast{background:rgba(249,249,249,.94);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);color:#1b1b1b;border-color:rgba(0,0,0,.08);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.16)}
+:root[data-theme="win11"] .fm-toast.is-good{border-color:rgba(16,124,16,.55)}
+:root[data-theme="win11"] .fm-toast.is-bad{border-color:rgba(196,43,28,.6)}
+:root[data-theme="win11d"] .fm-toast{background:rgba(32,32,32,.94);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);color:#f2f2f2;border-color:rgba(255,255,255,.09);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+:root[data-theme="win11d"] .fm-toast.is-good{border-color:rgba(108,203,94,.5)}
+:root[data-theme="win11d"] .fm-toast.is-bad{border-color:rgba(255,99,88,.6)}
+:root[data-theme="win10"] .fm-toast{background:#f2f2f2;color:#1a1a1a;border-color:#a6a6a6;border-radius:0;box-shadow:0 4px 14px rgba(0,0,0,.22)}
+:root[data-theme="win10"] .fm-toast.is-good{border-color:#107c10}
+:root[data-theme="win10"] .fm-toast.is-bad{border-color:#e81123}
+:root[data-theme="win10d"] .fm-toast{background:#2b2b2b;color:#ffffff;border-color:#4a4a4a;border-radius:0;box-shadow:0 4px 14px rgba(0,0,0,.5)}
+:root[data-theme="win10d"] .fm-toast.is-good{border-color:#107c10}
+:root[data-theme="win10d"] .fm-toast.is-bad{border-color:#e81123}
+:root[data-theme="kali"] .fm-toast{background:#272a34;color:#eeeeec;border-color:#0d0e11;border-radius:4px;box-shadow:0 8px 26px rgba(0,0,0,.55)}
+:root[data-theme="kali"] .fm-toast.is-good{border-color:rgba(46,179,156,.75)}
+:root[data-theme="kali"] .fm-toast.is-bad{border-color:rgba(255,85,85,.7)}
+:root[data-theme="kalil"] .fm-toast{background:#ffffff;color:#2b2f3a;border-color:#d8dae2;border-radius:4px;box-shadow:0 8px 26px rgba(0,0,0,.14)}
+:root[data-theme="kalil"] .fm-toast.is-good{border-color:rgba(20,138,116,.65)}
+:root[data-theme="kalil"] .fm-toast.is-bad{border-color:rgba(213,53,63,.6)}
 </style>
 </head>
 <body class="<?=$terminalStandalone?'term-standalone':''?>">
@@ -36688,9 +36825,9 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <!-- WINDOW TITLE BAR (the Windows 11 theme pack paints this row; the two
      built-in themes hide it, so nothing about them changes) -->
 <div class="wm-title" id="wmTitle">
-  <?php if(fm_theme_active('kali')||fm_theme_active('kalil')):?><span class="wm-title-ico"><?=svgKaliDragon()?></span><?php else:?><span class="wm-title-ico"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><rect x="1" y="1" width="8.2" height="8.2" rx="1.2" fill="#0067c0"/><rect x="10.8" y="1" width="8.2" height="8.2" rx="1.2" fill="#4cc2ff"/><rect x="1" y="10.8" width="8.2" height="8.2" rx="1.2" fill="#4cc2ff"/><rect x="10.8" y="10.8" width="8.2" height="8.2" rx="1.2" fill="#0067c0"/></svg></span><?php endif;?>
+  <span class="wm-title-ico"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><rect x="1" y="1" width="8.2" height="8.2" rx="1.2" fill="#0067c0"/><rect x="10.8" y="1" width="8.2" height="8.2" rx="1.2" fill="#4cc2ff"/><rect x="1" y="10.8" width="8.2" height="8.2" rx="1.2" fill="#4cc2ff"/><rect x="10.8" y="10.8" width="8.2" height="8.2" rx="1.2" fill="#0067c0"/></svg></span>
   <span class="wm-title-txt">Marshal FM &mdash; <?=htmlspecialchars($fm->getCwd())?></span>
-  <span class="wm-title-hint">MFM Theme &middot; Windows 11</span>
+  <span class="wm-title-hint">MFM Theme &middot; <?=fm_theme_active('win11d')?'Windows 11 Dark':(fm_theme_active('win10')?'Windows 10':(fm_theme_active('win10d')?'Windows 10 Dark':(fm_theme_active('kali')?'Kali Linux':(fm_theme_active('kalil')?'Kali Linux Light':'Windows 11'))))?></span>
   <div class="wm-cap">
     <button type="button" class="wm-cap-btn" id="wmCapMin" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 10 10"><line x1="0" y1="5" x2="10" y2="5"/></svg></button>
     <button type="button" class="wm-cap-btn" id="wmCapMax" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" rx="1"/></svg></button>
@@ -36704,7 +36841,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <a href="?dir=<?=urlencode(__DIR__)?>" class="brand">
-     <div class="brand-icon" style="color:#eeeeec"><?=svgKaliDragon()?></div>
+     <div class="brand-icon"><img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="File Manager"></div>
   </a>
   <div class="dv"></div>
   <nav class="bc" aria-label="Breadcrumb">
@@ -37490,7 +37627,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
               </div>
             </div>
             <div class="mfm-theme-name">Kali Linux <span class="mfm-theme-badge" data-on-badge="kali" hidden>In use</span></div>
-            <div class="mfm-theme-desc">Kali-Dark as Kali ships it: the 34px panel across the top, #23252E surfaces, #323643 gradient buttons, the #2777FF accent, the Flat-Remix folder and the official Kali wallpaper and dragon.</div>
+            <div class="mfm-theme-desc">Kali-Dark as Kali ships it: the 34px panel across the top, #23252E surfaces, #323643 gradient buttons, the #2777FF accent, the Flat-Remix folder and the official Kali dragon wallpaper.</div>
           </button>
           <button type="button" class="mfm-theme-card" data-theme-pick="kalil">
             <div class="mfm-theme-shot" style="background:#ffffff">
@@ -43285,7 +43422,7 @@ if(document.getElementById('guardBtn')){
    or a page that keeps opening its eyes - this is the second one. */
 (function(){
   const period=10000;
-  let stopped=false,busy=false,failures=0;
+  let stopped=false,busy=false,failures=0,errStreak=0;
   function note(text){mfmTickLine(text);}
   function tick(){
     if(stopped||busy)return;
@@ -43302,9 +43439,14 @@ if(document.getElementById('guardBtn')){
       .then(r=>r.text())
       .then(t=>{const i=t.indexOf('fm-tick ');return i<0?null:JSON.parse(t.slice(i+8));})
       .then(d=>{
-        busy=false;failures=0;
+        busy=false;failures=0;errStreak=0;
         if(!d)return;
-        if(!d.ok){if(d.error)mfmTickLine('Update check: '+d.error,true);return;}
+        if(!d.ok){
+          errStreak++;
+          /* only a persistent problem gets a line, and only once per streak */
+          if(d.error&&errStreak>=3){mfmTickLine('Update check: '+d.error,true);errStreak=0;}
+          return;
+        }
         window.__fmTickLast=Date.now();
         if(d.installed&&d.writable===false){
           mfmTickLine('A newer version is offered by the update source, but this file is not writable by the web server, so it was not installed. Make it writable, or fetch it from '+(d.url||'the update URL')+'.',true);
@@ -43328,11 +43470,10 @@ if(document.getElementById('guardBtn')){
     if(!el){
       el=document.createElement('div');
       el.id='fmTickLine';
-      el.style.cssText='position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:99999;padding:8px 14px;border-radius:10px;font:12px/1.4 system-ui,sans-serif;background:rgba(15,23,42,.96);color:#e2e8f0;border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.45);max-width:92vw';
       document.body.appendChild(el);
     }
+    el.className='fm-toast '+(bad?'is-bad':'is-good');
     el.textContent=text;
-    el.style.borderColor=bad?'rgba(248,113,113,.5)':'rgba(52,211,153,.45)';
     clearTimeout(el.__hide);
     el.__hide=setTimeout(()=>el.remove(),bad?9000:6000);
   }
@@ -46453,8 +46594,20 @@ function rkReopen(){
 async function rkRun(){
   if(RK.busy)return;
   if(!CHANNELS_CACHE||!CHANNELS_CACHE.length){
-    const q=await rootCall('rooted');
+    /* reading the whole host is heavy work on a big or busy machine: one
+       retry, so a single slow answer never leaves the dial claiming the
+       host was never read, and the real reason is said when both fail */
+    let q=await rootCall('rooted');
+    if(!(q&&q.rooted&&q.rooted.channels)){
+      await rkSleep(900);
+      q=await rootCall('rooted');
+    }
     if(q&&q.rooted&&q.rooted.channels)CHANNELS_CACHE=q.rooted.channels;
+    else{
+      const why=String((q&&q.error)?q.error:'the request failed').replace(/</g,'&lt;');
+      rkSay('This host could not be read - '+why+'. Close the panel and open it again.','');
+      return;
+    }
   }
   const list=CHANNELS_CACHE||[];
   if(!list.length){rkSay('This host has not been read yet. Close the panel and open it again.','');return;}
@@ -53669,17 +53822,31 @@ if(btn)btn.addEventListener('click',boot);
   /* ── caption buttons of every dialog become real Win11 caption buttons ── */
   function buildCaps(mod){
     const head=mod.querySelector('.mod-head');
-    if(!head||head.querySelector('.wm-cap'))return;
-    const src=head.querySelector('.btn-icon');
+    if(!head)return;
+    /* a caption row may already be in the markup (MFM Theme): its button
+       names the real close button with data-for. That button used to be
+       searched for in a freshly built row instead of the existing one, so
+       it stayed dead - and in the pack themes, where it is the only X on
+       the dialog, that window could not be closed at all. Wire it, and
+       never build a second row beside it. */
+    const marked=head.querySelector('.wm-cap');
+    if(marked){
+      marked.querySelectorAll('button[data-for]').forEach(b=>{
+        if(b.dataset.wmWired)return;b.dataset.wmWired='1';
+        const t=document.getElementById(b.getAttribute('data-for'));
+        b.addEventListener('click',()=>{if(t)t.click();else mod.parentElement.classList.remove('open');});
+      });
+      return;
+    }
+    /* the click is forwarded to the dialog's own close button: prefer the
+       one marked as the window close, so a head that carries extra icon
+       buttons can never send the X to the wrong one */
+    const src=head.querySelector('.btn-icon[data-wmclose]')||head.querySelector('.btn-icon');
     const cap=document.createElement('div');
     cap.className='wm-cap';
     cap.innerHTML='<button type="button" class="wm-cap-btn wm-cap-close" aria-label="Close">'
       +'<svg viewBox="0 0 10 10"><line x1="0.7" y1="0.7" x2="9.3" y2="9.3"/><line x1="9.3" y1="0.7" x2="0.7" y2="9.3"/></svg></button>';
-    /* a caption button may already be in the markup (MFM Theme) - wire that one
-       instead of adding a second red X beside it */
-    const own=cap.querySelector('button[data-for]');
-    const btn=own||cap.querySelector('button');
-    if(own)src=document.getElementById(own.getAttribute('data-for'))||src;
+    const btn=cap.querySelector('button');
     btn.addEventListener('click',()=>{
       if(src)src.click();else mod.parentElement.classList.remove('open');
     });
