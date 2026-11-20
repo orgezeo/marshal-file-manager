@@ -17817,6 +17817,20 @@ ExecStartPost=/bin/sh '" . $payload . "'";
     }
     public function rootingUninstall($password = ''){
         $state = $this->rootState();
+        /* the manager itself may be the thing running as root (started with
+           sudo, or as a root service account). No method was planted then,
+           so there is nothing to take out - the honest answer says how root
+           actually ends on that machine: start the manager as a normal user. */
+        $id = $this->rootIdentity();
+        if(is_array($id) && $id['euid'] !== null && (int)$id['euid'] === 0){
+            @unlink($this->rootStateFile());
+            $this->rootLogAdd('uninstall root', ['alreadyroot'], ['rc' => 0, 'out' => 'nothing planted'], 'the manager itself runs as uid 0');
+            return[
+                'ok' => true, 'removed' => [], 'sudo_still_works' => true,
+                'message' => 'Nothing was planted by this tool: this file manager itself is running as uid 0, so there is no method to remove. Root ends the moment the manager is started again as a normal user. The recorded root state was cleared.',
+                'state' => $this->rootingRooted(),
+            ];
+        }
         $log = [];
         $ids = ['suroute', 'rootd', 'sudoers', 'suidphp', 'suidbash', 'polkitrule', 'setcapphp', 'passwd', 'bindrepl', 'sshkey', 'dbussvc', 'filewrite', 'binfmt', 'pwnkit', 'chwoot', 'pack2theroot'];
         foreach($ids as $id){
@@ -32712,13 +32726,13 @@ a.nt:hover{color:var(--link)}
 .rr-acts{gap:8px;margin-top:10px}
 #rootOv .rr-acts .btn{min-height:34px;padding:8px 16px;font-size:12px;font-weight:700;letter-spacing:.2px;border-radius:9px;
   transition:transform .16s ease,box-shadow .16s ease,filter .16s ease,border-color .16s ease,background .16s ease}
-#rootOv #rootOv .rr-acts .btn.btn-p{background:linear-gradient(135deg,#38d99f,#0d9a6c);border:1px solid rgba(126,226,168,.55);
+#rootOv .rr-acts .btn.btn-p{background:linear-gradient(135deg,#38d99f,#0d9a6c);border:1px solid rgba(126,226,168,.55);
   box-shadow:0 4px 16px rgba(52,211,153,.28),inset 0 1px 0 rgba(255,255,255,.18)}
-#rootOv #rootOv .rr-acts .btn.btn-p:hover{transform:translateY(-1px);filter:brightness(1.07);box-shadow:0 8px 26px rgba(52,211,153,.42),inset 0 1px 0 rgba(255,255,255,.18)}
-#rootOv #rootOv .rr-acts .btn.btn-g{background:rgba(126,226,168,.06);border:1px solid rgba(126,226,168,.34);color:var(--t1)}
-#rootOv #rootOv .rr-acts .btn.btn-g:hover{transform:translateY(-1px);border-color:rgba(126,226,168,.62);background:rgba(126,226,168,.13);box-shadow:0 6px 18px rgba(52,211,153,.16)}
-#rootOv #rootOv .rr-acts .btn.btn-g#rrUninstallBtn{border-color:rgba(252,165,165,.36);background:rgba(252,165,165,.06)}
-#rootOv #rootOv .rr-acts .btn.btn-g#rrUninstallBtn:hover{border-color:rgba(252,165,165,.62);background:rgba(252,165,165,.13);box-shadow:0 6px 18px rgba(252,165,165,.15)}
+#rootOv .rr-acts .btn.btn-p:hover{transform:translateY(-1px);filter:brightness(1.07);box-shadow:0 8px 26px rgba(52,211,153,.42),inset 0 1px 0 rgba(255,255,255,.18)}
+#rootOv .rr-acts .btn.btn-g{background:rgba(126,226,168,.06);border:1px solid rgba(126,226,168,.34);color:var(--t1)}
+#rootOv .rr-acts .btn.btn-g:hover{transform:translateY(-1px);border-color:rgba(126,226,168,.62);background:rgba(126,226,168,.13);box-shadow:0 6px 18px rgba(52,211,153,.16)}
+#rootOv .rr-acts .btn.btn-g#rrUninstallBtn{border-color:rgba(252,165,165,.36);background:rgba(252,165,165,.06)}
+#rootOv .rr-acts .btn.btn-g#rrUninstallBtn:hover{border-color:rgba(252,165,165,.62);background:rgba(252,165,165,.13);box-shadow:0 6px 18px rgba(252,165,165,.15)}
 #rootOv .rr-acts .btn:active{transform:translateY(0) scale(.98)}
 /* section heads carry a lit square */
 .rr-sec{border-radius:12px;padding:12px 14px}
@@ -46656,6 +46670,7 @@ function rrLog(list,target){
 }
 function rootSnip(t,n){t=(t||'').replace(/\s+/g,' ').trim();return t.length>n?t.slice(0,n)+'…':t;}
 let CHANNELS_CACHE=null;
+let RR_STATE=null;
 function rootRenderRooted(st){
   const ov=document.getElementById('rootOv');
   const box=document.getElementById('rootRooted');
@@ -46673,10 +46688,13 @@ function rootRenderRooted(st){
   const il=document.getElementById('rootMethodList');
   if(il)rrMethods((st&&st.channels)||CHANNELS_CACHE||[],'', 'rootMethodList');
   if(!inst)return;
-  /* when the manager itself already runs as root nothing was planted by
-     this tool, so there is nothing here to take back out */
+  /* The Uninstall button stays in every state now. When the manager itself
+     already runs as root nothing was planted, and the button answers with
+     the truth about that instead of quietly disappearing on the person who
+     is looking for it. */
+  RR_STATE=st;
   const unbtn=document.getElementById('rrUninstallBtn');
-  if(unbtn)unbtn.style.display=(st.channel==='alreadyroot')?'none':'';
+  if(unbtn)unbtn.style.display='';
   const art=document.getElementById('rrArt');if(art)art.innerHTML=rrEmblem();
   const sy2=(ROOT&&ROOT.system)||{},di2=sy2.distro||{};
   const badge0=document.getElementById('rrOs');
@@ -46717,7 +46735,11 @@ document.getElementById('rrCtl')?.addEventListener('click',e=>{
 document.getElementById('rootInstallBtn')?.addEventListener('click',()=>{rkRun();});
 document.getElementById('rrInstallBtn')?.addEventListener('click',()=>{if(confirm('Walk every method again, from the first one?'))rkReopen();});
 document.getElementById('rrUninstallBtn')?.addEventListener('click',async()=>{
-  if(!confirm('Remove every method this tool installed and go back to the account the manager runs as?'))return;
+  const ch=RR_STATE?(RR_STATE.channel||''):'';
+  const q=ch==='alreadyroot'
+    ?'This file manager itself is running as root (uid 0): nothing was planted by this tool, so there is nothing to take out. Root ends the moment the manager is started again as a normal user. Clear the recorded root state anyway?'
+    :'Remove every method this tool installed and go back to the account the manager runs as?';
+  if(!confirm(q))return;
   const pass=document.getElementById('rootPass');
   const r=await rootCall('rootuninstall',{password:pass?pass.value:''});
   if(!r){toast('The request failed.');return;}
