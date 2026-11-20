@@ -1270,6 +1270,11 @@ function fm_guardian_sync($content=null){
     $c=fm_guardian_conn();if(!$c)return false;
     if($content===null)$content=@file_get_contents(__FILE__);
     if($content===false||$content==='')return false;
+    /* The guardian copy is the only way back from a bad install. Storing a
+       stub, a truncated file or a half-written build destroys that way back, so
+       nothing that is not plausibly a whole build is ever stored. */
+    if(strlen($content)<fm_update_min_bytes())return false;
+    if(defined('FM_VERSION')&&FM_VERSION!==''&&strpos($content,'FM_VERSION')===false)return false;
     $hash=hash('sha256',$content);$now=time();$by=isset($_SESSION['fm_user'])?$_SESSION['fm_user']:'unknown';
     $mode=fileperms(__FILE__)&0777; // capture original permissions so watchdog can restore them
     $fn=basename(__FILE__);$fp=__FILE__;$url=FM_UPDATE_URL;
@@ -1591,9 +1596,9 @@ function fm_tick_silent($allowUpgrade){
            quietly replaced the local build with the plain upstream one would be
            the worst possible behaviour for an update feature. */
         $installable=!empty($r['available'])
-            && (($r['relation']??'')==='offered is larger'||($r['relation']??'')==='offered is newer'||($r['relation']??'')==='offered is the same size');
+            && in_array((string)($r['relation']??''),['larger','newer','same-size'],true);
         if(!empty($r['available'])&&!$installable){
-            $out['skipped']='the offered file is not newer than the installed one ('.($r['relation']??'relation unknown').'), so the automatic install was not attempted';
+            $out['skipped']='the offered file is not newer than the installed one ('.fm_update_relation_phrase((string)($r['relation']??'unknown')).'), so the automatic install was not attempted';
         }
         if($installable&&$allowUpgrade&&!fm_guardian_update_paused()){
             session_write_close();
@@ -2608,6 +2613,24 @@ function fm_guardian_release_timestamp($url,$headers=[]){
     return $parsed===false?0:$parsed;
 }
 
+/* The comparison tells three different things apart - a bigger file, a smaller
+   one, and a file that cannot be ordered at all - and every screen that shows it
+   has to say the same words. They come from here, once. */
+function fm_update_relation_phrase($code){
+    $map=['larger'=>'the offered file is larger than the installed one',
+          'newer'=>'the offered file has a newer release date',
+          'same-size'=>'the offered file has exactly the same size',
+          'smaller'=>'the offered file is SMALLER than the installed one',
+          'older'=>'the offered file is OLDER than the installed one',
+          'different'=>'the offered file is different, and its size could not be read',
+          'same'=>'the offered file is identical to the installed one',
+          'unknown'=>'the two files could not be ordered'];
+    return $map[$code]??$map['unknown'];
+}
+/* An install must never leave a stub behind: anything below this is not a build
+   of this tool, whatever its name or link says. */
+function fm_update_min_bytes(){return 20000;}
+
 /* Downloads $url and, if it looks like a valid PHP file (lints clean and
    differs from what's on disk), atomically replaces this file with it and
    refreshes the Guardian database copy. Used both by "Check updates" and,
@@ -2645,6 +2668,9 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
     }
     if($data===false||strlen($data)<20)return ['ok'=>false,'error'=>'Could not download the update URL.'];
     if(strpos(ltrim($data),'<?php')!==0)return ['ok'=>false,'error'=>'The fetched file does not look like a valid PHP file.'];
+    /* a 30-byte "<?php echo 1;" passes every other check and would erase this
+       tool; a real build of it is never this small */
+    if(strlen($data)<fm_update_min_bytes())return ['ok'=>false,'error'=>'What came back is only '.strlen($data).' bytes, far too small to be this tool, so it was not installed.'];
     if(!$remoteSize)$remoteSize=strlen($data);
     if(!$releaseTimestamp)$releaseTimestamp=fm_guardian_release_timestamp($url,$responseHeaders);
     $updateMeta=['size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp];
@@ -2675,11 +2701,14 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
             $relation='different';
             $cSize=(int)@filesize(__FILE__);
             $cTime=(int)@filemtime(__FILE__);
-            if($remoteSize>0&&$cSize>0)$relation=$remoteSize>$cSize?'offered is larger':($remoteSize<$cSize?'offered is smaller':'offered is the same size');
-            else $relation=$releaseTimestamp>0&&$cTime>0?($releaseTimestamp>$cTime?'offered is newer':'offered is older'):'cannot be ordered';
+            if($remoteSize>0&&$cSize>0)$relation=$remoteSize>$cSize?'larger':($remoteSize<$cSize?'smaller':'same-size');
+            elseif($releaseTimestamp>0&&$cTime>0)$relation=$releaseTimestamp>$cTime?'newer':'older';
+            else $relation='unknown';
         }
         @file_put_contents($statePath,fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'current_hash'=>$currentHash,'checked_at'=>time(),'fetched_at'=>time(),'available'=>$available,'relation'=>$relation,'current_size'=>(int)@filesize(__FILE__),'size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp],JSON_UNESCAPED_SLASHES)),LOCK_EX);
-        return array_merge(['ok'=>true,'changed'=>false,'available'=>$available,'relation'=>$relation,'current_hash'=>$currentHash,'remote_hash'=>$remoteHash,'current_size'=>(int)@filesize(__FILE__)],$updateMeta);
+        return array_merge(['ok'=>true,'changed'=>false,'available'=>$available,'relation'=>$relation,
+            'relation_phrase'=>fm_update_relation_phrase($relation),'compared'=>true,
+            'current_hash'=>$currentHash,'remote_hash'=>$remoteHash,'current_size'=>(int)@filesize(__FILE__)],$updateMeta);
     }
     if($current!==false&&$currentHash===$remoteHash){
         @file_put_contents(__DIR__.'/.guardian_update_state.php',fm_store_guard(json_encode(['url'=>$url,'remote_hash'=>$remoteHash,'checked_at'=>time()],JSON_UNESCAPED_SLASHES)),LOCK_EX);
@@ -2749,6 +2778,7 @@ function fm_force_update_download($url){
         if($data===false)return ['ok'=>false,'error'=>'The download failed (file_get_contents).'];
     }
     if(!is_string($data)||strlen($data)<20)return ['ok'=>false,'error'=>'The source returned an empty or unreadably short answer.'];
+    if(strlen($data)<fm_update_min_bytes())return ['ok'=>false,'error'=>'What came back is only '.strlen($data).' bytes, far too small to be this tool, so it was not installed.'];
     if(strpos(ltrim($data),'<?php')!==0)
         return ['ok'=>false,'error'=>'What came back is not a PHP file (it does not start with <?php), so it was not installed. A repository page or an error page looks exactly like this.'];
     return ['ok'=>true,'data'=>$data,'size'=>strlen($data),'sha256'=>hash('sha256',$data),'http'=>$httpCode,'url'=>$url];
@@ -7869,7 +7899,7 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
  .login-shell,.card{transition:opacity .24s ease,filter .24s ease,transform .24s ease}
  .login-shell.is-leaving{opacity:0;filter:blur(5px);transform:scale(1.012);pointer-events:none}
 }
-@media(max-width:760px){.login-shell,.login-center{display:contents}.login-wallpaper,.login-actions,.login-settings-panel,.login-help-panel{display:none!important}.linux-topbar,.login-logo-desktop,.login-form-desktop{display:none}.login-logo-mobile,.login-form-mobile{display:block}}
+@media(max-width:760px){.login-shell,.login-center{display:contents}.login-wallpaper,.login-actions,.login-settings-panel,.login-help-panel,.win11-signin-id,.win11-signin-options{display:none!important}.linux-topbar,.login-logo-desktop,.login-form-desktop{display:none}.login-logo-mobile,.login-form-mobile{display:block}}
 @media(prefers-reduced-motion:reduce){.login-shell,.card,.login-wallpaper,.login-settings-panel,.login-help-panel{animation:none;transition:none}}
 /* ── Win11 loading spinner: the ring of fading dots, drawn in CSS ─────── */
 @keyframes fmWinSpin{to{transform:rotate(360deg)}}
@@ -7908,6 +7938,8 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
 @keyframes fmWinBusy{0%,100%{opacity:1}50%{opacity:.55}}
 .upd-loading{display:flex;align-items:center;gap:9px}
 
+/* the sign-in heading and the sign-in options belong to the desktop screen only */
+.win11-signin-id,.win11-signin-options{display:none}
 @media(min-width:861px){
   /* the desktop login is its own layout (round avatar + pill field), so the
      Win11 pack keeps that structure and only repaints its chrome. */
@@ -7931,8 +7963,8 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
   }
   :root[data-theme="win11d"] .login-entry-row{
     width:min(320px,100%);height:34px;border-radius:4px;padding:0;
-    background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.09);
-    border-bottom-color:rgba(255,255,255,.44);box-shadow:none;
+    background:rgba(255,255,255,.0605);border:1px solid rgba(255,255,255,.0933);
+    border-bottom-color:rgba(255,255,255,.5442);box-shadow:0 2px 10px rgba(0,0,0,.30);
   }
   :root[data-theme="win11d"] .login-entry-row:focus-within{
     background:rgba(255,255,255,.08);border-bottom:2px solid #4cc2ff;
@@ -7990,6 +8022,178 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
     -webkit-backdrop-filter:blur(60px) saturate(160%);backdrop-filter:blur(60px) saturate(160%);
     box-shadow:0 16px 40px rgba(0,0,0,.55);
   }
+
+/* ── WINDOWS 11 SIGN-IN SCREEN ───────────────────────────────────────────
+   Windows draws the lock screen over the wallpaper - clock centred at the
+   top, date under it - and, once you press a key, the account picture in a
+   circle with its name beneath and a single password field with an accent
+   arrow. The two colour modes share that geometry and differ only in the
+   fills, which is why this block is one rule set with two value sets. */
+:root[data-theme="win11"] .win11-signin-id,
+:root[data-theme="win11d"] .win11-signin-id{
+  display:block;text-align:center;margin:0 0 26px;
+}
+:root[data-theme="win11"] .win11-signin-name,
+:root[data-theme="win11d"] .win11-signin-name{
+  font-family:'Segoe UI Variable Display','Segoe UI',system-ui,sans-serif;
+  font-size:24px;font-weight:600;letter-spacing:-.01em;color:#ffffff;
+  text-shadow:0 1px 12px rgba(0,0,0,.45);
+}
+:root[data-theme="win11"] .win11-signin-sub,
+:root[data-theme="win11d"] .win11-signin-sub{
+  font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
+  font-size:12.5px;color:rgba(255,255,255,.82);margin-top:4px;
+  text-shadow:0 1px 10px rgba(0,0,0,.45);
+}
+@media(min-width:861px){
+  /* the wallpaper is the whole screen, dimmed the way Windows dims it */
+  :root[data-theme="win11"] body,:root[data-theme="win11d"] body{
+    background:#000;isolation:isolate;
+  }
+  :root[data-theme="win11"] body::after,
+  :root[data-theme="win11d"] body::after{
+    background:linear-gradient(180deg,rgba(0,0,0,.18),rgba(0,0,0,.42) 55%,rgba(0,0,0,.55));
+  }
+  :root[data-theme="win11"] .login-wallpaper,
+  :root[data-theme="win11d"] .login-wallpaper{
+    filter:none;transform:none;
+  }
+  /* the clock: big and centred at the top, date beneath it */
+  :root[data-theme="win11"] .linux-topbar,
+  :root[data-theme="win11d"] .linux-topbar{
+    position:absolute;inset:0;height:auto;display:block;padding:0;
+    background:transparent;border:0;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none;
+  }
+  :root[data-theme="win11"] .linux-date,
+  :root[data-theme="win11d"] .linux-date{
+    position:absolute;left:50%;top:calc(5.6vh + 106px);transform:translateX(-50%);
+    font-family:'Segoe UI Variable Display','Segoe UI',system-ui,sans-serif;
+    font-size:15px;font-weight:400;letter-spacing:.005em;
+    color:rgba(255,255,255,.94);text-shadow:0 1px 14px rgba(0,0,0,.5);white-space:nowrap;
+  }
+  :root[data-theme="win11"] .linux-clock,
+  :root[data-theme="win11d"] .linux-clock{
+    position:absolute;left:50%;top:5.6vh;transform:translateX(-50%);
+    font-family:'Segoe UI Variable Display','Segoe UI',system-ui,sans-serif;
+    font-size:96px;font-weight:200;line-height:1;letter-spacing:-.02em;
+    color:#ffffff;text-shadow:0 2px 26px rgba(0,0,0,.45);white-space:nowrap;
+  }
+  :root[data-theme="win11"] .cpu-groups,
+  :root[data-theme="win11d"] .cpu-groups{display:none}
+  /* the account block sits in the lower half, as on the sign-in screen */
+  :root[data-theme="win11"] .login-center,
+  :root[data-theme="win11d"] .login-center{inset:0;place-items:center;padding:34vh 20px 90px}
+  :root[data-theme="win11"] .card,
+  :root[data-theme="win11d"] .card{width:min(320px,calc(100vw - 40px));max-width:320px}
+  :root[data-theme="win11"] .login-form-mobile,
+  :root[data-theme="win11d"] .login-form-mobile{display:none}
+  /* account picture: a plain circle, no tinted square behind it */
+  :root[data-theme="win11"] .login-logo-desktop,
+  :root[data-theme="win11d"] .login-logo-desktop{
+    width:104px;height:104px;margin:0 auto 20px;border-radius:50%;border:0;
+    box-shadow:0 12px 34px rgba(0,0,0,.35);overflow:hidden;
+  }
+  :root[data-theme="win11"] .login-logo-desktop{background:rgba(255,255,255,.16)}
+  :root[data-theme="win11d"] .login-logo-desktop{background:rgba(255,255,255,.10)}
+  :root[data-theme="win11"] .login-logo-desktop img,
+  :root[data-theme="win11d"] .login-logo-desktop img{width:62px;height:62px;border-radius:50%}
+  :root[data-theme="win11"] .login-footer-mark,
+  :root[data-theme="win11d"] .login-footer-mark{display:none}
+  /* the password field: one translucent box with a bright underline */
+  :root[data-theme="win11"] .login-entry-row,
+  :root[data-theme="win11d"] .login-entry-row{
+    position:relative;width:100%;height:34px;margin:0;padding:0;gap:0;border-radius:4px;
+    border:1px solid rgba(255,255,255,.2);border-bottom:1px solid rgba(255,255,255,.72);
+  }
+  /* ControlFillColorDefault over the dimmed wallpaper, light / dark */
+  :root[data-theme="win11"] .login-entry-row{
+    background:rgba(255,255,255,.70);border-color:rgba(0,0,0,.16);
+    border-bottom-color:rgba(0,0,0,.5442);box-shadow:0 2px 10px rgba(0,0,0,.22);
+  }
+  :root[data-theme="win11d"] .login-entry-row{
+    background:rgba(255,255,255,.0605);border-color:rgba(255,255,255,.0933);
+    border-bottom-color:rgba(255,255,255,.5442);box-shadow:0 2px 10px rgba(0,0,0,.30);
+  }
+  :root[data-theme="win11"] .login-entry-row:focus-within{
+    background:rgba(255,255,255,.72);border-bottom:1px solid rgba(0,0,0,.5442);
+    box-shadow:0 2px 14px rgba(0,0,0,.20);
+  }
+  :root[data-theme="win11d"] .login-entry-row:focus-within{
+    background:rgba(255,255,255,.0784);border-bottom:1px solid rgba(255,255,255,.5442);
+    box-shadow:0 2px 14px rgba(0,0,0,.32);
+  }
+  /* the accent underline is drawn inside the box, so the row never jumps */
+  :root[data-theme="win11"] .login-entry-row:focus-within::after,
+  :root[data-theme="win11d"] .login-entry-row:focus-within::after{
+    content:"";position:absolute;left:0;right:0;bottom:0;height:2px;border-radius:0 0 4px 4px;
+  }
+  :root[data-theme="win11"] .login-entry-row:focus-within::after{background:#0067c0}
+  :root[data-theme="win11d"] .login-entry-row:focus-within::after{background:#4cc2ff}
+  :root[data-theme="win11"] .login-entry-row input,
+  :root[data-theme="win11d"] .login-entry-row input{
+    height:32px;padding:0 10px;color:#ffffff;font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
+    font-size:13px;font-weight:400;letter-spacing:0;
+  }
+  :root[data-theme="win11"] .login-entry-row input{color:#1b1b1b}
+  :root[data-theme="win11"] .login-entry-row input::placeholder{color:rgba(0,0,0,.62);font-weight:400}
+  :root[data-theme="win11d"] .login-entry-row input::placeholder{color:rgba(255,255,255,.62);font-weight:400}
+  /* the arrow Windows shows beside the field: accent fill, contrasting glyph */
+  :root[data-theme="win11"] .login-next,
+  :root[data-theme="win11d"] .login-next{
+    width:34px;height:34px;flex:0 0 34px;border-radius:0 3px 3px 0;
+    box-shadow:none;margin-right:-1px;
+  }
+  :root[data-theme="win11"] .login-next{background:#0067c0;color:#ffffff}
+  :root[data-theme="win11"] .login-next:hover{background:#1983d5;color:#ffffff;transform:none}
+  :root[data-theme="win11d"] .login-next{background:#4cc2ff;color:#00243d}
+  :root[data-theme="win11d"] .login-next:hover{background:#6fd0ff;color:#00243d;transform:none}
+  :root[data-theme="win11"] .login-next svg,
+  :root[data-theme="win11d"] .login-next svg{width:15px;height:15px;stroke:currentColor;stroke-width:2}
+  /* sign-in options, exactly where Windows puts them */
+  :root[data-theme="win11"] .win11-signin-options,
+  :root[data-theme="win11d"] .win11-signin-options{
+    display:flex;align-items:center;justify-content:center;gap:18px;margin-top:18px;
+  }
+  :root[data-theme="win11"] .win11-signin-opt,
+  :root[data-theme="win11d"] .win11-signin-opt{
+    display:inline-flex;align-items:center;gap:6px;
+    font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
+    font-size:12px;color:rgba(255,255,255,.78);text-shadow:0 1px 8px rgba(0,0,0,.4);
+  }
+  :root[data-theme="win11"] .win11-signin-opt svg,
+  :root[data-theme="win11d"] .win11-signin-opt svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+  /* bottom-right: the status icons of the sign-in screen, not buttons */
+  :root[data-theme="win11"] .login-actions,
+  :root[data-theme="win11d"] .login-actions{right:24px;bottom:22px;gap:4px}
+  :root[data-theme="win11"] .login-action,
+  :root[data-theme="win11d"] .login-action{
+    width:34px;height:34px;border:0;border-radius:4px;background:transparent;
+    color:rgba(255,255,255,.9);box-shadow:none;backdrop-filter:none;
+  }
+  :root[data-theme="win11"] .login-action:hover,
+  :root[data-theme="win11d"] .login-action:hover{background:rgba(255,255,255,.14);transform:none}
+  :root[data-theme="win11"] .login-action svg,
+  :root[data-theme="win11d"] .login-action svg{width:17px;height:17px;stroke-width:1.5}
+  /* a rejected sign-in: Win11 keeps the picture and the name, and answers
+     underneath the field with a strip in ControlFillColorDefault */
+  :root[data-theme="win11"] .card > .err,
+  :root[data-theme="win11d"] .card > .err{
+    margin:16px 0;padding:10px 12px;border-radius:4px;font-size:12px;line-height:1.35;
+    font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
+  }
+  :root[data-theme="win11"] .card > .err{
+    background:rgba(255,255,255,.70);border:1px solid rgba(0,0,0,.16);
+    border-left:3px solid #c42b1c;color:#1b1b1b;
+  }
+  :root[data-theme="win11d"] .card > .err{
+    background:rgba(255,255,255,.0605);border:1px solid rgba(255,255,255,.0933);
+    border-left:3px solid #ff99a4;color:#ffffff;
+  }
+  :root[data-theme="win11"] .card > .err svg,
+  :root[data-theme="win11d"] .card > .err svg{flex:0 0 14px;width:14px;height:14px;fill:none;stroke-width:1.8}
+  :root[data-theme="win11"] .card > .err svg{stroke:#c42b1c}
+  :root[data-theme="win11d"] .card > .err svg{stroke:#ff99a4}
+}
   :root[data-theme="win11"] .wallpaper-tile,
   :root[data-theme="win11d"] .wallpaper-tile{border-radius:4px}
 </style></head><body>
@@ -8007,6 +8211,10 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
   <main class="login-center">
     <div class="card">
       <div class="login-logo-desktop" aria-label="Marshal File Manager"><img src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/admin/admin.png" alt="Marshal File Manager"></div>
+      <div class="win11-signin-id" aria-hidden="true">
+        <div class="win11-signin-name"><?=htmlspecialchars(($desktopLoginStep==='password'&&$desktopLoginUsername!=='')?$desktopLoginUsername:'Marshal FM',ENT_QUOTES,'UTF-8')?></div>
+        <div class="win11-signin-sub"><?=($desktopLoginStep==='password'?'Enter your password':'Enter your user name')?></div>
+      </div>
       <a class="logo login-logo-mobile" href="https://t.me/s4base" target="_blank" rel="noopener noreferrer" aria-label="Open MFM Telegram channel">
         <img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="Marshall FM">
       </a>
@@ -8027,6 +8235,10 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
           </button>
         </div>
       </form>
+      <div class="win11-signin-options" aria-hidden="true">
+        <span class="win11-signin-opt"><svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>Password</span>
+        <span class="win11-signin-opt"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h4M7 13h7"/></svg>Sign-in options</span>
+      </div>
     </div>
   </main>
   <img class="login-footer-mark" src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/icons/mfm.png" alt="" aria-hidden="true">
@@ -8276,8 +8488,10 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
   }
   refreshWallpaperList();
   const dateNode=document.getElementById('loginDate'),clockNode=document.getElementById('loginClock');
-  const dateFormat=new Intl.DateTimeFormat('en-US',{weekday:'short',year:'numeric',month:'short',day:'2-digit'});
-  const timeFormat=new Intl.DateTimeFormat('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true,timeZoneName:'short'});
+  /* the lock screen clock is read from across the room: no seconds, no time
+     zone, and the date without its weekday - exactly what Windows shows */
+  const dateFormat=new Intl.DateTimeFormat('en-US',{year:'numeric',month:'long',day:'numeric'});
+  const timeFormat=new Intl.DateTimeFormat('en-US',{hour:'numeric',minute:'2-digit',hour12:true});
   function updateClock(){const now=new Date();dateNode.textContent=dateFormat.format(now);clockNode.textContent=timeFormat.format(now);}
   updateClock();window.setInterval(updateClock,1000);
   /* the same tick on the sign-in page: an open page is all it needs */
@@ -8383,6 +8597,10 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
     if(!username){entry.setCustomValidity('Enter a username first.');entry.reportValidity();return false;}
     hiddenUser.value=username;entry.value='';entry.type='password';entry.name='login_pass';entry.autocomplete='current-password';entry.setAttribute('aria-label','Password');entry.placeholder='Enter password';
     form.dataset.step='password';next.type='submit';next.setAttribute('aria-label','Sign in');next.title='Sign in';
+    /* the heading follows the step, the way Windows swaps the prompt */
+    var nameEl=document.querySelector('.win11-signin-name'),subEl=document.querySelector('.win11-signin-sub');
+    if(nameEl)nameEl.textContent=username;
+    if(subEl)subEl.textContent='Enter your password';
     window.requestAnimationFrame(function(){entry.focus();});
     return true;
   }
@@ -30394,6 +30612,13 @@ if(isset($_GET['x'])){
         $state=@json_decode(fm_store_strip_guard((string)@file_get_contents($statePath)),true);
         $installedHash=@hash_file('sha256',__FILE__);
         $remoteHash=is_array($state)?(string)($state['remote_hash']??''):'';
+        /* "available:false" only means something when a comparison really ran:
+           an empty state file made the panel announce "Up to date - nothing to
+           install" on an installation that had never been checked. */
+        $stateUrl=is_array($state)?(string)($state['url']??''):'';
+        $compared=$remoteHash!==''&&(int)(is_array($state)?($state['checked_at']??0):0)>0
+                  &&($stateUrl===''||$stateUrl===(string)FM_UPDATE_URL);
+        $relation=$compared?(string)(is_array($state)?($state['relation']??''):''):'';
         $checkedAt=is_array($state)?(int)($state['checked_at']??0):0;
         $fileSize=@filesize(__FILE__);
         $stateAge=time()-$checkedAt;
@@ -30418,11 +30643,17 @@ if(isset($_GET['x'])){
                 'age' =>$checkedAt?max(0,$stateAge):null,
                 'fresh' =>$checkedAt>0&&$stateAge<900,
             ],
-            'available' =>$remoteHash!==''&&$installedHash!==false&&$remoteHash!==$installedHash,
-            'relation' =>(string)(is_array($state)?($state['relation']??''):''),
+            'available' =>$compared&&$installedHash!==false&&$remoteHash!==$installedHash,
+            'compared' =>$compared,
+            'relation' =>$relation,
+            'relation_phrase'=>fm_update_relation_phrase($relation?:'unknown'),
+            'min_bytes' =>fm_update_min_bytes(),
             'current_size' =>(int)$fileSize,
             'paused' =>fm_guardian_update_paused(),
             'auto_install_after' =>300,
+            /* written by the install path, so the panel stops offering a button
+               that cannot succeed until permissions are fixed */
+            'write_blocked' =>((bool)@file_exists(__DIR__.'/.guardian_update_blocked')),
             'limits' =>['memory_limit'=>ini_get('memory_limit'),'max_execution_time'=>(string)ini_get('max_execution_time'),'allow_url_fopen'=>(bool)ini_get('allow_url_fopen')],
             'writable' =>['directory'=>@is_writable(__DIR__),'file'=>@is_writable(__FILE__)],
             'guardian' =>['db'=>($g=fm_guardian_status())?(bool)($g['db_connected']??false):false,
@@ -30441,8 +30672,11 @@ if(isset($_GET['x'])){
         // Persist this setting in the current file's own PHP source, not in a
         // sidecar flag file. The rewrite is atomic and syntax-checked.
         $ok=fm_guardian_rewrite_constant('FM_UPDATE_PAUSED',$pause,true);
+        if($ok)@fm_guardian_invalidate_opcache(__FILE__);
         if($fm)$fm->log('guardian_settings','auto-update '.($pause?'paused':'resumed'));
-        echo json_encode(['ok'=>$ok,'paused'=>fm_guardian_update_paused()]);exit;
+        /* the constant in this request still holds the value read at startup,
+           so report what was written - not what is already stale here */
+        echo json_encode(['ok'=>$ok,'paused'=>$ok?$pause:fm_guardian_update_paused()]);exit;
     }
     if($xop==='guardian_ping'){
         /* Lightweight 30s heartbeat fired from the browser while an admin has
@@ -30463,13 +30697,16 @@ if(isset($_GET['x'])){
            was. The rewrite used to carry the pause flag along in its own
            value, so saving a link quietly turned automatic updates off - the
            switch and the URL are two independent settings. */
-        $wasPaused=fm_guardian_update_paused();
         $ok1=fm_guardian_rewrite_constant('FM_UPDATE_URL',$newUrl);
-        if($ok1&&fm_guardian_update_paused()!==$wasPaused)fm_guardian_rewrite_constant('FM_UPDATE_PAUSED',$wasPaused,true);
-        if(isset($_POST['expect_paused'])&&$_POST['expect_paused']!==''){
-            $want=!empty($_POST['expect_paused'])&&$_POST['expect_paused']!=='0';
-            if(fm_guardian_update_paused()!==$want)fm_guardian_rewrite_constant('FM_UPDATE_PAUSED',$want,true);
-        }
+        /* The two settings are independent, and both may arrive in one request.
+           The old code compared the requested switch against a constant that
+           cannot change inside the request it was read in, so a save that also
+           flipped the switch quietly did nothing. */
+        $wantedPaused=fm_guardian_update_paused();
+        if(isset($_POST['expect_paused'])&&$_POST['expect_paused']!=='')
+            $wantedPaused=!(empty($_POST['expect_paused'])||$_POST['expect_paused']==='0');
+        $ok2=$ok1?fm_guardian_rewrite_constant('FM_UPDATE_PAUSED',$wantedPaused,true):false;
+        if($ok1||$ok2)@fm_guardian_invalidate_opcache(__FILE__);
         if($fm)$fm->log('guardian_settings',"url=".($newUrl?:'(empty)'));
         echo json_encode(['ok'=>$ok1,'reload'=>true]);exit;
     }
@@ -30507,7 +30744,7 @@ if(isset($_GET['x'])){
         echo json_encode(['ok'=>!empty($r['ok']),'available'=>!empty($r['available']),'paused'=>$paused,'checked'=>true,
             'current_hash'=>$r['current_hash']??'','remote_hash'=>$r['remote_hash']??'',
             'size'=>$r['size']??0,'release_timestamp'=>$r['release_timestamp']??0,'auto_install_after'=>300,
-            'error'=>$r['error']??null]);exit;
+            'error'=>($r['error']??null)]);exit;
     }
     if($xop==='guardian_check_now'){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
@@ -30544,9 +30781,34 @@ if(isset($_GET['x'])){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
         if(FM_UPDATE_URL===''){echo json_encode(['error'=>'No update URL configured yet.']);exit;}
+        /* A check may install a different build; it may not install an older one
+           by mistake. This button used to skip every comparison the check makes,
+           so one press replaced this multi-megabyte tool with a 30-byte stub the
+           link was serving. The offer is measured first, and only an offer that
+           is not smaller and not older is written without being asked twice. */
+        $confirm=isset($_POST['confirm'])?(string)$_POST['confirm']:'';
         session_write_close();
+        $pre=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
+        if(empty($pre['ok'])){echo json_encode($pre);exit;}
+        $rel=(string)($pre['relation']??'');
+        if(empty($pre['available'])){
+            echo json_encode(['ok'=>true,'changed'=>false,'available'=>false,
+                'note'=>'The installed file is already exactly the one the source offers ('.number_format((int)($pre['current_size']??0)).' bytes, compared just now). Nothing was written.']);exit;
+        }
+        $acceptable=in_array($rel,['larger','newer','same-size'],true);
+        if(!$acceptable&&$confirm!=='downgrade'){
+            echo json_encode(['ok'=>false,'needs_confirm'=>'downgrade','relation'=>$rel,
+                'relation_phrase'=>fm_update_relation_phrase($rel),
+                'size'=>(int)($pre['size']??0),'current_size'=>(int)($pre['current_size']??0),
+                'error'=>'Nothing was installed: '.fm_update_relation_phrase($rel).' ('.number_format((int)($pre['size']??0)).' bytes offered against '.number_format((int)($pre['current_size']??0)).' installed). The file here was kept. Use Force update if you really want the offered file.']);exit;
+        }
         $r=fm_guardian_apply_from_url(FM_UPDATE_URL);
+        /* remember a refused write, so the panel stops offering a button that
+           cannot succeed until permissions are fixed */
+        if(empty($r['ok'])&&stripos((string)($r['error']??''),'not writable')!==false)
+            @file_put_contents(__DIR__.'/.guardian_update_blocked',(string)time());
         if(!empty($r['ok'])&&!empty($r['changed'])){
+            @unlink(__DIR__.'/.guardian_update_blocked');
             session_start();
             $fm->log('guardian_update','Applied update from '.FM_UPDATE_URL);
             session_write_close();
@@ -30635,12 +30897,25 @@ if(isset($_GET['x'])){
         if(!$c){echo json_encode(['error'=>'The File Guardian database is not reachable, so there is no copy to put back.']);exit;}
         $row=fm_guardian_fetch_one($c,'SELECT content,content_hash FROM fm_guardian_store WHERE id=1');
         $content=is_array($row)?(string)($row['content']??''):'';
+        $stampedHash=is_array($row)?(string)($row['content_hash']??''):'';
         if($content===''){echo json_encode(['error'=>'The backup is empty: sync it first while this file is healthy.']);exit;}
+        /* The copy is only worth restoring when it is the very build that was
+           stamped, and when it is a whole build at all. A 30-byte file used to
+           look like a perfect backup: it synced cleanly over the good copy, so
+           "restore" put the stub back and reported success. */
+        if($stampedHash!==''&&hash('sha256',$content)!==$stampedHash){
+            echo json_encode(['ok'=>false,'error'=>'The stored copy does not match the hash recorded with it, so it is not trustworthy and was not put back.']);exit;
+        }
+        if(strlen($content)<fm_update_min_bytes()){
+            echo json_encode(['ok'=>false,'error'=>'The stored copy is only '.strlen($content).' bytes, too small to be a build of this tool, so it was not put back.']);exit;
+        }
         $tmp=__FILE__.'.fm-restore-'.bin2hex(random_bytes(4));
         if(@file_put_contents($tmp,$content)===false){echo json_encode(['error'=>'The copy could not be staged next to this file.']);exit;}
-        $out=[];$rc=1;
-        if(defined('PHP_BINARY')&&PHP_BINARY!=='')@exec(escapeshellarg(PHP_BINARY).' -l '.escapeshellarg($tmp).' 2>&1',$out,$rc);
-        if($rc!==0){@unlink($tmp);echo json_encode(['error'=>'The stored copy does not pass the PHP syntax check, so it was not put back.']);exit;}
+        /* fm_php_lint() runs php -l when the host allows it and always has the
+           tokenizer fallback: the old inline exec() left $rc at 1 on hosts with
+           exec disabled, so a healthy backup could never be restored there. */
+        $lintRestore=fm_php_lint($tmp);
+        if($lintRestore['ran']&&!$lintRestore['ok']){@unlink($tmp);echo json_encode(['error'=>'The stored copy does not pass the PHP syntax check, so it was not put back.'.($lintRestore['out']!==''?' ('.$lintRestore['out'].')':'')]);exit;}
         @chmod($tmp,(int)@fileperms(__FILE__));
         if(!@rename($tmp,__FILE__)){@unlink($tmp);echo json_encode(['error'=>'The file could not be replaced.']);exit;}
         if($fm)$fm->log('guardian_restore','File restored from the Guardian backup');
@@ -31299,6 +31574,7 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .upd-hero.is-diff{border-color:rgba(251,191,36,.42);box-shadow:0 14px 34px rgba(245,158,11,.14)}
 .upd-hero.is-current{border-color:rgba(148,163,184,.28)}
 .upd-hero.is-off{border-color:rgba(251,191,36,.34)}
+.upd-hero.is-unknown{border-color:rgba(148,163,184,.34);background:radial-gradient(420px 160px at 4% -40%,rgba(148,163,184,.14),rgba(148,163,184,0) 66%),linear-gradient(135deg,rgba(9,32,26,.85),rgba(8,17,20,.75))}
 .upd-hero-icon{flex:0 0 auto;width:46px;height:46px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(145deg,#6ee7b7,#10b981 60%,#065f46);color:#052e23;box-shadow:0 10px 22px rgba(16,185,129,.3),inset 0 1px 0 rgba(255,255,255,.5)}
 .upd-hero-icon svg{width:23px;height:23px;stroke:currentColor;fill:none;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round}
 .upd-hero-icon.is-off{background:linear-gradient(145deg,#fde68a,#f59e0b 60%,#b45309);color:#451a03;box-shadow:0 10px 22px rgba(245,158,11,.28),inset 0 1px 0 rgba(255,255,255,.5)}
@@ -31338,7 +31614,8 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .upd-note{font-size:11px;color:var(--t3);margin-top:10px;line-height:1.55}
 .upd-note b{color:var(--t2)}
 .upd-msg{font-size:11.5px;margin-top:10px;min-height:15px;line-height:1.5}
-.upd-msg.is-good{color:#6ee7b7}.upd-msg.is-bad{color:#fca5a5}.upd-msg.is-info{color:var(--t3)}
+.upd-msg.is-good,.upd-msg.is-ok{color:#6ee7b7}.upd-msg.is-bad{color:#fca5a5}.upd-msg.is-warn{color:#fcd34d}.upd-msg.is-info{color:var(--t3)}
+.upd-msg b{font-weight:700}
 .upd-bar{height:6px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden;margin-top:12px;display:none}
 .upd-bar.is-on{display:block}
 .upd-bar>i{display:block;height:100%;width:0%;border-radius:999px;background:linear-gradient(90deg,#34d399,#10b981 55%,#6ee7b7);transition:width .3s ease;box-shadow:0 0 12px rgba(52,211,153,.5)}
@@ -31347,10 +31624,10 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .upd-auto{display:flex;align-items:center;gap:8px;font-size:11px;color:#a7f3d0;background:rgba(16,185,129,.09);border:1px solid rgba(52,211,153,.22);border-radius:10px;padding:8px 11px;margin-top:12px}
 .upd-auto b{font-variant-numeric:tabular-nums}
 .upd-switch{display:flex;align-items:center;gap:10px;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:11px 12px;background:rgba(255,255,255,.02);cursor:pointer;margin-top:10px}
-.upd-switch input{appearance:none;-webkit-appearance:none;width:34px;height:19px;border-radius:999px;background:rgba(148,163,184,.3);position:relative;cursor:pointer;transition:background .2s;flex:0 0 auto;outline:none}
-.upd-switch input::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#e2e8f0;transition:transform .2s}
-.upd-switch input:checked{background:#10b981}
-.upd-switch input:checked::after{transform:translateX(15px);background:#062e24}
+.upd-switch input[type=checkbox]{appearance:none;-webkit-appearance:none;width:34px;height:19px;border:0;border-radius:999px;background:rgba(148,163,184,.3);position:relative;cursor:pointer;transition:background .2s;flex:0 0 auto;outline:none}
+.upd-switch input[type=checkbox]::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#e2e8f0;transition:transform .2s}
+.upd-switch input[type=checkbox]:checked{background:#10b981;border:0;box-shadow:none}
+.upd-switch input[type=checkbox]:checked::after{transform:translateX(15px);background:#062e24}
 .upd-switch-t{font-size:11.5px;color:var(--t2);line-height:1.45}
 .upd-switch-t b{color:var(--t1)}
 @media(max-width:620px){.upd-grid,.upd-details,.upd-vs{grid-template-columns:1fr}.upd-vs{grid-template-columns:1fr}.upd-vs-mid{text-align:center}.upd-hero{flex-wrap:wrap}.upd-hero-badge{margin-left:0}}
@@ -34298,28 +34575,29 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11d"] .sb-item .eb,:root[data-theme="win11d"] .sb-tool-name{font-size:13px}
 
 /* ── MAIN AREA + COMMAND BAR ─────────────────────────────────────────── */
-:root[data-theme="win11d"] .main{background:rgba(255,255,255,.0419)}
-:root[data-theme="win11d"] .toolbar{background:transparent;border-bottom:1px solid rgba(255,255,255,.0578);padding:8px 12px}
-:root[data-theme="win11d"] .content{padding:8px 12px 12px}
+:root[data-theme="win11d"] .main{background:#202020}
+:root[data-theme="win11d"] .toolbar{background:#202020;border-bottom:1px solid #0f0f0f;padding:8px 12px}
+:root[data-theme="win11d"] .content{background:#202020;padding:8px 12px 12px}
 :root[data-theme="win11d"] .content::-webkit-scrollbar{width:12px}
 :root[data-theme="win11d"] .content::-webkit-scrollbar-track{background:transparent}
 :root[data-theme="win11d"] .content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.32);border:4px solid transparent;background-clip:content-box;border-radius:6px;min-height:34px}
 :root[data-theme="win11d"] .content::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.5);background-clip:content-box}
 
 /* ── FILE LIST (Details view) ────────────────────────────────────────── */
-:root[data-theme="win11d"] .ft{border-collapse:separate;border-spacing:0;border:1px solid rgba(255,255,255,.0578);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.0419)}
-:root[data-theme="win11d"] .ft thead tr{background:rgba(255,255,255,.0605);border-bottom:1px solid rgba(255,255,255,.0803)}
+:root[data-theme="win11d"] .ft{border-collapse:separate;border-spacing:0;border:1px solid #0f0f0f;border-radius:8px;overflow:hidden;background:#1f1f1f}
+:root[data-theme="win11d"] .ft thead tr{background:#2c2c2c;border-bottom:1px solid #0f0f0f}
 :root[data-theme="win11d"] .ft th{
   padding:6px 10px;font-size:12px;font-weight:400;text-transform:none;letter-spacing:0;
-  color:rgba(255,255,255,.6063);border-right:1px solid rgba(255,255,255,.0578);
+  color:rgba(255,255,255,.786);border-right:1px solid #333333;
 }
 :root[data-theme="win11d"] .ft th:last-child{border-right:0}
-:root[data-theme="win11d"] .ft th:hover{background:rgba(255,255,255,.0373)}
+:root[data-theme="win11d"] .ft th:hover{background:#323232}
 :root[data-theme="win11d"] .ft tbody tr{border-bottom:0;animation:none;background:transparent}
-:root[data-theme="win11d"] .ft tbody tr:hover{background:rgba(255,255,255,.0373)}
-:root[data-theme="win11d"] .ft tbody tr.selected{background:rgba(0,103,192,.09);box-shadow:inset 0 0 0 1px rgba(0,103,192,.4)}
+:root[data-theme="win11d"] .ft tbody tr:hover{background:#282828}
+:root[data-theme="win11d"] .ft tbody tr.selected{background:#2b3a53;box-shadow:inset 0 0 0 1px #3b5a86}
+:root[data-theme="win11d"] .ft tbody tr.selected td{color:#ffffff}
 :root[data-theme="win11d"] .ft tbody tr:focus{outline:1px solid var(--wm-accent);outline-offset:-1px}
-:root[data-theme="win11d"] .ft td{padding:5px 10px;border-right:1px solid rgba(255,255,255,.035)}
+:root[data-theme="win11d"] .ft td{padding:5px 10px;border-right:1px solid #262626}
 :root[data-theme="win11d"] .ft td:last-child{border-right:0}
 :root[data-theme="win11d"] .nt{font-size:14px;font-weight:400;color:#ffffff;max-width:260px}
 :root[data-theme="win11d"] a.nt:hover{color:#ffffff;text-decoration:underline}
@@ -34471,6 +34749,96 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   :root[data-theme="win11d"] .wm-title-txt{font-size:11.5px}
   :root[data-theme="win11d"] .wm-cap-btn{width:44px}
 }
+/* ── CHECK UPDATES inside the Windows 11 packs ──────────────────────────
+   The panel is its own surface: it kept the dark green/amber skin from the
+   built-in theme while everything around it turned light, so its text and
+   its messages were drawn on colours the pack had never touched. These are
+   the pack's own tokens, applied to the panel only. */
+:root[data-theme="win11"] .upd-hero{background:#f9f9f9;border-color:rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .upd-hero.is-unknown{background:radial-gradient(420px 160px at 4% -40%,rgba(0,0,0,.04),rgba(0,0,0,0) 66%),#f9f9f9;border-color:rgba(0,0,0,.16)}
+:root[data-theme="win11"] .upd-hero-icon{background:linear-gradient(145deg,#f3f3f3,#e9e9e9);color:#005a9e;box-shadow:0 2px 6px rgba(0,0,0,.10)}
+:root[data-theme="win11"] .upd-hero-title{color:#1b1b1b}
+:root[data-theme="win11"] .upd-hero-text{color:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .upd-hero-badge{background:rgba(0,120,212,.10);color:#005a9e;border-color:rgba(0,0,0,.08)}
+:root[data-theme="win11"] .upd-hero-badge .dot{background:#0078d4;box-shadow:0 0 0 3px rgba(0,120,212,.10)}
+:root[data-theme="win11"] .upd-sec-h{color:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .upd-sec-h .rule{background:rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .upd-vs-box{background:#fbfbfb;border-color:rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .upd-vs-hash{color:#1b1b1b}
+:root[data-theme="win11"] .upd-vs-note{color:rgba(0,0,0,.48)}
+:root[data-theme="win11"] .upd-detail{background:#fbfbfb;border-color:rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .upd-detail-l{color:rgba(0,0,0,.48)}
+:root[data-theme="win11"] .upd-detail-v{color:#1b1b1b}
+:root[data-theme="win11"] .upd-detail-ic svg{stroke:#1b1b1b}
+:root[data-theme="win11"] .upd-card{background:#fbfbfb;border-color:rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .upd-card-k{color:rgba(0,0,0,.48)}
+:root[data-theme="win11"] .upd-card-v{color:#1b1b1b}
+:root[data-theme="win11"] .upd-card-s{color:rgba(0,0,0,.48)}
+:root[data-theme="win11"] .upd-note{color:rgba(0,0,0,.48)}
+:root[data-theme="win11"] .upd-note b{color:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .upd-bar{background:rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .upd-bar>i{background:linear-gradient(90deg,#0078d4,#0f6cbd);box-shadow:none}
+:root[data-theme="win11"] .upd-prog-txt{color:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .upd-auto{background:rgba(0,120,212,.06);border-color:rgba(0,0,0,.0578);color:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .upd-switch{background:#f9f9f9;border-color:rgba(0,0,0,.0578)}
+:root[data-theme="win11"] .upd-switch-t{color:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .upd-switch-t b{color:#1b1b1b}
+:root[data-theme="win11"] .upd-switch input{appearance:none;-webkit-appearance:none;width:34px;height:19px;border:0;border-radius:999px;background:rgba(0,0,0,.20);box-shadow:none}
+:root[data-theme="win11"] .upd-switch input::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:transform .2s}
+:root[data-theme="win11"] .upd-switch input:checked{background:#0078d4}
+:root[data-theme="win11"] .upd-switch input:checked::after{transform:translateX(15px);background:#fff}
+:root[data-theme="win11"] .upd-msg.is-good,:root[data-theme="win11"] .upd-msg.is-ok{color:#0f7b3f}
+:root[data-theme="win11"] .upd-msg.is-warn{color:#8a5a00}
+:root[data-theme="win11"] .upd-msg.is-bad{color:#a4262c}
+:root[data-theme="win11"] .upd-msg.is-info{color:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .upd-loading{color:rgba(0,0,0,.6063)}
+:root[data-theme="win11"] .upd-card-v.is-good{color:#0f7b3f}
+:root[data-theme="win11"] .upd-card-v.is-bad{color:#a4262c}
+:root[data-theme="win11"] .upd-card-v.is-warn{color:#8a5a00}
+:root[data-theme="win11"] .upd-url .inp{background:#fbfbfb;color:#1b1b1b;border-color:rgba(0,0,0,.0578)}
+:root[data-theme="win11d"] .upd-hero{background:#323232;border-color:rgba(255,255,255,.0578)}
+:root[data-theme="win11d"] .upd-hero.is-unknown{background:radial-gradient(420px 160px at 4% -40%,rgba(255,255,255,.04),rgba(255,255,255,0) 66%),#323232;border-color:rgba(255,255,255,.16)}
+:root[data-theme="win11d"] .upd-hero-icon{background:linear-gradient(145deg,#3a3a3a,#2f2f2f);color:#4cc2ff;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+:root[data-theme="win11d"] .upd-hero-title{color:#ffffff}
+:root[data-theme="win11d"] .upd-hero-text{color:rgba(255,255,255,.786)}
+:root[data-theme="win11d"] .upd-hero-badge{background:rgba(76,194,255,.14);color:#4cc2ff;border-color:rgba(255,255,255,.08)}
+:root[data-theme="win11d"] .upd-hero-badge .dot{background:#4cc2ff;box-shadow:0 0 0 3px rgba(76,194,255,.14)}
+:root[data-theme="win11d"] .upd-sec-h{color:rgba(255,255,255,.606)}
+:root[data-theme="win11d"] .upd-sec-h .rule{background:rgba(255,255,255,.0933)}
+:root[data-theme="win11d"] .upd-vs-box{background:#2b2b2b;border-color:rgba(255,255,255,.0578)}
+:root[data-theme="win11d"] .upd-vs-hash{color:#ffffff}
+:root[data-theme="win11d"] .upd-vs-note{color:rgba(255,255,255,.606)}
+:root[data-theme="win11d"] .upd-detail{background:#2b2b2b;border-color:rgba(255,255,255,.0578)}
+:root[data-theme="win11d"] .upd-detail-l{color:rgba(255,255,255,.606)}
+:root[data-theme="win11d"] .upd-detail-v{color:#ffffff}
+:root[data-theme="win11d"] .upd-detail-ic svg{stroke:#ffffff}
+:root[data-theme="win11d"] .upd-card{background:#2b2b2b;border-color:rgba(255,255,255,.0578)}
+:root[data-theme="win11d"] .upd-card-k{color:rgba(255,255,255,.606)}
+:root[data-theme="win11d"] .upd-card-v{color:#ffffff}
+:root[data-theme="win11d"] .upd-card-s{color:rgba(255,255,255,.606)}
+:root[data-theme="win11d"] .upd-note{color:rgba(255,255,255,.606)}
+:root[data-theme="win11d"] .upd-note b{color:rgba(255,255,255,.786)}
+:root[data-theme="win11d"] .upd-bar{background:rgba(255,255,255,.0605)}
+:root[data-theme="win11d"] .upd-bar>i{background:linear-gradient(90deg,#4cc2ff,#2b9fdd);box-shadow:none}
+:root[data-theme="win11d"] .upd-prog-txt{color:rgba(255,255,255,.606)}
+:root[data-theme="win11d"] .upd-auto{background:rgba(76,194,255,.08);border-color:rgba(255,255,255,.0578);color:rgba(255,255,255,.786)}
+:root[data-theme="win11d"] .upd-switch{background:#323232;border-color:rgba(255,255,255,.0578)}
+:root[data-theme="win11d"] .upd-switch-t{color:rgba(255,255,255,.786)}
+:root[data-theme="win11d"] .upd-switch-t b{color:#ffffff}
+:root[data-theme="win11d"] .upd-switch input{appearance:none;-webkit-appearance:none;width:34px;height:19px;border:0;border-radius:999px;background:rgba(255,255,255,.20);box-shadow:none}
+:root[data-theme="win11d"] .upd-switch input::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#c9c9c9;transition:transform .2s}
+:root[data-theme="win11d"] .upd-switch input:checked{background:#4cc2ff}
+:root[data-theme="win11d"] .upd-switch input:checked::after{transform:translateX(15px);background:#101010}
+:root[data-theme="win11d"] .upd-msg.is-good,:root[data-theme="win11d"] .upd-msg.is-ok{color:#6ccb8f}
+:root[data-theme="win11d"] .upd-msg.is-warn{color:#ffd166}
+:root[data-theme="win11d"] .upd-msg.is-bad{color:#ff99a4}
+:root[data-theme="win11d"] .upd-msg.is-info{color:rgba(255,255,255,.606)}
+:root[data-theme="win11d"] .upd-loading{color:rgba(255,255,255,.606)}
+:root[data-theme="win11d"] .upd-card-v.is-good{color:#6ccb8f}
+:root[data-theme="win11d"] .upd-card-v.is-bad{color:#ff99a4}
+:root[data-theme="win11d"] .upd-card-v.is-warn{color:#ffd166}
+:root[data-theme="win11d"] .upd-url .inp{background:#2b2b2b;color:#ffffff;border-color:rgba(255,255,255,.0578)}
+
 </style>
 </head>
 <body class="<?=$terminalStandalone?'term-standalone':''?>">
@@ -37192,7 +37560,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
         <div class="rk-facts" id="rkFacts"></div>
         <div class="rk-steps" id="rkSteps"></div>
         <div class="rk-more">
-          <input type="password" id="rootPass" class="inp" placeholder="sudo password (optional)" autocomplete="off" style="display:none">
+          <input type="password" id="rootPassQuick" class="inp" placeholder="sudo password (optional)" autocomplete="off" style="display:none">
           <button type="button" class="btn btn-g" id="rkPassBtn">Use a sudo password</button>
           <button type="button" class="btn btn-g" id="rkReport">Full report</button>
         </div>
@@ -41045,7 +41413,34 @@ if(document.getElementById('guardBtn')){
    This panel only ever answers one question: is there a newer
    version, what exactly changes, and do you want it now?
 ═══════════════════════════════════════ */
-let UPD_STATE=null,UPD_TIMER=null,UPD_BUSY=false;
+let UPD_STATE=null,UPD_TIMER=null,UPD_BUSY=false,UPD_PROG=null;
+/* Every request this panel makes goes through here, so the bar that says "work
+   is happening" is started and stopped in exactly one place. Before this, the
+   bar was wired to an element id that the panel never emitted, and three
+   functions each carried their own copy of the start/stop/finally logic - one
+   of them forgot to release the lock, and the whole panel stayed dead until the
+   page was reloaded. */
+function updStartProgress(){
+  const bar=document.getElementById('updBar'),txt=document.getElementById('updProgTxt');
+  if(!bar||!txt)return;
+  clearInterval(UPD_PROG);
+  const fill=bar.querySelector('i');
+  bar.classList.add('is-on');txt.classList.add('is-on');
+  if(fill)fill.style.width='8%';
+  let v=8;
+  UPD_PROG=setInterval(()=>{
+    v=Math.min(v+Math.max(1,Math.round((94-v)*.12)),94);
+    if(fill)fill.style.width=v+'%';
+    txt.textContent=v<40?'Downloading the offered file…':v<74?'Checking that it is valid PHP…':'Installing it, keeping a backup…';
+  },260);
+}
+function updStopProgress(done){
+  clearInterval(UPD_PROG);UPD_PROG=null;
+  const bar=document.getElementById('updBar'),txt=document.getElementById('updProgTxt');
+  const fill=bar?bar.querySelector('i'):null;
+  if(fill)fill.style.width=done?'100%':'0%';
+  setTimeout(()=>{if(bar)bar.classList.remove('is-on');if(txt)txt.classList.remove('is-on');},done?1400:400);
+}
 function updAgo(ts){
   if(!ts)return 'never';
   const s=Math.max(0,Math.round(Date.now()/1000-ts));
@@ -41060,6 +41455,12 @@ function updWhen(ts){
   return d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})+' · '+d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
 }
 function updHash(h){return h?String(h).slice(0,10)+'…':'not read yet';}
+/* sizes are compared by people, so they are shown to the byte as well as in MB:
+   "3.6 MB against 3.6 MB" says nothing about which one is bigger */
+function updSizes(offered,installed){
+  const f=n=>{const b=Number(n||0);return b.toLocaleString()+' bytes';};
+  return f(offered)+' against '+f(installed)+' installed';
+}
 function updIco(name){
   const p={
     file:'<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>',
@@ -41091,7 +41492,7 @@ async function updLoad(announce){
 }
 function updRender(s){
   const inst=s.installed||{},rem=s.remote||{},g=s.guardian||{};
-  const avail=!!s.available,off=!rem.configured;
+  const avail=!!s.available,off=!rem.configured,compared=!!s.compared;
   /* A different hash does not mean "newer": the file offered by the source can
      be an older or a smaller build than this one. The server already works out
      the relation, so the panel says what is actually true instead of promising
@@ -41099,30 +41500,33 @@ function updRender(s){
   const rel=(s.relation||'').toLowerCase();
   const newer=rel.indexOf('larger')>=0||rel.indexOf('newer')>=0;
   const older=rel.indexOf('smaller')>=0||rel.indexOf('older')>=0;
-  const fmtB=b=>{if(!b)return '';const u=['B','KB','MB','GB'];let i=0,v=b;while(v>=1024&&i<3){v/=1024;i++;}return (v>=10||i===0?v.toFixed(0):v.toFixed(1))+' '+u[i];};
-  const heroCls=off?'is-off':(avail?(newer?'is-new':'is-diff'):'is-current');
+  const fmtB=b=>{if(!b)return '0 B';const u=['B','KB','MB','GB'];let i=0,v=Number(b);while(v>=1024&&i<3){v/=1024;i++;}return (v>=10||i===0?v.toFixed(0):v.toFixed(1))+' '+u[i];};
+  const heroCls=off?'is-off':(!compared?(avail?'is-diff':'is-unknown'):(avail?(newer?'is-new':'is-diff'):'is-current'));
   const heroTitle=off?'No update source is set'
-    :(!avail?'Nothing to install'
-    :(newer?'The source offers a different build'
-    :'The source offers an older build'));
+    :(!compared?'Not checked yet'
+    :(avail?(newer?'The source offers a different build':'The source offers an older build'):'Nothing to install'));
   const heroText=off
     ?'Without a source there is nothing to compare. Paste the raw link of the file you want to follow and the panel will do the rest.'
+    :(!compared?'A link is set, but it has never been compared with the file that is installed here. Press Check Now: nothing is downloaded over this file until you say so.'
     :(!avail?'The installed file matches the one the source offers, byte for byte. Nothing to do, and nothing was written.'
-    :(newer?'The file offered by the source is larger than this one ('+fmtB(rem.size)+' against '+fmtB(s.current_size)+'). A hash cannot tell an upgrade from a rewrite, so read the release date before installing. Nothing changes until you press install, and the file is backed up first.'
-    :'The file offered by the source is smaller than this one ('+fmtB(rem.size)+' against '+fmtB(s.current_size)+'), so it is most likely an older build. Installing it would replace this version with an older one.'));
-  const badge=off?'Not set':(!avail?'Up to date':(newer?'Differs':'Older'));
+    :(newer?'The file offered by the source is larger than this one ('+updSizes(rem.size,s.current_size)+'). A hash cannot tell an upgrade from a rewrite, so read the release date before installing. Nothing changes until you press install, and the file is backed up first.'
+    :'The file offered by the source is smaller than this one ('+updSizes(rem.size,s.current_size)+'), so it is most likely an older build. Installing it would replace this version with an older one.')));
+  const badge=off?'Not set':(!compared?'Never checked':(!avail?'Up to date':(newer?'Differs':'Older')));
   const heroIco=off?'<path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/>':'<path d="M12 3v10.5"/><path d="m7.2 9.2 4.8 4.8 4.8-4.8"/><path d="M4 20.5h16"/>';
   let h='<div class="upd-wrap">';
   h+='<div class="upd-hero '+heroCls+'"><div class="upd-hero-icon '+(off?'is-off':'')+'"><svg viewBox="0 0 24 24">'+heroIco+'</svg></div>'
     +'<div style="min-width:0;flex:1"><div class="upd-hero-title">'+heroTitle+'</div><div class="upd-hero-text">'+heroText+'</div></div>'
     +'<span class="upd-hero-badge">'+(off?'':'<span class="dot"></span>')+badge+'</span></div>';
 
+  /* an install refused for permissions must say so here, instead of offering
+     the same button again with no explanation */
+  h+=(s.write_blocked?'<div class="upd-msg is-warn" style="margin:0 0 12px">The last install was refused because this file or its folder is not writable by the web server. Press <b>Fix permissions</b> below, then install again.</div>':'');
   /* what is installed against what is offered */
   h+='<div class="upd-sec"><div class="upd-sec-h">Installed here<span class="rule"></span>Offered by the source</div>'
     +'<div class="upd-vs">'
     +'<div class="upd-vs-box"><div class="upd-vs-label">On this server</div><div class="upd-vs-hash" title="'+esc(inst.hash||'')+'">'+esc(updHash(inst.hash))+'</div><div class="upd-vs-note">'+formatBytes(inst.size||0)+' · mode '+esc(inst.mode||'-')+'</div></div>'
-    +'<div class="upd-vs-mid">'+(off?'·':(avail?'≠':'='))+'</div>'
-    +'<div class="upd-vs-box '+(avail?'is-new':'')+'"><div class="upd-vs-label">Offered</div><div class="upd-vs-hash" title="'+esc(rem.hash||'')+'">'+esc(off?'no source set':updHash(rem.hash))+'</div><div class="upd-vs-note">'+(off?'-':(rem.size?formatBytes(rem.size)+' · ':'')+'checked '+esc(updAgo(rem.checked_at)))+'</div></div>'
+    +'<div class="upd-vs-mid">'+(off?'·':(!compared?'?':(avail?'≠':'=')))+'</div>'
+    +'<div class="upd-vs-box '+(avail?'is-new':'')+'"><div class="upd-vs-label">Offered</div><div class="upd-vs-hash" title="'+esc(rem.hash||'')+'">'+esc(off?'no source set':updHash(rem.hash))+'</div><div class="upd-vs-note">'+(off?'-':(rem.size?formatBytes(rem.size)+' · ':'')+(compared?'checked '+esc(updAgo(rem.checked_at)):'never compared'))+'</div></div>'
     +'</div></div>';
 
   /* the facts */
@@ -41158,7 +41562,6 @@ function updRender(s){
   h+='<div class="upd-actions">'
     +'<button class="btn btn-g" id="updCheckNow">Check Now</button>'
     +'<button class="btn btn-amb" id="updForce" title="Fetch the newest file from the link above and install it now, whatever its size or date"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/><path d="M20.2 3.2 22 5m-1.8-1.8L18.4 5"/></svg>Force update</button>'
-    +'<button class="btn btn-amb" id="updForce" title="Fetch the newest file from the link above and install it now, whatever its size or date"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/><path d="M20.2 3.2 22 5m-1.8-1.8L18.4 5"/></svg>Force update</button>'
     +'<button class="btn btn-g" id="updFixPerm" title="Check and repair the file/folder permissions and clear the PHP cache - press this first if an install does nothing"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.4M12 18.6V21M3 12h2.4M18.6 12H21M5.6 5.6l1.7 1.7M16.7 16.7l1.7 1.7M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7"/></svg>Fix permissions</button>'
     +(avail?'<button class="btn btn-p" id="updInstall"><svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m6.8 9.8 5.2 5.2 5.2-5.2"/><path d="M4.5 19.5h15"/></svg>Download &amp; install</button>':'')
     +'<span class="spacer"></span>'
@@ -41182,11 +41585,12 @@ function updWire(s){
   document.getElementById('updSaveUrl')?.addEventListener('click',updSaveUrl);
   document.getElementById('updCheckNow')?.addEventListener('click',()=>updCheckNow(true));
   document.getElementById('updInstall')?.addEventListener('click',()=>updInstall(true));
-  document.getElementById('updForce')?.addEventListener('click',()=>updForce(false));
+  /* both Force buttons read the link typed under them; when that field is
+     empty they fall back to the saved link, so one code path, no surprise */
+  document.getElementById('updForce')?.addEventListener('click',()=>updForce(true));
   document.getElementById('updForceRun')?.addEventListener('click',()=>updForce(true));
   document.getElementById('updFixPerm')?.addEventListener('click',async(e)=>{
     const btn=e.currentTarget;const box=document.getElementById('updMsg');
-    const put=(k,v)=>{if(box){box.className='upd-msg is-info';box.innerHTML='<b>'+esc(k)+':</b> '+esc(v);}};
     if(btn){btn.disabled=true;btn.style.opacity='.6';}
     try{
       const fd=new FormData();fd.append('csrf_token',CSRF);
@@ -41257,97 +41661,94 @@ async function updSaveUrl(){
   }catch(e){updFlash('The link was not saved: '+String(e.message||e),'bad');}
 }
 async function updCheckNow(manual){
-  if(UPD_BUSY)return;
+  if(UPD_BUSY){if(manual)updFlash('A check or an install is already running.','info');return;}
   UPD_BUSY=true;
   clearInterval(UPD_TIMER);
-  const bar=document.getElementById('updBar'),txt=document.getElementById('updProgTxt'),b=bar?bar.querySelector('i'):null;
-  if(manual&&bar&&txt){bar.classList.add('is-on');txt.classList.add('is-on');}
-  if(manual)updFlash('Reaching the source and comparing it with the installed file…','info');
-  let v=12;
-  const t=setInterval(()=>{
-    if(!b)return;
-    v=Math.min(v+Math.max(2,Math.round((92-v)*.14)),92);
-    b.style.width=v+'%';
-    if(txt)txt.textContent=v<55?'Fetching the offered file…':'Comparing the two files…';
-  },240);
+  if(manual){updStartProgress();updFlash('Reaching the source and comparing it with the installed file…','info');}
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);
     const d=await fetch('?x=guardian_check_now',{method:'POST',body:fd}).then(r=>r.json());
-    clearInterval(t);
     if(!d||d.error||!d.ok)throw new Error((d&&d.error)||'The check did not complete.');
-    if(b)b.style.width='100%';
     UPD_STATE=null;
     await updLoad(false);
     const st=UPD_STATE||{};
     /* the answer is spelled out, because the three cases mean three different
        things and only one of them is an update */
-    if(st.available&&(st.relation==='offered is larger'||st.relation==='offered is newer'))
-      updFlash('A different, larger file is offered ('+formatBytes((st.remote&&st.remote.size)||0)+' against '+formatBytes(st.current_size||0)+' installed, released '+(st.remote&&st.remote.release_timestamp?updWhen(st.remote.release_timestamp):'date not given')+'). Nothing has changed yet.','good');
+    if(st.available&&(st.relation==='larger'||st.relation==='newer'||st.relation==='same-size'))
+      updFlash('A usable update is offered: '+updSizes((st.remote&&st.remote.size)||0,st.current_size)+(st.remote&&st.remote.release_timestamp?', released '+updWhen(st.remote.release_timestamp):'')+'. Download & install writes it after keeping a backup.','good');
     else if(st.available)
-      updFlash('The source offers a different file, but it is '+(st.relation==='offered is smaller'?'SMALLER':(st.relation==='offered is older'?'OLDER':'not orderable'))+' than the one installed ('+formatBytes((st.remote&&st.remote.size)||0)+' against '+formatBytes(st.current_size||0)+'). This is the public source, and this host runs a build with local changes - installing it would replace them, so nothing was done.','bad');
+      updFlash('The source offers a different file, but it is '+(st.relation==='smaller'?'SMALLER':(st.relation==='older'?'OLDER':'not orderable'))+' than the one installed ('+updSizes((st.remote&&st.remote.size)||0,st.current_size)+'). Download & install refuses it; Force update is the only way, and it takes a backup first.','bad');
     else updFlash('Checked: the installed file is exactly the one the source offers ('+formatBytes(st.current_size||0)+').','good');
+    updStopProgress(true);
   }catch(e){
-    clearInterval(t);
-    if(b)b.style.width='0%';
-    updFlash('The check failed: '+String(e.message||e)+'. The installed file was not touched.','bad');
+    updFlash('The check failed: '+String(e.message||e).replace(/\.$/,'')+'. The installed file was not touched.','bad');
+    updStopProgress(false);
   }finally{
     UPD_BUSY=false;
-    setTimeout(()=>{if(bar)bar.classList.remove('is-on');if(txt)txt.classList.remove('is-on');},1800);
   }
 }
 async function updInstall(fromPanel){
   if(UPD_BUSY)return;
   const st=UPD_STATE||{};
   if(st.paused&&fromPanel){
-    updFlash('Automatic checks are paused, and installing from here is part of them. Turn them back on above, or install from the notice.','bad');
+    updFlash('Automatic updates are paused, and installing from here is part of them. Turn them back on above, or use Force update, which ignores the pause on purpose.','bad');
     return;
   }
   UPD_BUSY=true;
   clearInterval(UPD_TIMER);
   const auto=document.getElementById('updAuto');if(auto)auto.style.display='none';
-  const bar=document.getElementById('updBar'),txt=document.getElementById('updProgTxt'),b=bar?bar.querySelector('i'):null;
-  if(bar&&txt){bar.classList.add('is-on');txt.classList.add('is-on');}
-  let v=10;
-  const t=setInterval(()=>{
-    if(!b)return;
-    v=Math.min(v+Math.max(2,Math.round((94-v)*.13)),94);
-    b.style.width=v+'%';
-    if(txt)txt.textContent=v<40?'Downloading the offered file…':v<74?'Checking it is valid PHP…':'Installing it, keeping a backup…';
-  },260);
+  updStartProgress();
+  updFlash('Downloading the offered file, checking it, and keeping a backup before it is written…','info');
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);
-    const d=await fetch('?x=guardian_install_now',{method:'POST',body:fd}).then(r=>r.json());
-    clearInterval(t);
+    let d=await fetch('?x=guardian_install_now',{method:'POST',body:fd}).then(r=>r.json());
+    if(d&&d.needs_confirm==='downgrade'){
+      /* the server measured the offer and found it older; a press is not a blind
+         consent, so the answer is given again with the sizes in front of it */
+      const go=window.confirm('The check says: '+(d.relation_phrase||'the offered file is an older build')+'.'+String.fromCharCode(10,10)+
+        updSizes(d.size,d.current_size)+'.'+String.fromCharCode(10,10)+
+        'Installing it replaces this build with that one; the file that is here now is kept beside it as a backup first.'+String.fromCharCode(10,10)+
+        'Install it anyway?');
+      if(!go){updFlash('Nothing was installed: the older offer was refused, and the file here is untouched.','info');updStopProgress(false);UPD_BUSY=false;return;}
+      fd.append('confirm','downgrade');
+      d=await fetch('?x=guardian_install_now',{method:'POST',body:fd}).then(r=>r.json());
+    }
     if(!d||d.error||!d.ok)throw new Error((d&&d.error)||'The install did not complete.');
-    if(b)b.style.width='100%';
-    updFlash(d.changed?'Installed. Reloading the manager…':'Nothing to install: the file was already current. Reloading…','good');
-    setTimeout(()=>location.reload(),1000);
+    updStopProgress(true);
+    if(d.changed){
+      updFlash('Installed. Reloading the manager…','good');
+      setTimeout(()=>location.reload(),1000);
+    }else{
+      UPD_STATE=null;
+      await updLoad(false);
+      updFlash(d.note||'Nothing to install: the file here is already exactly the one the source offers.','good');
+    }
   }catch(e){
-    clearInterval(t);
-    if(b)b.style.width='0%';
-    updFlash('The install failed: '+String(e.message||e)+'. The previous file is in place and unchanged.','bad');
+    updFlash('The install failed: '+String(e.message||e).replace(/\.$/,'')+'. The previous file is in place and unchanged.','bad');
+    updStopProgress(false);
   }finally{
     UPD_BUSY=false;
-    setTimeout(()=>{if(bar)bar.classList.remove('is-on');if(txt)txt.classList.remove('is-on');},1800);
   }
 }
 /* ── MFM FORCED UPDATE ─────────────────────────────────────────────────
-   A normal check refuses a file that is not bigger and not newer, and an
-   install is refused while automatic updates are paused. Both rules exist
-   to stop the panel from quietly downgrading a local build - but they also
-   mean that when the source really had moved on, there was no way to say
-   "take it anyway". This is that way, and only this way: it asks once,
-   then posts to guardian_force_install_now, which fetches the newest file,
-   lints it, copies the current one beside itself and replaces it. */
+   A check refuses a file that is not bigger and not newer, and an install is
+   refused while automatic updates are paused. Both rules exist to stop the
+   panel from quietly downgrading a local build - but they also mean that when
+   the source really had moved on, there was no way to say "take it anyway".
+   This is that way, and only this way: it asks once, then posts to
+   guardian_force_install_now, which fetches the file, lints it, copies the
+   current one beside itself and replaces it. */
 async function updForce(theUrl){
-  if(UPD_BUSY)return;
-  const typed=(theUrl?(document.getElementById('updForceUrl')||{}).value||'':'').trim();
+  if(UPD_BUSY){updFlash('A check or an install is already running.','info');return;}
   const st=UPD_STATE||{};
-  const url=typed||(st.remote&&st.remote.url)||'';
-  if(!url){updFlash('There is no link to fetch from. Save an update link first.','bad');return;}
+  let url='';
+  if(theUrl){const f=document.getElementById('updForceUrl');url=(f&&f.value||'').trim();}
+  if(url&&!/^https?:\/\//i.test(url)){updFlash('That link must begin with http:// or https://','bad');return;}
+  url=url||(st.remote&&st.remote.url)||'';
+  if(!url){updFlash('There is no link to fetch from. Save an update link first, or paste one in the Force field.','bad');return;}
   const ok=window.confirm(
     'Force update?\n\n'+
-    'The newest file will be downloaded from:\n'+url+'\n\n'+
+    'The file will be downloaded from:\n'+url+'\n\n'+
     'and installed over this file even if it is the same size, smaller, older, '+
     'or automatic updates are paused.\n\n'+
     'The file that is here now is kept beside it as .index.php.forced-backup-….bak '+
@@ -41357,37 +41758,29 @@ async function updForce(theUrl){
   if(!ok)return;
   UPD_BUSY=true;
   clearInterval(UPD_TIMER);
-  const bar=document.getElementById('updBar'),txt=document.getElementById('updProgTxt'),b=bar?bar.querySelector('i'):null;
-  if(bar&&txt){bar.classList.add('is-on');txt.classList.add('is-on');}
-  let v=8;
-  const t=setInterval(()=>{
-    if(!b)return;
-    v=Math.min(v+Math.max(2,Math.round((95-v)*.12)),95);
-    b.style.width=v+'%';
-    if(txt)txt.textContent=v<45?'Downloading the newest file from the link…':v<75?'Checking it is valid PHP…':'Backing up the current file, then installing…';
-  },260);
+  const auto=document.getElementById('updAuto');if(auto)auto.style.display='none';
+  updStartProgress();
   updFlash('Forcing the update…','info');
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('update_url',url);
     const d=await fetch('?x=guardian_force_install_now',{method:'POST',body:fd}).then(r=>r.json());
-    clearInterval(t);
     if(!d||!d.ok||d.error)throw new Error((d&&d.error)||'The forced update did not complete.');
-    if(b)b.style.width='100%';
+    updStopProgress(true);
     if(d.changed){
       updFlash('Forced update installed: '+formatBytes(d.old_size||0)+' → '+formatBytes(d.size||0)+
-        (d.backup?' · previous file kept as '+d.backup:'')+'. Reloading…','good');
-      setTimeout(()=>location.reload(),1200);
+        (d.backup?' · the previous file is kept as '+d.backup:'')+'. Reloading…','good');
+      setTimeout(()=>location.reload(),1400);
     }else{
-      updFlash(d.note||'The file on this server is already the one the link offers. Nothing was written.','good');
-      UPD_BUSY=false;
+      const note=d.note||'The file on this server is already the one the link offers. Nothing was written.';
+      UPD_STATE=null;
+      await updLoad(false);
+      updFlash(note,'good');
     }
   }catch(e){
-    clearInterval(t);
-    if(b)b.style.width='0%';
-    updFlash('The forced update failed: '+String(e.message||e)+'. The installed file is unchanged.','bad');
-    UPD_BUSY=false;
+    updFlash('The forced update failed: '+String(e.message||e).replace(/\.$/,'')+'. The installed file is unchanged.','bad');
+    updStopProgress(false);
   }finally{
-    setTimeout(()=>{if(bar)bar.classList.remove('is-on');if(txt)txt.classList.remove('is-on');},1800);
+    UPD_BUSY=false;
   }
 }
 function openUpdatesPanel(){
@@ -43826,8 +44219,8 @@ function rootRender(){
   }).join('');
   const b=document.getElementById('rootBadge');
   if(b)b.textContent=(sy.sudo?'· root':((c.vulnerable||0)>0?'· '+(c.vulnerable||0)+' open':''));
-  const pass=document.getElementById('rootPass');
-  if(pass)pass.style.display=((typeof RK!=='undefined'&&RK.wantPass)||!sy.sudo)?'block':'none';
+  ['rootPass','rootPassQuick'].forEach(id=>{const pass=document.getElementById(id);
+    if(pass)pass.style.display=((typeof RK!=='undefined'&&RK.wantPass)||!sy.sudo)?'block':'none';});
   if(typeof rkFacts==='function')rkFacts();
 }
 function rootSteps(steps){
@@ -44187,8 +44580,8 @@ document.getElementById('rkDial')?.addEventListener('click',()=>{rkRun();});
 document.getElementById('rkDial')?.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();rkRun();}});
 document.getElementById('rkPassBtn')?.addEventListener('click',()=>{
   RK.wantPass=!RK.wantPass;
-  const p=document.getElementById('rootPass');
-  if(p){p.style.display=RK.wantPass?'block':'none';if(RK.wantPass)p.focus();}
+  ['rootPass','rootPassQuick'].forEach(id=>{const p=document.getElementById(id);
+    if(p){p.style.display=RK.wantPass?'block':'none';if(RK.wantPass)p.focus();}});
   const b=document.getElementById('rkPassBtn');
   if(b)b.textContent=RK.wantPass?'Hide the password field':'Use a sudo password';
 });
@@ -45785,7 +46178,7 @@ async function guardCheckNow(){
     if(!r.ok){msg.style.color='#fca5a5';msg.textContent='The source did not answer: '+(r.error||'unknown');return;}
     msg.style.color=r.available?'var(--t1)':'var(--t2)';
     msg.textContent=r.available
-      ? ('A different file is offered ('+(r.relation||'difference not measurable')+'). Checked only - nothing was changed.')
+      ? ('A different file is offered: '+(({larger:'it is larger than the installed one',newer:'it carries a newer release date','same-size':'it has exactly the same size',smaller:'it is SMALLER than the installed one',older:'it is OLDER than the installed one',different:'the sizes could not be read'}[r.relation])||'the difference could not be measured')+'. Checked only - nothing was changed.')
       : 'Checked: the installed file is the one the source offers. Nothing was changed.';
   }catch{msg.textContent='Check failed.';msg.style.color='#fca5a5';}
 }
