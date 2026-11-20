@@ -36645,7 +36645,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 /* ── TOP BAR (command area) ──────────────────────────────────────────── */
 :root[data-theme="win11d"] .topbar{background:rgba(32,32,32,.80);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(255,255,255,.0578);padding:0 10px;gap:8px}
-:root[data-theme="win11d"] .brand-icon{width:30px;height:30px;background:transparent;box-shadow:none;display:grid;place-items:center}
+:root[data-theme="win11d"] .brand-icon{width:calc(var(--th) - 2px);height:calc(var(--th) - 2px);background:transparent;box-shadow:none;display:grid;place-items:center}
 :root[data-theme="win11d"] .brand-icon img{width:100%;height:100%;object-fit:contain}
 :root[data-theme="win11d"] .dv{background:rgba(255,255,255,.0803);height:20px}
 :root[data-theme="win11d"] .bc a{color:rgba(255,255,255,.6063);font-size:13px;border-radius:4px;padding:3px 6px;transition:background .1s,color .1s}
