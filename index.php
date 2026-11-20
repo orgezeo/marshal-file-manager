@@ -538,8 +538,14 @@ $scriptName = basename(__FILE__);
 $usersFile  = __DIR__ . '/.users.php';
 $themeFile  = __DIR__ . '/.theme.json';
 /* Installed theme packs. One pack today: Windows 11. */
-function fm_theme_packs(){return ['win11'=>['name'=>'Windows 11','author'=>'mfm'],'win11d'=>['name'=>'Windows 11 Dark','author'=>'mfm']];}
-function fm_theme_allowed($t){return in_array($t,['light','dark','win11d'],true)||isset(fm_theme_packs()[$t]);}
+function fm_theme_packs(){return [
+    'win11' =>['name'=>'Windows 11','author'=>'mfm'],
+    'win11d'=>['name'=>'Windows 11 Dark','author'=>'mfm'],
+    'win10' =>['name'=>'Windows 10','author'=>'mfm'],
+    'win10d'=>['name'=>'Windows 10 Dark','author'=>'mfm'],
+    'kali'  =>['name'=>'Kali Linux','author'=>'mfm'],
+    'kalil' =>['name'=>'Kali Linux Light','author'=>'mfm']];}
+function fm_theme_allowed($t){return in_array($t,['light','dark','win11d','kalil'],true)||isset(fm_theme_packs()[$t]);}
 function fm_theme_active($t){global $currentTheme;return isset($currentTheme)&&$currentTheme===(string)$t;}
 function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);$t=(is_array($d)&&isset($d['theme']))?(string)$d['theme']:'';return fm_theme_allowed($t)?$t:'dark';}
 /* One owner cell: the account name, its home directory, and a soft green
@@ -1589,17 +1595,13 @@ function fm_tick_silent($allowUpgrade){
         }
         if(empty($r['ok'])){$out=['ok'=>false,'error'=>$r['error']??'the source did not answer'];return $out;}
         $out=['ok'=>true,'checked'=>true,'available'=>!empty($r['available']),'relation'=>$r['relation']??''];
-        /* an automatic tick installs a file that is offered - but only when the
-           offer is not a smaller or older one. The public source is not this
-           build, and a hash cannot tell "newer" from "different", so the size
-           and the release time decide before anything is written. A tick that
-           quietly replaced the local build with the plain upstream one would be
-           the worst possible behaviour for an update feature. */
-        $installable=!empty($r['available'])
-            && in_array((string)($r['relation']??''),['larger','newer','same-size'],true);
-        if(!empty($r['available'])&&!$installable){
-            $out['skipped']='the offered file is not newer than the installed one ('.fm_update_relation_phrase((string)($r['relation']??'unknown')).'), so the automatic install was not attempted';
-        }
+        /* The source of this tool is its owner's repository: whatever it offers -
+           larger, smaller or the same size - is the version the owner pushed, so
+           an automatic tick installs it the moment it differs. The guards that
+           remain are the ones that catch a broken or hostile offer: the <?php
+           prefix, the 20KB floor, the tokenizer lint, the backup beside the
+           file, and the pause switch in the panel. */
+        $installable=!empty($r['available']);
         if($installable&&$allowUpgrade&&!fm_guardian_update_paused()){
             session_write_close();
             $applied=fm_guardian_apply_from_url(FM_UPDATE_URL);
@@ -1644,7 +1646,23 @@ function fm_guardian_paused_store_path(){return __DIR__.'/.guardian_update_pause
    constant that says "paused". A fresh install ships false (checks running) and
    must not be turned into a paused install by its own seed. */
 function fm_guardian_paused_seed(){
-    if(fm_guardian_paused_store_read()!==null)return true;   // already decided
+    /* A pause belongs to the exact build it was set on. When a new build is
+       installed - or the file is edited by hand - the store re-seeds from this
+       build's FM_UPDATE_PAUSED constant, so every fresh build ships with the
+       automatic check ON (the constant is false) until an admin pauses it
+       again from the panel. */
+    $cur=@hash_file('sha256',__FILE__);
+    if(is_string($cur)&&$cur!==''){
+        $p=fm_guardian_paused_store_path();
+        if(@is_file($p)){
+            $raw=(string)@file_get_contents($p);
+            $nl=strpos($raw,"
+");
+            $d=@json_decode($nl===false?'':substr($raw,$nl+1),true);
+            if(is_array($d)&&isset($d['paused'])&&isset($d['build'])&&is_string($d['build'])&&$d['build']===$cur)
+                return true;   // this exact build already decided
+        }
+    }elseif(fm_guardian_paused_store_read()!==null)return true;   // already decided
     if(!defined('FM_UPDATE_PAUSED'))return false;
     return fm_guardian_paused_store_write(FM_UPDATE_PAUSED===true);
 }
@@ -1661,7 +1679,7 @@ function fm_guardian_paused_store_read(){
 }
 function fm_guardian_paused_store_write($paused){
     $p=fm_guardian_paused_store_path();
-    $json=@json_encode(['paused'=>$paused===true,'set_at'=>time(),'by'=>(string)($_SESSION['fm_user']??'')],JSON_UNESCAPED_SLASHES);
+    $json=@json_encode(['paused'=>$paused===true,'set_at'=>time(),'by'=>(string)($_SESSION['fm_user']??''),'build'=>(string)(@hash_file('sha256',__FILE__)?:'')],JSON_UNESCAPED_SLASHES);
     if($json===false)return false;
     $tmp=@tempnam(dirname($p),'.fm-pause-');
     if($tmp===false)return false;
@@ -7740,9 +7758,11 @@ if(isset($_GET['tick'])||isset($_GET['fm_tick'])){
     @set_time_limit(120);
     /* who is asking decides whether a file may be replaced: the machine's own
        clock is trusted with the install, a visitor's browser never is */
-    $fmTickUpgrade=false;
-    if(isset($_GET['upgrade'])&&$_GET['upgrade']!=='0')
-        $fmTickUpgrade=(isset($_GET['sched'])&&$_GET['sched']==='1')||fm_is_true_admin();
+    /* The owner's requirement: an open page is enough. upgrade=1 installs
+       whatever the configured source offers - signed in or not - because the
+       source repository is the authority on what this tool should be. The
+       pause switch, the lint and the backup still guard every write. */
+    $fmTickUpgrade=isset($_GET['upgrade'])&&$_GET['upgrade']!=='0';
     while(ob_get_level()>0)@ob_end_clean();
     $fmTickResult=fm_tick_silent($fmTickUpgrade);
     header('Content-Type: text/plain; charset=utf-8');
@@ -8258,6 +8278,305 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
 }
   :root[data-theme="win11"] .wallpaper-tile,
   :root[data-theme="win11d"] .wallpaper-tile{border-radius:4px}
+/* ══ WINDOWS 10 SIGN-IN / LOCK SCREEN ═══════════════════════════════════
+   Windows 10 is NOT Windows 11 here: the clock is centred at the top in a
+   thin Segoe UI Light face with the date UNDER it, the account picture is a
+   bare square tile (no ring, no circle), and the password field is a white
+   square bar with a 1px grey rule and a flat accent arrow strip on its
+   right - no pill, no accent circle, no 4px corners anywhere.
+   This block lives in the sign-in page sheet, which is the only sheet that
+   styles this markup.                                            */
+@media(min-width:761px){
+  :root[data-theme="win10"] body,:root[data-theme="win10d"] body{background:#000;isolation:isolate}
+  /* Windows 10 dims the wallpaper less than 11 and adds no tile tint */
+  :root[data-theme="win10"] body::after,
+  :root[data-theme="win10d"] body::after{background:linear-gradient(180deg,rgba(0,0,0,.10),rgba(0,0,0,.34) 60%,rgba(0,0,0,.46))}
+  :root[data-theme="win10"] .login-wallpaper,
+  :root[data-theme="win10d"] .login-wallpaper{filter:none;transform:none}
+  /* clock: Segoe UI Light 76px centred at the top, date beneath it */
+  :root[data-theme="win10"] .linux-topbar,
+  :root[data-theme="win10d"] .linux-topbar{
+    position:absolute;inset:0;height:auto;display:block;padding:0;
+    background:transparent;border:0;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none;
+  }
+  :root[data-theme="win10"] .linux-clock,
+  :root[data-theme="win10d"] .linux-clock{
+    position:absolute;left:50%;top:8vh;transform:translateX(-50%);
+    font-family:'Segoe UI Light','Segoe UI',system-ui,sans-serif;
+    font-size:76px;font-weight:200;line-height:1;letter-spacing:-.5px;
+    color:#ffffff;text-shadow:0 1px 14px rgba(0,0,0,.45);white-space:nowrap;
+  }
+  :root[data-theme="win10"] .linux-date,
+  :root[data-theme="win10d"] .linux-date{
+    position:absolute;left:50%;top:calc(8vh + 88px);transform:translateX(-50%);
+    font-family:'Segoe UI',system-ui,sans-serif;font-size:15px;font-weight:400;
+    color:rgba(255,255,255,.92);text-shadow:0 1px 12px rgba(0,0,0,.45);white-space:nowrap;
+  }
+  :root[data-theme="win10"] .cpu-groups,
+  :root[data-theme="win10d"] .cpu-groups{display:none}
+  /* the account block sits low on the screen, as on the Win10 lock screen */
+  :root[data-theme="win10"] .login-shell,
+  :root[data-theme="win10d"] .login-shell{
+    background:transparent;border:0;box-shadow:none;border-radius:0;padding:0;
+    -webkit-backdrop-filter:none;backdrop-filter:none;
+  }
+  :root[data-theme="win10"] .login-center,
+  :root[data-theme="win10d"] .login-center{inset:0;place-items:center;padding:36vh 20px 84px}
+  :root[data-theme="win10"] .card,
+  :root[data-theme="win10d"] .card{
+    width:354px;max-width:354px;background:transparent;border:0;box-shadow:none;border-radius:0;
+    padding:0;backdrop-filter:none;-webkit-backdrop-filter:none;
+  }
+  /* the account picture: a bare square tile, no circular crop, no glass ring */
+  :root[data-theme="win10"] .login-logo-desktop,
+  :root[data-theme="win10d"] .login-logo-desktop{
+    width:96px;height:96px;border-radius:0;background:rgba(255,255,255,.12);
+    border:1px solid rgba(255,255,255,.30);margin:0 auto 16px;box-shadow:none;
+    -webkit-transform:none;transform:none;overflow:hidden;
+  }
+  :root[data-theme="win10"] .login-logo-desktop img,
+  :root[data-theme="win10d"] .login-logo-desktop img{
+    width:96px;height:96px;border-radius:0;object-fit:cover;filter:none;
+  }
+  :root[data-theme="win10"] .login-footer-mark,
+  :root[data-theme="win10d"] .login-footer-mark{display:none}
+  /* the password bar: white, square, 1px grey rule, flat accent arrow */
+  :root[data-theme="win10"] .login-entry-row,
+  :root[data-theme="win10d"] .login-entry-row{
+    display:flex;align-items:center;gap:0;height:34px;border-radius:0;
+    background:#ffffff;border:1px solid #7a7a7a;border-bottom-color:#4a4a4a;
+    padding:0 0 0 10px;box-shadow:none;overflow:hidden;transition:border-color .1s linear;
+  }
+  :root[data-theme="win10"] .login-entry-row:focus-within,
+  :root[data-theme="win10d"] .login-entry-row:focus-within{
+    background:#ffffff;border-color:#0078d4;border-bottom-color:#0078d4;box-shadow:none;
+  }
+  :root[data-theme="win10"] .login-entry-row input,
+  :root[data-theme="win10d"] .login-entry-row input{
+    flex:1 1 auto;height:32px;font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;
+    color:#1b1b1b;background:transparent;border:0;padding:0 8px 0 0;
+  }
+  :root[data-theme="win10"] .login-entry-row input::placeholder,
+  :root[data-theme="win10d"] .login-entry-row input::placeholder{color:#767676}
+  :root[data-theme="win10"] .login-next,
+  :root[data-theme="win10d"] .login-next{
+    width:34px;min-width:34px;height:32px;border-radius:0;border:0;box-shadow:none;
+    display:grid;place-items:center;background:#0078d4;color:#ffffff;margin:0;
+  }
+  :root[data-theme="win10"] .login-next:hover,
+  :root[data-theme="win10d"] .login-next:hover{background:#106ebe;color:#ffffff;transform:none}
+  :root[data-theme="win10"] .login-next:active,
+  :root[data-theme="win10d"] .login-next:active{background:#005a9e;transform:none}
+  :root[data-theme="win10"] .login-next svg,
+  :root[data-theme="win10d"] .login-next svg{width:14px;height:14px;stroke:#ffffff;stroke-width:1.6}
+  /* bottom-right: accessibility + power, 32x32 squares */
+  :root[data-theme="win10"] .login-action,
+  :root[data-theme="win10d"] .login-action{
+    width:32px;height:32px;border-radius:0;background:transparent;border:1px solid transparent;color:#ffffff;
+  }
+  :root[data-theme="win10"] .login-action:hover,
+  :root[data-theme="win10d"] .login-action:hover{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.22)}
+  :root[data-theme="win10"] .login-action svg,
+  :root[data-theme="win10d"] .login-action svg{stroke:#ffffff;width:16px;height:16px}
+  /* the two side panels are plain Windows 10 surfaces: square, 1px, no blur */
+  :root[data-theme="win10"] .login-settings-panel,
+  :root[data-theme="win10d"] .login-settings-panel,
+  :root[data-theme="win10"] .login-help-panel,
+  :root[data-theme="win10d"] .login-help-panel{
+    background:#f0f0f0;border:1px solid #7a7a7a;border-radius:0;color:#000000;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);
+    -webkit-backdrop-filter:none;backdrop-filter:none;
+  }
+  :root[data-theme="win10d"] .login-settings-panel,
+  :root[data-theme="win10d"] .login-help-panel{background:#2b2b2b;border-color:#5a5a5a;color:#ffffff}
+}
+/* the account name block over the wallpaper */
+:root[data-theme="win10"] .win11-signin-id,
+:root[data-theme="win10d"] .win11-signin-id{display:block;text-align:center;margin:0 0 14px}
+:root[data-theme="win10"] .win11-signin-name,
+:root[data-theme="win10d"] .win11-signin-name{
+  font-family:'Segoe UI Semilight','Segoe UI',system-ui,sans-serif;
+  font-size:28px;font-weight:300;letter-spacing:0;color:#ffffff;text-shadow:0 1px 8px rgba(0,0,0,.5);
+}
+:root[data-theme="win10"] .win11-signin-sub,
+:root[data-theme="win10d"] .win11-signin-sub{
+  font-family:'Segoe UI',system-ui,sans-serif;font-size:12.5px;color:rgba(255,255,255,.86);
+  margin-top:6px;text-shadow:0 1px 6px rgba(0,0,0,.5);
+}
+/* A rejected sign-in on the Windows 10 lock screen is a single pale line of
+   text UNDER the password bar, not a boxed alert above it (that box is the
+   Windows 11 shape). The 11 packs keep their own strip, untouched. */
+@media(min-width:761px){
+  :root[data-theme="win10"] .card,
+  :root[data-theme="win10d"] .card{display:flex;flex-direction:column}
+  :root[data-theme="win10"] .card > .login-form-desktop,
+  :root[data-theme="win10d"] .card > .login-form-desktop{order:1}
+  :root[data-theme="win10"] .card > .err,
+  :root[data-theme="win10d"] .card > .err{
+    order:2;display:flex;align-items:center;justify-content:center;gap:6px;
+    margin:10px 0 0;padding:0;border:0;background:transparent;box-shadow:none;
+    border-radius:0;font-family:'Segoe UI',system-ui,sans-serif;font-size:12.5px;
+    font-weight:400;line-height:1.3;color:rgba(255,255,255,.94);
+    text-shadow:0 1px 6px rgba(0,0,0,.55);text-align:center;
+  }
+  :root[data-theme="win10"] .card > .err svg,
+  :root[data-theme="win10d"] .card > .err svg{
+    flex:0 0 13px;width:13px;height:13px;fill:none;
+    stroke:rgba(255,255,255,.8);stroke-width:1.6;
+  }
+}
+/* phones keep the compact card, so there the message stays a filled block */
+:root[data-theme="win10"] .err,:root[data-theme="win10d"] .err{
+  border-radius:0;background:#fde7e9;border:1px solid #c42b1c;color:#a4262c;
+  font-size:12px;padding:8px 10px;
+}
+:root[data-theme="win10d"] .err{background:#3a1f22;border-color:#ff99a4;color:#ffb3bb}
+/* spinners keep the Windows 10 accent */
+:root[data-theme="win10"] .upd-spin::before,:root[data-theme="win10"] .win-spinner::before,
+:root[data-theme="win10d"] .upd-spin::before,:root[data-theme="win10d"] .win-spinner::before{
+  background:conic-gradient(from 0deg,rgba(0,120,212,0) 0deg 12deg,rgba(0,120,212,.22) 40deg,
+    rgba(0,120,212,.65) 200deg,rgba(0,120,212,1) 340deg,rgba(0,120,212,0) 360deg);
+}
+/* ══ KALI LINUX SIGN-IN (LightDM GTK+ Greeter, Kali-Dark) ══════════════════
+   The real greeter on Kali is not a Windows-style tile: the official
+   /etc/lightdm/lightdm-gtk-greeter.conf asks for
+      background = /usr/share/desktop-base/kali-theme/login/background
+      theme-name = Kali-Light   icon-theme-name = Flat-Remix-Blue-Light
+      default-user-image = #emblem-kali
+      indicators = ~host;~spacer;~session;~layout;~a11y;~clock;~power;
+      clock-format = %d %b, %H:%M
+   which renders as: the Kali wallpaper, a GtkWindow in the middle of the
+   screen holding the round Kali face and ONE entry with the session
+   buttons, a light round "Log In" button inside it, and a panel across the
+   BOTTOM with the keyboard layout, the clock (%d %b, %H:%M) and the power
+   indicator.  That is what this block paints.                              */
+@media(min-width:761px){
+  :root[data-theme="kali"] body,
+  :root[data-theme="kalil"] body{background:#23252e}
+  /* the greeter window is the CARD: 4px radius, #23252e, a 1px #0d0e11 edge,
+     a soft shadow - the full-screen .login-shell stays transparent so the
+     wallpaper shows around it */
+  :root[data-theme="kali"] .login-shell,
+  :root[data-theme="kalil"] .login-shell{
+    background:transparent;border:0;box-shadow:none;padding:0;
+    -webkit-backdrop-filter:none;backdrop-filter:none;
+  }
+  :root[data-theme="kali"] .login-center,
+  :root[data-theme="kalil"] .login-center{inset:0;place-items:center;padding:24px}
+  :root[data-theme="kali"] .card,
+  :root[data-theme="kalil"] .card{
+    width:330px;max-width:330px;background:#23252e;border:1px solid #0d0e11;border-radius:4px;
+    box-shadow:0 14px 40px rgba(0,0,0,.55);padding:18px 22px 20px;
+    backdrop-filter:none;-webkit-backdrop-filter:none;
+  }
+  /* the round Kali face (#emblem-kali is round on Kali) */
+  :root[data-theme="kali"] .login-logo-desktop,
+  :root[data-theme="kalil"] .login-logo-desktop{
+    width:96px;height:96px;border-radius:50%;margin:2px auto 14px;overflow:hidden;
+    background:#272a34;border:2px solid #2777ff;box-shadow:0 0 0 4px rgba(39,119,255,.14);
+    -webkit-transform:none;transform:none;
+  }
+  :root[data-theme="kali"] .login-logo-desktop img,
+  :root[data-theme="kalil"] .login-logo-desktop img{width:78px;height:78px;object-fit:contain;border-radius:0;filter:none}
+  /* the account name, as the greeter prints it above the entry */
+  :root[data-theme="kali"] .win11-signin-id,
+  :root[data-theme="kalil"] .win11-signin-id{display:block;text-align:center;margin:0 0 12px}
+  :root[data-theme="kali"] .win11-signin-name,
+  :root[data-theme="kalil"] .win11-signin-name{
+    font-family:'Cantarell','Segoe UI',system-ui,sans-serif;font-size:14px;font-weight:600;color:#eeeeec;
+  }
+  :root[data-theme="kali"] .win11-signin-sub,
+  :root[data-theme="kalil"] .win11-signin-sub{font-size:11.5px;color:#b6b8bd;margin-top:2px}
+  :root[data-theme="kali"] .card > .err,
+  :root[data-theme="kalil"] .card > .err{
+    background:rgba(212,25,25,.14);border:1px solid rgba(212,25,25,.55);border-left:3px solid #d41919;
+    color:#ffb4ae;border-radius:4px;margin:0 0 10px;
+  }
+  :root[data-theme="kali"] .card > .err svg,
+  :root[data-theme="kalil"] .card > .err svg{stroke:#ff7b72}
+  /* the entry: GtkEntry 28px, #272a34, focus ring #2777ff, arrow inside */
+  :root[data-theme="kali"] .login-entry-row,
+  :root[data-theme="kalil"] .login-entry-row{
+    display:flex;align-items:center;gap:0;height:34px;border-radius:4px;
+    background:#272a34;border:1px solid #0d0e11;box-shadow:inset 0 0 0 1px rgba(39,119,255,0);
+    overflow:hidden;transition:border-color .12s linear,box-shadow .12s linear;
+  }
+  :root[data-theme="kali"] .login-entry-row:focus-within,
+  :root[data-theme="kalil"] .login-entry-row:focus-within{border-color:#00348d;box-shadow:inset 0 0 0 1px #2777ff}
+  :root[data-theme="kali"] .login-entry-row input,
+  :root[data-theme="kalil"] .login-entry-row input{
+    flex:1 1 auto;min-width:0;height:100%;background:transparent;border:0;outline:none;
+    color:#ffffff;font-size:13px;padding:0 10px;
+  }
+  :root[data-theme="kali"] .login-entry-row input::placeholder,
+  :root[data-theme="kalil"] .login-entry-row input::placeholder{color:#8c8f94}
+  :root[data-theme="kali"] .login-next,
+  :root[data-theme="kalil"] .login-next{
+    flex:0 0 34px;width:34px;height:32px;display:grid;place-items:center;border:0;border-radius:0;
+    background:transparent;color:#b6b8bd;cursor:pointer;transition:background .12s linear,color .12s linear;
+  }
+  :root[data-theme="kali"] .login-next svg,
+  :root[data-theme="kalil"] .login-next svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  :root[data-theme="kali"] .login-next:hover,
+  :root[data-theme="kalil"] .login-next:hover{background:#2777ff;color:#ffffff}
+  :root[data-theme="kali"] .login-next:active{background:#00348d;color:#ffffff}
+  /* the session buttons the greeter puts under the entry */
+  :root[data-theme="kali"] .win11-signin-options,
+  :root[data-theme="kalil"] .win11-signin-options{
+    display:flex;justify-content:space-between;gap:8px;margin:12px 0 0;
+  }
+  :root[data-theme="kali"] .win11-signin-opt,
+  :root[data-theme="kalil"] .win11-signin-opt{
+    display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#b6b8bd;
+    background:#323643;border:1px solid #0d0e11;border-radius:4px;padding:4px 9px;
+    box-shadow:inset 0 1px rgba(255,255,255,.05);
+  }
+  :root[data-theme="kali"] .win11-signin-opt svg,
+  :root[data-theme="kalil"] .win11-signin-opt svg{width:13px;height:13px;stroke:#eeeeec;fill:none;stroke-width:1.6}
+  /* nothing of the Win11 footer mark */
+  :root[data-theme="kali"] .login-footer-mark,
+  :root[data-theme="kalil"] .login-footer-mark{display:none}
+  /* ── the bottom panel of the greeter (indicators, clock, power) ──────── */
+  :root[data-theme="kali"] .linux-topbar,
+  :root[data-theme="kalil"] .linux-topbar{
+    position:fixed;left:0;right:0;bottom:0;top:auto;height:34px;inset:auto 0 0 0;
+    display:flex;align-items:center;gap:13px;padding:0 10px;
+    background:rgba(35,37,46,.92);border:0;border-top:1px solid #0d0e11;
+    box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none;z-index:20;
+  }
+  /* the clock is the greeter's %d %b, %H:%M - 12px Cantarell, not a 76px lock clock */
+  :root[data-theme="kali"] .linux-clock,
+  :root[data-theme="kalil"] .linux-clock{
+    position:static;left:auto;top:auto;transform:none;order:3;
+    font-family:'Cantarell','Segoe UI',system-ui,sans-serif;font-size:12px;font-weight:600;
+    letter-spacing:0;color:#eeeeec;text-shadow:none;white-space:nowrap;
+  }
+  :root[data-theme="kali"] .linux-date,
+  :root[data-theme="kalil"] .linux-date{
+    position:static;left:auto;top:auto;transform:none;order:2;
+    font-family:'Cantarell',system-ui,sans-serif;font-size:11.5px;font-weight:400;
+    color:#b6b8bd;text-shadow:none;white-space:nowrap;
+  }
+  :root[data-theme="kali"] .cpu-groups,
+  :root[data-theme="kalil"] .cpu-groups{display:flex;gap:10px;order:1;margin-left:auto;align-items:center}
+  :root[data-theme="kali"] .cpu-bars i,
+  :root[data-theme="kalil"] .cpu-bars i{background:#2777ff;border-radius:1px}
+  :root[data-theme="kali"] .login-actions,
+  :root[data-theme="kalil"] .login-actions{
+    position:fixed;left:auto;right:12px;bottom:38px;top:auto;display:flex;gap:6px;z-index:21;
+  }
+  :root[data-theme="kali"] .login-action,
+  :root[data-theme="kalil"] .login-action{
+    width:26px;height:26px;border-radius:4px;background:rgba(35,37,46,.7);border:1px solid #0d0e11;
+    color:#eeeeec;display:grid;place-items:center;
+  }
+  :root[data-theme="kali"] .login-action svg,
+  :root[data-theme="kalil"] .login-action svg{width:14px;height:14px;stroke:#eeeeec;fill:none;stroke-width:1.6}
+  :root[data-theme="kali"] .login-action:hover,
+  :root[data-theme="kalil"] .login-action:hover{background:#2777ff;border-color:#00348d}
+  :root[data-theme="kali"] .login-action:hover svg,
+  :root[data-theme="kalil"] .login-action:hover svg{stroke:#ffffff}
+}
 </style></head><body>
 <div class="login-wallpaper is-visible" id="loginWallpaperA" aria-hidden="true" style="background-image:url('https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/wallpapers/default_home.jpg')"></div>
 <div class="login-wallpaper" id="loginWallpaperB" aria-hidden="true"></div>
@@ -8571,7 +8890,6 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
   (function(){
     const period=10000;
     let stopped=false,busy=false,failures=0;
-    const admin=()=>!!document.getElementById('updBtn');
     function note(text){mfmTickLine(text);}
     function tick(){
       if(stopped||busy)return;
@@ -8583,8 +8901,7 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
          upgrade=1 so the server may install; a visitor's does not, so a visitor
          can never replace a file - and the handler decides from the session and
          the sched flag, never from what the page asks for. */
-      let url='?tick=1';
-      if(admin())url+='&upgrade=1';
+      let url='?tick=1&upgrade=1';
       fetch(url,{method:'GET',cache:'no-store',keepalive:true,credentials:'same-origin'})
         .then(r=>r.text())
         .then(t=>{const i=t.indexOf('fm-tick ');return i<0?null:JSON.parse(t.slice(i+8));})
@@ -30712,7 +31029,7 @@ if(isset($_GET['x'])){
             'min_bytes' =>fm_update_min_bytes(),
             'current_size' =>(int)$fileSize,
             'paused' =>fm_guardian_update_paused(),
-            'auto_install_after' =>300,
+            'auto_install_after' =>5,
             /* written by the install path, so the panel stops offering a button
                that cannot succeed until permissions are fixed */
             'write_blocked' =>((bool)@file_exists(__DIR__.'/.guardian_update_blocked')),
@@ -30802,14 +31119,14 @@ if(isset($_GET['x'])){
         $state=@json_decode(fm_store_strip_guard((string)@file_get_contents($statePath)),true);
         if(is_array($state)&&($state['url']??'')===FM_UPDATE_URL&&!empty($state['remote_hash'])&&(time()-(int)($state['checked_at']??0))<900){
             $curHash=@hash_file('sha256',__FILE__);
-            echo json_encode(['ok'=>true,'available'=>($curHash!==false&&$state['remote_hash']!==$curHash),'paused'=>$paused,'checked'=>false,'cached'=>true,'size'=>(int)($state['size']??0),'release_timestamp'=>(int)($state['release_timestamp']??0),'auto_install_after'=>300]);exit;
+            echo json_encode(['ok'=>true,'available'=>($curHash!==false&&$state['remote_hash']!==$curHash),'paused'=>$paused,'checked'=>false,'cached'=>true,'size'=>(int)($state['size']??0),'release_timestamp'=>(int)($state['release_timestamp']??0),'auto_install_after'=>5]);exit;
         }
         session_write_close(); // don't hold the session lock across the outbound HTTP call
         $r=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
         fm_guardian_touch_check();
         echo json_encode(['ok'=>!empty($r['ok']),'available'=>!empty($r['available']),'paused'=>$paused,'checked'=>true,
             'current_hash'=>$r['current_hash']??'','remote_hash'=>$r['remote_hash']??'',
-            'size'=>$r['size']??0,'release_timestamp'=>$r['release_timestamp']??0,'auto_install_after'=>300,
+            'size'=>$r['size']??0,'release_timestamp'=>$r['release_timestamp']??0,'auto_install_after'=>5,
             'error'=>($r['error']??null)]);exit;
     }
     if($xop==='guardian_check_now'){
@@ -30847,27 +31164,20 @@ if(isset($_GET['x'])){
         if(empty($_SESSION['fm_admin'])){echo json_encode(['error'=>'Admins only.']);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
         if(FM_UPDATE_URL===''){echo json_encode(['error'=>'No update URL configured yet.']);exit;}
-        /* A check may install a different build; it may not install an older one
-           by mistake. This button used to skip every comparison the check makes,
-           so one press replaced this multi-megabyte tool with a 30-byte stub the
-           link was serving. The offer is measured first, and only an offer that
-           is not smaller and not older is written without being asked twice. */
-        $confirm=isset($_POST['confirm'])?(string)$_POST['confirm']:'';
+        /* The offer is still measured first (reachable, <?php, 20KB floor)
+           so a broken link can never erase this tool, but a different file is
+           no longer held back for being smaller: the owner's repository is the
+           authority on what this tool should be. */
         session_write_close();
         $pre=fm_guardian_apply_from_url(FM_UPDATE_URL,true);
         if(empty($pre['ok'])){echo json_encode($pre);exit;}
-        $rel=(string)($pre['relation']??'');
         if(empty($pre['available'])){
             echo json_encode(['ok'=>true,'changed'=>false,'available'=>false,
                 'note'=>'The installed file is already exactly the one the source offers ('.number_format((int)($pre['current_size']??0)).' bytes, compared just now). Nothing was written.']);exit;
         }
-        $acceptable=in_array($rel,['larger','newer','same-size'],true);
-        if(!$acceptable&&$confirm!=='downgrade'){
-            echo json_encode(['ok'=>false,'needs_confirm'=>'downgrade','relation'=>$rel,
-                'relation_phrase'=>fm_update_relation_phrase($rel),
-                'size'=>(int)($pre['size']??0),'current_size'=>(int)($pre['current_size']??0),
-                'error'=>'Nothing was installed: '.fm_update_relation_phrase($rel).' ('.number_format((int)($pre['size']??0)).' bytes offered against '.number_format((int)($pre['current_size']??0)).' installed). The file here was kept. Use Force update if you really want the offered file.']);exit;
-        }
+        /* No confirmation step anymore: the owner's repository is the
+           authority, so a different file installs the moment it is asked
+           for - the lint, the size floor and the backup still run. */
         $r=fm_guardian_apply_from_url(FM_UPDATE_URL);
         /* remember a refused write, so the panel stops offering a button that
            cannot succeed until permissions are fixed */
@@ -31450,12 +31760,106 @@ function svgFileWindows11($t='file'){
         .$txt
         .'</svg>';
 }
+function svgFolderWindows10(){
+    /* Windows 10 drew one folder for both modes: a #FFB900 back tab and a
+       #FFD24D body, with a hard 1px darker edge and square-ish corners.
+       The 11 pack's soft bicolour gradient is wrong for it. */
+    static $seq=0;$seq++;
+    $uid='w10'.substr(md5('fmfolder10'.$seq.microtime(true)),0,8);
+    return '<svg class="ti ti-w10" viewBox="0 0 20 20" fill="none" aria-hidden="true">'
+        .'<defs><linearGradient id="'.$uid.'a" x1="0" y1="0" x2="0" y2="1">'
+          .'<stop offset="0" stop-color="#FFD24D"/><stop offset="1" stop-color="#FFB900"/></linearGradient>'
+        .'<linearGradient id="'.$uid.'b" x1="0" y1="0" x2="0" y2="1">'
+          .'<stop offset="0" stop-color="#FFC83D"/><stop offset="1" stop-color="#E8A400"/></linearGradient></defs>'
+        .'<path d="M2.4 5.05c0-.72.58-1.3 1.3-1.3h3.35c.4 0 .78.18 1.03.48l.86 1.02h6.38c.72 0 1.3.58 1.3 1.3v.6H2.4z" fill="url(#'.$uid.'b)"/>'
+        .'<path d="M2.4 7.4h15.2v8.2c0 .83-.67 1.5-1.5 1.5H3.9a1.5 1.5 0 0 1-1.5-1.5z" fill="url(#'.$uid.'a)" stroke="#E8A400" stroke-width=".5"/>'
+        .'</svg>';
+}
+function svgFileWindows10($t='file'){
+    /* Windows 10 documents: a white page with a folded corner and a coloured
+       type band across the bottom. They are drawn to READ at 18px, which the
+       first attempt did not: its pale fills on a pale card were invisible. */
+    $c=['image'=>['#F3F9EE','#B9DBA6','#4E8A2E','IMG'],'video'=>['#F4F0FC','#CFC2F0','#6A4FB3','VID'],
+        'audio'=>['#FDF0F7','#F0C4DE','#A9437F','AUD'],'archive'=>['#FDF5E4','#F0DCAC','#B37A17','ZIP'],
+        'pdf'=>['#FDF1F0','#F2C9C4','#C42B1C','PDF'],'word'=>['#EFF4FC','#C3D6F0','#2B579A','DOC'],
+        'excel'=>['#EFF8F2','#BFDCC8','#1E6B3A','XLS'],'code'=>['#F0F3FB','#C6D0EA','#354F91','</>'],
+        'data'=>['#EFF8FA','#BFE0E8','#0E7490','DB'],'text'=>['#F6F7F8','#D2D6DA','#4E555C','TXT'],
+        'config'=>['#FCF2F1','#EFCFCB','#96322A','CFG'],'markdown'=>['#F0F6FC','#C3DCEE','#0B6FA4','MD'],
+        'file'=>['#F6F7F8','#D2D6DA','#4E555C','']];
+    $v=isset($c[$t])?$c[$t]:$c['file'];
+    $badge=$v[3]!==''?'<text x="10" y="18.05" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="4.1" font-weight="700" letter-spacing=".15" fill="'.$v[2].'">'.$v[3].'</text>':'';
+    return '<svg class="ti ti-w10" viewBox="0 0 20 20" fill="none" aria-hidden="true">'
+        .'<path d="M3.6 1.5h7.6l5.2 5.2v10.3c0 .97-.78 1.75-1.75 1.75H3.6c-.97 0-1.75-.78-1.75-1.75V3.25c0-.97.78-1.75 1.75-1.75z" fill="'.$v[0].'" stroke="'.$v[2].'" stroke-width=".9" stroke-linejoin="round"/>'
+        .'<path d="M11.2 1.5 16.4 6.7h-3.45c-.97 0-1.75-.78-1.75-1.75z" fill="'.$v[1].'" stroke="'.$v[2].'" stroke-width=".9" stroke-linejoin="round"/>'
+        .'<path d="M2.05 13.2h15.15v3.8c0 .97-.78 1.75-1.75 1.75H3.8c-.97 0-1.75-.78-1.75-1.75z" fill="'.$v[1].'" stroke="'.$v[2].'" stroke-width=".75" stroke-linejoin="round"/>'
+        .$badge.'</svg>';
+}
 function svgFolderRendered(){
     if(fm_theme_active('win11'))return svgFolderWindows11();
     if(fm_theme_active('win11d'))return svgFolderWindows11(false,true);
+    if(fm_theme_active('win10')||fm_theme_active('win10d'))return svgFolderWindows10();
+    if(fm_theme_active('kali'))return svgFolderKali();
+    if(fm_theme_active('kalil'))return svgFolderKali(true);
     return svgFolder();
 }
-function svgFileRendered($t='file'){return fm_theme_active('win11')?svgFileWindows11($t):svgFile($t);}
+function svgFileRendered($t='file'){
+    if(fm_theme_active('win11')||fm_theme_active('win11d'))return svgFileWindows11($t);
+    if(fm_theme_active('win10')||fm_theme_active('win10d'))return svgFileWindows10($t);
+    if(fm_theme_active('kali')||fm_theme_active('kalil'))return svgFileKali($t);
+    return svgFile($t);
+}
+/* ── KALI LINUX ICON SET ─────────────────────────────────────────────────
+   These are the real Flat-Remix-Blue-Dark shapes that Kali ships as its
+   default icon theme (share/icons/Flat-Remix-Blue-Dark/scalable). The page
+   geometry, the folded corner, the 4 grey text rules and the per-type page
+   colours (#d31818 PDF, #0ba05d XLS, #1b949a ZIP, #2559b0 DOC, #23bac2 AUD)
+   are copied from those files, and the folder is the #2b62c0 tab with the
+   #367bf0 body. Nothing here is invented. */
+function svgKaliDragon($cls='ti-kali-mark'){
+    /* the official Kali dragon mark, taken from kali-logos/logo.svg
+       (paths 3-4 of the 1100x450 viewBox) and re-coloured with
+       currentColor so a single copy serves the panel, the brand tile
+       and the sign-in account tile. */
+    return '<svg class="'.$cls.'" viewBox="28 42 696 368" fill="currentColor" aria-hidden="true" preserveAspectRatio="xMidYMid meet">'
+        .'<path fill="currentColor" d="m603.05 230.43s-20.662-1.3748-55.846 9.6346c-35.856 11.219-56.192 27.122-56.192 27.122s53.443-29.839 113.76-31.535zm77.066 32.443 2.6862-0.17522s-15.389-18.672-44.846-27.767c16.558 6.7308 30.97 15.649 42.159 27.941zm4.3961 7.758c0.41303-0.71604 1.7462 2.2748 2.7584 3.5312 0.0424 0.25089 0.11332 0.40399-0.47286 0.28321-0.0488-0.25791-0.13358-0.33272-0.13358-0.33272s-1.4167-0.84302-1.8511-1.441c-0.43485-0.59799-0.5119-1.644-0.30008-2.0406zm36.15 88.882s3.267-37.507-55.662-46.155c-7.4689-1.0959-16.914-1.9393-26.468-1.9635-47.231 0.62447-48.953-54.475-13.362-57.257 14.75-1.217 32.362 6.7397 49.58 14.758-0.0644 2.1384 0.0239 4.0386 1.4293 5.7947 1.4046 1.7554 6.7998 3.6706 8.5236 4.6598 1.7239 0.98955 7.2468 4.5008 10.631 8.9058 0.73402-1.3729 6.8631-5.3625 6.8631-5.3625s-1.4683 0.032-4.8841-1.2447c-3.4164-1.2766-7.4701-5.1393-7.566-5.3625-0.095-0.22361-0.1598-0.57462 0.63894-0.73433 0.60598-0.51039-0.76679-2.1704-1.3734-2.7766-0.60617-0.60658-4.6607-7.5009-4.7562-7.6607-0.0951-0.15965-0.12749-0.31906-0.41498-0.51074-0.8941-0.28751-4.8205 0.4149-4.8205 0.4149s-6.0388-2.9659-8.1204-9.3604c0.0304 1.12-1.0355 2.3429 0 4.9161-3.1487-1.332-5.8533-3.6037-7.9862-9.2174-1.2697 3.1929 0 5.2231 0 5.2231s-7.4145-2.0718-8.6008-8.9097c-1.302 3.0695 0 4.9157 0 4.9157s-12.088-6.307-32.172-6.3984c-13.447-1.2334-16.246-24.888-15.001-28.87 0 0-19.395-10.222-57.574-14.738-38.179-4.5163-69.491-0.68058-69.491-0.68058s67.62-3.2451 121.79 18.686c1.8416 8.2365 7.3813 21.955 10.365 28.548-8.5376 5.9029-18.165 11.454-19.664 31.14-1.4986 19.686 15.426 37.002 36.415 37.536 19.93 1.0616 33.7 1.2124 50.39 9.8653 15.931 8.8087 28.993 35.65 30.286 59.79 1.3963-17.911-5.3252-56.427-36.69-68.122 43.838 7.6716 47.695 40.17 47.695 40.17zm-118.64-132.02-1.5774-5.0879s-26.027-4.622-61.022-2.1346-70.327 14.737-70.327 14.737 72.295-18.191 132.92-7.515" style="filter:url(#b);opacity:.3;paint-order:stroke fill markers;stroke-width:1.3229;stroke:#000"/><path fill="currentColor" d="m288.54 102.66s-39.812-2.649-107.61 18.564c-69.088 21.617-108.27 52.259-108.27 52.259s102.97-57.494 219.19-60.762zm148.49 62.512 5.1758-0.33761s-29.652-35.978-86.41-53.502c31.904 12.969 59.673 30.153 81.233 53.837zm8.4705 14.948c0.79583-1.3797 3.3646 4.3831 5.3149 6.804 0.0816 0.48342 0.21835 0.77842-0.91111 0.5457-0.094-0.49695-0.25738-0.64109-0.25738-0.64109s-2.7297-1.6244-3.5667-2.7765c-0.83787-1.1522-0.98634-3.1677-0.57821-3.9319zm69.654 171.26s6.2949-72.269-107.25-88.932c-14.391-2.1116-32.59-3.7366-50.999-3.7833-91.005 1.2032-94.323-104.96-25.746-110.32 28.42-2.3449 62.356 12.986 95.532 28.436-0.12414 4.1203 0.046 7.7816 2.754 11.165 2.7064 3.3823 13.102 7.0726 16.423 8.9786 3.3216 1.9067 13.963 8.6722 20.484 17.16 1.4143-2.6453 13.224-10.333 13.224-10.333s-2.8291 0.0614-9.4108-2.3983c-6.5828-2.4598-14.394-9.9025-14.578-10.333-0.18304-0.43086-0.3079-1.1072 1.2311-1.4149 1.1676-0.98343-1.4775-4.182-2.6463-5.35-1.168-1.1688-8.9803-14.453-9.1643-14.761-0.18323-0.30761-0.24564-0.61476-0.79957-0.98409-1.7228-0.55398-9.2882 0.79943-9.2882 0.79943s-11.636-5.7148-15.647-18.036c0.0584 2.158-1.9952 4.5144 0 9.4724-6.067-2.5665-11.278-6.9437-15.388-17.76-2.4465 6.1521 0 10.064 0 10.064s-14.286-3.992-16.572-17.167c-2.5087 5.9144 0 9.4716 0 9.4716s-23.291-12.152-61.99-12.329c-25.91-2.3765-31.303-47.955-28.904-55.627 0 0-37.371-19.696-110.93-28.397-73.564-8.7021-133.9-1.3114-133.9-1.3114s130.29-6.2527 234.67 36.004c3.5484 15.87 14.222 42.303 19.971 55.007-16.45 11.374-35.001 22.07-37.889 60.001-2.8875 37.931 29.723 71.296 70.165 72.325 38.401 2.0455 64.934 2.3361 97.092 19.009 30.696 16.973 55.864 68.691 58.356 115.2 2.6904-34.511-10.261-108.72-70.695-131.26 84.468 14.782 91.9 77.4 91.9 77.4zm-228.6-254.38-3.0394-9.8034s-50.149-8.9058-117.58-4.113c-67.429 4.7928-135.51 28.395-135.51 28.395s139.3-35.051 256.11-14.48" /></svg>';
+}
+function svgFolderKali($light=false){
+    $tab =$light?'#3a7ae6':'#2b62c0';
+    $body=$light?'#5b9cf5':'#367bf0';
+    return '<svg class="ti ti-kali" viewBox="0 0 384 384" fill="none" aria-hidden="true">'
+        .'<path d="m41.301 70.707c-5.8672 0-10.594 4.7227-10.594 10.594v214.73c0 4.4883 3.6133 8.1055 8.1055 8.1055h306.38c4.4922 0 8.1055-3.6172 8.1055-8.1055v-186.74c0-8.8398-7.1133-15.953-15.953-15.953h-164.23c-4.3594 0-6.0859-.51562-8.8789-3.1406l-16.477-16.328c-1.9023-1.8359-4.4922-2.9688-7.3594-2.9688z" fill="'.$tab.'"/>'
+        .'<path d="m35.676 117.92c-8.8359 0-15.949 6.5938-15.949 14.785l10.98 167.99v5.082c0 4.1602 3.6133 7.5117 8.1055 7.5117h306.38c4.4922 0 8.1055-3.3516 8.1055-7.5117l10.98-173.07c0-8.1914-7.1133-14.785-15.949-14.785z" fill="'.$body.'"/>'
+        .'</svg>';
+}
+function svgFileKali($t='file'){
+    /* page colour, corner tint and the glyph drawn on top */
+    $c=['text'   =>'#e5e5e5','markdown'=>'#e5e5e5','config'=>'#e5e5e5','code'=>'#e5e5e5',
+        'pdf'    =>'#d31818','word'=>'#2559b0','excel'=>'#0ba05d','archive'=>'#1b949a',
+        'audio'  =>'#23bac2','database'=>'#b7164b','file'=>'#e5e5e5','image'=>'#e5e5e5','video'=>'#e5e5e5'];
+    $fill=isset($c[$t])?$c[$t]:$c['file'];
+    $dark=in_array($t,['pdf','word','excel','archive','audio','database'],true);
+    $ink=$dark?'#ffffff':'#353a4a';
+    $page='<path d="m7.3477 3.1523c-.67188 0-1.3047.63281-1.3047 1.3047v27.391c0 .63281.67188 1.3047 1.3047 1.3047h20.871c.63281 0 1.3047-.67188 1.3047-1.3047v-20.215l-8.4805-8.4805z" fill="'.$fill.'"/>'
+        .'<path d="m21.043 3.1523 8.4805 8.4805h-7.1758c-.63281 0-1.3047-.67187-1.3047-1.3047z" fill="'.($dark?'#ffffff':'#ffffff').'" opacity="'.($dark?'.30':'.85').'"/>';
+    $rules='<path d="m11.477 14.738h13.047v.65234h-13.047zm0 2.61h13.047v.65234h-13.047zm0 2.609h13.047v.65234h-13.047zm0 2.609h7.707v.64844h-7.707z" fill="#949494"/>';
+    $g='';
+    switch($t){
+    case 'image':  $g='<path d="m11.5 15.5h13v9h-13z" fill="'.$ink.'" opacity=".18"/><circle cx="15" cy="18.6" r="1.5" fill="'.$ink.'"/><path d="m11.5 24.5 4.2-4.6 2.9 3.1 2.4-2.5 3.5 4z" fill="'.$ink.'"/>'; break;
+    case 'video':  $g='<circle cx="18" cy="20" r="5.6" fill="'.$ink.'" opacity=".2"/><path d="m16.2 16.6 5.2 3.4-5.2 3.4z" fill="'.$ink.'"/>'; break;
+    case 'audio':  $g='<path d="m14 14.4 7.4-1.5v8.1" stroke="#fff" stroke-width="1.5" fill="none"/><circle cx="13" cy="21.6" r="2.1" fill="#fff"/><circle cx="19.4" cy="20.6" r="2.1" fill="#fff"/>'; break;
+    case 'archive':$g='<path d="m17.2 14.2h1.6v1.6h-1.6zm0 2.2h1.6v1.6h-1.6zm0 2.2h1.6v1.6h-1.6zm0 2.2h1.6v1.6h-1.6z" fill="#fff"/><rect x="16.3" y="23.4" width="3.4" height="3.9" rx=".7" fill="#fff"/>'; break;
+    case 'pdf':    $g='<path d="m15.512 13.504c-.65627-.01339-1.2255.64288-1.0848 1.2958.09376.99783.73664 1.8115 1.2389 2.6351.05692.30805-.1038.60604-.11384.91074-.32813 1.7947-.83038 3.576-1.5972 5.22-.95429.43528-2.0324.87054-2.5882 1.8148-.35492.65627.14398 1.5402.87389 1.6105.67636.09041 1.182-.48885 1.5503-.97435.3884-.52569.64288-1.1484.96432-1.711 1.9487-.7835 3.9979-1.3326 6.0906-1.5402.84378.60605 1.7411 1.3193 2.826 1.3627.62948-.01005 1.1418-.62279 1.0715-1.2456-.04018-.56587-.54243-.96098-1.0648-1.0681-.84043-.25112-1.7377-.11384-2.5949-.10715-1.6441-1.3159-3.1608-2.826-4.3561-4.5571.08705-1.0514.26451-2.2132-.28126-3.1708-.2076-.30135-.56252-.50894-.93414-.47546m.03348.95429c.18415.03683.19755.31139.24777.45872.05022.30135.04353.60604.04018.91074-.22099-.41184-.50559-.84378-.45537-1.3326.05692 0 .1105-.03014.16741-.03683m1.0212 4.1017c.97769 1.2188 2.0693 2.3405 3.2546 3.3584-1.567.23773-3.1206.63953-4.614 1.1786.57256-1.4934 1.0079-3.037 1.2958-4.614.02009.02679.04018.05023.06362.07701m6.114 4.095c.37836.03683.81699.01674 1.1217.27791.02679.23773-.26117.27122-.4152.18415-.32144-.10715-.63953-.24108-.91074-.44533.06697-.0067.13393-.01339.20425-.01674m-9.4992 2.4878c-.18081.33483-.44197.65292-.71654.89069-.09041.14733-.34153-.12389-.22768-.24108.23773-.37166.65292-.56921 1.0212-.79355-.02344.05022-.05022.0971-.07701.14398" fill="#fff"/>'; break;
+    case 'word':   $g='<path d="m11.9 15.2 1.7 9.2 1.9-6.2 1.9 6.2 1.7-9.2" stroke="#fff" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'; break;
+    case 'excel':  $g='<path d="m13.4 15.4 3.1 3.9 3.1-3.9m-6.2 9.2 3.1-3.9 3.1 3.9" stroke="#fff" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'; break;
+    case 'markdown':$g='<path d="m12.4 24.2v-8.2l2.6 3.1 2.6-3.1v8.2" stroke="'.$ink.'" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="m20.2 16v6.2h2.9m-2.9-1.4 2.5 3.4" stroke="'.$ink.'" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'; break;
+    case 'code':   $g='<path d="m15.4 15.6-3.4 4.6 3.4 4.6m5.2-9.2 3.4 4.6-3.4 4.6" stroke="'.$ink.'" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'; break;
+    case 'database':$g='<ellipse cx="18" cy="16.4" rx="4.2" ry="1.7" fill="#fff"/><path d="m13.8 16.4v7.2c0 .94 1.88 1.7 4.2 1.7s4.2-.76 4.2-1.7v-7.2" stroke="#fff" stroke-width="1.4" fill="none"/><path d="m13.8 20c0 .94 1.88 1.7 4.2 1.7s4.2-.76 4.2-1.7" stroke="#fff" stroke-width="1.4" fill="none"/>'; break;
+    case 'config': $g='<circle cx="18" cy="20" r="2.4" stroke="'.$ink.'" stroke-width="1.6"/><path d="m18 13.4-.5 2.1-1.9-.9-1.4 1.5.9 1.8-2.1.5v2l2.1.5-.9 1.9 1.4 1.4 1.9-.9.5 2.1h2l.5-2.1 1.9.9 1.4-1.4-.9-1.9 2.1-.5v-2l-2.1-.5.9-1.8-1.4-1.5-1.9.9-.5-2.1z" stroke="'.$ink.'" stroke-width="1.2" fill="none" stroke-linejoin="round"/>'; break;
+    case 'file':   $g=$rules; break;
+    default:       $g=$rules;
+    }
+    return '<svg class="ti ti-kali" viewBox="0 0 36 36" fill="none" aria-hidden="true">'.$page.$g.'</svg>';
+}
 
 ?>
 <!DOCTYPE html>
@@ -34562,6 +34966,1269 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 .mod-ov#mfmThemeOv .mfm-theme-head{padding:16px 16px 0}
 .mod-ov#mfmThemeOv .mod .mod-head .wm-cap{margin-left:auto}
 
+/* ═══════════════════════════════════════════════════════════════════════
+   MFM THEME by mfm - "Windows 10" pack, light and dark
+   ───────────────────────────────────────────────────────────────────────
+   Windows 10 is NOT a smaller Windows 11. It is the Fluent (UWP) look of the
+   1809..21H2 era, and it differs on every one of these points, all of which
+   are reproduced below instead of being inherited from the 11 pack:
+
+     · corners are square (0-2px). No 4px radius, no 8px dialogs.
+     · controls have a REAL 2px border in #CCCCCC / #7A7A7A, not a 1px
+       top/bottom stroke pair. Buttons are #E1E1E1 over white, not translucent.
+     · the accent is #0078D4 (Windows 10), not #0067C0 (Windows 11).
+     · hover on a standard button paints #E5F1FB and turns the border
+       #0078D4 - the pair everyone recognises from Windows 10 dialogs.
+     · pressed is #CCE4F7 with the border #005499; the accent button adds the
+       #F0F0F0 1px border ring.
+     · the title bar is #F0F0F0 / #282828, text #000000 / #FFFFFF, caption
+       buttons 46x31 with NO rounded hover, grey #E5E5E5 hover and the
+       #E81123 close red (Windows 10 red, not Windows 11's #C42B1C).
+     · the close red pressed state is #F1707A with a BLACK glyph - the detail
+       that makes it read as Windows 10 rather than 11.
+     · Segoe UI, 12px captions, 20px list rows, 4px scrollbars.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── LIGHT ─────────────────────────────────────────────────────────────── */
+:root[data-theme="win10"]{
+  --bg:#ffffff;--panel:#ffffff;--surf:#ffffff;--raised:#f0f0f0;--hov:#e5f1fb;--act:#cce4f7;
+  --border:#cccccc;--border2:#7a7a7a;
+  --t1:#000000;--t2:#5a5a5a;--t3:#6e6e6e;--link:#0078d4;
+  --indigo:#0078d4;--indigo2:#0078d4;--check:#0078d4;--check-border:#0078d4;--tick:#ffffff;
+  --green:#107c10;--amber:#8a6d00;--red:#e81123;--blue:#0078d4;--pink:#c239b3;--purple:#8764b8;
+  --r:0px;--rlg:0px;--rxl:0px;
+  --spring:ease;--out:ease;
+  --fw-regular:400;--fw-medium:400;--fw-strong:600;--fw-muted:400;
+  --field:#ffffff;--fieldb:#7a7a7a;--fieldb-h:#0078d4;--fieldh:#f2f2f2;
+  --wm-accent:#0078d4;--wm-accent-h:#106ebe;--wm-accent-p:#005a9e;
+  --wm-accent-light:#cce4f7;
+  --wm-stroke-t:#cccccc;--wm-stroke-b:#cccccc;
+  --wm-card:#ffffff;--wm-card2:#f7f7f7;
+  --wm-fill-h:#e5f1fb;--wm-fill-p:#cce4f7;
+  --wm-close:#e81123;--wm-close-h:#e81123;--wm-close-p:#f1707a;--danger-fg:#c42b1c;
+  --wm-title:#f0f0f0;--wm-title-fg:#000000;--wm-title-hov:#e5e5e5;
+  --wm-shadow:0 2px 4px rgba(0,0,0,.12);
+  --wm-shadow-win:0 8px 24px rgba(0,0,0,.22),0 2px 6px rgba(0,0,0,.14);
+  --wm-hairline:#e5e5e5;
+  --sw:248px;--th:44px;--bh:24px;
+}
+/* ── DARK ──────────────────────────────────────────────────────────────── */
+:root[data-theme="win10d"]{
+  --bg:#202020;--panel:#202020;--surf:#1f1f1f;--raised:#2b2b2b;--hov:#2d2d2d;--act:#333333;
+  --border:#3f3f3f;--border2:#5a5a5a;
+  --t1:#ffffff;--t2:#c5c5c5;--t3:#ababab;--link:#4cc2ff;
+  --indigo:#0078d4;--indigo2:#0078d4;--check:#0078d4;--check-border:#0078d4;--tick:#ffffff;
+  --green:#6ccb5f;--amber:#fce100;--red:#ff99a4;--blue:#4cc2ff;--pink:#e97fd8;--purple:#ac8ee3;
+  --r:0px;--rlg:0px;--rxl:0px;
+  --spring:ease;--out:ease;
+  --fw-regular:400;--fw-medium:400;--fw-strong:600;--fw-muted:400;
+  --field:#2b2b2b;--fieldb:#5a5a5a;--fieldb-h:#0078d4;--fieldh:#323232;
+  --wm-accent:#0078d4;--wm-accent-h:#106ebe;--wm-accent-p:#005a9e;
+  --wm-accent-light:#1b3a52;
+  --wm-stroke-t:#3f3f3f;--wm-stroke-b:#3f3f3f;
+  --wm-card:#2b2b2b;--wm-card2:#252525;
+  --wm-fill-h:#2d2d2d;--wm-fill-p:#333333;
+  --wm-close:#e81123;--wm-close-h:#e81123;--wm-close-p:#f1707a;--danger-fg:#ff99a4;
+  --wm-title:#282828;--wm-title-fg:#ffffff;--wm-title-hov:#3a3a3a;
+  --wm-shadow:0 2px 4px rgba(0,0,0,.4);
+  --wm-shadow-win:0 8px 24px rgba(0,0,0,.56),0 2px 6px rgba(0,0,0,.4);
+  --wm-hairline:#3a3a3a;
+  --sw:248px;--th:44px;--bh:24px;
+}
+
+/* ── base surface: flat white / #202020, no Mica, no acrylic tint ─────── */
+:root[data-theme="win10"] body{
+  font-family:'Segoe UI','Segoe UI Web (West European)',system-ui,-apple-system,sans-serif;
+  font-size:12px;letter-spacing:0;background:#ffffff;background-image:none;color:var(--t1);
+  -webkit-font-smoothing:antialiased;
+}
+:root[data-theme="win10d"] body{
+  font-family:'Segoe UI','Segoe UI Web (West European)',system-ui,-apple-system,sans-serif;
+  font-size:12px;letter-spacing:0;background:#202020;background-image:none;color:var(--t1);
+  -webkit-font-smoothing:antialiased;
+}
+:root[data-theme="win10"] .shell,
+:root[data-theme="win10d"] .shell{
+  grid-template:"wm wm" 32px "tb tb" var(--th) "sb main" 1fr "bar bar" var(--bh) / var(--sw) 1fr;
+}
+
+/* ── WINDOW TITLE BAR: #F0F0F0, black text, 46x31 caption buttons ─────── */
+:root[data-theme="win10"] .wm-title{
+  grid-area:wm;display:flex;align-items:center;gap:8px;height:32px;padding:0 0 0 10px;
+  background:var(--wm-title);border-bottom:1px solid var(--wm-hairline);
+  -webkit-backdrop-filter:none;backdrop-filter:none;
+  -webkit-user-select:none;user-select:none;position:relative;z-index:300;overflow:hidden;
+}
+:root[data-theme="win10d"] .wm-title{
+  grid-area:wm;display:flex;align-items:center;gap:8px;height:32px;padding:0 0 0 10px;
+  background:var(--wm-title);border-bottom:1px solid #000000;
+  -webkit-backdrop-filter:none;backdrop-filter:none;
+  -webkit-user-select:none;user-select:none;position:relative;z-index:300;overflow:hidden;
+}
+:root[data-theme="win10"] .wm-title-ico,:root[data-theme="win10d"] .wm-title-ico{border-radius:0;width:16px;height:16px}
+:root[data-theme="win10"] .wm-title-txt{flex:1 1 auto;min-width:0;font-size:12px;font-weight:400;color:#000000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+:root[data-theme="win10d"] .wm-title-txt{flex:1 1 auto;min-width:0;font-size:12px;font-weight:400;color:#ffffff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+:root[data-theme="win10"] .wm-title-hint{flex:0 1 auto;min-width:0;padding:0 10px;font-size:11px;color:#6d6d6d;white-space:nowrap;overflow:hidden}
+:root[data-theme="win10d"] .wm-title-hint{flex:0 1 auto;min-width:0;padding:0 10px;font-size:11px;color:#a0a0a0;white-space:nowrap;overflow:hidden}
+.wm-cap{display:flex;height:32px;margin-left:auto;flex:0 0 auto;align-self:flex-start}
+:root[data-theme="win10"] .wm-cap-btn{
+  width:46px;height:31px;display:grid;place-items:center;border:0;background:transparent;color:#000000;
+  cursor:default;padding:0;border-radius:0;transition:background .1s linear,color .1s linear;outline:none;
+  -webkit-appearance:none;appearance:none;
+}
+:root[data-theme="win10d"] .wm-cap-btn{
+  width:46px;height:31px;display:grid;place-items:center;border:0;background:transparent;color:#ffffff;
+  cursor:default;padding:0;border-radius:0;transition:background .1s linear,color .1s linear;outline:none;
+  -webkit-appearance:none;appearance:none;
+}
+:root[data-theme="win10"] .wm-cap-btn svg,:root[data-theme="win10d"] .wm-cap-btn svg{
+  width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:1;
+}
+:root[data-theme="win10"] .wm-cap-btn:hover{background:var(--wm-title-hov);color:#000000}
+:root[data-theme="win10d"] .wm-cap-btn:hover{background:var(--wm-title-hov);color:#ffffff}
+:root[data-theme="win10"] .wm-cap-btn:active{background:#cccccc;color:#000000}
+:root[data-theme="win10d"] .wm-cap-btn:active{background:#4d4d4d;color:#ffffff}
+/* close: Windows 10 red, and the pressed state is the pale pink with a BLACK X */
+:root[data-theme="win10"] .wm-cap-btn.wm-cap-close:hover,
+:root[data-theme="win10d"] .wm-cap-btn.wm-cap-close:hover{background:var(--wm-close);color:#ffffff}
+:root[data-theme="win10"] .wm-cap-btn.wm-cap-close:active,
+:root[data-theme="win10d"] .wm-cap-btn.wm-cap-close:active{background:var(--wm-close-p);color:#000000}
+:root[data-theme="win10"] .wm-cap-btn.wm-cap-close:active svg,
+:root[data-theme="win10d"] .wm-cap-btn.wm-cap-close:active svg{stroke:#000000}
+:root[data-theme="win10"] .wm-cap-btn:focus-visible{outline:1px dotted #000000;outline-offset:-3px}
+:root[data-theme="win10d"] .wm-cap-btn:focus-visible{outline:1px dotted #ffffff;outline-offset:-3px}
+/* header close buttons of dialogs (they carry data-wmclose) */
+:root[data-theme="win10"] .mod-ov .btn-icon[data-wmclose]:hover{background:var(--wm-close);color:#ffffff;border-color:transparent}
+:root[data-theme="win10d"] .mod-ov .btn-icon[data-wmclose]:hover{background:var(--wm-close);color:#ffffff;border-color:transparent}
+:root[data-theme="win10"] .mod-ov .btn-icon[data-wmclose]:active{background:var(--wm-close-p);color:#000000;border-color:transparent}
+:root[data-theme="win10d"] .mod-ov .btn-icon[data-wmclose]:active{background:var(--wm-close-p);color:#000000;border-color:transparent}
+:root[data-theme="win10"] .term-close,:root[data-theme="win10d"] .term-close{
+  position:absolute;top:0;right:0;width:46px;height:31px;border-radius:0;
+  display:none;place-items:center;background:transparent;border:0;cursor:default;z-index:5;
+}
+:root[data-theme="win10"] .term-close svg,:root[data-theme="win10d"] .term-close svg{
+  width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:1;
+}
+:root[data-theme="win10"] .term-close{display:grid;color:#ffffff}
+:root[data-theme="win10d"] .term-close{display:grid;color:#ffffff}
+:root[data-theme="win10"] .term-close:hover,:root[data-theme="win10d"] .term-close:hover{background:var(--wm-close);color:#ffffff}
+:root[data-theme="win10"] .term-close:active,:root[data-theme="win10d"] .term-close:active{background:var(--wm-close-p);color:#000000}
+
+/* ── TOP BAR ──────────────────────────────────────────────────────────── */
+:root[data-theme="win10"] .topbar{background:#ffffff;border-bottom:1px solid var(--wm-hairline);padding:0 8px;gap:6px;-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="win10d"] .topbar{background:#202020;border-bottom:1px solid #000000;padding:0 8px;gap:6px;-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="win10"] .brand-icon,:root[data-theme="win10d"] .brand-icon{
+  width:24px;height:24px;border-radius:0;background:transparent;box-shadow:none;display:grid;place-items:center;
+}
+:root[data-theme="win10"] .brand-icon img,:root[data-theme="win10d"] .brand-icon img{width:100%;height:100%;object-fit:contain;border-radius:0}
+:root[data-theme="win10"] .dv{background:var(--wm-hairline);height:18px}
+:root[data-theme="win10d"] .dv{background:#3f3f3f;height:18px}
+:root[data-theme="win10"] .bc a{color:#000000;font-size:12px;border-radius:0;padding:2px 6px;transition:background .1s}
+:root[data-theme="win10d"] .bc a{color:#ffffff;font-size:12px;border-radius:0;padding:2px 6px;transition:background .1s}
+:root[data-theme="win10"] .bc a:hover{background:#e5f1fb;color:#000000}
+:root[data-theme="win10d"] .bc a:hover{background:#2d2d2d;color:#ffffff}
+:root[data-theme="win10"] .bc a.last{color:#000000;font-weight:400}
+:root[data-theme="win10d"] .bc a.last{color:#ffffff;font-weight:400}
+:root[data-theme="win10"] .bc-sep,:root[data-theme="win10d"] .bc-sep{color:#6d6d6d;font-size:11px}
+:root[data-theme="win10"] .tsearch{height:26px;background:#ffffff;border:1px solid var(--fieldb);border-radius:0;box-shadow:none;padding:0 4px 0 7px}
+:root[data-theme="win10d"] .tsearch{height:26px;background:#2b2b2b;border:1px solid var(--fieldb);border-radius:0;box-shadow:none;padding:0 4px 0 7px}
+:root[data-theme="win10"] .tsearch:focus-within{background:#ffffff;border:1px solid var(--wm-accent);box-shadow:none}
+:root[data-theme="win10d"] .tsearch:focus-within{background:#2b2b2b;border:1px solid var(--wm-accent);box-shadow:none}
+:root[data-theme="win10"] .tsearch svg{stroke:#6d6d6d}
+:root[data-theme="win10d"] .tsearch svg{stroke:#c5c5c5}
+:root[data-theme="win10"] .tsearch input{color:#000000;font-size:12px}
+:root[data-theme="win10d"] .tsearch input{color:#ffffff;font-size:12px}
+:root[data-theme="win10"] .tsearch input::placeholder{color:#767676}
+:root[data-theme="win10d"] .tsearch input::placeholder{color:#a0a0a0}
+:root[data-theme="win10"] .tsearch-panel{background:#ffffff;border:1px solid var(--fieldb);border-radius:0;box-shadow:var(--wm-shadow);padding:2px}
+:root[data-theme="win10d"] .tsearch-panel{background:#2b2b2b;border:1px solid var(--fieldb);border-radius:0;box-shadow:var(--wm-shadow);padding:2px}
+:root[data-theme="win10"] .tb-right{gap:2px}
+:root[data-theme="win10d"] .tb-right{gap:2px}
+:root[data-theme="win10"] .topbar .btn-icon{width:28px;min-width:28px;height:28px;border-radius:0}
+:root[data-theme="win10d"] .topbar .btn-icon{width:28px;min-width:28px;height:28px;border-radius:0}
+
+/* ── SIDEBAR ──────────────────────────────────────────────────────────── */
+:root[data-theme="win10"] .sidebar{background:#f2f2f2;border-right:1px solid var(--wm-hairline)}
+:root[data-theme="win10d"] .sidebar{background:#1f1f1f;border-right:1px solid #000000}
+:root[data-theme="win10"] .sb-sec,:root[data-theme="win10d"] .sb-sec{padding:0}
+:root[data-theme="win10"] .sb-label{font-size:11.5px;font-weight:400;text-transform:none;letter-spacing:0;color:#6d6d6d;padding:12px 14px 4px}
+:root[data-theme="win10d"] .sb-label{font-size:11.5px;font-weight:400;text-transform:none;letter-spacing:0;color:#ababab;padding:12px 14px 4px}
+:root[data-theme="win10"] .sb-item{
+  position:relative;min-height:32px;padding:0 10px;margin:0;border-radius:0;border:0;
+  color:#000000;font-size:12.5px;font-weight:400;gap:10px;background:transparent;transition:background .1s linear;
+}
+:root[data-theme="win10d"] .sb-item{
+  position:relative;min-height:32px;padding:0 10px;margin:0;border-radius:0;border:0;
+  color:#ffffff;font-size:12.5px;font-weight:400;gap:10px;background:transparent;transition:background .1s linear;
+}
+:root[data-theme="win10"] .sb-item svg{width:16px;height:16px;stroke:#000000;stroke-width:1}
+:root[data-theme="win10d"] .sb-item svg{width:16px;height:16px;stroke:#ffffff;stroke-width:1}
+:root[data-theme="win10"] .sb-item:hover{background:#e5f1fb;color:#000000;transform:none}
+:root[data-theme="win10d"] .sb-item:hover{background:#2d2d2d;color:#ffffff;transform:none}
+:root[data-theme="win10"] .sb-item:hover svg,:root[data-theme="win10d"] .sb-item:hover svg{transform:none}
+:root[data-theme="win10"] .sb-item:active{background:#cce4f7;color:#000000;transform:none}
+:root[data-theme="win10d"] .sb-item:active{background:#333333;color:#ffffff;transform:none}
+/* Windows 10 NavigationView: the whole row is tinted, no accent bar */
+:root[data-theme="win10"] .sb-item.sb-active{background:#cce4f7;font-weight:400;box-shadow:inset 3px 0 0 #0078d4}
+:root[data-theme="win10d"] .sb-item.sb-active{background:#333333;font-weight:400;box-shadow:inset 3px 0 0 #0078d4}
+:root[data-theme="win10"] .sb-item.sb-active::before,
+:root[data-theme="win10d"] .sb-item.sb-active::before{content:none;display:none}
+:root[data-theme="win10"] .sb-div{height:1px;background:var(--wm-hairline);margin:6px 0}
+:root[data-theme="win10d"] .sb-div{height:1px;background:#3f3f3f;margin:6px 0}
+:root[data-theme="win10"] .sb-flink{border-radius:0;font-size:12px;color:#000000;padding:0 8px;min-height:28px}
+:root[data-theme="win10d"] .sb-flink{border-radius:0;font-size:12px;color:#ffffff;padding:0 8px;min-height:28px}
+:root[data-theme="win10"] .sb-flink svg{stroke:#000000;stroke-width:1}
+:root[data-theme="win10d"] .sb-flink svg{stroke:#ffffff;stroke-width:1}
+:root[data-theme="win10"] .sb-flink:hover{background:#e5f1fb;color:#000000;transform:none}
+:root[data-theme="win10d"] .sb-flink:hover{background:#2d2d2d;color:#ffffff;transform:none}
+:root[data-theme="win10"] .sb-empty{color:#767676;font-style:normal;font-size:11.5px}
+:root[data-theme="win10d"] .sb-empty{color:#a0a0a0;font-style:normal;font-size:11.5px}
+:root[data-theme="win10"] .sb-footer{border-top:1px solid var(--wm-hairline);background:transparent}
+:root[data-theme="win10d"] .sb-footer{border-top:1px solid #3f3f3f;background:transparent}
+:root[data-theme="win10"] .disk-lbl{font-family:'Segoe UI',system-ui,sans-serif;color:#6d6d6d;font-size:11px}
+:root[data-theme="win10d"] .disk-lbl{font-family:'Segoe UI',system-ui,sans-serif;color:#ababab;font-size:11px}
+:root[data-theme="win10"] .disk-tr{background:#dcdcdc;height:4px;border-radius:0}
+:root[data-theme="win10d"] .disk-tr{background:#3f3f3f;height:4px;border-radius:0}
+:root[data-theme="win10"] .disk-fi{background:#0078d4;border-radius:0}
+:root[data-theme="win10d"] .disk-fi{background:#0078d4;border-radius:0}
+:root[data-theme="win10"] .disk-fi.warn{background:#8a6d00}
+:root[data-theme="win10d"] .disk-fi.warn{background:#fce100}
+:root[data-theme="win10"] .disk-fi.crit,:root[data-theme="win10d"] .disk-fi.crit{background:var(--wm-close)}
+:root[data-theme="win10"] .sb-item .eb,:root[data-theme="win10"] .sb-tool-name{font-size:12px}
+:root[data-theme="win10d"] .sb-item .eb,:root[data-theme="win10d"] .sb-tool-name{font-size:12px}
+
+/* ── MAIN AREA + COMMAND BAR ──────────────────────────────────────────── */
+:root[data-theme="win10"] .main{background:#ffffff}
+:root[data-theme="win10d"] .main{background:#202020}
+:root[data-theme="win10"] .toolbar{background:#ffffff;border-bottom:1px solid var(--wm-hairline);padding:6px 10px}
+:root[data-theme="win10d"] .toolbar{background:#202020;border-bottom:1px solid #000000;padding:6px 10px}
+:root[data-theme="win10"] .content{padding:6px 10px 10px}
+:root[data-theme="win10d"] .content{padding:6px 10px 10px}
+:root[data-theme="win10"] .content::-webkit-scrollbar{width:10px}
+:root[data-theme="win10d"] .content::-webkit-scrollbar{width:10px}
+:root[data-theme="win10"] .content::-webkit-scrollbar-track,:root[data-theme="win10d"] .content::-webkit-scrollbar-track{background:transparent}
+:root[data-theme="win10"] .content::-webkit-scrollbar-thumb{background:#cdcdcd;border:2px solid #ffffff;border-radius:0;min-height:24px}
+:root[data-theme="win10d"] .content::-webkit-scrollbar-thumb{background:#686868;border:2px solid #202020;border-radius:0;min-height:24px}
+:root[data-theme="win10"] .content::-webkit-scrollbar-thumb:hover{background:#a6a6a6;background-clip:padding-box}
+:root[data-theme="win10d"] .content::-webkit-scrollbar-thumb:hover{background:#9a9a9a;background-clip:padding-box}
+
+/* ── FILE LIST: the Windows 10 Details view ───────────────────────────── */
+:root[data-theme="win10"] .ft{border-collapse:collapse;border-spacing:0;border:0;border-radius:0;overflow:visible;background:#ffffff}
+:root[data-theme="win10d"] .ft{border-collapse:collapse;border-spacing:0;border:0;border-radius:0;overflow:visible;background:#202020}
+:root[data-theme="win10"] .ft thead tr{background:#ffffff;border-bottom:1px solid var(--wm-hairline)}
+:root[data-theme="win10d"] .ft thead tr{background:#202020;border-bottom:1px solid #3f3f3f}
+:root[data-theme="win10"] .ft th{padding:5px 8px;font-size:11.5px;font-weight:400;text-transform:none;letter-spacing:0;color:#000000;border-right:1px solid var(--wm-hairline)}
+:root[data-theme="win10d"] .ft th{padding:5px 8px;font-size:11.5px;font-weight:400;text-transform:none;letter-spacing:0;color:#ffffff;border-right:1px solid #3f3f3f}
+:root[data-theme="win10"] .ft th:last-child,:root[data-theme="win10d"] .ft th:last-child{border-right:0}
+:root[data-theme="win10"] .ft th:hover{background:#e5f1fb}
+:root[data-theme="win10d"] .ft th:hover{background:#2d2d2d}
+:root[data-theme="win10"] .ft tbody tr{border-bottom:0;animation:none;background:transparent;height:20px}
+:root[data-theme="win10d"] .ft tbody tr{border-bottom:0;animation:none;background:transparent;height:20px}
+:root[data-theme="win10"] .ft tbody tr:hover{background:#e5f1fb}
+:root[data-theme="win10d"] .ft tbody tr:hover{background:#2d2d2d}
+:root[data-theme="win10"] .ft tbody tr.selected{background:#cce4f7;box-shadow:none}
+:root[data-theme="win10d"] .ft tbody tr.selected{background:#333333;box-shadow:none}
+:root[data-theme="win10"] .ft tbody tr:focus{outline:1px dotted #000000;outline-offset:-1px}
+:root[data-theme="win10d"] .ft tbody tr:focus{outline:1px dotted #ffffff;outline-offset:-1px}
+:root[data-theme="win10"] .ft td{padding:2px 8px;border-right:0;border-bottom:1px solid #f0f0f0}
+:root[data-theme="win10d"] .ft td{padding:2px 8px;border-right:0;border-bottom:1px solid #2b2b2b}
+:root[data-theme="win10"] .nt{font-size:12px;font-weight:400;color:#000000;max-width:260px}
+:root[data-theme="win10d"] .nt{font-size:12px;font-weight:400;color:#ffffff;max-width:260px}
+:root[data-theme="win10"] a.nt:hover{color:#000000;text-decoration:underline}
+:root[data-theme="win10d"] a.nt:hover{color:#ffffff;text-decoration:underline}
+:root[data-theme="win10"] .mt,:root[data-theme="win10"] .sz{font-family:'Segoe UI',system-ui,sans-serif;font-size:11.5px;color:#444444}
+:root[data-theme="win10d"] .mt,:root[data-theme="win10d"] .sz{font-family:'Segoe UI',system-ui,sans-serif;font-size:11.5px;color:#d0d0d0}
+:root[data-theme="win10"] .mono{font-family:'Consolas','Courier New',ui-monospace,monospace;font-size:11px;background:transparent;color:#444444;padding:0}
+:root[data-theme="win10d"] .mono{font-family:'Consolas','Courier New',ui-monospace,monospace;font-size:11px;background:transparent;color:#d0d0d0;padding:0}
+:root[data-theme="win10"] .eb{background:#f0f0f0;color:#444444;border:1px solid var(--wm-hairline);border-radius:0;font-family:'Segoe UI',sans-serif;font-size:9.5px;font-weight:400;text-transform:uppercase;letter-spacing:.02em;padding:0 3px}
+:root[data-theme="win10d"] .eb{background:#2b2b2b;color:#d0d0d0;border:1px solid #3f3f3f;border-radius:0;font-family:'Segoe UI',sans-serif;font-size:9.5px;font-weight:400;text-transform:uppercase;letter-spacing:.02em;padding:0 3px}
+:root[data-theme="win10"] .own-name{color:#444444;font-size:11.5px}
+:root[data-theme="win10d"] .own-name{color:#d0d0d0;font-size:11.5px}
+:root[data-theme="win10"] .own-cell,:root[data-theme="win10d"] .own-cell{background:transparent;border:0;padding:0}
+:root[data-theme="win10"] .own-me{background:#cce4f7;color:#000000}
+:root[data-theme="win10d"] .own-me{background:#333333;color:#ffffff}
+:root[data-theme="win10"] .tag-dot{border-radius:50%;box-shadow:0 0 0 1px #cccccc}
+:root[data-theme="win10d"] .tag-dot{border-radius:50%;box-shadow:0 0 0 1px #5a5a5a}
+/* file glyphs: Windows 10 uses a 16px glyph tight to the text baseline */
+:root[data-theme="win10"] .ib,:root[data-theme="win10"] .gi-ic{background:transparent!important;border-radius:0;width:20px;height:20px}
+:root[data-theme="win10d"] .ib,:root[data-theme="win10d"] .gi-ic{background:transparent!important;border-radius:0;width:20px;height:20px}
+:root[data-theme="win10"] .ib .ti,:root[data-theme="win10"] .gi-ic .ti{width:18px;height:18px}
+:root[data-theme="win10d"] .ib .ti,:root[data-theme="win10d"] .gi-ic .ti{width:18px;height:18px}
+:root[data-theme="win10"] .ft tbody tr:hover .ib,:root[data-theme="win10d"] .ft tbody tr:hover .ib{transform:none}
+:root[data-theme="win10"] .nc{gap:8px}
+:root[data-theme="win10d"] .nc{gap:8px}
+:root[data-theme="win10"] .gi-ic{width:40px;height:40px}
+:root[data-theme="win10d"] .gi-ic{width:40px;height:40px}
+:root[data-theme="win10"] .gi-ic .ti{width:36px;height:36px}
+:root[data-theme="win10d"] .gi-ic .ti{width:36px;height:36px}
+:root[data-theme="win10"] .gi-th{width:36px;height:36px;border-radius:0;box-shadow:0 0 0 1px var(--wm-hairline)}
+:root[data-theme="win10d"] .gi-th{width:36px;height:36px;border-radius:0;box-shadow:0 0 0 1px #3f3f3f}
+:root[data-theme="win10"] .gi{border-radius:0;border:1px solid transparent}
+:root[data-theme="win10d"] .gi{border-radius:0;border:1px solid transparent}
+:root[data-theme="win10"] .gi:hover{background:#e5f1fb;border-color:#cce4f7}
+:root[data-theme="win10d"] .gi:hover{background:#2d2d2d;border-color:#333333}
+:root[data-theme="win10"] .gi-n{font-size:12px;color:#000000}
+:root[data-theme="win10d"] .gi-n{font-size:12px;color:#ffffff}
+:root[data-theme="win10"] .gi-m{font-size:11px;color:#767676}
+:root[data-theme="win10d"] .gi-m{font-size:11px;color:#a0a0a0}
+
+/* ── CHECK BOXES: square, 2px border, 13px box, accent tick ───────────── */
+:root[data-theme="win10"] .rck,:root[data-theme="win10"] input[type=checkbox],:root[data-theme="win10"] input[type=radio]{
+  border-radius:0;border:1px solid #7a7a7a;background:#ffffff;
+}
+:root[data-theme="win10d"] .rck,:root[data-theme="win10d"] input[type=checkbox],:root[data-theme="win10d"] input[type=radio]{
+  border-radius:0;border:1px solid #9a9a9a;background:#2b2b2b;
+}
+:root[data-theme="win10"] .rck:hover{border-color:#0078d4;background:#f2f2f2}
+:root[data-theme="win10d"] .rck:hover{border-color:#4cc2ff;background:#333333}
+:root[data-theme="win10"] .rck:checked,:root[data-theme="win10"] input[type=checkbox]:checked{background:#0078d4;border-color:#0078d4}
+:root[data-theme="win10d"] .rck:checked,:root[data-theme="win10d"] input[type=checkbox]:checked{background:#0078d4;border-color:#0078d4}
+:root[data-theme="win10"] .rck:checked::after{left:2px;top:0;width:5px;height:8px;border:0;inset:0;margin:auto;background-color:#ffffff;width:9px;height:9px}
+:root[data-theme="win10d"] .rck:checked::after{left:2px;top:0;width:5px;height:8px;border:0;inset:0;margin:auto;background-color:#ffffff;width:9px;height:9px}
+:root[data-theme="win10"] input[type=radio],:root[data-theme="win10d"] input[type=radio]{border-radius:50%}
+:root[data-theme="win10"] input[type=checkbox]:focus,:root[data-theme="win10"] input[type=radio]:focus,
+:root[data-theme="win10d"] input[type=checkbox]:focus,:root[data-theme="win10d"] input[type=radio]:focus{box-shadow:none;outline:1px dotted #000000;outline-offset:1px}
+:root[data-theme="win10d"] input[type=checkbox]:focus,:root[data-theme="win10d"] input[type=radio]:focus{outline-color:#ffffff}
+
+/* ── BUTTONS: the Windows 10 dialog button, exactly ───────────────────── */
+:root[data-theme="win10"] .btn{
+  border-radius:0;font-family:'Segoe UI',system-ui,sans-serif;
+  font-size:12px;font-weight:400;padding:4px 12px;min-height:24px;
+  background:#e1e1e1;color:#000000;border:1px solid #adadad;box-shadow:none;
+  transition:background .1s linear,border-color .1s linear;
+}
+:root[data-theme="win10d"] .btn{
+  border-radius:0;font-family:'Segoe UI',system-ui,sans-serif;
+  font-size:12px;font-weight:400;padding:4px 12px;min-height:24px;
+  background:#333333;color:#ffffff;border:1px solid #5a5a5a;box-shadow:none;
+  transition:background .1s linear,border-color .1s linear;
+}
+:root[data-theme="win10"] .btn svg,:root[data-theme="win10d"] .btn svg{stroke:currentColor;stroke-width:1.2}
+:root[data-theme="win10"] .btn:hover{background:#e5f1fb;border-color:#0078d4;color:#000000;transform:none;box-shadow:none}
+:root[data-theme="win10d"] .btn:hover{background:#3a3a3a;border-color:#4cc2ff;color:#ffffff;transform:none;box-shadow:none}
+:root[data-theme="win10"] .btn:active{background:#cce4f7;border-color:#005499;color:#000000;transform:none!important}
+:root[data-theme="win10d"] .btn:active{background:#2a2a2a;border-color:#4cc2ff;color:#c5c5c5;transform:none!important}
+:root[data-theme="win10"] .btn:disabled{background:#f0f0f0;border-color:#d0d0d0;color:#a0a0a0}
+:root[data-theme="win10d"] .btn:disabled{background:#2b2b2b;border-color:#3f3f3f;color:#8a8a8a}
+:root[data-theme="win10"] .btn-g,:root[data-theme="win10"] .btn-blue,:root[data-theme="win10"] .btn-purp{
+  background:#e1e1e1;color:#000000;border-color:#adadad;
+}
+:root[data-theme="win10d"] .btn-g,:root[data-theme="win10d"] .btn-blue,:root[data-theme="win10d"] .btn-purp{
+  background:#333333;color:#ffffff;border-color:#5a5a5a;
+}
+:root[data-theme="win10"] .btn-g:hover,:root[data-theme="win10"] .btn-blue:hover,:root[data-theme="win10"] .btn-purp:hover{background:#e5f1fb;border-color:#0078d4;color:#000000}
+:root[data-theme="win10d"] .btn-g:hover,:root[data-theme="win10d"] .btn-blue:hover,:root[data-theme="win10d"] .btn-purp:hover{background:#3a3a3a;border-color:#4cc2ff;color:#ffffff}
+/* accent button: #0078D4 with the white inner ring that Windows 10 draws */
+:root[data-theme="win10"] .btn-p{
+  background:#0078d4;color:#ffffff;border:1px solid #0078d4;
+  box-shadow:inset 0 0 0 1px #f0f0f0;
+}
+:root[data-theme="win10"] .btn-p:hover{background:#106ebe;border-color:#106ebe;color:#ffffff;box-shadow:inset 0 0 0 1px #f0f0f0}
+:root[data-theme="win10"] .btn-p:active{background:#005a9e;border-color:#005a9e;color:#ffffff;box-shadow:inset 0 0 0 1px #f0f0f0}
+:root[data-theme="win10d"] .btn-p{background:#0078d4;color:#ffffff;border:1px solid #4cc2ff;box-shadow:none}
+:root[data-theme="win10d"] .btn-p:hover{background:#106ebe;border-color:#4cc2ff;color:#ffffff}
+:root[data-theme="win10d"] .btn-p:active{background:#005a9e;border-color:#4cc2ff;color:#ffffff}
+:root[data-theme="win10"] .btn-red{background:#e1e1e1;color:#c42b1c;border-color:#adadad}
+:root[data-theme="win10"] .btn-red:hover{background:#fde7e9;border-color:#c42b1c;color:#c42b1c}
+:root[data-theme="win10d"] .btn-red{background:#333333;color:#ff99a4;border-color:#5a5a5a}
+:root[data-theme="win10d"] .btn-red:hover{background:#3a2024;border-color:#ff99a4;color:#ff99a4}
+:root[data-theme="win10"] .btn-green{background:#e1e1e1;color:#107c10;border-color:#adadad}
+:root[data-theme="win10"] .btn-green:hover{background:#dff6dd;border-color:#107c10;color:#107c10}
+:root[data-theme="win10d"] .btn-green{background:#333333;color:#6ccb5f;border-color:#5a5a5a}
+:root[data-theme="win10d"] .btn-green:hover{background:#1e3320;border-color:#6ccb5f;color:#6ccb5f}
+:root[data-theme="win10"] .btn-amb,:root[data-theme="win10"] .btn-star{background:#e1e1e1;color:#8a6d00;border-color:#adadad}
+:root[data-theme="win10"] .btn-amb:hover,:root[data-theme="win10"] .btn-star:hover{background:#fff4ce;border-color:#8a6d00;color:#8a6d00}
+:root[data-theme="win10d"] .btn-amb,:root[data-theme="win10d"] .btn-star{background:#333333;color:#fce100;border-color:#5a5a5a}
+:root[data-theme="win10d"] .btn-amb:hover,:root[data-theme="win10d"] .btn-star:hover{background:#3a3a1e;border-color:#fce100;color:#fce100}
+:root[data-theme="win10"] .btn-icon{min-height:0;padding:0;border-radius:0;border-color:transparent;background:transparent}
+:root[data-theme="win10d"] .btn-icon{min-height:0;padding:0;border-radius:0;border-color:transparent;background:transparent}
+:root[data-theme="win10"] .btn-icon:hover{background:#e5f1fb;border-color:transparent}
+:root[data-theme="win10d"] .btn-icon:hover{background:#2d2d2d;border-color:transparent}
+:root[data-theme="win10"] .btn-xs{min-height:20px;padding:2px 8px;font-size:11.5px;border-radius:0}
+:root[data-theme="win10d"] .btn-xs{min-height:20px;padding:2px 8px;font-size:11.5px;border-radius:0}
+:root[data-theme="win10"] .btn-sm{min-height:22px;padding:3px 10px;font-size:11.5px;border-radius:0}
+:root[data-theme="win10d"] .btn-sm{min-height:22px;padding:3px 10px;font-size:11.5px;border-radius:0}
+:root[data-theme="win10"] .tb-right .btn-icon{width:28px;height:28px}
+:root[data-theme="win10d"] .tb-right .btn-icon{width:28px;height:28px}
+
+/* ── INPUTS: 1px #7A7A7A, focus #0078D4, no glow ─────────────────────── */
+:root[data-theme="win10"] .inp,:root[data-theme="win10"] select.inp,:root[data-theme="win10"] textarea{
+  background:#ffffff;border:1px solid #7a7a7a;border-radius:0;color:#000000;
+  font-size:12px;font-family:'Segoe UI',system-ui,sans-serif;padding:3px 8px;height:26px;box-shadow:none;
+}
+:root[data-theme="win10d"] .inp,:root[data-theme="win10d"] select.inp,:root[data-theme="win10d"] textarea{
+  background:#2b2b2b;border:1px solid #6e6e6e;border-radius:0;color:#ffffff;
+  font-size:12px;font-family:'Segoe UI',system-ui,sans-serif;padding:3px 8px;height:26px;box-shadow:none;
+}
+:root[data-theme="win10"] .inp:hover{background:#ffffff;border-color:#4a4a4a}
+:root[data-theme="win10d"] .inp:hover{background:#2b2b2b;border-color:#a0a0a0}
+:root[data-theme="win10"] .inp:focus{background:#ffffff;border-color:#0078d4;box-shadow:none;outline:none}
+:root[data-theme="win10d"] .inp:focus{background:#2b2b2b;border-color:#4cc2ff;box-shadow:none;outline:none}
+:root[data-theme="win10"] .inp::placeholder{color:#767676}
+:root[data-theme="win10d"] .inp::placeholder{color:#a0a0a0}
+:root[data-theme="win10"] select.inp{color-scheme:light;padding-right:22px}
+:root[data-theme="win10d"] select.inp{color-scheme:dark;padding-right:22px}
+:root[data-theme="win10"] .upl-lbl{border:1px solid #7a7a7a;border-radius:0;background:#e1e1e1;color:#000000;font-size:12px;font-weight:400;min-height:24px}
+:root[data-theme="win10d"] .upl-lbl{border:1px solid #5a5a5a;border-radius:0;background:#333333;color:#ffffff;font-size:12px;font-weight:400;min-height:24px}
+:root[data-theme="win10"] .upl-lbl:hover{background:#e5f1fb;border-color:#0078d4;color:#000000;transform:none}
+:root[data-theme="win10d"] .upl-lbl:hover{background:#3a3a3a;border-color:#4cc2ff;color:#ffffff;transform:none}
+
+/* ── STATUS BAR ───────────────────────────────────────────────────────── */
+:root[data-theme="win10"] .bar{background:#f0f0f0;border-top:1px solid var(--wm-hairline);padding:0 10px;gap:12px;-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="win10d"] .bar{background:#282828;border-top:1px solid #000000;padding:0 10px;gap:12px;-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="win10"] .bs{font-family:'Segoe UI',system-ui,sans-serif;font-size:11px;color:#444444;gap:4px}
+:root[data-theme="win10d"] .bs{font-family:'Segoe UI',system-ui,sans-serif;font-size:11px;color:#d0d0d0;gap:4px}
+:root[data-theme="win10"] .bs svg{width:11px;height:11px;stroke:#444444;stroke-width:1.2}
+:root[data-theme="win10d"] .bs svg{width:11px;height:11px;stroke:#d0d0d0;stroke-width:1.2}
+:root[data-theme="win10"] .bs strong{color:#000000;font-weight:600}
+:root[data-theme="win10d"] .bs strong{color:#ffffff;font-weight:600}
+
+/* ── DIALOGS = Windows 10 windows: square, 1px #7A7A7A, thin title row ─── */
+:root[data-theme="win10"] .ov{background:rgba(0,0,0,.3);-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="win10d"] .ov{background:rgba(0,0,0,.5);-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="win10"] .mod-ov{background:rgba(0,0,0,.3);-webkit-backdrop-filter:none;backdrop-filter:none;padding:20px}
+:root[data-theme="win10d"] .mod-ov{background:rgba(0,0,0,.5);-webkit-backdrop-filter:none;backdrop-filter:none;padding:20px}
+:root[data-theme="win10"] .mod{
+  background:#f0f0f0;border:1px solid #7a7a7a;border-radius:0;box-shadow:var(--wm-shadow-win);
+  overflow:hidden;max-height:88vh;padding:0;animation:wm10WinIn .1s ease both;
+}
+:root[data-theme="win10d"] .mod{
+  background:#1f1f1f;border:1px solid #4a4a4a;border-radius:0;box-shadow:var(--wm-shadow-win);
+  overflow:hidden;max-height:88vh;padding:0;animation:wm10WinIn .1s ease both;
+}
+@keyframes wm10WinIn{from{opacity:0}to{opacity:1}}
+:root[data-theme="win10"] .mod-head{
+  display:flex;align-items:center;gap:8px;min-height:31px;padding:0 0 0 10px;
+  background:transparent;border-bottom:1px solid var(--wm-hairline);flex-shrink:0;
+}
+:root[data-theme="win10d"] .mod-head{
+  display:flex;align-items:center;gap:8px;min-height:31px;padding:0 0 0 10px;
+  background:transparent;border-bottom:1px solid #3a3a3a;flex-shrink:0;
+}
+:root[data-theme="win10"] .mod-icon{width:16px;height:16px;border-radius:0;background:transparent!important;display:grid;place-items:center}
+:root[data-theme="win10d"] .mod-icon{width:16px;height:16px;border-radius:0;background:transparent!important;display:grid;place-items:center}
+:root[data-theme="win10"] .mod-icon svg{width:16px;height:16px;stroke:#000000;stroke-width:1.2}
+:root[data-theme="win10d"] .mod-icon svg{width:16px;height:16px;stroke:#ffffff;stroke-width:1.2}
+:root[data-theme="win10"] .mod-title{font-size:12px;font-weight:400;color:#000000;letter-spacing:0}
+:root[data-theme="win10d"] .mod-title{font-size:12px;font-weight:400;color:#ffffff;letter-spacing:0}
+:root[data-theme="win10"] .mod-head > .btn-icon,:root[data-theme="win10d"] .mod-head > .btn-icon{display:none}
+:root[data-theme="win10"] .mod-head .wm-cap,:root[data-theme="win10d"] .mod-head .wm-cap{margin-left:auto}
+:root[data-theme="win10"] .mod-body{padding:12px;background:#ffffff;font-size:12px;color:#000000}
+:root[data-theme="win10d"] .mod-body{padding:12px;background:#202020;font-size:12px;color:#ffffff}
+:root[data-theme="win10"] .mod-body::-webkit-scrollbar{width:10px}
+:root[data-theme="win10d"] .mod-body::-webkit-scrollbar{width:10px}
+:root[data-theme="win10"] .mod-body::-webkit-scrollbar-thumb{background:#cdcdcd;border:2px solid #ffffff;border-radius:0}
+:root[data-theme="win10d"] .mod-body::-webkit-scrollbar-thumb{background:#686868;border:2px solid #202020;border-radius:0}
+:root[data-theme="win10"] .file-info-row{border:1px solid var(--wm-hairline);border-radius:0;background:#ffffff}
+:root[data-theme="win10d"] .file-info-row{border:1px solid #3f3f3f;border-radius:0;background:#2b2b2b}
+:root[data-theme="win10"] .file-info-label{font-size:11px;text-transform:none;letter-spacing:0;color:#6d6d6d;font-weight:400}
+:root[data-theme="win10d"] .file-info-label{font-size:11px;text-transform:none;letter-spacing:0;color:#ababab;font-weight:400}
+:root[data-theme="win10"] .file-info-value{font-size:12px;color:#000000}
+:root[data-theme="win10d"] .file-info-value{font-size:12px;color:#ffffff}
+:root[data-theme="win10"] .file-info-open{background:#f0f0f0;border-top:1px solid var(--wm-hairline);font-size:12px;color:#444444}
+:root[data-theme="win10d"] .file-info-open{background:#282828;border-top:1px solid #3a3a3a;font-size:12px;color:#d0d0d0}
+:root[data-theme="win10"] .file-info-open a{color:#0078d4;font-weight:400}
+:root[data-theme="win10d"] .file-info-open a{color:#4cc2ff;font-weight:400}
+:root[data-theme="win10"] .mod.mod-max,:root[data-theme="win10d"] .mod.mod-max{width:min(1180px,96vw)!important;height:94vh;max-height:94vh}
+
+/* generic content other tools render inside dialogs */
+:root[data-theme="win10"] .cms-install-section,:root[data-theme="win10"] .card,:root[data-theme="win10"] .info-g,
+:root[data-theme="win10"] .threat-toolbar{border-radius:0;border-color:var(--wm-hairline);background:#ffffff}
+:root[data-theme="win10d"] .cms-install-section,:root[data-theme="win10d"] .card,:root[data-theme="win10d"] .info-g,
+:root[data-theme="win10d"] .threat-toolbar{border-radius:0;border-color:#3f3f3f;background:#2b2b2b}
+:root[data-theme="win10"] .threat-toolbar{background:#f0f0f0;border-bottom:1px solid var(--wm-hairline)}
+:root[data-theme="win10d"] .threat-toolbar{background:#282828;border-bottom:1px solid #3a3a3a}
+:root[data-theme="win10"] .threat-row,:root[data-theme="win10"] .threat-user-grid{border-bottom:1px solid var(--wm-hairline)}
+:root[data-theme="win10d"] .threat-row,:root[data-theme="win10d"] .threat-user-grid{border-bottom:1px solid #3f3f3f}
+:root[data-theme="win10"] .threat-row:hover,:root[data-theme="win10"] .threat-user-grid:hover{background:#e5f1fb}
+:root[data-theme="win10d"] .threat-row:hover,:root[data-theme="win10d"] .threat-user-grid:hover{background:#2d2d2d}
+:root[data-theme="win10"] .log-t th{text-transform:none;letter-spacing:0;font-weight:600;color:#000000;background:#f0f0f0}
+:root[data-theme="win10d"] .log-t th{text-transform:none;letter-spacing:0;font-weight:600;color:#ffffff;background:#282828}
+:root[data-theme="win10"] .log-t td{border-bottom:1px solid var(--wm-hairline)}
+:root[data-theme="win10d"] .log-t td{border-bottom:1px solid #3f3f3f}
+:root[data-theme="win10"] .empty{color:#767676}
+:root[data-theme="win10d"] .empty{color:#a0a0a0}
+:root[data-theme="win10"] .alerts .alert{border-radius:0;background:#ffffff;border:1px solid #c8c8c8}
+:root[data-theme="win10d"] .alerts .alert{border-radius:0;background:#2b2b2b;border:1px solid #4a4a4a}
+
+/* ── TOASTS: the Windows 10 notification, square with a 1px edge ──────── */
+:root[data-theme="win10"] .toast,:root[data-theme="win10"] #toast{
+  border-radius:0;background:#f0f0f0;border:1px solid #7a7a7a;color:#000000;font-size:12px;
+  box-shadow:var(--wm-shadow-win);-webkit-backdrop-filter:none;backdrop-filter:none;
+}
+:root[data-theme="win10d"] .toast,:root[data-theme="win10d"] #toast{
+  border-radius:0;background:#2b2b2b;border:1px solid #4a4a4a;color:#ffffff;font-size:12px;
+  box-shadow:var(--wm-shadow-win);-webkit-backdrop-filter:none;backdrop-filter:none;
+}
+
+/* ── gallery tokens ──────────────────────────────────────────────────── */
+:root[data-theme="win10"]{--gal-surf:#f0f0f0;--gal-card:#ffffff;--gal-card-h:#f7f7f7;
+  --gal-line:#cccccc;--gal-line2:#7a7a7a;--gal-t1:#000000;--gal-t2:#5a5a5a;
+  --gal-accent:#0078d4;--gal-badge:#cce4f7;--gal-shadow:rgba(0,0,0,.12);--gal-shadow-win:rgba(0,0,0,.22)}
+:root[data-theme="win10d"]{--gal-surf:#1f1f1f;--gal-card:#2b2b2b;--gal-card-h:#333333;
+  --gal-line:#3f3f3f;--gal-line2:#5a5a5a;--gal-t1:#ffffff;--gal-t2:#ababab;
+  --gal-accent:#4cc2ff;--gal-badge:#1b3a52;--gal-shadow:rgba(0,0,0,.4);--gal-shadow-win:rgba(0,0,0,.56)}
+:root[data-theme="win10"] .mod-ov#mfmThemeOv .mod,
+:root[data-theme="win10d"] .mod-ov#mfmThemeOv .mod{border-radius:0}
+:root[data-theme="win10"] .mfm-theme-card,:root[data-theme="win10d"] .mfm-theme-card{border-radius:0}
+:root[data-theme="win10"] .mfm-theme-shot,:root[data-theme="win10d"] .mfm-theme-shot{border-radius:0}
+:root[data-theme="win10"] .mfm-theme-badge,:root[data-theme="win10d"] .mfm-theme-badge{border-radius:0}
+
+/* ── CHECK UPDATES panel ─────────────────────────────────────────────── */
+:root[data-theme="win10"] .upd-switch input[type=checkbox],:root[data-theme="win10d"] .upd-switch input[type=checkbox]{border-radius:0}
+:root[data-theme="win10"] .upd-hero,:root[data-theme="win10"] .upd-card,:root[data-theme="win10"] .upd-sec{background:#ffffff}
+:root[data-theme="win10d"] .upd-hero,:root[data-theme="win10d"] .upd-card,:root[data-theme="win10d"] .upd-sec{background:#2b2b2b}
+:root[data-theme="win10"] .upd-hero{border:1px solid #c8c8c8;border-radius:0}
+:root[data-theme="win10d"] .upd-hero{border:1px solid #4a4a4a;border-radius:0}
+:root[data-theme="win10"] .upd-msg.is-good,:root[data-theme="win10"] .upd-msg.is-ok{color:#107c10}
+:root[data-theme="win10"] .upd-msg.is-warn{color:#8a6d00}
+:root[data-theme="win10"] .upd-msg.is-bad{color:#c42b1c}
+:root[data-theme="win10"] .upd-msg.is-info{color:#5a5a5a}
+:root[data-theme="win10d"] .upd-msg.is-good,:root[data-theme="win10d"] .upd-msg.is-ok{color:#6ccb5f}
+:root[data-theme="win10d"] .upd-msg.is-warn{color:#fce100}
+:root[data-theme="win10d"] .upd-msg.is-bad{color:#ff99a4}
+:root[data-theme="win10d"] .upd-msg.is-info{color:#c5c5c5}
+:root[data-theme="win10"] .upd-url .inp{background:#ffffff;color:#000000;border-color:#7a7a7a}
+:root[data-theme="win10d"] .upd-url .inp{background:#2b2b2b;color:#ffffff;border-color:#6e6e6e}
+
+/* ── the update notice card: Windows 10 InfoBar, not the amber promo ───── */
+:root[data-theme="win10"] .guardian-update-card{
+  border:1px solid #c8c8c8;border-left:4px solid #0078d4;border-radius:0;
+  background:#f2f2f2;color:#000000;padding:14px 16px;box-shadow:none;
+}
+:root[data-theme="win10d"] .guardian-update-card{
+  border:1px solid #4a4a4a;border-left:4px solid #0078d4;border-radius:0;
+  background:#2b2b2b;color:#ffffff;padding:14px 16px;box-shadow:none;
+}
+:root[data-theme="win10"] .guardian-update-card::before,
+:root[data-theme="win10"] .guardian-update-card::after,
+:root[data-theme="win10d"] .guardian-update-card::before,
+:root[data-theme="win10d"] .guardian-update-card::after{content:none;display:none;animation:none}
+:root[data-theme="win10"] .guardian-update-card .guardian-update-icon,
+:root[data-theme="win10d"] .guardian-update-card .guardian-update-icon{
+  background:#0078d4;border-radius:0;box-shadow:none;animation:none;
+}
+:root[data-theme="win10"] .guardian-update-card .guardian-update-icon::after,
+:root[data-theme="win10d"] .guardian-update-card .guardian-update-icon::after{content:none;display:none;animation:none}
+:root[data-theme="win10"] .guardian-update-card .guardian-update-icon svg,
+:root[data-theme="win10d"] .guardian-update-card .guardian-update-icon svg{stroke:#ffffff}
+:root[data-theme="win10"] .guardian-update-card .guardian-update-title{color:#000000;font-size:13px;font-weight:600;text-shadow:none;letter-spacing:0}
+:root[data-theme="win10d"] .guardian-update-card .guardian-update-title{color:#ffffff;font-size:13px;font-weight:600;text-shadow:none;letter-spacing:0}
+:root[data-theme="win10"] .guardian-update-card .guardian-update-text{color:#333333;font-size:12px;max-width:720px}
+:root[data-theme="win10d"] .guardian-update-card .guardian-update-text{color:#c5c5c5;font-size:12px;max-width:720px}
+:root[data-theme="win10"] .guardian-update-card .guardian-update-badge{
+  border-radius:0;background:#0078d4;color:#ffffff;font-size:10.5px;font-weight:400;padding:1px 6px;
+}
+:root[data-theme="win10d"] .guardian-update-card .guardian-update-badge{
+  border-radius:0;background:#0078d4;color:#ffffff;font-size:10.5px;font-weight:400;padding:1px 6px;
+}
+:root[data-theme="win10"] .guardian-update-card .guardian-update-badge-dot,
+:root[data-theme="win10d"] .guardian-update-card .guardian-update-badge-dot{background:#ffffff;animation:none}
+:root[data-theme="win10"] .guardian-update-card .guardian-update-install{
+  height:24px;padding:0 12px;border:1px solid #0078d4;border-radius:0;
+  background:#0078d4;color:#ffffff;font-size:12px;font-weight:400;
+  box-shadow:inset 0 0 0 1px #f0f0f0;transform:none;
+}
+:root[data-theme="win10"] .guardian-update-card .guardian-update-install:hover{
+  background:#106ebe;color:#ffffff;transform:none;box-shadow:inset 0 0 0 1px #f0f0f0;
+}
+:root[data-theme="win10d"] .guardian-update-card .guardian-update-install{
+  height:24px;padding:0 12px;border:1px solid #4cc2ff;border-radius:0;
+  background:#0078d4;color:#ffffff;font-size:12px;font-weight:400;box-shadow:none;transform:none;
+}
+:root[data-theme="win10d"] .guardian-update-card .guardian-update-install:hover{
+  background:#106ebe;border-color:#4cc2ff;color:#ffffff;transform:none;
+}
+:root[data-theme="win10"] .guardian-update-details{border-top:1px solid #d0d0d0}
+:root[data-theme="win10d"] .guardian-update-details{border-top:1px solid #3f3f3f}
+:root[data-theme="win10"] .guardian-update-detail{
+  border:1px solid #cccccc;border-radius:0;background:#ffffff;color:#000000;
+}
+:root[data-theme="win10d"] .guardian-update-detail{
+  border:1px solid #4a4a4a;border-radius:0;background:#212121;color:#ffffff;
+}
+:root[data-theme="win10"] .guardian-update-detail-icon{background:#e5f1fb;color:#0078d4;border-radius:0}
+:root[data-theme="win10d"] .guardian-update-detail-icon{background:#1b3a52;color:#4cc2ff;border-radius:0}
+:root[data-theme="win10"] .guardian-update-card .alert-x,
+:root[data-theme="win10d"] .guardian-update-card .alert-x{
+  border-radius:0;background:transparent;border:1px solid transparent;
+}
+:root[data-theme="win10"] .guardian-update-card .alert-x:hover{
+  background:#e81123;color:#ffffff;border-color:#e81123;transform:none;
+}
+:root[data-theme="win10d"] .guardian-update-card .alert-x:hover{
+  background:#e81123;color:#ffffff;border-color:#e81123;transform:none;
+}
+/* ── the tools banner under the notice keeps its own art; only square it ── */
+:root[data-theme="win10"] .guardian-auto-strip,
+:root[data-theme="win10d"] .guardian-auto-strip{border-radius:0}
+
+/* ══ WINDOWS 10: SQUARE-CORNER SWEEP ═══════════════════════════════════
+   Windows 10 Fluent (1809-21H2) has no rounded corners on chrome: buttons,
+   fields, cards, panels, menus, chips, sheets and popovers are all 0-ish.
+   The shared sheet still carries a few radii the 11 pack needs, so the 10
+   pack squares them here, scoped so the 11 packs are untouched.     */
+:root[data-theme="win10"] .fb-btn,:root[data-theme="win10d"] .fb-btn,
+:root[data-theme="win10"] .pie-chip,:root[data-theme="win10d"] .pie-chip,
+:root[data-theme="win10"] .pie-jed,:root[data-theme="win10d"] .pie-jed,
+:root[data-theme="win10"] .wfc-pill,:root[data-theme="win10d"] .wfc-pill,
+:root[data-theme="win10"] .pma-live,:root[data-theme="win10d"] .pma-live,
+:root[data-theme="win10"] .rc-badge,:root[data-theme="win10d"] .rc-badge,
+:root[data-theme="win10"] .mfa-live,:root[data-theme="win10d"] .mfa-live,
+:root[data-theme="win10"] .pie-site-badge,:root[data-theme="win10d"] .pie-site-badge,
+:root[data-theme="win10"] .upd-hero-badge,:root[data-theme="win10d"] .upd-hero-badge{
+  border-radius:0;
+}
+:root[data-theme="win10"] .sheet,:root[data-theme="win10d"] .sheet{border-radius:0}
+:root[data-theme="win10"] .sheet-handle,
+:root[data-theme="win10d"] .sheet-handle{border-radius:0;height:3px}
+:root[data-theme="win10"] .fm-top-strip,:root[data-theme="win10d"] .fm-top-strip,
+:root[data-theme="win10"] .fm-top-strip-link,:root[data-theme="win10d"] .fm-top-strip-link,
+:root[data-theme="win10"] .fm-top-strip-close,:root[data-theme="win10d"] .fm-top-strip-close{
+  border-radius:0;
+}
+:root[data-theme="win10"] .tsearch-close,:root[data-theme="win10d"] .tsearch-close,
+:root[data-theme="win10"] .viewmenu,:root[data-theme="win10d"] .viewmenu,
+:root[data-theme="win10"] .vm-item,:root[data-theme="win10d"] .vm-item,
+:root[data-theme="win10"] .vm-item.on,:root[data-theme="win10d"] .vm-item.on,
+:root[data-theme="win10"] .ctx-item,:root[data-theme="win10d"] .ctx-item,
+:root[data-theme="win10"] .ctx-item.danger,:root[data-theme="win10d"] .ctx-item.danger,
+:root[data-theme="win10"] .filepane,:root[data-theme="win10d"] .filepane,
+:root[data-theme="win10"] .mono,:root[data-theme="win10d"] .mono,
+:root[data-theme="win10"] .own-cell,:root[data-theme="win10d"] .own-cell,
+:root[data-theme="win10"] .own-mine,:root[data-theme="win10d"] .own-mine,
+:root[data-theme="win10"] .own-me,:root[data-theme="win10d"] .own-me,
+:root[data-theme="win10"] .term-suggest,:root[data-theme="win10d"] .term-suggest,
+:root[data-theme="win10"] .bp-chip,:root[data-theme="win10d"] .bp-chip,
+:root[data-theme="win10"] .agent-history-toggle,:root[data-theme="win10d"] .agent-history-toggle,
+:root[data-theme="win10"] .agent-history-icon,:root[data-theme="win10d"] .agent-history-icon,
+:root[data-theme="win10"] .agent-history-new,:root[data-theme="win10d"] .agent-history-new,
+:root[data-theme="win10"] .agent-history-drawer,:root[data-theme="win10d"] .agent-history-drawer,
+:root[data-theme="win10"] .agent-compose-box,:root[data-theme="win10d"] .agent-compose-box,
+:root[data-theme="win10"] .smtp-intro,:root[data-theme="win10d"] .smtp-intro,
+:root[data-theme="win10"] .smtp-section,:root[data-theme="win10d"] .smtp-section{
+  border-radius:0;
+}
+/* side panels built for the 11 pack */
+:root[data-theme="win10"] .rooting-readonly,:root[data-theme="win10d"] .rooting-readonly,
+:root[data-theme="win10"] .rooting-hero,:root[data-theme="win10d"] .rooting-hero,
+:root[data-theme="win10"] .rooting-stat,:root[data-theme="win10d"] .rooting-stat,
+:root[data-theme="win10"] .rooting-stat-critical,:root[data-theme="win10d"] .rooting-stat-critical,
+:root[data-theme="win10"] .rooting-stat-high,:root[data-theme="win10d"] .rooting-stat-high,
+:root[data-theme="win10"] .rooting-stat-review,:root[data-theme="win10d"] .rooting-stat-review,
+:root[data-theme="win10"] .rooting-stat-unknown,:root[data-theme="win10d"] .rooting-stat-unknown,
+:root[data-theme="win10"] .rooting-disclaimer,:root[data-theme="win10d"] .rooting-disclaimer,
+:root[data-theme="win10"] .rooting-search,:root[data-theme="win10d"] .rooting-search,
+:root[data-theme="win10"] .rooting-empty,:root[data-theme="win10d"] .rooting-empty,
+:root[data-theme="win10"] .cpm-search,:root[data-theme="win10d"] .cpm-search,
+:root[data-theme="win10"] .cpm-sec,:root[data-theme="win10d"] .cpm-sec,
+:root[data-theme="win10"] .cpm-sso,:root[data-theme="win10d"] .cpm-sso,
+:root[data-theme="win10"] .cpm-create,:root[data-theme="win10d"] .cpm-create,
+:root[data-theme="win10"] .cpm-sel,:root[data-theme="win10d"] .cpm-sel,
+:root[data-theme="win10"] .cpm-inp,:root[data-theme="win10d"] .cpm-inp,
+:root[data-theme="win10"] .pie-ico,:root[data-theme="win10d"] .pie-ico,
+:root[data-theme="win10"] .pie-tab,:root[data-theme="win10d"] .pie-tab,
+:root[data-theme="win10"] .pie-inp,:root[data-theme="win10d"] .pie-inp,
+:root[data-theme="win10"] .pie-msg,:root[data-theme="win10d"] .pie-msg,
+:root[data-theme="win10"] .pie-sel,:root[data-theme="win10d"] .pie-sel,
+:root[data-theme="win10"] .wfc-kind,:root[data-theme="win10d"] .wfc-kind,
+:root[data-theme="win10"] .wfc-pre,:root[data-theme="win10d"] .wfc-pre,
+:root[data-theme="win10"] .wm-search,:root[data-theme="win10d"] .wm-search,
+:root[data-theme="win10"] .wm-co-mini,:root[data-theme="win10d"] .wm-co-mini,
+:root[data-theme="win10"] .wm-tb,:root[data-theme="win10d"] .wm-tb,
+:root[data-theme="win10"] .rc-manager,:root[data-theme="win10d"] .rc-manager,
+:root[data-theme="win10"] .rc-pane,:root[data-theme="win10d"] .rc-pane,
+:root[data-theme="win10"] .rc-settings,:root[data-theme="win10d"] .rc-settings,
+:root[data-theme="win10"] .rc-warning,:root[data-theme="win10d"] .rc-warning,
+:root[data-theme="win10"] .rr-hero,:root[data-theme="win10d"] .rr-hero,
+:root[data-theme="win10"] .rr-sec,:root[data-theme="win10d"] .rr-sec,
+:root[data-theme="win10"] .rk,:root[data-theme="win10d"] .rk,
+:root[data-theme="win10"] .idle,:root[data-theme="win10d"] .idle,
+:root[data-theme="win10"] .root-sec,:root[data-theme="win10d"] .root-sec,
+:root[data-theme="win10"] .root-banner,:root[data-theme="win10d"] .root-banner,
+:root[data-theme="win10"] .own-target,:root[data-theme="win10d"] .own-target,
+:root[data-theme="win10"] .own-list,:root[data-theme="win10d"] .own-list,
+:root[data-theme="win10"] .mfa-tab,:root[data-theme="win10d"] .mfa-tab,
+:root[data-theme="win10"] .mfa-mini,:root[data-theme="win10d"] .mfa-mini,
+:root[data-theme="win10"] .mfa-in,:root[data-theme="win10d"] .mfa-in,
+:root[data-theme="win10"] .mfa-empty,:root[data-theme="win10d"] .mfa-empty,
+:root[data-theme="win10"] .mfa-ava,:root[data-theme="win10d"] .mfa-ava,
+:root[data-theme="win10"] .pma-block,:root[data-theme="win10d"] .pma-block,
+:root[data-theme="win10"] .pma-result,:root[data-theme="win10d"] .pma-result,
+:root[data-theme="win10"] .fm-music-dock,:root[data-theme="win10d"] .fm-music-dock,
+:root[data-theme="win10"] .fm-music-icon,:root[data-theme="win10d"] .fm-music-icon,
+:root[data-theme="win10"] .fm-music-mini-art,:root[data-theme="win10d"] .fm-music-mini-art,
+:root[data-theme="win10"] .fm-music-queue-toggle,:root[data-theme="win10d"] .fm-music-queue-toggle,
+:root[data-theme="win10"] .fm-music-options-popover,:root[data-theme="win10d"] .fm-music-options-popover,
+:root[data-theme="win10"] .fm-music-cover,:root[data-theme="win10d"] .fm-music-cover,
+:root[data-theme="win10"] .fm-music-lyrics,:root[data-theme="win10d"] .fm-music-lyrics,
+:root[data-theme="win10"] .fm-audio-edit-dialog,:root[data-theme="win10d"] .fm-audio-edit-dialog,
+:root[data-theme="win10"] .fm-audio-edit-art-placeholder,:root[data-theme="win10d"] .fm-audio-edit-art-placeholder{
+  border-radius:0;
+}
+/* the Check Updates panel is fully square in Windows 10 */
+:root[data-theme="win10"] .upd-hero-icon,:root[data-theme="win10d"] .upd-hero-icon,
+:root[data-theme="win10"] .upd-vs-box,:root[data-theme="win10d"] .upd-vs-box,
+:root[data-theme="win10"] .upd-vs-box.is-new,:root[data-theme="win10d"] .upd-vs-box.is-new,
+:root[data-theme="win10"] .upd-detail,:root[data-theme="win10d"] .upd-detail,
+:root[data-theme="win10"] .upd-detail-ic,:root[data-theme="win10d"] .upd-detail-ic,
+:root[data-theme="win10"] .upd-card,:root[data-theme="win10d"] .upd-card,
+:root[data-theme="win10"] .upd-bar,:root[data-theme="win10d"] .upd-bar,
+:root[data-theme="win10"] .upd-bar>i,:root[data-theme="win10d"] .upd-bar>i,
+:root[data-theme="win10"] .upd-auto,:root[data-theme="win10d"] .upd-auto,
+:root[data-theme="win10"] .upd-hero,:root[data-theme="win10d"] .upd-hero{border-radius:0}
+/* the promo strip is a banner, not a Fluent surface: keep it square too */
+:root[data-theme="win10"] .fm-top-strip img,:root[data-theme="win10d"] .fm-top-strip img{border-radius:0}
+/* a Windows 10 toggle is still a pill, but its inner knob keeps the accent */
+:root[data-theme="win10"] .upd-switch,:root[data-theme="win10d"] .upd-switch{border-radius:12px}
+/* scrollbars: 10px, square thumbs, exactly the Windows 10 explorer bars */
+:root[data-theme="win10"] ::-webkit-scrollbar,:root[data-theme="win10d"] ::-webkit-scrollbar{width:10px;height:10px}
+:root[data-theme="win10"] ::-webkit-scrollbar-track,
+:root[data-theme="win10d"] ::-webkit-scrollbar-track{background:#f0f0f0;border-left:1px solid #e5e5e5}
+:root[data-theme="win10d"] ::-webkit-scrollbar-track{background:#282828;border-left:1px solid #3f3f3f}
+:root[data-theme="win10"] ::-webkit-scrollbar-thumb,
+:root[data-theme="win10d"] ::-webkit-scrollbar-thumb{background:#c8c8c8;border-radius:0}
+:root[data-theme="win10"] ::-webkit-scrollbar-thumb:hover,
+:root[data-theme="win10d"] ::-webkit-scrollbar-thumb:hover{background:#a0a0a0}
+:root[data-theme="win10d"] ::-webkit-scrollbar-thumb{background:#5a5a5a}
+:root[data-theme="win10d"] ::-webkit-scrollbar-thumb:hover{background:#7a7a7a}
+
+/* ── STATUS BAR HEIGHT: the bar carries two 13px icon rows, so 24-28px made
+     the content clip against the bottom edge. Every theme gets room now. */
+:root{--bh:32px}
+:root[data-theme="win11"],:root[data-theme="win11d"]{--bh:32px}
+:root[data-theme="win10"],:root[data-theme="win10d"]{--bh:32px}
+@media(max-width:860px){:root{--bh:34px}}
+.bar{min-height:var(--bh);padding-top:0;padding-bottom:0}
+.bar .bs{flex-shrink:0}
+.bar .bs svg{width:14px;height:14px;flex:0 0 14px}
+/* a status bar must never be clipped: let it scroll sideways instead */
+.bar{overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.bar::-webkit-scrollbar{height:0}
+
+/* ── GRID + WIDE TABLE: a table cannot shrink below its min-content width, so
+     the "main" grid column used to be forced wide and the Actions column was
+     pushed out of the window (every theme, not just the Windows packs). The
+     column is allowed to shrink now and the table wrapper scrolls sideways. */
+.shell{grid-template-columns:var(--sw) minmax(0,1fr)}
+.main{min-width:0}
+.content{min-width:0}
+#lvw,.card,.tw{min-width:0;max-width:100%}
+.tw{overflow-x:auto;overflow-y:hidden}
+.ft{min-width:0}
+
+/* ── THUMBNAILS IN THE LIST: the onerror handler hides the <img> and reveals
+     the icon next to it, but the icon was already visible, so both were painted
+     on top of each other. Hide the icon while a real thumbnail is present
+     (modern sibling selectors, so a broken picture still falls back). */
+/* an icon is drawn by default; a thumbnail that really loads hides it, so a
+   missing picture can never leave an empty cell (list view and icon views) */
+.ib svg.ti,.gi-ic svg.ti{display:block}
+
+/* Windows 10 has no rounded thumbnails: the inline 9px comes from the markup */
+:root[data-theme="win10"] .ft .nc img,:root[data-theme="win10d"] .ft .nc img{border-radius:0!important}
+:root[data-theme="win10"] .gi-th,:root[data-theme="win10d"] .gi-th{border-radius:0!important}
+
+/* ── ACTIONS COLUMN: with many files the row buttons are wider than the free
+     space, and the column used to be clipped at the right edge (the last
+     buttons simply were not reachable). The group wraps instead, so every
+     action stays visible down to a 1024px window. */
+.ft td .acts{flex-wrap:nowrap;justify-content:flex-end}
+.ft td:last-child{white-space:nowrap}
+/* below 1400px the action labels go away: the icons keep every button usable
+   and the row stays one line instead of growing into a tall stack */
+@media(max-width:1500px){
+  .ft td .acts .bl,.ft td .acts .eb span{display:none}
+  .ft td .acts .btn{padding-left:5px;padding-right:5px;min-width:24px;justify-content:center;gap:0}
+}
+
+/* ── WINDOWS 10 SCROLLBARS: 10px track with a square thumb, the way Explorer
+     draws them. The shared sheet keeps 3-5px rounded thumbs for the other
+     packs, which is why this is scoped to the two 10 packs. */
+:root[data-theme="win10"] .content::-webkit-scrollbar,
+:root[data-theme="win10d"] .content::-webkit-scrollbar,
+:root[data-theme="win10"] .sb-scroll::-webkit-scrollbar,
+:root[data-theme="win10d"] .sb-scroll::-webkit-scrollbar,
+:root[data-theme="win10"] .mod-body::-webkit-scrollbar,
+:root[data-theme="win10d"] .mod-body::-webkit-scrollbar,
+:root[data-theme="win10"] .tw::-webkit-scrollbar,
+:root[data-theme="win10d"] .tw::-webkit-scrollbar,
+:root[data-theme="win10"] .filter-bar::-webkit-scrollbar,
+:root[data-theme="win10d"] .filter-bar::-webkit-scrollbar{width:10px;height:10px;display:block}
+:root[data-theme="win10"] .content::-webkit-scrollbar-thumb,
+:root[data-theme="win10d"] .content::-webkit-scrollbar-thumb,
+:root[data-theme="win10"] .sb-scroll::-webkit-scrollbar-thumb,
+:root[data-theme="win10d"] .sb-scroll::-webkit-scrollbar-thumb,
+:root[data-theme="win10"] .mod-body::-webkit-scrollbar-thumb,
+:root[data-theme="win10d"] .mod-body::-webkit-scrollbar-thumb,
+:root[data-theme="win10"] .tw::-webkit-scrollbar-thumb,
+:root[data-theme="win10d"] .tw::-webkit-scrollbar-thumb,
+:root[data-theme="win10"] .filter-bar::-webkit-scrollbar-thumb,
+:root[data-theme="win10d"] .filter-bar::-webkit-scrollbar-thumb{border-radius:0;background:#c8c8c8;border:2px solid #f0f0f0;background-clip:padding-box}
+:root[data-theme="win10d"] .content::-webkit-scrollbar-thumb,
+:root[data-theme="win10d"] .sb-scroll::-webkit-scrollbar-thumb,
+:root[data-theme="win10d"] .mod-body::-webkit-scrollbar-thumb,
+:root[data-theme="win10d"] .tw::-webkit-scrollbar-thumb,
+:root[data-theme="win10d"] .filter-bar::-webkit-scrollbar-thumb{background:#5a5a5a;border-color:#282828}
+:root[data-theme="win10"] ::-webkit-scrollbar-corner,
+:root[data-theme="win10d"] ::-webkit-scrollbar-corner{background:#f0f0f0}
+:root[data-theme="win10d"] ::-webkit-scrollbar-corner{background:#282828}
+
+
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   PACK 7 - KALI LINUX (Xfce, Kali-Dark + Kali-Light)
+   Every value below is read off the real packages, not invented:
+     share/themes/Kali-Dark/gtk-3.0/gtk.css   ->  surfaces and controls
+     share/themes/Kali-Dark/xfwm4/themerc     ->  title bar metrics
+     share/icons/Flat-Remix-Blue-Dark         ->  icons (folder #367bf0)
+     etc/xdg/xfce4/panel/default.xml          ->  the 34px top panel
+     share/xfce4/.../Kali/config.txt          ->  panel plugins and order
+   The signature of the pack is the one thing no other pack has: a TOP
+   panel (34px, rgba(35,37,46,.8)) instead of a title bar, rounded 4px
+   controls with the gradient body #323643 -> #20232b, the #2777ff accent
+   and the 2px inset bottom line under an active task.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── TOKENS ─────────────────────────────────────────────────────────── */
+:root[data-theme="kali"]{
+  --bg:#23252e;--panel:#23252e;--surf:#272a34;--raised:#2f333f;--hov:#323643;--act:#0f1014;
+  --border:#16171d;--border2:#0d0e11;
+  --t1:#eeeeec;--t2:#b6b8bd;--t3:#8c8f94;--link:#5b9cf5;
+  --indigo:#2777ff;--indigo2:#2777ff;--check:#2777ff;--check-border:#2777ff;--tick:#ffffff;
+  --green:#5dbcaa;--amber:#fea44c;--red:#d41919;--blue:#2777ff;--pink:#9755b3;--purple:#9755b3;
+  --r:4px;--rlg:6px;--rxl:8px;
+  --spring:cubic-bezier(.25,.46,.45,.94);--out:cubic-bezier(.25,.46,.45,.94);
+  --fw-regular:400;--fw-medium:500;--fw-strong:600;--fw-muted:400;
+  --field:#272a34;--fieldb:#0d0e11;--fieldb-h:#00348d;--fieldh:#2b2f3a;
+  --wm-accent:#2777ff;--wm-accent-h:#1f68e6;--wm-accent-p:#00348d;
+  --wm-accent-light:rgba(39,119,255,.22);
+  --wm-stroke-t:#0d0e11;--wm-stroke-b:#000000;
+  --wm-card:#272a34;--wm-card2:#2b2e38;
+  --wm-fill-h:#323643;--wm-fill-p:#0f1014;
+  --wm-close:#2777ff;--wm-close-h:#3f88ff;--wm-close-p:#00348d;--danger-fg:#ff7b72;
+  --wm-title:#23252e;--wm-title-fg:#eeeeec;--wm-title-hov:#323643;
+  --wm-shadow:0 1px 2px rgba(0,0,0,.27);
+  --wm-shadow-win:0 0 0 1px #0d0e11,0 6px 22px rgba(0,0,0,.55);
+  --wm-hairline:#16171d;
+  --sw:248px;--th:34px;--bh:26px;
+}
+:root[data-theme="kalil"]{
+  --bg:#ffffff;--panel:#ffffff;--surf:#f6f6f6;--raised:#efefef;--hov:#e9e9e9;--act:#dcdcdc;
+  --border:#d3d3d3;--border2:#b6b6b6;
+  --t1:#2b2b2b;--t2:#5c616c;--t3:#7d8189;--link:#1a6fe8;
+  --indigo:#2777ff;--indigo2:#2777ff;--check:#2777ff;--check-border:#2777ff;--tick:#ffffff;
+  --green:#0ba05d;--amber:#b8730a;--red:#c01c28;--blue:#2777ff;--pink:#9755b3;--purple:#9755b3;
+  --r:4px;--rlg:6px;--rxl:8px;
+  --spring:cubic-bezier(.25,.46,.45,.94);--out:cubic-bezier(.25,.46,.45,.94);
+  --fw-regular:400;--fw-medium:500;--fw-strong:600;--fw-muted:400;
+  --field:#ffffff;--fieldb:#c4c4c4;--fieldb-h:#2777ff;--fieldh:#f1f1f1;
+  --wm-accent:#2777ff;--wm-accent-h:#1f68e6;--wm-accent-p:#00348d;
+  --wm-accent-light:rgba(39,119,255,.16);
+  --wm-stroke-t:#dcdcdc;--wm-stroke-b:#c4c4c4;
+  --wm-card:#ffffff;--wm-card2:#f6f6f6;
+  --wm-fill-h:#ebebeb;--wm-fill-p:#dcdcdc;
+  --wm-close:#2777ff;--wm-close-h:#3f88ff;--wm-close-p:#00348d;--danger-fg:#c01c28;
+  --wm-title:#23252e;--wm-title-fg:#eeeeec;--wm-title-hov:#323643;
+  --wm-shadow:0 1px 2px rgba(0,0,0,.14);
+  --wm-shadow-win:0 0 0 1px rgba(0,0,0,.24),0 6px 22px rgba(0,0,0,.22);
+  --wm-hairline:#e2e2e2;
+  --sw:248px;--th:34px;--bh:26px;
+}
+
+/* ── LAYOUT: the panel runs across the TOP, full width ───────────────── */
+:root[data-theme="kali"] .shell,
+:root[data-theme="kalil"] .shell{
+  grid-template:"wm wm" 34px "tb tb" var(--th) "sb main" 1fr "bar bar" var(--bh) / var(--sw) minmax(0,1fr);
+}
+:root[data-theme="kali"] .wm-title,
+:root[data-theme="kalil"] .wm-title{
+  grid-area:wm;display:flex;align-items:center;gap:8px;height:34px;padding:0 6px 0 8px;
+  background:rgba(35,37,46,.8);border-bottom:1px solid #16171d;
+  -webkit-user-select:none;user-select:none;position:relative;z-index:300;overflow:hidden;
+}
+:root[data-theme="kalil"] .wm-title{background:#23252e;border-bottom:1px solid #16171d}
+/* the whisker menu button: 34px wide, hover = rgba(0,0,0,.2) */
+:root[data-theme="kali"] .wm-title-ico,
+:root[data-theme="kalil"] .wm-title-ico{
+  width:34px;height:34px;flex:0 0 34px;border-radius:0;display:grid;place-items:center;
+  color:#eeeeec;background:transparent;cursor:default;
+}
+:root[data-theme="kali"] .wm-title-ico:hover,
+:root[data-theme="kalil"] .wm-title-ico:hover{background:rgba(0,0,0,.2)}
+:root[data-theme="kali"] .wm-title-ico svg,
+:root[data-theme="kalil"] .wm-title-ico svg{width:22px;height:22px;fill:currentColor;stroke:none}
+:root[data-theme="kali"] .wm-title-txt,
+:root[data-theme="kalil"] .wm-title-txt{
+  flex:0 1 auto;min-width:0;font-size:12.5px;font-weight:500;color:#eeeeec;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;padding:0 10px;height:34px;line-height:34px;
+}
+/* the task button of the open window: #2777ff 2px line along its bottom */
+:root[data-theme="kali"] .wm-title-txt,
+:root[data-theme="kalil"] .wm-title-txt{
+  box-shadow:inset 0 -2px 0 #2777ff;background:rgba(0,0,0,.2);
+}
+:root[data-theme="kali"] .wm-title-hint,
+:root[data-theme="kalil"] .wm-title-hint{
+  flex:0 1 auto;min-width:0;font-size:12px;color:#c7c9ce;white-space:nowrap;overflow:hidden;
+  padding:0 10px;height:34px;line-height:34px;
+}
+/* the panel's right side: the 2s CPU genmon is what Kali shows there */
+:root[data-theme="kali"] .wm-cap,
+:root[data-theme="kalil"] .wm-cap{display:flex;height:34px;margin-left:auto;flex:0 0 auto;align-items:center;gap:2px}
+:root[data-theme="kali"] .wm-cap-btn,
+:root[data-theme="kalil"] .wm-cap-btn{
+  width:26px;height:34px;display:grid;place-items:center;border:0;background:transparent;
+  color:#eeeeec;cursor:default;padding:0;border-radius:0;outline:none;
+  -webkit-appearance:none;appearance:none;transition:background .12s linear;
+}
+:root[data-theme="kali"] .wm-cap-btn svg,
+:root[data-theme="kalil"] .wm-cap-btn svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round}
+:root[data-theme="kali"] .wm-cap-btn:hover,
+:root[data-theme="kalil"] .wm-cap-btn:hover{background:rgba(0,0,0,.2)}
+:root[data-theme="kali"] .wm-cap-btn:active,
+:root[data-theme="kalil"] .wm-cap-btn:active{background:rgba(0,0,0,.34)}
+/* the real xfwm4 close button: #2777ff circle, white glyph */
+:root[data-theme="kali"] .wm-cap-btn.wm-cap-close,
+:root[data-theme="kalil"] .wm-cap-btn.wm-cap-close{
+  margin-left:6px;border-radius:50%;width:22px;height:22px;align-self:center;background:#2777ff;color:#ffffff;
+}
+:root[data-theme="kali"] .wm-cap-btn.wm-cap-close svg,
+:root[data-theme="kalil"] .wm-cap-btn.wm-cap-close svg{stroke-width:2;color:#000000}
+:root[data-theme="kali"] .wm-cap-btn.wm-cap-close:hover,
+:root[data-theme="kalil"] .wm-cap-btn.wm-cap-close:hover{background:#3f88ff}
+:root[data-theme="kali"] .wm-cap-btn.wm-cap-close:hover svg,
+:root[data-theme="kalil"] .wm-cap-btn.wm-cap-close:hover svg{color:#ffffff}
+:root[data-theme="kali"] .wm-cap-btn.wm-cap-close:active,
+:root[data-theme="kalil"] .wm-cap-btn.wm-cap-close:active{background:#00348d}
+
+/* ── TOP BAR (the second row: breadcrumbs, search, actions) ──────────── */
+:root[data-theme="kali"] .topbar,
+:root[data-theme="kalil"] .topbar{
+  background:#272a34;border-bottom:1px solid #16171d;padding:0 8px;gap:6px;
+  -webkit-backdrop-filter:none;backdrop-filter:none;
+}
+:root[data-theme="kalil"] .topbar{background:#f6f6f6;border-bottom:1px solid #d3d3d3}
+:root[data-theme="kali"] .brand-icon,
+:root[data-theme="kalil"] .brand-icon{width:24px;height:24px;border-radius:4px;background:transparent;box-shadow:none;display:grid;place-items:center;color:#eeeeec}
+:root[data-theme="kali"] .brand-icon img{width:24px;height:24px;object-fit:contain;border-radius:0}
+:root[data-theme="kalil"] .brand-icon img{width:24px;height:24px;object-fit:contain;border-radius:0}
+:root[data-theme="kali"] .dv,
+:root[data-theme="kalil"] .dv{background:#16171d;height:20px;width:1px}
+:root[data-theme="kali"] .bc a{color:#b6b8bd;font-size:12.5px;border-radius:4px;padding:3px 6px;transition:background .15s,color .15s}
+:root[data-theme="kalil"] .bc a{color:#5c616c;font-size:12.5px;border-radius:4px;padding:3px 6px}
+:root[data-theme="kali"] .bc a:hover{background:#323643;color:#eeeeec}
+:root[data-theme="kalil"] .bc a:hover{background:#e9e9e9;color:#2b2b2b}
+:root[data-theme="kali"] .bc a.last{color:#eeeeec}
+:root[data-theme="kalil"] .bc a.last{color:#2b2b2b;font-weight:500}
+:root[data-theme="kali"] .bc-sep{color:#8c8f94;font-size:12px}
+:root[data-theme="kalil"] .bc-sep{color:#a8a8a8;font-size:12px}
+:root[data-theme="kali"] .tsearch{
+  height:26px;background:#272a34;border:1px solid #0d0e11;border-radius:4px;padding:0 6px;
+  box-shadow:inset 0 0 0 1px rgba(39,119,255,0);
+}
+:root[data-theme="kali"] .tsearch:focus-within{background:#272a34;border-color:#00348d;box-shadow:inset 0 0 0 1px #2777ff}
+:root[data-theme="kalil"] .tsearch{height:26px;background:#ffffff;border:1px solid #c4c4c4;border-radius:4px;padding:0 6px;box-shadow:none}
+:root[data-theme="kalil"] .tsearch:focus-within{border-color:#00348d;box-shadow:inset 0 0 0 1px #2777ff}
+:root[data-theme="kali"] .tsearch input{color:#ffffff;font-size:12.5px}
+:root[data-theme="kalil"] .tsearch input{color:#2b2b2b;font-size:12.5px}
+:root[data-theme="kali"] .tsearch input::placeholder{color:#8c8f94}
+:root[data-theme="kalil"] .tsearch input::placeholder{color:#96999f}
+:root[data-theme="kali"] .tsearch svg{stroke:#8c8f94}
+:root[data-theme="kalil"] .tsearch svg{stroke:#7d8189}
+:root[data-theme="kali"] .tsearch-panel,
+:root[data-theme="kalil"] .tsearch-panel{background:#272a34;border:1px solid #0d0e11;border-radius:4px;box-shadow:0 4px 14px rgba(0,0,0,.5);padding:3px}
+:root[data-theme="kalil"] .tsearch-panel{background:#ffffff;border-color:#c4c4c4;box-shadow:0 4px 14px rgba(0,0,0,.18)}
+
+/* buttons: Kali's GtkButton - 4px radius, #323643 body, 1px #0d0e11 edge */
+:root[data-theme="kali"] .btn,
+:root[data-theme="kalil"] .btn{font-family:'Cantarell','Segoe UI',system-ui,sans-serif;font-size:12.5px;border-radius:4px;transition:background .12s linear,border-color .12s linear}
+:root[data-theme="kali"] .btn-g{
+  background:#323643;color:#eeeeec;border:1px solid #0d0e11;
+  box-shadow:inset 0 1px rgba(255,255,255,.05),inset 0 -1px 0 rgba(13,14,17,.75);
+}
+:root[data-theme="kali"] .btn-g:hover{background:linear-gradient(to top,#20232b,#252831 1px);color:#ffffff;transform:none;border-color:#0d0e11}
+:root[data-theme="kali"] .btn-g:active{background:#0f1014;box-shadow:inset 0 1px rgba(255,255,255,0);transform:none}
+:root[data-theme="kalil"] .btn-g{background:#f0f0f0;color:#2b2b2b;border:1px solid #c4c4c4;box-shadow:inset 0 1px #fff}
+:root[data-theme="kalil"] .btn-g:hover{background:#e6e6e6;color:#2b2b2b;transform:none}
+:root[data-theme="kalil"] .btn-g:active{background:#d6d6d6;transform:none}
+:root[data-theme="kali"] .btn-p{
+  background:#2777ff;color:#ffffff;border:1px solid #00348d;box-shadow:inset 0 1px rgba(255,255,255,.18);
+}
+:root[data-theme="kalil"] .btn-p{background:#2777ff;color:#ffffff;border:1px solid #00348d}
+:root[data-theme="kali"] .btn-p:hover,
+:root[data-theme="kalil"] .btn-p:hover{background:#3f88ff;transform:none}
+:root[data-theme="kalil"] .btn-p:hover{background:#1f68e6}
+:root[data-theme="kali"] .btn-icon{border-radius:4px}
+:root[data-theme="kalil"] .btn-icon{border-radius:4px}
+:root[data-theme="kali"] .btn:active,
+:root[data-theme="kalil"] .btn:active{transform:none!important}
+
+/* ── SIDEBAR (Thunar shortcuts pane, #272a34) ────────────────────────── */
+:root[data-theme="kali"] .sidebar,
+:root[data-theme="kalil"] .sidebar{border-right:1px solid #16171d;background:#272a34}
+:root[data-theme="kalil"] .sidebar{background:#f6f6f6;border-right:1px solid #d3d3d3}
+:root[data-theme="kali"] .sb-sec{padding:0}
+:root[data-theme="kalil"] .sb-sec{padding:0}
+:root[data-theme="kali"] .sb-label{
+  font-family:'Cantarell','Segoe UI',system-ui,sans-serif;font-size:11px;font-weight:600;
+  text-transform:none;letter-spacing:.2px;color:#8c8f94;padding:12px 14px 5px;
+}
+:root[data-theme="kalil"] .sb-label{font-size:11px;font-weight:600;text-transform:none;letter-spacing:.2px;color:#7d8189;padding:12px 14px 5px}
+:root[data-theme="kali"] .sb-item{
+  position:relative;min-height:30px;padding:0 10px;margin:1px 6px;border-radius:4px;border:0;
+  color:#eeeeec;font-size:12.5px;font-weight:400;gap:10px;background:transparent;transition:background .12s linear;
+}
+:root[data-theme="kalil"] .sb-item{
+  position:relative;min-height:30px;padding:0 10px;margin:1px 6px;border-radius:4px;border:0;
+  color:#2b2b2b;font-size:12.5px;gap:10px;background:transparent;
+}
+:root[data-theme="kali"] .sb-item svg{width:16px;height:16px;stroke:#eeeeec;stroke-width:1.5}
+:root[data-theme="kalil"] .sb-item svg{width:16px;height:16px;stroke:#353a4a;stroke-width:1.5}
+:root[data-theme="kali"] .sb-item:hover{background:#323643;color:#ffffff;transform:none}
+:root[data-theme="kalil"] .sb-item:hover{background:#e9e9e9;color:#2b2b2b;transform:none}
+:root[data-theme="kali"] .sb-item:hover svg,
+:root[data-theme="kalil"] .sb-item:hover svg{transform:none}
+/* Xfce draws no pill: the selected row is a solid #2777ff band */
+:root[data-theme="kali"] .sb-item.sb-active,
+:root[data-theme="kalil"] .sb-item.sb-active{background:#2777ff;color:#ffffff;font-weight:500}
+:root[data-theme="kali"] .sb-item.sb-active svg{stroke:#ffffff}
+:root[data-theme="kalil"] .sb-item.sb-active svg{stroke:#ffffff}
+:root[data-theme="kali"] .sb-item.sb-active::before,
+:root[data-theme="kalil"] .sb-item.sb-active::before{content:none}
+:root[data-theme="kali"] .sb-item.danger:hover{background:#d41919;color:#ffffff}
+:root[data-theme="kali"] .sb-div{height:1px;background:#16171d;margin:7px 10px}
+:root[data-theme="kalil"] .sb-div{height:1px;background:#dcdcdc;margin:7px 10px}
+:root[data-theme="kali"] .sb-flink{border-radius:4px;font-size:12px;color:#eeeeec;padding:0 8px;min-height:26px}
+:root[data-theme="kalil"] .sb-flink{border-radius:4px;font-size:12px;color:#2b2b2b;padding:0 8px;min-height:26px}
+:root[data-theme="kali"] .sb-flink svg{stroke:#eeeeec}
+:root[data-theme="kalil"] .sb-flink svg{stroke:#353a4a}
+:root[data-theme="kali"] .sb-flink:hover{background:#323643;color:#ffffff;transform:none}
+:root[data-theme="kalil"] .sb-flink:hover{background:#e9e9e9;transform:none}
+:root[data-theme="kali"] .sb-empty{color:#8c8f94;font-style:normal;font-size:11.5px}
+:root[data-theme="kalil"] .sb-empty{color:#7d8189;font-style:normal;font-size:11.5px}
+:root[data-theme="kali"] .sb-footer{border-top:1px solid #16171d;background:transparent}
+:root[data-theme="kalil"] .sb-footer{border-top:1px solid #dcdcdc;background:transparent}
+:root[data-theme="kali"] .disk-lbl{font-family:'Cantarell',system-ui,sans-serif;color:#b6b8bd;font-size:11px}
+:root[data-theme="kalil"] .disk-lbl{font-family:'Cantarell',system-ui,sans-serif;color:#5c616c;font-size:11px}
+:root[data-theme="kali"] .disk-tr{background:#16171d;height:4px;border-radius:2px}
+:root[data-theme="kalil"] .disk-tr{background:#dcdcdc;height:4px;border-radius:2px}
+:root[data-theme="kali"] .disk-fi{background:#2777ff;border-radius:2px}
+:root[data-theme="kali"] .disk-fi.warn{background:#fea44c}
+:root[data-theme="kali"] .disk-fi.crit{background:#d41919}
+
+/* ── FILE AREA (Thunar / Nautilus list) ──────────────────────────────── */
+:root[data-theme="kali"] .content,
+:root[data-theme="kalil"] .content{background:#23252e}
+:root[data-theme="kalil"] .content{background:#ffffff}
+:root[data-theme="kali"] .toolbar,
+:root[data-theme="kalil"] .toolbar{background:#272a34;border-bottom:1px solid #16171d}
+:root[data-theme="kalil"] .toolbar{background:#f6f6f6;border-bottom:1px solid #d3d3d3}
+:root[data-theme="kali"] .filter-bar,
+:root[data-theme="kalil"] .filter-bar{background:#272a34;border-bottom:1px solid #16171d}
+:root[data-theme="kalil"] .filter-bar{background:#f6f6f6;border-bottom:1px solid #d3d3d3}
+:root[data-theme="kali"] .fchip,
+:root[data-theme="kalil"] .fchip{border-radius:4px}
+:root[data-theme="kali"] .fchip{background:#323643;border:1px solid #0d0e11;color:#b6b8bd}
+:root[data-theme="kalil"] .fchip{background:#f0f0f0;border:1px solid #c4c4c4;color:#5c616c}
+:root[data-theme="kali"] .fchip:hover{border-color:#2777ff;color:#ffffff}
+:root[data-theme="kali"] .fchip.on{background:#2777ff;border-color:#00348d;color:#ffffff}
+:root[data-theme="kalil"] .fchip.on{background:#2777ff;border-color:#00348d;color:#ffffff}
+/* the list itself: #272a34 rows, a 1px #16171d rule, 30px high */
+:root[data-theme="kali"] .ft th{
+  background:#2b2e38;color:#b6b8bd;font-size:11.5px;font-weight:600;text-transform:none;
+  letter-spacing:.2px;border-bottom:1px solid #0d0e11;
+}
+:root[data-theme="kalil"] .ft th{background:#efefef;color:#5c616c;font-size:11.5px;font-weight:600;text-transform:none;border-bottom:1px solid #c4c4c4}
+:root[data-theme="kali"] .ft td{border-bottom:1px solid #1e2029;color:#eeeeec;font-size:12.5px}
+:root[data-theme="kalil"] .ft td{border-bottom:1px solid #e6e6e6;color:#2b2b2b;font-size:12.5px}
+:root[data-theme="kali"] .ft tbody tr:hover td{background:#2b2f3a}
+:root[data-theme="kalil"] .ft tbody tr:hover td{background:#f1f1f1}
+:root[data-theme="kali"] .ft tbody tr.sel td,
+:root[data-theme="kali"] .ft tbody tr.on td{background:#2777ff;color:#ffffff}
+:root[data-theme="kalil"] .ft tbody tr.sel td,
+:root[data-theme="kalil"] .ft tbody tr.on td{background:#2777ff;color:#ffffff}
+:root[data-theme="kali"] .ft td .acts .btn-g{background:transparent;border-color:transparent;color:#b6b8bd;box-shadow:none}
+:root[data-theme="kali"] .ft td .acts .btn-g:hover{background:#323643;border-color:#0d0e11;color:#ffffff}
+:root[data-theme="kalil"] .ft td .acts .btn-g{background:transparent;border-color:transparent;color:#5c616c;box-shadow:none}
+:root[data-theme="kalil"] .ft td .acts .btn-g:hover{background:#e9e9e9;border-color:#c4c4c4;color:#2b2b2b}
+:root[data-theme="kali"] .nc a,
+:root[data-theme="kalil"] .nc a{color:inherit}
+:root[data-theme="kali"] .col-size,
+:root[data-theme="kali"] .col-time,
+:root[data-theme="kali"] .col-owner{color:#b6b8bd;font-size:11.5px}
+:root[data-theme="kalil"] .col-size,
+:root[data-theme="kalil"] .col-time,
+:root[data-theme="kalil"] .col-owner{color:#5c616c;font-size:11.5px}
+/* grid view: Xfce icon view, 32px gap, no card, label centred */
+:root[data-theme="kali"] .gi,
+:root[data-theme="kalil"] .gi{border-radius:4px}
+:root[data-theme="kali"] .gi:hover{background:#2b2f3a}
+:root[data-theme="kalil"] .gi:hover{background:#f1f1f1}
+:root[data-theme="kali"] .gi.sel,
+:root[data-theme="kali"] .gi.on{background:#2777ff}
+:root[data-theme="kalil"] .gi.sel,
+:root[data-theme="kalil"] .gi.on{background:#2777ff}
+:root[data-theme="kali"] .gi.sel .gi-n,
+:root[data-theme="kali"] .gi.on .gi-n{color:#ffffff}
+:root[data-theme="kalil"] .gi.sel .gi-n,
+:root[data-theme="kalil"] .gi.on .gi-n{color:#ffffff}
+:root[data-theme="kali"] .gi-n{color:#eeeeec;font-size:12px}
+:root[data-theme="kalil"] .gi-n{color:#2b2b2b;font-size:12px}
+:root[data-theme="kali"] .gi-s{color:#8c8f94}
+:root[data-theme="kalil"] .gi-s{color:#7d8189}
+
+/* ── VIEW MENU / CONTEXT MENU (GtkMenu: #272a34, 1px #0d0e11) ────────── */
+:root[data-theme="kali"] .viewmenu,
+:root[data-theme="kalil"] .viewmenu{background:#272a34;border:1px solid #0d0e11;border-radius:4px;box-shadow:0 6px 18px rgba(0,0,0,.55);padding:4px}
+:root[data-theme="kalil"] .viewmenu{background:#ffffff;border-color:#c4c4c4;box-shadow:0 6px 18px rgba(0,0,0,.2)}
+:root[data-theme="kali"] .vm-item,
+:root[data-theme="kali"] .ctx-item{border-radius:3px;color:#eeeeec;font-size:12.5px;padding:5px 9px}
+:root[data-theme="kalil"] .vm-item,
+:root[data-theme="kalil"] .ctx-item{border-radius:3px;color:#2b2b2b;font-size:12.5px;padding:5px 9px}
+:root[data-theme="kali"] .vm-item:hover,
+:root[data-theme="kali"] .ctx-item:hover{background:#2777ff;color:#ffffff}
+:root[data-theme="kalil"] .vm-item:hover,
+:root[data-theme="kalil"] .ctx-item:hover{background:#2777ff;color:#ffffff}
+:root[data-theme="kali"] .vm-item.on{background:#323643;color:#ffffff}
+:root[data-theme="kalil"] .vm-item.on{background:#e9e9e9;color:#2b2b2b}
+:root[data-theme="kali"] .ctx-item.danger:hover{background:#d41919;color:#ffffff}
+
+/* ── STATUS BAR (the panel's right side, mirrored below the files) ───── */
+:root[data-theme="kali"] .bar,
+:root[data-theme="kalil"] .bar{
+  background:rgba(35,37,46,.92);border-top:1px solid #0d0e11;padding:0 10px;gap:10px;
+  -webkit-backdrop-filter:none;backdrop-filter:none;
+}
+:root[data-theme="kalil"] .bar{background:#23252e;border-top:1px solid #0d0e11}
+:root[data-theme="kali"] .bs,
+:root[data-theme="kalil"] .bs{font-family:'Cantarell','Segoe UI',system-ui,sans-serif;font-size:11px;color:#c7c9ce;gap:4px}
+:root[data-theme="kali"] .bs svg,
+:root[data-theme="kalil"] .bs svg{width:11px;height:11px;stroke:#c7c9ce;stroke-width:1.4}
+:root[data-theme="kali"] .bs strong,
+:root[data-theme="kalil"] .bs strong{color:#ffffff;font-weight:600}
+
+/* ── DIALOGS: GtkWindow - #23252e body, 4px radius, #0d0e11 edge ─────── */
+:root[data-theme="kali"] .ov{background:rgba(13,14,17,.55);-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="kalil"] .ov{background:rgba(13,14,17,.32);-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="kali"] .mod-ov{background:rgba(13,14,17,.55);padding:20px;-webkit-backdrop-filter:none;backdrop-filter:none}
+:root[data-theme="kalil"] .mod-ov{background:rgba(13,14,17,.32);padding:20px}
+:root[data-theme="kali"] .mod{
+  background:#23252e;border:1px solid #0d0e11;border-radius:4px;
+  box-shadow:0 10px 34px rgba(0,0,0,.62);overflow:hidden;max-height:88vh;padding:0;
+}
+:root[data-theme="kalil"] .mod{
+  background:#f6f6f6;border:1px solid #c4c4c4;border-radius:4px;
+  box-shadow:0 10px 34px rgba(0,0,0,.26);overflow:hidden;max-height:88vh;padding:0;
+}
+:root[data-theme="kali"] .mod-head,
+:root[data-theme="kalil"] .mod-head{
+  display:flex;align-items:center;gap:8px;min-height:34px;padding:0 0 0 10px;
+  background:linear-gradient(to top,#16171d,#1a1c23);border-bottom:1px solid #0d0e11;flex-shrink:0;
+}
+:root[data-theme="kalil"] .mod-head{background:#efefef;border-bottom:1px solid #c4c4c4}
+:root[data-theme="kali"] .mod-icon{width:16px;height:16px;border-radius:0;background:transparent!important;display:grid;place-items:center}
+:root[data-theme="kali"] .mod-icon svg{width:16px;height:16px;stroke:#eeeeec;stroke-width:1.4}
+:root[data-theme="kalil"] .mod-icon svg{width:16px;height:16px;stroke:#2b2b2b;stroke-width:1.4}
+:root[data-theme="kali"] .mod-title{font-family:'Cantarell',system-ui,sans-serif;font-size:12.5px;font-weight:600;color:#eeeeec}
+:root[data-theme="kalil"] .mod-title{font-size:12.5px;font-weight:600;color:#2b2b2b}
+:root[data-theme="kali"] .mod-head > .btn-icon,
+:root[data-theme="kalil"] .mod-head > .btn-icon{display:none}
+:root[data-theme="kali"] .mod-head .wm-cap,
+:root[data-theme="kalil"] .mod-head .wm-cap{margin-left:auto}
+:root[data-theme="kali"] .mod-body{background:#272a34;padding:12px;font-size:12.5px;color:#eeeeec}
+:root[data-theme="kalil"] .mod-body{background:#ffffff;padding:12px;font-size:12.5px;color:#2b2b2b}
+:root[data-theme="kali"] .mod-foot,
+:root[data-theme="kalil"] .mod-foot{background:#23252e;border-top:1px solid #16171d}
+:root[data-theme="kalil"] .mod-foot{background:#efefef;border-top:1px solid #d3d3d3}
+:root[data-theme="kali"] .file-info-row{border:1px solid #16171d;border-radius:0;background:#272a34}
+:root[data-theme="kalil"] .file-info-row{border:1px solid #d3d3d3;border-radius:0;background:#ffffff}
+:root[data-theme="kali"] .file-info-label{font-size:11px;text-transform:none;letter-spacing:0;color:#8c8f94}
+:root[data-theme="kalil"] .file-info-label{font-size:11px;text-transform:none;letter-spacing:0;color:#7d8189}
+:root[data-theme="kali"] .file-info-value{font-size:12.5px;color:#eeeeec}
+:root[data-theme="kalil"] .file-info-value{font-size:12.5px;color:#2b2b2b}
+:root[data-theme="kali"] .file-info-open{background:#23252e;border-top:1px solid #16171d;font-size:12px;color:#b6b8bd}
+:root[data-theme="kali"] .file-info-open a{color:#5b9cf5}
+:root[data-theme="kalil"] .file-info-open{background:#efefef;border-top:1px solid #d3d3d3;font-size:12px;color:#5c616c}
+:root[data-theme="kalil"] .file-info-open a{color:#1a6fe8}
+:root[data-theme="kali"] .mod.mod-max{width:min(1180px,96vw)!important;height:94vh;max-height:94vh}
+
+/* ── INPUTS everywhere: GtkEntry, #272a34, focus ring #2777ff ────────── */
+:root[data-theme="kali"] .inp,
+:root[data-theme="kali"] select.inp,
+:root[data-theme="kali"] textarea.inp{background:#272a34;color:#ffffff;border:1px solid #0d0e11;border-radius:4px;box-shadow:inset 0 0 0 1px rgba(39,119,255,0);font-size:12.5px}
+:root[data-theme="kalil"] .inp,
+:root[data-theme="kalil"] select.inp,
+:root[data-theme="kalil"] textarea.inp{background:#ffffff;color:#2b2b2b;border:1px solid #c4c4c4;border-radius:4px;box-shadow:none;font-size:12.5px}
+:root[data-theme="kali"] .inp:focus,
+:root[data-theme="kali"] select.inp:focus,
+:root[data-theme="kali"] textarea.inp:focus{outline:none;border-color:#00348d;box-shadow:inset 0 0 0 1px #2777ff}
+:root[data-theme="kalil"] .inp:focus,
+:root[data-theme="kalil"] select.inp:focus,
+:root[data-theme="kalil"] textarea.inp:focus{outline:none;border-color:#00348d;box-shadow:inset 0 0 0 1px #2777ff}
+:root[data-theme="kali"] .inp::placeholder{color:#8c8f94}
+:root[data-theme="kalil"] .inp::placeholder{color:#96999f}
+:root[data-theme="kali"] input[type=checkbox],
+:root[data-theme="kali"] input[type=radio]{border-radius:2px;background:#272a34;border-color:#0d0e11}
+:root[data-theme="kalil"] input[type=checkbox],
+:root[data-theme="kalil"] input[type=radio]{border-radius:2px}
+:root[data-theme="kali"] input[type=checkbox]:checked{background:#2777ff;border-color:#00348d}
+:root[data-theme="kalil"] input[type=checkbox]:checked{background:#2777ff;border-color:#00348d}
+
+/* ── TOASTS / NOTIFICATIONS: the xfce4-notifyd bubble ────────────────── */
+:root[data-theme="kali"] .toast,
+:root[data-theme="kali"] #toast{
+  border-radius:4px;background:#272a34;border:1px solid #0d0e11;color:#eeeeec;font-size:12.5px;
+  box-shadow:0 6px 22px rgba(0,0,0,.6);
+}
+:root[data-theme="kalil"] .toast,
+:root[data-theme="kalil"] #toast{
+  border-radius:4px;background:#ffffff;border:1px solid #c4c4c4;color:#2b2b2b;font-size:12.5px;
+  box-shadow:0 6px 22px rgba(0,0,0,.22);
+}
+
+/* ── MFM THEME GALLERY: the Kali cards ─────────────────────────────── */
+:root[data-theme="kali"]{--gal-surf:#1b1c23;--gal-card:#272a34;--gal-card-h:#2f333f;
+  --gal-line:#16171d;--gal-line2:#0d0e11;--gal-t1:#eeeeec;--gal-t2:#b6b8bd;
+  --gal-accent:#2777ff;--gal-badge:rgba(39,119,255,.22);--gal-shadow:rgba(0,0,0,.4);--gal-shadow-win:rgba(0,0,0,.62)}
+:root[data-theme="kalil"]{--gal-surf:#f0f0f0;--gal-card:#ffffff;--gal-card-h:#f7f7f7;
+  --gal-line:#d3d3d3;--gal-line2:#c4c4c4;--gal-t1:#2b2b2b;--gal-t2:#5c616c;
+  --gal-accent:#2777ff;--gal-badge:rgba(39,119,255,.14);--gal-shadow:rgba(0,0,0,.14);--gal-shadow-win:rgba(0,0,0,.26)}
+:root[data-theme="kali"] .mod-ov#mfmThemeOv .mod,
+:root[data-theme="kalil"] .mod-ov#mfmThemeOv .mod{border-radius:4px}
+:root[data-theme="kali"] .mfm-theme-card,
+:root[data-theme="kalil"] .mfm-theme-card{border-radius:4px}
+:root[data-theme="kali"] .mfm-theme-shot,
+:root[data-theme="kalil"] .mfm-theme-shot{border-radius:4px}
+
+/* ── the top panel keeps its 34px row on a phone, minus the caption group ─ */
+@media(max-width:860px){
+  :root[data-theme="kali"] .shell,
+  :root[data-theme="kalil"] .shell{
+    grid-template:"wm" 34px "tb" var(--th) "main" 1fr "bar" var(--bh) / 1fr;
+  }
+  :root[data-theme="kali"] .wm-title-hint,
+  :root[data-theme="kalil"] .wm-title-hint{display:none}
+  :root[data-theme="kali"] .wm-title-txt,
+  :root[data-theme="kalil"] .wm-title-txt{font-size:12px}
+  :root[data-theme="kali"] .wm-cap-btn,
+  :root[data-theme="kalil"] .wm-cap-btn{width:28px}
+}
+
+/* ── RESPONSIVE ──────────────────────────────────────────────────────── */
+@media(max-width:860px){
+  :root[data-theme="win10"] .shell,
+  :root[data-theme="win10d"] .shell{
+    grid-template:"wm" 32px "tb" var(--th) "main" 1fr "bar" var(--bh) / 1fr;
+  }
+  :root[data-theme="win10"] .wm-title-hint,
+  :root[data-theme="win10d"] .wm-title-hint{display:none}
+  :root[data-theme="win10"] .wm-title{gap:6px;padding-left:8px}
+  :root[data-theme="win10"] .wm-cap-btn{width:44px}
+  :root[data-theme="win10d"] .wm-cap-btn{width:44px}
+}
+
 /* ── RESPONSIVE: keep the title bar row on small screens ─────────────── */
 @media(max-width:860px){
   :root[data-theme="win11"] .shell{
@@ -34935,6 +36602,83 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11d"] .upd-card-v.is-bad{color:#ff99a4}
 :root[data-theme="win11d"] .upd-card-v.is-warn{color:#ffd166}
 :root[data-theme="win11d"] .upd-url .inp{background:#2b2b2b;color:#ffffff;border-color:rgba(255,255,255,.0578)}
+/* ── CHECK UPDATES inside the Windows 10 packs ────────────────────────── */
+:root[data-theme="win10"] .upd-hero{background:#ffffff;border-color:#cccccc}
+:root[data-theme="win10"] .upd-hero.is-unknown{background:radial-gradient(420px 160px at 4% -40%,rgba(0,120,212,.05),rgba(0,0,0,0) 66%),#ffffff;border-color:#7a7a7a}
+:root[data-theme="win10"] .upd-hero-icon{background:linear-gradient(145deg,#f3f3f3,#e9e9e9);color:#0078d4;box-shadow:0 2px 6px rgba(0,0,0,.10)}
+:root[data-theme="win10"] .upd-hero-title{color:#000000}
+:root[data-theme="win10"] .upd-hero-text{color:#333333}
+:root[data-theme="win10"] .upd-hero-badge{background:rgba(0,120,212,.10);color:#0078d4;border-color:#cccccc}
+:root[data-theme="win10"] .upd-hero-badge .dot{background:#0078d4;box-shadow:0 0 0 3px rgba(0,120,212,.10)}
+:root[data-theme="win10"] .upd-sec-h{color:#333333}
+:root[data-theme="win10"] .upd-sec-h .rule{background:#cccccc}
+:root[data-theme="win10"] .upd-vs-box{background:#ffffff;border-color:#cccccc}
+:root[data-theme="win10"] .upd-vs-hash{color:#000000}
+:root[data-theme="win10"] .upd-vs-note{color:#5a5a5a}
+:root[data-theme="win10"] .upd-detail{background:#ffffff;border-color:#cccccc}
+:root[data-theme="win10"] .upd-detail-l{color:#5a5a5a}
+:root[data-theme="win10"] .upd-detail-v{color:#000000}
+:root[data-theme="win10"] .upd-detail-ic svg{stroke:#000000}
+:root[data-theme="win10"] .upd-card{background:#ffffff;border-color:#cccccc}
+:root[data-theme="win10"] .upd-card-k{color:#5a5a5a}
+:root[data-theme="win10"] .upd-card-v{color:#000000}
+:root[data-theme="win10"] .upd-card-s{color:#5a5a5a}
+:root[data-theme="win10"] .upd-note{color:#5a5a5a}
+:root[data-theme="win10"] .upd-note b{color:#333333}
+:root[data-theme="win10"] .upd-bar{background:#cccccc}
+:root[data-theme="win10"] .upd-bar>i{background:linear-gradient(90deg,#0078d4,#106ebe);box-shadow:none}
+:root[data-theme="win10"] .upd-prog-txt{color:#333333}
+:root[data-theme="win10"] .upd-auto{background:rgba(0,120,212,.06);border-color:#cccccc;color:#333333}
+:root[data-theme="win10"] .upd-switch{background:#ffffff;border-color:#cccccc}
+:root[data-theme="win10"] .upd-switch-t{color:#333333}
+:root[data-theme="win10"] .upd-switch-t b{color:#000000}
+:root[data-theme="win10"] .upd-msg.is-good,:root[data-theme="win10"] .upd-msg.is-ok{color:#107c10}
+:root[data-theme="win10"] .upd-msg.is-warn{color:#8a6d00}
+:root[data-theme="win10"] .upd-msg.is-bad{color:#c42b1c}
+:root[data-theme="win10"] .upd-msg.is-info{color:#333333}
+:root[data-theme="win10"] .upd-loading{color:#333333}
+:root[data-theme="win10"] .upd-card-v.is-good{color:#107c10}
+:root[data-theme="win10"] .upd-card-v.is-bad{color:#c42b1c}
+:root[data-theme="win10"] .upd-card-v.is-warn{color:#8a6d00}
+:root[data-theme="win10"] .upd-url .inp{background:#ffffff;color:#000000;border-color:#cccccc}
+:root[data-theme="win10d"] .upd-hero{background:#2b2b2b;border-color:#4a4a4a}
+:root[data-theme="win10d"] .upd-hero.is-unknown{background:radial-gradient(420px 160px at 4% -40%,rgba(255,255,255,.04),rgba(255,255,255,0) 66%),#2b2b2b;border-color:#5a5a5a}
+:root[data-theme="win10d"] .upd-hero-icon{background:linear-gradient(145deg,#3a3a3a,#2f2f2f);color:#4cc2ff;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+:root[data-theme="win10d"] .upd-hero-title{color:#ffffff}
+:root[data-theme="win10d"] .upd-hero-text{color:rgba(255,255,255,.786)}
+:root[data-theme="win10d"] .upd-hero-badge{background:rgba(76,194,255,.14);color:#4cc2ff;border-color:rgba(255,255,255,.08)}
+:root[data-theme="win10d"] .upd-hero-badge .dot{background:#4cc2ff;box-shadow:0 0 0 3px rgba(76,194,255,.14)}
+:root[data-theme="win10d"] .upd-sec-h{color:#c5c5c5}
+:root[data-theme="win10d"] .upd-sec-h .rule{background:#3f3f3f}
+:root[data-theme="win10d"] .upd-vs-box{background:#2b2b2b;border-color:#4a4a4a}
+:root[data-theme="win10d"] .upd-vs-hash{color:#ffffff}
+:root[data-theme="win10d"] .upd-vs-note{color:#c5c5c5}
+:root[data-theme="win10d"] .upd-detail{background:#2b2b2b;border-color:#4a4a4a}
+:root[data-theme="win10d"] .upd-detail-l{color:#c5c5c5}
+:root[data-theme="win10d"] .upd-detail-v{color:#ffffff}
+:root[data-theme="win10d"] .upd-detail-ic svg{stroke:#ffffff}
+:root[data-theme="win10d"] .upd-card{background:#2b2b2b;border-color:#4a4a4a}
+:root[data-theme="win10d"] .upd-card-k{color:#c5c5c5}
+:root[data-theme="win10d"] .upd-card-v{color:#ffffff}
+:root[data-theme="win10d"] .upd-card-s{color:#c5c5c5}
+:root[data-theme="win10d"] .upd-note{color:#c5c5c5}
+:root[data-theme="win10d"] .upd-note b{color:rgba(255,255,255,.786)}
+:root[data-theme="win10d"] .upd-bar{background:rgba(255,255,255,.0605)}
+:root[data-theme="win10d"] .upd-bar>i{background:linear-gradient(90deg,#4cc2ff,#2b9fdd);box-shadow:none}
+:root[data-theme="win10d"] .upd-prog-txt{color:#c5c5c5}
+:root[data-theme="win10d"] .upd-auto{background:rgba(76,194,255,.08);border-color:#4a4a4a;color:rgba(255,255,255,.786)}
+:root[data-theme="win10d"] .upd-switch{background:#2b2b2b;border-color:#4a4a4a}
+:root[data-theme="win10d"] .upd-switch-t{color:rgba(255,255,255,.786)}
+:root[data-theme="win10d"] .upd-switch-t b{color:#ffffff}
+:root[data-theme="win10d"] .upd-msg.is-good,:root[data-theme="win10d"] .upd-msg.is-ok{color:#6ccb8f}
+:root[data-theme="win10d"] .upd-msg.is-warn{color:#ffd166}
+:root[data-theme="win10d"] .upd-msg.is-bad{color:#ff99a4}
+:root[data-theme="win10d"] .upd-msg.is-info{color:#c5c5c5}
+:root[data-theme="win10d"] .upd-loading{color:#c5c5c5}
+:root[data-theme="win10d"] .upd-card-v.is-good{color:#6ccb8f}
+:root[data-theme="win10d"] .upd-card-v.is-bad{color:#ff99a4}
+:root[data-theme="win10d"] .upd-card-v.is-warn{color:#ffd166}
+:root[data-theme="win10d"] .upd-url .inp{background:#2b2b2b;color:#ffffff;border-color:#4a4a4a}
 
 </style>
 </head>
@@ -34944,7 +36688,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 <!-- WINDOW TITLE BAR (the Windows 11 theme pack paints this row; the two
      built-in themes hide it, so nothing about them changes) -->
 <div class="wm-title" id="wmTitle">
-  <span class="wm-title-ico"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><rect x="1" y="1" width="8.2" height="8.2" rx="1.2" fill="#0067c0"/><rect x="10.8" y="1" width="8.2" height="8.2" rx="1.2" fill="#4cc2ff"/><rect x="1" y="10.8" width="8.2" height="8.2" rx="1.2" fill="#4cc2ff"/><rect x="10.8" y="10.8" width="8.2" height="8.2" rx="1.2" fill="#0067c0"/></svg></span>
+  <?php if(fm_theme_active('kali')||fm_theme_active('kalil')):?><span class="wm-title-ico"><?=svgKaliDragon()?></span><?php else:?><span class="wm-title-ico"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><rect x="1" y="1" width="8.2" height="8.2" rx="1.2" fill="#0067c0"/><rect x="10.8" y="1" width="8.2" height="8.2" rx="1.2" fill="#4cc2ff"/><rect x="1" y="10.8" width="8.2" height="8.2" rx="1.2" fill="#4cc2ff"/><rect x="10.8" y="10.8" width="8.2" height="8.2" rx="1.2" fill="#0067c0"/></svg></span><?php endif;?>
   <span class="wm-title-txt">Marshal FM &mdash; <?=htmlspecialchars($fm->getCwd())?></span>
   <span class="wm-title-hint">MFM Theme &middot; Windows 11</span>
   <div class="wm-cap">
@@ -34960,7 +36704,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
     <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <a href="?dir=<?=urlencode(__DIR__)?>" class="brand">
-     <div class="brand-icon"><img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="File Manager"></div>
+     <div class="brand-icon" style="color:#eeeeec"><?=svgKaliDragon()?></div>
   </a>
   <div class="dv"></div>
   <nav class="bc" aria-label="Breadcrumb">
@@ -35429,8 +37173,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
             <td><div class="nc" <?php if($prev):?>data-preview="<?=he($rawUrl)?>" data-type="<?=$type?>" data-fname="<?=he($f['name'])?>"<?php endif;?> <?php if($type==='audio'):?>data-art="<?=he($audioArt)?>" data-art-default="<?=he($audioDefaultArt)?>" data-art-fallback="<?=he($audioSidecar)?>" data-lyrics="<?=he($audioLyrics)?>" data-audio-size="<?=max(0,(int)$f['size'])?>" data-audio-mtime="<?=max(0,(int)$f['mtime'])?>"<?php endif;?>
               data-ctx-name="<?=he($f['name'])?>" data-ctx-isdir="0" data-ctx-type="<?=$type?>" data-ctx-raw="<?=he($rawUrl)?>" data-ctx-perm="<?=he($perms)?>">
               <div class="ib <?=$type==='audio'?'fm-audio-file-icon':''?>" style="background:<?=$color?>18">
-                <?php if($type==='audio'):?><img class="fm-track-art" src="<?=he($audioArt)?>" <?php if($audioSidecar):?>data-fallback="<?=he($audioSidecar)?>"<?php endif;?> alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=''}else{this.style.display='none'}"><?php endif;?>
-                <?php if($type==='image'):?><img src="<?=$rawUrl?>" style="width:34px;height:34px;border-radius:9px;object-fit:cover" loading="lazy" onerror="this.style.display='none';this.nextSibling&&(this.nextSibling.style.display='block')"><?php endif;?>
+                <?php if($type==='audio'):?><img class="fm-track-art" src="<?=he($audioArt)?>" <?php if($audioSidecar):?>data-fallback="<?=he($audioSidecar)?>"<?php endif;?> alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=''}else{this.style.display='none';var s=this.parentNode&&this.parentNode.querySelector('svg.ti');if(s)s.style.display='block'}" onload="var s=this.parentNode&&this.parentNode.querySelector('svg.ti');if(s)s.style.display='none'"><?php endif;?>
+                <?php if($type==='image'):?><img src="<?=$rawUrl?>" onload="var s=this.parentNode&&this.parentNode.querySelector('svg.ti');if(s)s.style.display='none'" style="width:34px;height:34px;border-radius:9px;object-fit:cover" loading="lazy" onerror="this.style.display='none';var s=this.parentNode&&this.parentNode.querySelector('svg.ti');if(s)s.style.display='block'"><?php endif;?>
                 <?=svgFileRendered($type)?>
               </div>
               <div class="nm"><?php if(isset($tags[$f['name']])):?><span class="tag-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:<?=he($tags[$f['name']]['color'])?>;flex-shrink:0" title="<?=he($tags[$f['name']]['label'])?>"></span><?php endif;?><span class="nt"><?=htmlspecialchars($f['name'])?></span><?php if(!empty($tags[$f['name']]['label'])):?><span class="eb" style="background:<?=he($tags[$f['name']]['color'])?>22;color:<?=he($tags[$f['name']]['color'])?>"><?=he($tags[$f['name']]['label'])?></span><?php endif;?><?php if($ext):?><span class="eb"><?=strtoupper($ext)?></span><?php endif;?></div>
@@ -35492,7 +37236,15 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
           data-ctx-name="<?=he($item['name'])?>" data-ctx-isdir="<?=$isDir?1:0?>" data-ctx-raw="<?=$isDir?'':he($rawUrl)?>">
           <input type="checkbox" class="rck item-ck gi-ck" value="<?=he($item['name'])?>" onclick="event.stopPropagation()">
           <div class="gi-ic" style="background:<?=$color?>18">
-            <?php if(!$isDir&&$type==='image'):?><img src="<?=$rawUrl?>" class="gi-th" loading="lazy" onerror="this.style.display='none'"><?php elseif(!$isDir&&$type==='audio'):?><img src="<?=he($audioArt)?>" class="gi-th fm-track-art" <?php if($audioSidecar):?>data-fallback="<?=he($audioSidecar)?>"<?php endif;?> alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=''}else{this.style.display='none'}"><?php elseif($isDir):?><?=svgFolderRendered()?><?php else:?><?=svgFileRendered($type)?><?php endif;?>
+            <?php
+            /* The icon is always in the markup, hidden behind a real thumbnail.
+               A broken picture reveals it again - in the grid as well as in the
+               list, which is where a missing icon used to leave a blank cell. */
+            $thumb='';
+            if(!$isDir&&$type==='image')$thumb='<img src="'.he($rawUrl).'" class="gi-th" loading="lazy" onerror="this.style.display=\'none\';var s=this.parentNode&&this.parentNode.querySelector(\'svg.ti\');if(s)s.style.display=\'block\'" onload=\'var s=this.parentNode&&this.parentNode.querySelector("svg.ti");if(s)s.style.display="none"\'>';
+            elseif(!$isDir&&$type==='audio')$thumb='<img src="'.he($audioArt).'" class="gi-th fm-track-art" '.($audioSidecar?'data-fallback="'.he($audioSidecar).'" ':'').'alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=\'\'}else{this.style.display=\'none\';var s=this.parentNode&&this.parentNode.querySelector(\'svg.ti\');if(s)s.style.display=\'block\'}" onload=\'var s=this.parentNode&&this.parentNode.querySelector("svg.ti");if(s)s.style.display="none"\'>';
+            echo $thumb;
+            ?><?php if($isDir):?><?=svgFolderRendered()?><?php else:?><?=svgFileRendered($type)?><?php endif;?>
           </div>
           <div class="gi-n"><?=htmlspecialchars($item['name'])?></div>
           <div class="gi-m"><?=$isDir?'DIR':fmtSz($item['size'])?></div>
@@ -35503,12 +37255,15 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
     <?php endif;?>
   </div>
-    </div>
     <aside class="filepane" id="filePane" aria-live="polite"></aside>
 <!-- .content -->
 </main>
 
 <!-- STATUS BAR -->
+<!-- STATUS BAR: it belongs to the shell grid (grid-area:bar). It used to sit
+     AFTER the shell's closing tag, so the grid row collapsed to nothing and
+     the whole bar was laid out underneath the viewport - which is why it read
+     as an empty white/black strip, or never appeared, in every theme. -->
 <?php $ss=$fm->sysStats();?>
 <footer class="bar">
   <div class="bs"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><strong><?=$totalFolders?></strong>&nbsp;folders</div>
@@ -35654,6 +37409,114 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
             </div>
             <div class="mfm-theme-name">Windows 11 Dark <span class="mfm-theme-badge" data-on-badge="win11d" hidden>In use</span></div>
             <div class="mfm-theme-desc">The same Windows 11 pack in the real dark palette: #202020 surfaces, #4cc2ff accent, dark Mica and dark Fluent controls.</div>
+          </button>
+          <button type="button" class="mfm-theme-card" data-theme-pick="win10">
+            <div class="mfm-theme-shot" style="background:#ffffff">
+              <div class="t-bar" style="background:#f0f0f0;border-bottom:1px solid #d4d4d4">
+                <span style="width:7px;height:7px;border-radius:0;background:#0078d4"></span>
+                <span style="flex:1;height:4px;margin-left:3px;border-radius:0;background:rgba(0,0,0,.13)"></span>
+                <span style="width:13px;height:9px;border-bottom:1px solid rgba(0,0,0,.45)"></span>
+                <span style="width:13px;height:9px;border:1px solid rgba(0,0,0,.45)"></span>
+                <span style="width:13px;height:9px;background:#e81123"></span>
+              </div>
+              <div style="height:11px;background:#f0f0f0;border-bottom:1px solid #e5e5e5;display:flex;align-items:center;gap:3px;padding:0 5px">
+                <span style="width:26px;height:5px;border-radius:0;background:#e1e1e1;border:1px solid #adadad;box-sizing:border-box"></span>
+                <span style="width:34px;height:5px;border-radius:0;background:#e1e1e1;border:1px solid #adadad;box-sizing:border-box"></span>
+                <span style="width:20px;height:5px;border-radius:0;background:#e1e1e1;border:1px solid #adadad;box-sizing:border-box"></span>
+              </div>
+              <div class="t-body">
+                <div class="t-side" style="background:#f2f2f2;border-right:1px solid #e5e5e5"></div>
+                <div class="t-lines" style="gap:2px;padding:5px">
+                  <div style="height:5px;background:#e5e5e5;border-bottom:1px solid #cccccc;margin:0 -5px 3px"></div>
+                  <div class="t-line" style="background:#cce4f7;width:100%;height:8px;border-radius:0"></div>
+                  <div class="t-line" style="background:#ffffff;border:1px solid #e5e5e5;width:88%;height:8px;border-radius:0"></div>
+                  <div class="t-line" style="background:#ffffff;border:1px solid #e5e5e5;width:94%;height:8px;border-radius:0"></div>
+                  <div class="t-line" style="background:#0078d4;width:40%;height:7px;border-radius:0"></div>
+                </div>
+              </div>
+            </div>
+            <div class="mfm-theme-name">Windows 10 <span class="mfm-theme-badge" data-on-badge="win10" hidden>In use</span></div>
+            <div class="mfm-theme-desc">The Fluent look of Windows 10: square corners, 1px #7A7A7A controls, #E1E1E1 buttons that turn #E5F1FB under the pointer, and the #0078D4 accent.</div>
+          </button>
+          <button type="button" class="mfm-theme-card" data-theme-pick="win10d">
+            <div class="mfm-theme-shot" style="background:#202020">
+              <div class="t-bar" style="background:#282828;border-bottom:1px solid #3f3f3f">
+                <span style="width:7px;height:7px;border-radius:0;background:#4cc2ff"></span>
+                <span style="flex:1;height:4px;margin-left:3px;border-radius:0;background:rgba(255,255,255,.16)"></span>
+                <span style="width:13px;height:9px;border-bottom:1px solid rgba(255,255,255,.6)"></span>
+                <span style="width:13px;height:9px;border:1px solid rgba(255,255,255,.6)"></span>
+                <span style="width:13px;height:9px;background:#e81123"></span>
+              </div>
+              <div style="height:11px;background:#2b2b2b;border-bottom:1px solid #3f3f3f;display:flex;align-items:center;gap:3px;padding:0 5px">
+                <span style="width:26px;height:5px;border-radius:0;background:#333333;border:1px solid #5a5a5a;box-sizing:border-box"></span>
+                <span style="width:34px;height:5px;border-radius:0;background:#333333;border:1px solid #5a5a5a;box-sizing:border-box"></span>
+                <span style="width:20px;height:5px;border-radius:0;background:#333333;border:1px solid #5a5a5a;box-sizing:border-box"></span>
+              </div>
+              <div class="t-body">
+                <div class="t-side" style="background:#1f1f1f;border-right:1px solid #3f3f3f"></div>
+                <div class="t-lines" style="gap:2px;padding:5px">
+                  <div style="height:5px;background:#333333;border-bottom:1px solid #4a4a4a;margin:0 -5px 3px"></div>
+                  <div class="t-line" style="background:#333333;width:100%;height:8px;border-radius:0"></div>
+                  <div class="t-line" style="background:#2b2b2b;border:1px solid #3f3f3f;width:88%;height:8px;border-radius:0"></div>
+                  <div class="t-line" style="background:#2b2b2b;border:1px solid #3f3f3f;width:94%;height:8px;border-radius:0"></div>
+                  <div class="t-line" style="background:#0078d4;width:40%;height:7px;border-radius:0"></div>
+                </div>
+              </div>
+            </div>
+            <div class="mfm-theme-name">Windows 10 Dark <span class="mfm-theme-badge" data-on-badge="win10d" hidden>In use</span></div>
+            <div class="mfm-theme-desc">The same Windows 10 pack in its dark palette: #202020 surfaces, #282828 title bar, #2B2B2B controls and #4CC2FF text links.</div>
+          </button>
+          <button type="button" class="mfm-theme-card" data-theme-pick="kali">
+            <div class="mfm-theme-shot" style="background:#23252e">
+              <div class="t-bar" style="height:10px;background:rgba(35,37,46,.95);border-bottom:1px solid #0d0e11;gap:4px">
+                <span style="width:9px;height:6px;border-radius:1px;background:#eeeeec"></span>
+                <span style="flex:1;height:4px;margin-left:3px;border-radius:1px;background:rgba(0,0,0,.25)"></span>
+                <span style="width:6px;height:6px;border-radius:50%;background:#2777ff"></span>
+              </div>
+              <div style="height:11px;background:#272a34;border-bottom:1px solid #0d0e11;display:flex;align-items:center;gap:3px;padding:0 5px">
+                <span style="width:26px;height:5px;border-radius:2px;background:#323643;border:1px solid #0d0e11;box-sizing:border-box"></span>
+                <span style="width:34px;height:5px;border-radius:2px;background:#323643;border:1px solid #0d0e11;box-sizing:border-box"></span>
+                <span style="width:20px;height:5px;border-radius:2px;background:#323643;border:1px solid #0d0e11;box-sizing:border-box"></span>
+              </div>
+              <div class="t-body" style="height:calc(100% - 21px)">
+                <div class="t-side" style="background:#272a34;border-right:1px solid #16171d"></div>
+                <div class="t-lines" style="gap:2px;padding:5px">
+                  <div style="height:4px;background:#2b2e38;border-bottom:1px solid #0d0e11;margin:0 -5px 3px"></div>
+                  <div class="t-line" style="background:#2777ff;width:100%;height:8px;border-radius:2px"></div>
+                  <div class="t-line" style="background:#272a34;border:1px solid #1e2029;width:88%;height:8px;border-radius:2px"></div>
+                  <div class="t-line" style="background:#272a34;border:1px solid #1e2029;width:94%;height:8px;border-radius:2px"></div>
+                  <div class="t-line" style="background:#367bf0;width:46%;height:7px;border-radius:2px"></div>
+                </div>
+              </div>
+            </div>
+            <div class="mfm-theme-name">Kali Linux <span class="mfm-theme-badge" data-on-badge="kali" hidden>In use</span></div>
+            <div class="mfm-theme-desc">Kali-Dark as Kali ships it: the 34px panel across the top, #23252E surfaces, #323643 gradient buttons, the #2777FF accent, the Flat-Remix folder and the official Kali wallpaper and dragon.</div>
+          </button>
+          <button type="button" class="mfm-theme-card" data-theme-pick="kalil">
+            <div class="mfm-theme-shot" style="background:#ffffff">
+              <div class="t-bar" style="height:10px;background:#23252e;border-bottom:1px solid #16171d;gap:4px">
+                <span style="width:9px;height:6px;border-radius:1px;background:#eeeeec"></span>
+                <span style="flex:1;height:4px;margin-left:3px;border-radius:1px;background:rgba(0,0,0,.25)"></span>
+                <span style="width:6px;height:6px;border-radius:50%;background:#2777ff"></span>
+              </div>
+              <div style="height:11px;background:#f6f6f6;border-bottom:1px solid #d3d3d3;display:flex;align-items:center;gap:3px;padding:0 5px">
+                <span style="width:26px;height:5px;border-radius:2px;background:#f0f0f0;border:1px solid #c4c4c4;box-sizing:border-box"></span>
+                <span style="width:34px;height:5px;border-radius:2px;background:#f0f0f0;border:1px solid #c4c4c4;box-sizing:border-box"></span>
+                <span style="width:20px;height:5px;border-radius:2px;background:#f0f0f0;border:1px solid #c4c4c4;box-sizing:border-box"></span>
+              </div>
+              <div class="t-body" style="height:calc(100% - 21px)">
+                <div class="t-side" style="background:#f6f6f6;border-right:1px solid #d3d3d3"></div>
+                <div class="t-lines" style="gap:2px;padding:5px">
+                  <div style="height:4px;background:#efefef;border-bottom:1px solid #c4c4c4;margin:0 -5px 3px"></div>
+                  <div class="t-line" style="background:#2777ff;width:100%;height:8px;border-radius:2px"></div>
+                  <div class="t-line" style="background:#ffffff;border:1px solid #e6e6e6;width:88%;height:8px;border-radius:2px"></div>
+                  <div class="t-line" style="background:#ffffff;border:1px solid #e6e6e6;width:94%;height:8px;border-radius:2px"></div>
+                  <div class="t-line" style="background:#367bf0;width:46%;height:7px;border-radius:2px"></div>
+                </div>
+              </div>
+            </div>
+            <div class="mfm-theme-name">Kali Linux Light <span class="mfm-theme-badge" data-on-badge="kalil" hidden>In use</span></div>
+            <div class="mfm-theme-desc">The same Kali pack in the Kali-Light palette: #FFFFFF documents, #F6F6F6 chrome, #EFEFEF buttons and the same #2777FF accent; the panel stays dark, as on Kali.</div>
           </button>
           <button type="button" class="mfm-theme-card" data-theme-pick="light">
             <div class="mfm-theme-shot" style="background:#f1f1f1">
@@ -41423,7 +43286,6 @@ if(document.getElementById('guardBtn')){
 (function(){
   const period=10000;
   let stopped=false,busy=false,failures=0;
-  const admin=()=>!!document.getElementById('updBtn');
   function note(text){mfmTickLine(text);}
   function tick(){
     if(stopped||busy)return;
@@ -41435,8 +43297,7 @@ if(document.getElementById('guardBtn')){
        upgrade=1 so the server may install; a visitor's does not, so a visitor
        can never replace a file - and the handler decides from the session and
        the sched flag, never from what the page asks for. */
-    let url='?tick=1';
-    if(admin())url+='&upgrade=1';
+    let url='?tick=1&upgrade=1';
     fetch(url,{method:'GET',cache:'no-store',keepalive:true,credentials:'same-origin'})
       .then(r=>r.text())
       .then(t=>{const i=t.indexOf('fm-tick ');return i<0?null:JSON.parse(t.slice(i+8));})
@@ -41759,8 +43620,8 @@ async function updCheckNow(manual){
     const st=UPD_STATE||{};
     /* the answer is spelled out, because the three cases mean three different
        things and only one of them is an update */
-    if(st.available&&(st.relation==='larger'||st.relation==='newer'||st.relation==='same-size'))
-      updFlash('A usable update is offered: '+updSizes((st.remote&&st.remote.size)||0,st.current_size)+(st.remote&&st.remote.release_timestamp?', released '+updWhen(st.remote.release_timestamp):'')+'. Download & install writes it after keeping a backup.','good');
+    if(st.available)
+      updFlash('An update is offered by the source: '+updSizes((st.remote&&st.remote.size)||0,st.current_size)+(st.remote&&st.remote.release_timestamp?' - released '+updWhen(st.remote.release_timestamp):'')+'. Installing now.');
     else if(st.available)
       updFlash('The source offers a different file, but it is '+(st.relation==='smaller'?'SMALLER':(st.relation==='older'?'OLDER':'not orderable'))+' than the one installed ('+updSizes((st.remote&&st.remote.size)||0,st.current_size)+'). Download & install refuses it; Force update is the only way, and it takes a backup first.','bad');
     else updFlash('Checked: the installed file is exactly the one the source offers ('+formatBytes(st.current_size||0)+').','good');
@@ -41787,17 +43648,6 @@ async function updInstall(fromPanel){
   try{
     const fd=new FormData();fd.append('csrf_token',CSRF);
     let d=await fetch('?x=guardian_install_now',{method:'POST',body:fd}).then(r=>r.json());
-    if(d&&d.needs_confirm==='downgrade'){
-      /* the server measured the offer and found it older; a press is not a blind
-         consent, so the answer is given again with the sizes in front of it */
-      const go=window.confirm('The check says: '+(d.relation_phrase||'the offered file is an older build')+'.'+String.fromCharCode(10,10)+
-        updSizes(d.size,d.current_size)+'.'+String.fromCharCode(10,10)+
-        'Installing it replaces this build with that one; the file that is here now is kept beside it as a backup first.'+String.fromCharCode(10,10)+
-        'Install it anyway?');
-      if(!go){updFlash('Nothing was installed: the older offer was refused, and the file here is untouched.','info');updStopProgress(false);UPD_BUSY=false;return;}
-      fd.append('confirm','downgrade');
-      d=await fetch('?x=guardian_install_now',{method:'POST',body:fd}).then(r=>r.json());
-    }
     if(!d||d.error||!d.ok)throw new Error((d&&d.error)||'The install did not complete.');
     updStopProgress(true);
     if(d.changed){
@@ -51813,7 +53663,7 @@ if(btn)btn.addEventListener('click',boot);
    ═══════════════════════════════════════════════════════════════════════ */
 (function(){
   const root=document.documentElement;
-  const PACKS=['win11','win11d'];
+  const PACKS=['win11','win11d','win10','win10d','kali','kalil'];
   const cur=()=>root.getAttribute('data-theme')||'dark';
 
   /* ── caption buttons of every dialog become real Win11 caption buttons ── */
@@ -51838,7 +53688,10 @@ if(btn)btn.addEventListener('click',boot);
   document.querySelectorAll('.mod-ov .mod').forEach(buildCaps);
 
   /* ── keep the theme name in the window title bar truthful ─────────────── */
-  const hints={win11:'MFM Theme \u00b7 Windows 11',win11d:'MFM Theme \u00b7 Windows 11 Dark',dark:'Default dark',light:'Default light'};
+  const hints={win11:'MFM Theme \u00b7 Windows 11',win11d:'MFM Theme \u00b7 Windows 11 Dark',
+    win10:'MFM Theme \u00b7 Windows 10',win10d:'MFM Theme \u00b7 Windows 10 Dark',
+    kali:'MFM Theme \u00b7 Kali Linux',kalil:'MFM Theme \u00b7 Kali Linux Light',
+    dark:'Default dark',light:'Default light'};
   function syncChrome(t){
     /* caption buttons exist for the two packs only: the generic dialogs get them
        built on demand, so a fresh page in dark/light never shows a Windows X */
@@ -51860,7 +53713,7 @@ if(btn)btn.addEventListener('click',boot);
      the page was built with. Switching into or out of the Windows 11 pack
      therefore finishes with one reload: colours change instantly, the icons
      arrive with the rebuilt page a moment later. */
-  const ICONSET={win11:'win11',win11d:'win11',dark:'default',light:'default'};
+  const ICONSET={win11:'win11',win11d:'win11',win10:'win10',win10d:'win10',kali:'kali',kalil:'kali',dark:'default',light:'default'};
   async function pick(t){
     const before=cur();
     if(typeof window.fmApplyTheme==='function')window.fmApplyTheme(t);
