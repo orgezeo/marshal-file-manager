@@ -2773,6 +2773,43 @@ function fm_update_relation_phrase($code){
    of this tool, whatever its name or link says. */
 function fm_update_min_bytes(){return 20000;}
 
+/* A URL with a query string no CDN edge has ever seen. raw.githubusercontent.com
+   (like most CDNs) keys its edge cache on the full URL including the query, so a
+   unique parameter can only be answered from the origin - never from a stale
+   edge copy of the plain URL. */
+function fm_update_bust_url($url){
+    $k=substr(md5(uniqid('',true).(string)mt_rand()),0,16);
+    return $url.(strpos($url,'?')===false?'?':'&').'mfmfresh='.$k;
+}
+/* One full GET of the busted URL: the truth about what the source holds right
+   now. Only ever used when a difference was already detected, so the steady
+   state keeps paying 304s, not multi-megabyte downloads. */
+function fm_update_fetch_origin($url){
+    $bust=fm_update_bust_url($url);
+    if(function_exists('curl_init')){
+        $ch=curl_init($bust);
+        curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,
+            CURLOPT_CONNECTTIMEOUT=>15,CURLOPT_TIMEOUT=>240,CURLOPT_LOW_SPEED_LIMIT=>1024,CURLOPT_LOW_SPEED_TIME=>60,CURLOPT_SSL_VERIFYPEER=>true,
+            CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,CURLOPT_FILETIME=>true,CURLOPT_HEADER=>true,
+            CURLOPT_HTTPHEADER=>['User-Agent:FileManager-Guardian/1.0','Cache-Control: no-cache','Pragma: no-cache']]);
+        $raw=curl_exec($ch);$err=curl_error($ch);$info=curl_getinfo($ch);curl_close($ch);
+        if($raw===false||$err||(int)($info['http_code']??0)>=400)return false;
+        $hs=(int)($info['header_size']??0);
+        $headers=$hs>0?preg_split('/\r\n|\n/',substr((string)$raw,0,$hs)):[];
+        $body=$hs>0?substr((string)$raw,$hs):(string)$raw;
+        $etag='';
+        foreach((array)$headers as $hh){if(stripos($hh,'etag:')===0){$etag=trim((string)substr($hh,5));break;}}
+        return ['data'=>$body,'etag'=>$etag,'size'=>strlen((string)$body),'time'=>max(0,(int)($info['filetime']??0))];
+    }
+    $ctx=stream_context_create(['http'=>['timeout'=>30,'header'=>"User-Agent: FileManager-Guardian/1.0\r\nCache-Control: no-cache\r\n"],
+                                 'https'=>['timeout'=>30]]);
+    $body=@file_get_contents($bust,false,$ctx);
+    if($body===false)return false;
+    $etag='';
+    if(isset($http_response_header)&&is_array($http_response_header))foreach($http_response_header as $hh){if(stripos($hh,'etag:')===0){$etag=trim((string)substr($hh,5));break;}}
+    return ['data'=>$body,'etag'=>$etag,'size'=>strlen((string)$body),'time'=>0];
+}
+
 /* Downloads $url and, if it looks like a valid PHP file (lints clean and
    differs from what's on disk), atomically replaces this file with it and
    refreshes the Guardian database copy. Used both by "Check updates" and,
@@ -2856,6 +2893,32 @@ function fm_guardian_apply_from_url($url,$checkOnly=false){
     $current=@file_get_contents(__FILE__);
     $currentHash=$current===false?'':hash('sha256',$current);
     $remoteHash=hash('sha256',$data);
+    /* ── The CDN truth test ────────────────────────────────────────────────────────────
+       raw.githubusercontent.com answers from edge caches, and in the minutes
+       after a push different edges can still hold different versions of the
+       very same URL. A check that lands on a stale edge then "sees" an update
+       that is really an older file, and installing it rolls the tool back -
+       which is the update / install / update-again loop that was reported.
+       So the moment a difference is detected, the source is asked once more
+       with a cache key no edge has ever served: only the origin can answer,
+       and that answer replaces whatever the first fetch saw. Identical to the
+       installed file means the difference was a stale edge (no update, the
+       loop stops right there); different means a real update, and the bytes
+       that get installed are the newest ones, never a cached older variant. */
+    if($currentHash!==''&&$remoteHash!==$currentHash){
+        $fresh=fm_update_fetch_origin($url);
+        if(is_array($fresh)&&is_string($fresh['data']??null)&&strlen($fresh['data'])>=fm_update_min_bytes()&&strpos(ltrim($fresh['data']),'<?php')===0){
+            $freshHash=hash('sha256',$fresh['data']);
+            if($freshHash!==$remoteHash){
+                $data=$fresh['data'];
+                $remoteHash=$freshHash;
+                if((string)($fresh['etag']??'')!=='')$etagNew=(string)$fresh['etag'];
+                if((int)($fresh['size']??0)>0)$remoteSize=(int)$fresh['size'];
+                if((int)($fresh['time']??0)>0)$releaseTimestamp=(int)$fresh['time'];
+                $updateMeta=['size'=>$remoteSize,'release_timestamp'=>$releaseTimestamp];
+            }
+        }
+    }
     if($checkOnly){
         /* "Available" means: the remote file differs from the file that is
            actually installed right now. (This used to compare the remote
@@ -2954,7 +3017,7 @@ function fm_force_update_download($url){
     @set_time_limit(60);@ignore_user_abort(true);
     $data=false;$httpCode=0;$err='';
     if(function_exists('curl_init')){
-        $ch=curl_init($url);
+        $ch=curl_init(fm_update_bust_url($url));
         curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>3,
             CURLOPT_CONNECTTIMEOUT=>8,CURLOPT_TIMEOUT=>30,CURLOPT_SSL_VERIFYPEER=>true,
             CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
@@ -2966,7 +3029,7 @@ function fm_force_update_download($url){
     }else{
         $ctx=stream_context_create(['http'=>['timeout'=>25,'header'=>"User-Agent: FileManager-Guardian/1.0\r\nCache-Control: no-cache\r\n"],
                                      'https'=>['timeout'=>25]]);
-        $data=@file_get_contents($url,false,$ctx);
+        $data=@file_get_contents(fm_update_bust_url($url),false,$ctx);
         if($data===false)return ['ok'=>false,'error'=>'The download failed (file_get_contents).'];
     }
     if(!is_string($data)||strlen($data)<20)return ['ok'=>false,'error'=>'The source returned an empty or unreadably short answer.'];
@@ -32143,7 +32206,7 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .bc-sep{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--t3);padding:0 1px;user-select:none}
 .tb-right{display:flex;align-items:center;gap:6px;margin-left:auto;flex-shrink:0}
 .tb-right .btn{height:32px;justify-content:center}
-.tb-right .btn-icon{width:32px;min-width:32px;padding:0}
+.tb-right .btn-icon{width:32px;min-width:32px;height:32px;padding:0}
 .tb-right .btn-sm{min-width:32px;padding:0 10px}
 .tb-right .btn svg{flex-shrink:0}
 .tsearch{height:32px;display:flex;align-items:center;gap:6px;background:var(--field);border:1px solid var(--border);border-radius:var(--r);padding:0 4px 0 10px;transition:border-color .18s}
@@ -32245,7 +32308,7 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .toolbar{padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);display:flex;flex-direction:column;flex-wrap:nowrap;gap:8px;align-items:stretch;flex-shrink:0}
 .toolbar .tb-row{display:flex;align-items:center;flex-wrap:nowrap!important;gap:8px;width:100%;min-width:0}
 .toolbar .tb-row .inp{height:32px;padding-top:0;padding-bottom:0}
-.toolbar .tb-row .btn-sm,.toolbar .tb-row .upl-lbl{height:29px;justify-content:center;padding-top:0;padding-bottom:0}
+.toolbar .tb-row .btn-sm,.toolbar .tb-row .upl-lbl{height:32px;justify-content:center;padding-top:0;padding-bottom:0}
 .toolbar .tb-row .btn-sm{flex-shrink:0}
 .content{flex:1;overflow-y:auto;padding:12px;position:relative}
 .content::-webkit-scrollbar{width:4px}.content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.07);border-radius:6px}
@@ -32953,17 +33016,22 @@ a.nt:hover{color:var(--link)}
 .br{margin-left:auto;display:flex;gap:16px;align-items:center}
 
 /* ══ BUTTONS ══ */
-.btn{display:inline-flex;align-items:center;gap:5px;padding:7px 13px;border-radius:var(--r);font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:12.5px;font-weight:var(--fw-medium);border:none;cursor:pointer;text-decoration:none;white-space:nowrap;line-height:1;transition:background .15s,transform .18s var(--spring),box-shadow .15s;-webkit-user-select:none;user-select:none}
+.btn{display:inline-flex;align-items:center;gap:5px;padding:7px 13px;border-radius:var(--r);font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:12.5px;font-weight:var(--fw-medium);border:1px solid transparent;cursor:pointer;text-decoration:none;white-space:nowrap;line-height:normal;transition:background .15s,transform .18s var(--spring),box-shadow .15s;-webkit-user-select:none;user-select:none}
 .btn svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}.btn:active{transform:scale(.93)!important}
 .btn-sm{padding:5px 11px;font-size:12px;border-radius:8px}.btn-sm svg{width:12px;height:12px}
 .btn-icon{padding:6px;border-radius:8px}.btn-icon svg{width:14px;height:14px}
 .btn-xs{padding:4px 8px;font-size:11.5px;border-radius:7px;gap:3px}.btn-xs svg{width:12px;height:12px}
+/* A button that shares its form with an .inp field is exactly as tall as that field -
+   the 1px sub-pixel gap between the button's text box and the input's is closed here,
+   without touching .btn-xs or any other small button that lives nowhere near a field. */
+form:has(> .inp) > .btn{min-height:32px}
+:root[data-theme="win11"] form:has(> .inp) > .btn,:root[data-theme="win11d"] form:has(> .inp) > .btn{min-height:32px}
 /* Compact text actions keep the top bar and file toolbar aligned with the
    smaller action buttons used throughout the manager. Icon-only controls
    intentionally keep their 32px touch target. */
 .topbar .btn-sm{height:29px;padding:4px 9px;font-size:11.5px;border-radius:7px}
 .topbar .btn-sm svg{width:12px;height:12px;stroke-width:2}
-.topbar .tb-right .btn-icon{width:29px;min-width:29px;height:29px;padding:5px;border-radius:7px}
+.topbar .tb-right .btn-icon{width:32px;min-width:32px;height:32px;padding:5px;border-radius:7px}
 .topbar .tb-right .btn-icon svg{width:12px;height:12px}
 .toolbar .tb-row .btn-sm,.toolbar .tb-row .upl-lbl{padding-left:9px;padding-right:9px;font-size:11.5px;border-radius:7px}
 .toolbar .tb-row .btn-sm svg,.toolbar .tb-row .upl-lbl svg{width:12px;height:12px}
@@ -35154,6 +35222,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11"] .btn{
   border-radius:4px;font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
   font-size:13px;font-weight:400;padding:6px 12px;min-height:30px;
+  /* paired buttons match the 32px fields */
   background:rgba(255,255,255,.7);color:#1b1b1b;
   border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);
   box-shadow:none;transition:background .1s linear;
@@ -35487,8 +35556,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win10d"] .tsearch-panel{background:#2b2b2b;border:1px solid var(--fieldb);border-radius:0;box-shadow:var(--wm-shadow);padding:2px}
 :root[data-theme="win10"] .tb-right{gap:2px}
 :root[data-theme="win10d"] .tb-right{gap:2px}
-:root[data-theme="win10"] .topbar .btn-icon{width:28px;min-width:28px;height:28px;border-radius:0}
-:root[data-theme="win10d"] .topbar .btn-icon{width:28px;min-width:28px;height:28px;border-radius:0}
+:root[data-theme="win10"] .topbar .btn-icon{width:26px;min-width:26px;height:26px;border-radius:0}
+:root[data-theme="win10d"] .topbar .btn-icon{width:26px;min-width:26px;height:26px;border-radius:0}
 
 /* ── SIDEBAR ──────────────────────────────────────────────────────────── */
 :root[data-theme="win10"] .sidebar{background:#f2f2f2;border-right:1px solid var(--wm-hairline)}
@@ -35647,6 +35716,11 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   transition:background .1s linear,border-color .1s linear;
 }
 :root[data-theme="win10"] .btn svg,:root[data-theme="win10d"] .btn svg{stroke:currentColor;stroke-width:1.2}
+:root[data-theme="win10"] form:has(> .inp) > .btn,:root[data-theme="win10d"] form:has(> .inp) > .btn{min-height:26px}
+/* every text field and select is a fixed, comfortable 32px tall, so its paired
+   button (min-height above) and the field always render the same height; the
+   Windows 10 pack and the mobile layout both set their own heights later */
+input.inp,select.inp{height:32px}
 :root[data-theme="win10"] .btn:hover{background:#e5f1fb;border-color:#0078d4;color:#000000;transform:none;box-shadow:none}
 :root[data-theme="win10d"] .btn:hover{background:#3a3a3a;border-color:#4cc2ff;color:#ffffff;transform:none;box-shadow:none}
 :root[data-theme="win10"] .btn:active{background:#cce4f7;border-color:#005499;color:#000000;transform:none!important}
@@ -35691,8 +35765,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win10d"] .btn-xs{min-height:20px;padding:2px 8px;font-size:11.5px;border-radius:0}
 :root[data-theme="win10"] .btn-sm{min-height:22px;padding:3px 10px;font-size:11.5px;border-radius:0}
 :root[data-theme="win10d"] .btn-sm{min-height:22px;padding:3px 10px;font-size:11.5px;border-radius:0}
-:root[data-theme="win10"] .tb-right .btn-icon{width:28px;height:28px}
-:root[data-theme="win10d"] .tb-right .btn-icon{width:28px;height:28px}
+:root[data-theme="win10"] .tb-right .btn-icon{width:26px;height:26px}
+:root[data-theme="win10d"] .tb-right .btn-icon{width:26px;height:26px}
 
 /* ── INPUTS: 1px #7A7A7A, focus #0078D4, no glow ─────────────────────── */
 :root[data-theme="win10"] .inp,:root[data-theme="win10"] select.inp,:root[data-theme="win10"] textarea{
@@ -35703,6 +35777,8 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   background:#2b2b2b;border:1px solid #6e6e6e;border-radius:0;color:#ffffff;
   font-size:12px;font-family:'Segoe UI',system-ui,sans-serif;padding:3px 8px;height:26px;box-shadow:none;
 }
+:root[data-theme="win10"] .toolbar .tb-row .btn-sm,:root[data-theme="win10"] .toolbar .tb-row .upl-lbl,
+:root[data-theme="win10d"] .toolbar .tb-row .btn-sm,:root[data-theme="win10d"] .toolbar .tb-row .upl-lbl{height:26px}
 :root[data-theme="win10"] .inp:hover{background:#ffffff;border-color:#4a4a4a}
 :root[data-theme="win10d"] .inp:hover{background:#2b2b2b;border-color:#a0a0a0}
 :root[data-theme="win10"] .inp:focus{background:#ffffff;border-color:#0078d4;box-shadow:none;outline:none}
@@ -36273,6 +36349,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 }
 :root[data-theme="kali"] .tsearch:focus-within{background:#272a34;border-color:#00348d;box-shadow:inset 0 0 0 1px #2777ff}
 :root[data-theme="kalil"] .tsearch{height:26px;background:#ffffff;border:1px solid #c4c4c4;border-radius:4px;padding:0 6px;box-shadow:none}
+:root[data-theme="kali"] .topbar .tb-right .btn-icon,:root[data-theme="kalil"] .topbar .tb-right .btn-icon{width:26px;min-width:26px;height:26px;padding:3px}
 :root[data-theme="kalil"] .tsearch:focus-within{border-color:#00348d;box-shadow:inset 0 0 0 1px #2777ff}
 :root[data-theme="kali"] .tsearch input{color:#ffffff;font-size:12.5px}
 :root[data-theme="kalil"] .tsearch input{color:#2b2b2b;font-size:12.5px}
