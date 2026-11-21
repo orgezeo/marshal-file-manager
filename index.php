@@ -3705,6 +3705,7 @@ function fm_mfm_registry_save($d){
     return true;
 }
 function fm_mfm_sess_dir(){
+    if(@is_file(__DIR__.'/.own-sessions')){$p=__DIR__.'/.sessions';if(@is_dir($p))return rtrim($p,'/');}
     $p=(string)ini_get('session.save_path');
     if(strpos($p,';')!==false){$bits=explode(';',$p);$p=(string)end($bits);}
     $p=trim($p);
@@ -7849,7 +7850,46 @@ function fm_session_cookie_policy(){
        visitor their session and the sign-in its token. Fall back to Lax there. */
     if($cur===''||$cur==='strict'||($cur==='none'&&!$https))@ini_set('session.cookie_samesite','Lax');
     if($https&&!@ini_get('session.cookie_secure'))@ini_set('session.cookie_secure','1');
+    /* Once this app has caught the server dropping its sessions (the marker
+       file below), every request starts its sessions inside a private folder
+       of the app's own directory: one owner, no shared-host cleanup, and it
+       works even when the system session folder is unwritable or restricted. */
+    if(@is_file(__DIR__.'/.own-sessions')&&@is_dir(__DIR__.'/.sessions')){
+        @session_save_path(__DIR__.'/.sessions');
+        @ini_set('session.gc_maxlifetime','86400');
+    }
     return strtolower(trim((string)@ini_get('session.cookie_samesite')));
+}
+/* ── the app's own session folder ────────────────────────────────────────
+   Some hosts drop PHP sessions between requests (an unwritable, aggressively
+   cleaned, or per-server session folder), which locks every visitor out at
+   the sign-in token. When that is caught, this app moves its sessions into
+   .sessions inside its own folder and marks the switch, so every later
+   request starts there directly. The folder is private (0700) and denied by
+   .htaccess for web servers that honor it. */
+function fm_try_own_sessions(){
+    if(@is_file(__DIR__.'/.own-sessions'))return @is_dir(__DIR__.'/.sessions');
+    $dir=__DIR__.'/.sessions';
+    if(!@is_dir($dir)&&!@mkdir($dir,0700))return false;
+    @chmod($dir,0700);
+    if(!@is_file($dir.'/.htaccess'))@file_put_contents($dir.'/.htaccess',"Require all denied\n");
+    $probe=$dir.'/probe-'.bin2hex(random_bytes(4));
+    if(@file_put_contents($probe,'ok')===false)return false;
+    @unlink($probe);
+    if(@file_put_contents(__DIR__.'/.own-sessions',date('c'))===false)return false;
+    @chmod(__DIR__.'/.own-sessions',0600);
+    return true;
+}
+/* moves the current (dead) session into that private folder and starts it
+   again there; returns true once sessions live in it */
+function fm_switch_session_to_own(){
+    if(!fm_try_own_sessions())return false;
+    $_SESSION=[];
+    @session_destroy();
+    @session_save_path(__DIR__.'/.sessions');
+    @ini_set('session.gc_maxlifetime','86400');
+    @session_start();
+    return true;
 }
 fm_session_cookie_policy();
 if(session_status()===PHP_SESSION_NONE) session_start();
@@ -8022,7 +8062,7 @@ if(isset($_GET['idle'])) $idleExpired=true;
 /* signed out from MFM Admin or by an administrator, not by inactivity */
 $signedOut=isset($_GET['signedout']);
 
-$lockoutSecs=0;
+$lockoutSecs=0;$fmOwnOk=null;
 if(isset($_POST['login_pass'])){
     $ckey=fm_client_key();
     $lockoutSecs=fm_lockout_remaining($ckey);
@@ -8031,6 +8071,20 @@ if(isset($_POST['login_pass'])){
         $loginError="Too many failed attempts. Try again in ".ceil($lockoutSecs/60)." minute(s).";
     } else {
         $ok=isset($_POST['login_csrf'])&&hash_equals($_SESSION['login_csrf'],$_POST['login_csrf']);
+        /* The server lost the session behind the cookie (no fm_seen in it).
+           The Lax probe cookie proves this post came from a form this app
+           really served to this browser - a cross-site post cannot carry it -
+           so the storage is repaired into the app's own session folder and the
+           sign-in may proceed; the password below is still verified like any
+           other sign-in. */
+        if(!$ok&&isset($_COOKIE[session_name()])&&!isset($_SESSION['fm_seen'])&&isset($_COOKIE['fm_signin_probe'])){
+            $fmOwnOk=fm_switch_session_to_own();
+            if($fmOwnOk){
+                $_SESSION['fm_seen']=time();
+                $_SESSION['login_csrf']=bin2hex(random_bytes(32));
+                $ok=true;
+            }
+        }
         $users=fm_load_users($usersFile);
         $uname=isset($_POST['login_user'])?trim($_POST['login_user']):'';
         $u=fm_find_user($users,$uname);
@@ -8068,7 +8122,9 @@ if(isset($_POST['login_pass'])){
                 if(!isset($_COOKIE[session_name()]))
                     $loginError="Security error: the browser sent no session cookie with the sign-in, so its one-time token could not be verified. Either cookies are blocked for this site (a browser setting or an extension), a cache layer is serving this page without its Set-Cookie header, or the address switched between http and https. Allow cookies, open the page over one address, and try again.";
                 elseif(!isset($_SESSION['fm_seen']))
-                    $loginError="Security error: the session cookie arrived, but the server has no session behind it anymore, so the sign-in token could not be verified. Retrying usually works; if it keeps happening, this server's PHP session storage is dropping sessions between requests (an unwritable or aggressively cleaned session folder, or several servers without a shared session store).";
+                    $loginError=$fmOwnOk===false
+                        ?"Security error: the server keeps losing the session behind the sign-in cookie, and the manager could not switch this app to its own private session folder because the folder holding this file is not writable by PHP. Make that folder writable, then try again."
+                        :"Security error: the session cookie arrived, but the server has no session behind it anymore, so the sign-in token could not be verified. Retrying usually works; if it keeps happening, this server's PHP session storage is dropping sessions between requests (an unwritable or aggressively cleaned session folder, or several servers without a shared session store).";
                 else
                     $loginError="Security error: this sign-in form is no longer current (the page was opened before another attempt, restored from history, or served from a cache), so its token has expired. Reload the page and try again.";
             }
@@ -8086,6 +8142,11 @@ if(!isset($_SESSION['auth'])||$_SESSION['auth']!==true){ ?>
 /* a marker that this session has rendered a sign-in form; the login handler
    reads it to tell a stale form from a session the server itself lost */
 $_SESSION['fm_seen']=time();
+/* a same-site proof for the sign-in: this cookie is Lax, so a cross-site post
+   cannot carry it back. When the server has lost the session behind the
+   sign-in cookie, its presence is what allows the repair-and-proceed path in
+   the login handler. */
+if(!headers_sent())@setcookie('fm_signin_probe','1',['expires'=>0,'path'=>'/','httponly'=>true,'samesite'=>'Lax','secure'=>((!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')||(string)($_SERVER['HTTP_X_FORWARDED_PROTO']??'')==='https')]);
 $desktopLoginStep=!empty($loginError)&&isset($_POST['login_user'])?'password':'username';
 $desktopLoginUsername=isset($_POST['login_user'])?trim((string)$_POST['login_user']):'';
 ?>
