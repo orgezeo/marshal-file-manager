@@ -7842,9 +7842,12 @@ function fm_response_changer_store_manager($settings,&$error=null){
 /* the cookie the whole manager stands on: see the note in fm_session_cookie_policy */
 function fm_session_cookie_policy(){
     $cur=strtolower(trim((string)@ini_get('session.cookie_samesite')));
-    if($cur===''||$cur==='strict')@ini_set('session.cookie_samesite','Lax');
     $https=(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')
         ||(string)($_SERVER['HTTP_X_FORWARDED_PROTO']??'')==='https';
+    /* SameSite=None is only valid together with Secure: over plain http every
+       current browser drops such a cookie outright, which would cost every
+       visitor their session and the sign-in its token. Fall back to Lax there. */
+    if($cur===''||$cur==='strict'||($cur==='none'&&!$https))@ini_set('session.cookie_samesite','Lax');
     if($https&&!@ini_get('session.cookie_secure'))@ini_set('session.cookie_secure','1');
     return strtolower(trim((string)@ini_get('session.cookie_samesite')));
 }
@@ -8050,14 +8053,25 @@ if(isset($_POST['login_pass'])){
             }
             $_SESSION['fm_force_credential_change']=!empty($_SESSION['fm_admin'])&&fm_user_requires_credential_change($u);
             $_SESSION['fm_wp_auto_login_pending']=in_array('cms',fm_mfm_user_perms($u),true);$_SESSION['fm_login_transition']=true;
-            unset($_SESSION['login_csrf'],$_SESSION['fm_login_metrics_snapshot'],$_SESSION['fm_login_metrics_manager_pids'],$_SESSION['fm_login_metrics_last']);
+            unset($_SESSION['login_csrf'],$_SESSION['fm_seen'],$_SESSION['fm_login_metrics_snapshot'],$_SESSION['fm_login_metrics_manager_pids'],$_SESSION['fm_login_metrics_last']);
             header("Location: ".$scriptName);exit;
         } else {
             if($ok)fm_record_failure($ckey);
             $lockoutSecs=fm_lockout_remaining($ckey);
             $_SESSION['login_csrf']=bin2hex(random_bytes(32));
             if($lockoutSecs>0)$loginError="Too many failed attempts. Try again in ".ceil($lockoutSecs/60)." minute(s).";
-            else $loginError=$ok?"Incorrect username or password.":"Security error. Please try again.";
+            elseif($ok)$loginError="Incorrect username or password.";
+            else{
+                /* the sign-in token did not match the session. This check runs before
+                   the password, so it is never about the credentials. Three honest
+                   causes, each named for the layer that actually failed. */
+                if(!isset($_COOKIE[session_name()]))
+                    $loginError="Security error: the browser sent no session cookie with the sign-in, so its one-time token could not be verified. Either cookies are blocked for this site (a browser setting or an extension), a cache layer is serving this page without its Set-Cookie header, or the address switched between http and https. Allow cookies, open the page over one address, and try again.";
+                elseif(!isset($_SESSION['fm_seen']))
+                    $loginError="Security error: the session cookie arrived, but the server has no session behind it anymore, so the sign-in token could not be verified. Retrying usually works; if it keeps happening, this server's PHP session storage is dropping sessions between requests (an unwritable or aggressively cleaned session folder, or several servers without a shared session store).";
+                else
+                    $loginError="Security error: this sign-in form is no longer current (the page was opened before another attempt, restored from history, or served from a cache), so its token has expired. Reload the page and try again.";
+            }
         }
     }
 }
@@ -8069,6 +8083,9 @@ if($fmApiRequest&&(!isset($_SESSION['auth'])||$_SESSION['auth']!==true)){
 }
 if(!isset($_SESSION['auth'])||$_SESSION['auth']!==true){ ?>
 <?php
+/* a marker that this session has rendered a sign-in form; the login handler
+   reads it to tell a stale form from a session the server itself lost */
+$_SESSION['fm_seen']=time();
 $desktopLoginStep=!empty($loginError)&&isset($_POST['login_user'])?'password':'username';
 $desktopLoginUsername=isset($_POST['login_user'])?trim((string)$_POST['login_user']):'';
 ?>
