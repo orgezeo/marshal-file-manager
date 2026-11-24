@@ -10269,7 +10269,7 @@ class FileManager {
             ['id'=>'github_token','label'=>'GitHub token','sev'=>'critical','min'=>20,
              'rx'=>'/\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/','deny'=>null],
             ['id'=>'gitlab_token','label'=>'GitLab token','sev'=>'critical','min'=>20,
-             'rx'=>'/\b(glpat-[A-Za-z0-9_-]{20,})/','deny'=>null],
+             'rx'=>'/\b(glpat-[A-Za-z0-9_\-]{20,})\b/','deny'=>null],
             ['id'=>'slack','label'=>'Slack token','sev'=>'critical','min'=>20,
              'rx'=>'/\b(xox[abprs]-[A-Za-z0-9-]{10,})/','deny'=>null],
             ['id'=>'slack_webhook','label'=>'Slack webhook URL','sev'=>'high','min'=>30,
@@ -10306,7 +10306,186 @@ class FileManager {
              'rx'=>'/(?:authorization|bearer)\s*[=:]\s*["\']?(?:bearer\s+)?([A-Za-z0-9._\-]{20,})/i','deny'=>'/^(?:bearer|token|your|\$|%|x{4,})/i'],
             ['id'=>'basic_auth_url','label'=>'URL with embedded credentials','sev'=>'high','min'=>16,'only'=>['env','config','tool','profile','history','loose','wpconfig','code'],
              'rx'=>'#\b([a-z][a-z0-9+.-]{2,12}://[^\s:\/@]{2,64}:[^\s\/@]{3,}@[^\s"\']{3,})#i','deny'=>'/:\/\/[^:]*:(?:\$\{|\$[a-z_(]|xxxx|password|pass|example|change|%[a-z]|proxyuser|proxypass|jschmoe|user|username|test|demo|sample|secret)/i'],
-            ['id'=>'wordpress_salt','label'=>'WordPress salt or key','sev'=>'medium','min'=>32,
+            /* ── the API keys a payment, mail, map or SMS account hands out ────
+               Each shape below is a documented prefix or a documented request
+               parameter, not a guess. The AI providers stay at the top of the
+               list because they are the ones that are asked for most. */
+            ['id'=>'google_maps','label'=>'Google Maps key','sev'=>'high','min'=>35,'rx'=>'/\b(AIza[0-9A-Za-z_\-]{35})\b/'],
+            ['id'=>'gcp_api_key','label'=>'Google Cloud API key (unrestricted)','sev'=>'high','min'=>30,
+             'rx'=>'/[?&]key=(AIza[0-9A-Za-z_\-]{35})\b/'],
+            ['id'=>'mapbox','label'=>'Mapbox token','sev'=>'high','min'=>60,
+             'rx'=>'/\b(pk\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,})/'],
+            ['id'=>'here_maps','label'=>'HERE maps key','sev'=>'medium','min'=>40,
+             'rx'=>'/(?:here[_-]?(?:api[_-]?)?key|HERE_KEY)\s*[=:]\s*["\']?([A-Za-z0-9_\-]{40,})/i'],
+            ['id'=>'twilio_sid','label'=>'Twilio account SID','sev'=>'medium','min'=>34,'rx'=>'/\b(AC[a-f0-9]{32})\b/i'],
+            ['id'=>'twilio_key','label'=>'Twilio API key','sev'=>'high','min'=>34,'rx'=>'/\b(SK[a-f0-9]{32})\b/'],
+            ['id'=>'vonage','label'=>'Vonage (Nexmo) key or secret','sev'=>'high','min'=>16,
+             'rx'=>'/(?:vonage|nexmo)[_-]?(?:api[_-]?)?(?:key|secret)\s*[=:]\s*["\']?([A-Za-z0-9]{8,32})/i'],
+            ['id'=>'clickatell','label'=>'Clickatell token','sev'=>'high','min'=>20,
+             'rx'=>'/clickatell[_-]?(?:api[_-]?)?(?:key|token)\s*[=:]\s*["\']?([A-Za-z0-9_\-]{20,})/i'],
+            ['id'=>'messagebird','label'=>'MessageBird key','sev'=>'high','min'=>25,
+             'rx'=>'/\b(live_[A-Za-z0-9]{25,40})\b/'],
+            ['id'=>'pusher','label'=>'Pusher key or secret','sev'=>'high','min'=>16,
+             'rx'=>'/pusher[_-]?(?:app[_-]?)?(?:secret|key)\s*[=:]\s*["\']?([a-f0-9]{16,64})/i'],
+            ['id'=>'ably','label'=>'Ably key','sev'=>'high','min'=>20,'rx'=>'/\b([A-Za-z0-9_\-]{5,10}\.[A-Za-z0-9_\-]{10,32}:[A-Za-z0-9_\-]{20,})\b/'],
+            ['id'=>'auth0','label'=>'Auth0 client secret','sev'=>'high','min'=>32,
+             'rx'=>'/auth0[_-]?(?:client[_-]?)?secret\s*[=:]\s*["\']?([A-Za-z0-9_\-]{32,})/i'],
+            ['id'=>'okta','label'=>'Okta API token','sev'=>'critical','min'=>40,
+             'rx'=>'/okta[_-]?(?:api[_-]?)?token\s*[=:]\s*["\']?([A-Za-z0-9_\-]{30,})/i'],
+            ['id'=>'supabase','label'=>'Supabase service key','sev'=>'critical','min'=>40,
+             'rx'=>'/\b(eyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,})\b/','only'=>['env','config','tool','profile','loose']],
+            ['id'=>'firebase_server','label'=>'Firebase server key','sev'=>'critical','min'=>30,'rx'=>'/\b(AAAA[A-Za-z0-9_\-]{7,}:[A-Za-z0-9_\-]{100,})\b/'],
+            ['id'=>'firebase_vapid','label'=>'Firebase / Web push key pair','sev'=>'high','min'=>80,
+             'rx'=>'/(?:vapid|web[_-]?push)[_-]?(?:private|public)[_-]?key\s*[=:]\s*["\']?([A-Za-z0-9_\-]{60,})/i'],
+            ['id'=>'onesignal','label'=>'OneSignal key','sev'=>'high','min'=>30,
+             'rx'=>'/(?:onesignal)[_-]?(?:rest[_-]?)?(?:api[_-]?)?key\s*[=:]\s*["\']?([A-Za-z0-9_\-]{30,})/i'],
+            ['id'=>'intercom','label'=>'Intercom token','sev'=>'high','min'=>40,
+             'rx'=>'/intercom[_-]?(?:access[_-]?)?token\s*[=:]\s*["\']?([A-Za-z0-9_\-]{40,})/i'],
+            ['id'=>'zendesk','label'=>'Zendesk API token','sev'=>'high','min'=>32,
+             'rx'=>'/zendesk[_-]?(?:api[_-]?)?token\s*[=:]\s*["\']?([A-Za-z0-9]{32,})/i'],
+            ['id'=>'freshdesk','label'=>'Freshdesk key','sev'=>'high','min'=>20,
+             'rx'=>'/freshdesk[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([A-Za-z0-9]{20,})/i'],
+            ['id'=>'hubspot','label'=>'HubSpot key or token','sev'=>'high','min'=>30,
+             'rx'=>'/(?:hubspot|hapikey)[_-]?(?:api[_-]?)?(?:key|token)\s*[=:]\s*["\']?([A-Za-z0-9_\-]{30,})/i'],
+            ['id'=>'salesforce','label'=>'Salesforce token','sev'=>'high','min'=>30,
+             'rx'=>'/salesforce[_-]?(?:security[_-]?)?token\s*[=:]\s*["\']?([A-Za-z0-9]{20,})/i'],
+            ['id'=>'shopify_token','label'=>'Shopify access token','sev'=>'critical','min'=>32,
+             'rx'=>'/\b(shp(?:at|ca|pa|ss)_[a-f0-9]{32})\b/'],
+            ['id'=>'shopify_private','label'=>'Shopify private app password','sev'=>'critical','min'=>32,
+             'rx'=>'/\b(shppa_[a-f0-9]{32})\b/'],
+            ['id'=>'woocommerce','label'=>'WooCommerce consumer key or secret','sev'=>'critical','min'=>40,
+             'rx'=>'/\b(ck_[a-f0-9]{40}|cs_[a-f0-9]{40})\b/'],
+            ['id'=>'bigcommerce','label'=>'BigCommerce token','sev'=>'high','min'=>30,
+             'rx'=>'/bigcommerce[_-]?(?:access[_-]?)?token\s*[=:]\s*["\']?([A-Za-z0-9]{30,})/i'],
+            ['id'=>'square','label'=>'Square access token','sev'=>'critical','min'=>22,
+             'rx'=>'/\b(sq0atp-[0-9A-Za-z_\-]{20,}|sq0csp-[0-9A-Za-z_\-]{40,}|EAAA[A-Za-z0-9_\-]{50,})\b/'],
+            ['id'=>'paypal','label'=>'PayPal client secret','sev'=>'critical','min'=>40,
+             'rx'=>'/(?:paypal)[_-]?(?:client[_-]?)?secret\s*[=:]\s*["\']?([A-Za-z0-9_\-]{40,})/i'],
+            ['id'=>'razorpay','label'=>'Razorpay key','sev'=>'critical','min'=>20,'rx'=>'/\b(rzp_(?:live|test)_[A-Za-z0-9]{14,})\b/'],
+            ['id'=>'flutterwave','label'=>'Flutterwave key','sev'=>'critical','min'=>30,'rx'=>'/\b(FLW(?:SEC|PUB)K-[A-Za-z0-9_\-]{30,})\b/'],
+            ['id'=>'paystack','label'=>'Paystack key','sev'=>'critical','min'=>30,'rx'=>'/\b((?:sk|pk)_(?:live|test)_[a-f0-9]{40})\b/'],
+            ['id'=>'mollie','label'=>'Mollie key','sev'=>'critical','min'=>30,
+             'rx'=>'/mollie[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?((?:live|test)_[A-Za-z0-9]{20,})/i',
+             'only'=>['env','config','tool','profile','loose']],
+            ['id'=>'coinbase','label'=>'Coinbase Commerce key','sev'=>'critical','min'=>30,
+             'rx'=>'/coinbase[_-]?(?:commerce[_-]?)?(?:api[_-]?)?(?:key|secret)\s*[=:]\s*["\']?([A-Za-z0-9_\-]{30,})/i'],
+            ['id'=>'binance','label'=>'Binance API key','sev'=>'critical','min'=>50,
+             'rx'=>'/(?:binance)[_-]?(?:api[_-]?)?(?:key|secret)\s*[=:]\s*["\']?([A-Za-z0-9]{50,70})/i'],
+            ['id'=>'kraken','label'=>'Kraken API key','sev'=>'critical','min'=>50,
+             'rx'=>'/(?:kraken)[_-]?(?:api[_-]?)?(?:key|secret)\s*[=:]\s*["\']?([A-Za-z0-9+/=]{40,})/i'],
+            ['id'=>'bybit','label'=>'Bybit API key','sev'=>'critical','min'=>18,
+             'rx'=>'/(?:bybit)[_-]?(?:api[_-]?)?(?:key|secret)\s*[=:]\s*["\']?([A-Za-z0-9]{18,64})/i'],
+            ['id'=>'datadog','label'=>'Datadog API or app key','sev'=>'high','min'=>32,
+             'rx'=>'/(?:datadog|dd)[_-]?(?:api[_-]?|app[_-]?)?key\s*[=:]\s*["\']?([a-f0-9]{32,40})/i'],
+            ['id'=>'newrelic','label'=>'New Relic license or API key','sev'=>'high','min'=>30,
+             'rx'=>'/\b(NR(?:AA|JS|RA)-[A-Za-z0-9]{20,}|NRAK-[A-Z0-9]{20,})\b/'],
+            ['id'=>'sentry_dsn','label'=>'Sentry DSN or auth token','sev'=>'medium','min'=>30,
+             'rx'=>'#\b(https://[a-f0-9]{32}@[\w.\-]+/\d+|sntrys?_[A-Za-z0-9_\-]{30,})#'],
+            ['id'=>'grafana','label'=>'Grafana token or password','sev'=>'high','min'=>30,
+             'rx'=>'/\b(glsa_[A-Za-z0-9_]{30,}|eyJrIjoi[A-Za-z0-9_\-=]{40,})\b/'],
+            ['id'=>'splunk','label'=>'Splunk HEC token','sev'=>'high','min'=>32,
+             'rx'=>'/splunk[_-]?(?:hec[_-]?)?(?:token|key)\s*[=:]\s*["\']?([a-f0-9\-]{32,40})/i',
+             'only'=>['env','config','tool','profile','loose','history']],
+            ['id'=>'elastic','label'=>'Elastic API key','sev'=>'high','min'=>40,'rx'=>'/\b([A-Za-z0-9_\-]{16,}:\S{20,})\b/','only'=>['config','env'],'deny'=>'/^(?:https?|ftp):/i'],
+            ['id'=>'snowflake','label'=>'Snowflake password','sev'=>'critical','min'=>12,
+             'rx'=>'/snowflake[_-]?(?:password|passwd|pwd)\s*[=:]\s*["\']?([^\s"\']{8,})/i'],
+            ['id'=>'airtable','label'=>'Airtable token','sev'=>'critical','min'=>17,
+             'rx'=>'/\b(pat[A-Za-z0-9]{14}\.[a-f0-9]{64}|key[A-Za-z0-9]{14})\b/',
+             'only'=>['env','config','tool','profile','loose'],
+             'deny'=>'/^(?:keyword|keydown|keyup|keypress|keycode|keyframe|keyboard)/i'],
+            ['id'=>'notion','label'=>'Notion secret','sev'=>'critical','min'=>40,'rx'=>'/\b(secret_[A-Za-z0-9]{30,43})\b/'],
+            ['id'=>'clickup','label'=>'ClickUp token','sev'=>'critical','min'=>40,'rx'=>'/\b(pk_[0-9]{6,12}_[A-Z0-9]{20,})\b/'],
+            ['id'=>'asana','label'=>'Asana token','sev'=>'high','min'=>30,'rx'=>'/asana[_-]?(?:access[_-]?)?token\s*[=:]\s*["\']?([A-Za-z0-9\/.=]{30,})/i'],
+            ['id'=>'linear','label'=>'Linear API key','sev'=>'critical','min'=>30,'rx'=>'/\b(lin_api_[A-Za-z0-9]{30,})\b/'],
+            ['id'=>'trello','label'=>'Trello key or token','sev'=>'high','min'=>32,
+             'rx'=>'/trello[_-]?(?:api[_-]?)?(?:key|token)\s*[=:]\s*["\']?([a-f0-9]{32,64})/i'],
+            ['id'=>'figma','label'=>'Figma token','sev'=>'high','min'=>30,'rx'=>'/\b(figd_[A-Za-z0-9_\-]{30,})\b/'],
+            ['id'=>'netlify','label'=>'Netlify token','sev'=>'critical','min'=>40,
+             'rx'=>'/netlify[_-]?(?:auth[_-]?|access[_-]?)?token\s*[=:]\s*["\']?([A-Za-z0-9_\-]{40,})/i'],
+            ['id'=>'heroku','label'=>'Heroku API key','sev'=>'critical','min'=>36,
+             'rx'=>'/heroku[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([a-f0-9\-]{36})/i'],
+            ['id'=>'fastly','label'=>'Fastly API token','sev'=>'high','min'=>32,
+             'rx'=>'/fastly[_-]?(?:api[_-]?)?(?:key|token)\s*[=:]\s*["\']?([A-Za-z0-9_=\-]{32,})/i'],
+            ['id'=>'linode','label'=>'Linode token','sev'=>'critical','min'=>40,
+             'rx'=>'/linode[_-]?(?:api[_-]?)?(?:key|token)\s*[=:]\s*["\']?([a-f0-9]{40,64})/i'],
+            ['id'=>'vultr','label'=>'Vultr API key','sev'=>'critical','min'=>40,
+             'rx'=>'/vultr[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([A-Z0-9]{20,40})/i'],
+            ['id'=>'hetzner','label'=>'Hetzner token','sev'=>'critical','min'=>40,
+             'rx'=>'/hetzner[_-]?(?:api[_-]?)?token\s*[=:]\s*["\']?([A-Za-z0-9]{40,})/i'],
+            ['id'=>'ovh','label'=>'OVH application secret','sev'=>'critical','min'=>20,
+             'rx'=>'/ovh[_-]?(?:application[_-]?)?(?:secret|key)\s*[=:]\s*["\']?([A-Za-z0-9]{20,})/i'],
+            ['id'=>'cloudinary','label'=>'Cloudinary URL or secret','sev'=>'high','min'=>30,
+             'rx'=>'#\b(cloudinary://\d{6,}:\S{20,}@\S+)#'],
+            ['id'=>'imgix','label'=>'imgix key','sev'=>'medium','min'=>20,
+             'rx'=>'/imgix[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([A-Za-z0-9_\-]{20,})/i'],
+            ['id'=>'mux','label'=>'Mux token','sev'=>'high','min'=>20,
+             'rx'=>'/mux[_-]?(?:token[_-]?)?(?:id|secret)\s*[=:]\s*["\']?([A-Za-z0-9]{20,})/i'],
+            ['id'=>'assemblyai','label'=>'AssemblyAI key','sev'=>'high','min'=>32,'rx'=>'/assemblyai[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([a-f0-9]{32})/i'],
+            ['id'=>'elevenlabs','label'=>'ElevenLabs key','sev'=>'high','min'=>30,'rx'=>'/\b(sk_[a-f0-9]{48})\b/'],
+            ['id'=>'stability','label'=>'Stability AI key','sev'=>'high','min'=>30,'rx'=>'/\b(sk-[A-Za-z0-9]{40,})\b/','only'=>['env','config','tool'],'deny'=>'/^(?:sk-proj|sk-ant)/'],
+            ['id'=>'tavily','label'=>'Tavily key','sev'=>'high','min'=>30,'rx'=>'/\b(tvly-[A-Za-z0-9_\-]{30,})\b/'],
+            ['id'=>'firecrawl','label'=>'Firecrawl key','sev'=>'high','min'=>30,'rx'=>'/\b(fc-[a-f0-9]{32})\b/'],
+            ['id'=>'exa','label'=>'Exa key','sev'=>'high','min'=>30,
+             'rx'=>'/exa[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([A-Za-z0-9\-]{30,})/i'],
+            ['id'=>'together','label'=>'Together AI key','sev'=>'high','min'=>40,
+             'rx'=>'/together[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([a-f0-9]{64})/i'],
+            ['id'=>'anyscale','label'=>'Anyscale key','sev'=>'high','min'=>30,'rx'=>'/\b(esecret_[A-Za-z0-9_\-]{20,})\b/'],
+            ['id'=>'baseten','label'=>'Baseten key','sev'=>'high','min'=>30,
+             'rx'=>'/baseten[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([A-Za-z0-9_\-]{20,})/i'],
+            ['id'=>'modal','label'=>'Modal token','sev'=>'high','min'=>30,'rx'=>'/\b(ak-[A-Za-z0-9]{20,}-[A-Za-z0-9]{20,}|as-[A-Za-z0-9]{20,}-[A-Za-z0-9]{20,})\b/'],
+            ['id'=>'runpod','label'=>'RunPod key','sev'=>'high','min'=>30,
+             'rx'=>'/runpod[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([A-Za-z0-9]{20,})/i'],
+            ['id'=>'cerebras','label'=>'Cerebras key','sev'=>'high','min'=>30,'rx'=>'/\b(csk-[A-Za-z0-9]{40,})\b/'],
+            ['id'=>'sambanova','label'=>'SambaNova key','sev'=>'high','min'=>30,'rx'=>'/sambanova[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([a-f0-9\-]{36})/i'],
+            ['id'=>'nvidia','label'=>'NVIDIA API key','sev'=>'high','min'=>30,'rx'=>'/\b(nvapi-[A-Za-z0-9_\-]{60,})\b/'],
+            ['id'=>'voyage','label'=>'Voyage AI key','sev'=>'high','min'=>30,'rx'=>'/\b(pa-[A-Za-z0-9_\-]{20,})\b/','only'=>['env'],'deny'=>'/^pa-(?:ss|ssword)/i'],
+            ['id'=>'stripe_restricted','label'=>'Stripe restricted key','sev'=>'critical','min'=>30,'rx'=>'/\b(rk_(?:live|test)_[A-Za-z0-9]{20,})\b/'],
+            ['id'=>'aws_web_identity','label'=>'AWS web identity token file','sev'=>'high','min'=>100,'rx'=>'/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/','only'=>['env'],'deny'=>'/^(?:ey|sk-)/'],
+            ['id'=>'google_service_account_json','label'=>'Google service-account JSON block','sev'=>'critical','min'=>100,
+             'rx'=>'/"(private_key_id|private_key)"\s*:\s*"((?:[^"\\]|\\.){100,})"/'],
+            ['id'=>'kubernetes_token','label'=>'Kubernetes service-account token','sev'=>'critical','min'=>200,
+             'rx'=>
+             '/\b(eyJhbGciOiJSUzI1NiIsImtpZCI6[A-Za-z0-9_\-\.]{150,})\b/'],
+            ['id'=>'docker_auth','label'=>'Docker registry auth','sev'=>'critical','min'=>20,
+             'rx'=>'/"auth"\s*:\s*"([A-Za-z0-9+\/=]{20,})"/'],
+            ['id'=>'pypi_upload_token','label'=>'PyPI upload token','sev'=>'critical','min'=>40,'rx'=>'/\b(pypi-[A-Za-z0-9_\-]{40,})\b/'],
+            ['id'=>'rubygems','label'=>'RubyGems API key','sev'=>'high','min'=>32,'rx'=>'/\b(rubygems_[a-f0-9]{48})\b/'],
+            ['id'=>'sonar','label'=>'SonarQube token','sev'=>'high','min'=>40,'rx'=>'/\b(squ_[a-f0-9]{40}|sqp_[a-f0-9]{40})\b/'],
+            ['id'=>'circleci','label'=>'CircleCI token','sev'=>'high','min'=>40,
+             'rx'=>'/circleci[_-]?(?:api[_-]?)?token\s*[=:]\s*["\']?([a-f0-9]{40})/i'],
+            ['id'=>'travis','label'=>'Travis CI token','sev'=>'high','min'=>20,
+             'rx'=>'/travis[_-]?(?:api[_-]?)?token\s*[=:]\s*["\']?([A-Za-z0-9_\-]{20,})/i'],
+            ['id'=>'vercel_hook','label'=>'Deployment hook URL','sev'=>'medium','min'=>40,
+             'rx'=>'#\b(https://api\.vercel\.com/v1/integrations/deploy/[A-Za-z0-9]+/[A-Za-z0-9]+)#'],
+            ['id'=>'ftp_password','label'=>'FTP or SFTP password','sev'=>'high','min'=>8,
+             'rx'=>'/\b(?:ftp|sftp)[_-]?(?:password|passwd|pass|pwd)\s*[=:]\s*["\']?([^\s"\']{8,})/i'],
+            ['id'=>'smtp_password','label'=>'SMTP password','sev'=>'high','min'=>8,
+             'rx'=>'/\b(?:smtp|mail)[_-]?(?:password|passwd|pass|pwd)\s*[=:]\s*["\']?([^\s"\']{8,})/i'],
+            ['id'=>'ldap_password','label'=>'LDAP bind password','sev'=>'critical','min'=>8,
+             'rx'=>'/\b(?:ldap|bind)[_-]?(?:password|passwd|pass|pwd|credentials)\s*[=:]\s*["\']?([^\s"\']{8,})/i'],
+            ['id'=>'sftp_keypath','label'=>'Private key path for SFTP','sev'=>'medium','min'=>10,
+             'rx'=>'/(?:sftp|ssh)[_-]?(?:private[_-]?)?key[_-]?(?:path|file)\s*[=:]\s*["\']?([^\s"\']{10,})/i'],
+            ['id'=>'webhook_generic','label'=>'Webhook URL with a token','sev'=>'high','min'=>40,
+             'rx'=>'#\b(https?://[^\s"\']{10,}/(?:hook|hooks|webhook|webhooks|callback)[^\s"\']{0,120}[?&](?:token|key|secret|sig|signature)=[A-Za-z0-9_\-\.]{16,})#i'],
+            ['id'=>'jwt_hs256_secret','label'=>'JWT signing secret','sev'=>'critical','min'=>16,
+             'rx'=>'/(?:jwt|token)[_-]?(?:signing[_-]?)?secret\s*[=:]\s*["\']?([^\s"\']{16,})/i'],
+            ['id'=>'encryption_key','label'=>'Encryption or app key','sev'=>'critical','min'=>16,
+             'rx'=>'/\b(?:app|encryption|encrypt|cipher|aes|secret)[_-]?key\s*[=:]\s*["\']?(?:base64:)?([A-Za-z0-9+\/=\-]{16,})/i'],
+            ['id'=>'hashicorp_boundary','label'=>'HashiCorp Boundary token','sev'=>'high','min'=>30,
+             'rx'=>'/\b(at_[A-Za-z0-9_\-]{20,})\b/'],
+            ['id'=>'terraform_cloud_token','label'=>'Terraform Cloud token','sev'=>'critical','min'=>40,
+             'rx'=>'/\b([A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9_\-]{60,})\b/'],
+            ['id'=>'cloudflare_origin','label'=>'Cloudflare origin CA key','sev'=>'high','min'=>40,
+             'rx'=>'/\b(v1\.0-[a-f0-9]{170,}-[a-f0-9]{10,})\b/'],
+            ['id'=>'github_app_key','label'=>'GitHub App private key','sev'=>'critical','min'=>200,
+             'rx'=>'/-----BEGIN RSA PRIVATE KEY-----/'],
+            ['id'=>'sentry_auth','label'=>'Sentry auth token','sev'=>'high','min'=>50,'rx'=>'/\b(sntrys_[A-Za-z0-9_\-]{50,})\b/'],
+            ['id'=>'postman','label'=>'Postman API key','sev'=>'high','min'=>30,'rx'=>'/\b(PMAK-[A-Za-z0-9]{24,})\b/'],
+            ['id'=>'securitytrails','label'=>'SecurityTrails key','sev'=>'high','min'=>32,
+             'rx'=>'/securitytrails[_-]?(?:api[_-]?)?key\s*[=:]\s*["\']?([A-Za-z0-9]{32})/i'],
+            ['id'=>'ipinfo','label'=>'ipinfo token','sev'=>'medium','min'=>14,
+             'rx'=>'/ipinfo[_-]?(?:api[_-]?)?token\s*[=:]\s*["\']?([a-f0-9]{14})/i'],
+                        ['id'=>'wordpress_salt','label'=>'WordPress salt or key','sev'=>'medium','min'=>32,
              'rx'=>'/define\s*\(\s*[\'"](?:AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY|AUTH_SALT|SECURE_AUTH_SALT|LOGGED_IN_SALT|NONCE_SALT)[\'"]\s*,\s*[\'"]([^\'"]{20,})[\'"]\s*\)/i','deny'=>null],
             ['id'=>'wp_db','label'=>'WordPress database password','sev'=>'high','min'=>8,
              'rx'=>'/define\s*\(\s*[\'"]DB_PASSWORD[\'"]\s*,\s*[\'"]([^\'"]{3,})[\'"]\s*\)/i','deny'=>null],
@@ -10908,8 +11087,39 @@ class FileManager {
             'laravel_key'=>'key','conn_string'=>'database','basic_auth_url'=>'link','bearer'=>'token',
             'wordpress_salt'=>'wordpress','wp_db'=>'wordpress','netrc_login'=>'lock','slack_cookie'=>'cookie',
             'private_key'=>'key','oauth'=>'google','gemini'=>'google',
+            /* the kinds added with the rest of the API keys */
+            'google_maps'=>'globe','gcp_api_key'=>'google','mapbox'=>'globe',
+            'twilio_sid'=>'phone','twilio_key'=>'phone','shopify_token'=>'shopping',
+            'shopify_private'=>'shopping','woocommerce'=>'wordpress','square'=>'shopping',
+            'razorpay'=>'shopping','flutterwave'=>'shopping','paystack'=>'shopping',
+            'mollie'=>'shopping','paypal'=>'shopping','binance'=>'shopping',
+            'kraken'=>'shopping','bybit'=>'shopping','stripe_restricted'=>'stripe',
+            'notion'=>'package','airtable'=>'package','linear'=>'package','figma'=>'package',
+            'clickup'=>'package','trello'=>'package','postman'=>'link','netlify'=>'cloud',
+            'heroku'=>'cloud','cloudinary'=>'cloud','deepgram'=>'ai','elevenlabs'=>'ai',
+            'assemblyai'=>'ai','nvidia'=>'ai','cerebras'=>'ai','runpod'=>'ai','tavily'=>'globe',
+            'firecrawl'=>'globe','datadog'=>'cloud','newrelic'=>'cloud','sentry_auth'=>'cloud',
+            'sentry_dsn'=>'cloud','grafana'=>'cloud','docker_auth'=>'package',
+            'kubernetes_token'=>'cloud','rubygems'=>'package','sonar'=>'package',
+            'terraform_cloud_token'=>'cloud','google_service_account_json'=>'google',
+            'jwt_hs256_secret'=>'token','encryption_key'=>'key','firebase_server'=>'cloud',
+            'firebase_vapid'=>'cloud','ftp_password'=>'lock','smtp_password'=>'mail',
+            'ldap_password'=>'lock','webhook_generic'=>'link','pusher'=>'cloud','ably'=>'cloud',
+            'auth0'=>'lock','okta'=>'lock','supabase'=>'database','mux'=>'cloud','imgix'=>'cloud',
+            'messagebird'=>'phone','vonage'=>'phone','clickatell'=>'phone','intercom'=>'chat',
+            'zendesk'=>'chat','freshdesk'=>'chat','hubspot'=>'chat','salesforce'=>'cloud',
+            'bigcommerce'=>'shopping','coinbase'=>'shopping','snowflake'=>'database',
+            'elastic'=>'cloud','splunk'=>'cloud','linode'=>'cloud','vultr'=>'cloud',
+            'hetzner'=>'cloud','ovh'=>'cloud','fastly'=>'cloud',
         ];
-        if(isset($map[$id]))return $map[$id];
+        /* a name that has no picture of its own borrows the nearest one, and
+           the window falls back to the lock if even that is missing */
+        $alias=['github'=>'git','gitlab'=>'git','slack'=>'chat','telegram'=>'chat',
+                'discord'=>'chat','xai'=>'ai','stripe'=>'shopping','vault'=>'lock',
+                'mail'=>'envelope','npm'=>'package','env'=>'key','cookie'=>'token'];
+        if(isset($map[$id])&&isset($this->keysFinderIcons()[$map[$id]]))return $map[$id];
+        if(isset($map[$id],$alias[$map[$id]]))return $alias[$map[$id]];
+        foreach($map as $needle=>$icon)if(strpos($l,$needle)!==false)return isset($alias[$icon])?$alias[$icon]:$icon;
         foreach($map as $needle=>$icon)if(strpos($l,$needle)!==false)return $icon;
         if(strpos($l,'key')!==false)return 'key';
         if(strpos($l,'token')!==false)return 'token';
@@ -11275,6 +11485,170 @@ class FileManager {
                 return ['verdict' => 'unverified', 'type' => 'Twilio',
                         'detail' => 'A Twilio SID alone cannot be checked; it needs the auth token from the same pair.'];
 
+
+            /* ── maps ───────────────────────────────────────────────────── */
+            case 'google_maps':
+            case 'gcp_api_key':
+                $r = $this->kfHttp('https://maps.googleapis.com/maps/api/geocode/json?address=test&key=' . urlencode($v), 'GET');
+                $j = json_decode((string)$r['body'], true);
+                $st = (string)($j['status'] ?? '');
+                if ($st === 'OK' || $st === 'ZERO_RESULTS')
+                    return ['verdict' => 'working', 'type' => 'Google Maps', 'detail' => 'The key works on the Geocoding API.'];
+                if ($st === 'REQUEST_DENIED')
+                    return ['verdict' => 'rejected', 'type' => 'Google Maps',
+                            'detail' => 'Google refused the key: ' . substr((string)($j['error_message'] ?? 'request denied'), 0, 130)];
+                return $this->kfVerdict($r, [200], 'Google Maps');
+            case 'mapbox':
+                $r = $this->kfHttp('https://api.mapbox.com/tokens/v2?access_token=' . urlencode($v), 'GET');
+                $out = $this->kfVerdict($r, [200], 'Mapbox');
+                if ($out['verdict'] === 'working') $out['detail'] = 'The token works and lists its own scopes.';
+                return $out;
+
+            /* ── messaging and mail ─────────────────────────────────────── */
+            case 'twilio_key':
+                /* a key SID needs its secret, which is checked with the pair */
+                return ['verdict' => 'unverified', 'type' => 'Twilio',
+                        'detail' => 'A Twilio key is two halves; the pair is checked together with the account SID and secret.'];
+            case 'twilio_sid':
+                return ['verdict' => 'unverified', 'type' => 'Twilio',
+                        'detail' => 'An account SID alone cannot be checked; it needs its auth token.'];
+
+            /* ── commerce ───────────────────────────────────────────────── */
+            case 'shopify_token':
+            case 'shopify_private':
+                $host = '';
+                if (preg_match('#([a-z0-9\-]+\.myshopify\.com)#i', (string)$where, $m)) $host = $m[1];
+                if ($host === '') return ['verdict' => 'unverified', 'type' => 'Shopify',
+                        'detail' => 'A Shopify token belongs to one store; no shop domain is written beside it.'];
+                $r = $this->kfHttp('https://' . $host . '/admin/api/2024-10/shop.json', 'GET', ['X-Shopify-Access-Token: ' . $v]);
+                return $this->kfVerdict($r, [200], 'Shopify');
+            case 'woocommerce':
+                return ['verdict' => 'unverified', 'type' => 'WooCommerce',
+                        'detail' => 'A WooCommerce key is half a pair: it is checked with its consumer secret and the shop address, which are not in this row.'];
+
+            /* ── the work tools ─────────────────────────────────────────── */
+            case 'notion':
+                $r = $this->kfHttp('https://api.notion.com/v1/users/me', 'GET',
+                    array_merge($bearer, ['Notion-Version: 2022-06-28']));
+                $out = $this->kfVerdict($r, [200], 'Notion');
+                if ($out['verdict'] === 'working' && preg_match('/"name"\s*:\s*"([^"]{1,60})"/', (string)$r['body'], $m))
+                    $out['detail'] = 'The token works for "' . $m[1] . '".';
+                return $out;
+            case 'airtable':
+                $r = $this->kfHttp('https://api.airtable.com/v0/meta/whoami', 'GET', $bearer);
+                return $this->kfVerdict($r, [200], 'Airtable');
+            case 'linear':
+                $r = $this->kfHttp('https://api.linear.app/graphql', 'POST',
+                    array_merge($bearer, ['Content-Type: application/json']), json_encode(['query' => '{ viewer { name } }']));
+                $out = $this->kfVerdict($r, [200], 'Linear');
+                if ($out['verdict'] === 'working' && preg_match('/"name"\s*:\s*"([^"]{1,60})"/', (string)$r['body'], $m))
+                    $out['detail'] = 'The key works for "' . $m[1] . '".';
+                return $out;
+            case 'figma':
+                $r = $this->kfHttp('https://api.figma.com/v1/me', 'GET', ['X-Figma-Token: ' . $v]);
+                $out = $this->kfVerdict($r, [200], 'Figma');
+                if ($out['verdict'] === 'working' && preg_match('/"email"\s*:\s*"([^"]{3,80})"/', (string)$r['body'], $m))
+                    $out['detail'] = 'The token works for ' . $m[1] . '.';
+                return $out;
+            case 'clickup':
+                $r = $this->kfHttp('https://api.clickup.com/api/v2/user', 'GET', ['Authorization: ' . $v]);
+                return $this->kfVerdict($r, [200], 'ClickUp');
+            case 'trello':
+                $r = $this->kfHttp('https://api.trello.com/1/members/me?key=' . urlencode($v) . '&token=' . urlencode($v), 'GET');
+                return $this->kfVerdict($r, [200], 'Trello');
+            case 'postman':
+                $r = $this->kfHttp('https://api.getpostman.com/me', 'GET', ['X-Api-Key: ' . $v]);
+                return $this->kfVerdict($r, [200], 'Postman');
+
+            /* ── hosting and delivery ───────────────────────────────────── */
+            case 'netlify':
+                $r = $this->kfHttp('https://api.netlify.com/api/v1/accounts', 'GET', $bearer);
+                return $this->kfVerdict($r, [200], 'Netlify');
+            case 'heroku':
+                $r = $this->kfHttp('https://api.heroku.com/account', 'GET',
+                    array_merge($bearer, ['Accept: application/vnd.heroku+json; version=3']));
+                $out = $this->kfVerdict($r, [200], 'Heroku');
+                if ($out['verdict'] === 'working' && preg_match('/"email"\s*:\s*"([^"]{3,80})"/', (string)$r['body'], $m))
+                    $out['detail'] = 'The key works for ' . $m[1] . '.';
+                return $out;
+            case 'vercel_hook':
+                return ['verdict' => 'unverified', 'type' => 'Deploy hook',
+                        'detail' => 'A deploy hook is checked by deploying; this tool does not start a build.'];
+            case 'cloudinary':
+                /* the address carries the key and secret; ask for one harmless resource */
+                if (preg_match('#cloudinary://([^:]+):([^@]+)@(\S+)#', $v, $m)) {
+                    $basic = base64_encode($m[1] . ':' . $m[2]);
+                    $r = $this->kfHttp('https://api.cloudinary.com/v1_1/' . rawurlencode($m[3]) . '/resources/image?max_results=1', 'GET',
+                        ['Authorization: Basic ' . $basic]);
+                    $out = $this->kfVerdict($r, [200], 'Cloudinary');
+                    if ($out['verdict'] === 'working') $out['detail'] = 'Cloudinary accepted the credentials (the media list was readable).';
+                    return $out;
+                }
+                return ['verdict' => 'unverified', 'type' => 'Cloudinary', 'detail' => 'The address could not be read.'];
+            case 'deepgram':
+                $r = $this->kfHttp('https://api.deepgram.com/v1/projects', 'GET', ['Authorization: Token ' . $v]);
+                return $this->kfVerdict($r, [200], 'Deepgram');
+            case 'elevenlabs':
+                $r = $this->kfHttp('https://api.elevenlabs.io/v1/user', 'GET', ['xi-api-key: ' . $v]);
+                $out = $this->kfVerdict($r, [200], 'ElevenLabs');
+                if ($out['verdict'] === 'working') $out['detail'] = 'The key works (the account was readable).';
+                return $out;
+            case 'assemblyai':
+                $r = $this->kfHttp('https://api.assemblyai.com/v2/account', 'GET', ['Authorization: ' . $v]);
+                return $this->kfVerdict($r, [200], 'AssemblyAI');
+            case 'sentry_dsn':
+            case 'sentry_auth':
+                if (strpos($v, 'https://') === 0)
+                    return ['verdict' => 'unverified', 'type' => 'Sentry DSN',
+                            'detail' => 'A DSN can only send events; it is not a credential that can be asked about.'];
+                $r = $this->kfHttp('https://sentry.io/api/0/', 'GET', $bearer);
+                return $this->kfVerdict($r, [200], 'Sentry');
+            case 'datadog':
+                $r = $this->kfHttp('https://api.datadoghq.com/api/v1/validate', 'GET',
+                    ['DD-API-KEY: ' . $v, 'DD-APPLICATION-KEY: ' . $v]);
+                $out = $this->kfVerdict($r, [200], 'Datadog');
+                if ($out['verdict'] === 'working') $out['detail'] = 'Datadog says the key is valid.';
+                return $out;
+            case 'newrelic':
+                $r = $this->kfHttp('https://api.newrelic.com/v2/applications.json', 'GET', ['X-Api-Key: ' . $v]);
+                return $this->kfVerdict($r, [200], 'New Relic');
+            case 'grafana':
+                return ['verdict' => 'unverified', 'type' => 'Grafana',
+                        'detail' => 'A Grafana token belongs to one server; no server address is written beside it.'];
+
+            /* ── search and data ────────────────────────────────────────── */
+            case 'tavily':
+                $r = $this->kfHttp('https://api.tavily.com/search', 'POST', ['Content-Type: application/json'],
+                    json_encode(['api_key' => $v, 'query' => 'test', 'max_results' => 1]), 10);
+                $out = $this->kfVerdict($r, [200], 'Tavily');
+                if ($out['verdict'] === 'working') $out['detail'] = 'The key works (one one-result search was sent).';
+                return $out;
+            case 'firecrawl':
+                $r = $this->kfHttp('https://api.firecrawl.dev/v1/team/credit-usage', 'GET', $bearer);
+                return $this->kfVerdict($r, [200], 'Firecrawl');
+            case 'nvidia':
+                $r = $this->kfHttp('https://integrate.api.nvidia.com/v1/models', 'GET', $bearer);
+                return $this->kfVerdict($r, [200], 'NVIDIA');
+            case 'cerebras':
+                $r = $this->kfHttp('https://api.cerebras.ai/v1/models', 'GET', $bearer);
+                return $this->kfVerdict($r, [200], 'Cerebras');
+            case 'runpod':
+                $r = $this->kfHttp('https://api.runpod.io/graphql', 'POST',
+                    array_merge($bearer, ['Content-Type: application/json']), json_encode(['query' => '{ myself { id } }']));
+                return $this->kfVerdict($r, [200], 'RunPod');
+
+            /* ── the local infrastructure secrets ───────────────────────── */
+            case 'ftp_password':
+            case 'smtp_password':
+            case 'ldap_password':
+            case 'jwt_hs256_secret':
+            case 'encryption_key':
+            case 'snowflake':
+            case 'firebase_vapid':
+            case 'sftp_keypath':
+                return ['verdict' => 'unverified', 'type' => 'Local secret',
+                        'detail' => 'This secret only means something inside the software that owns it; there is no service to ask.'];
+
             /* ── databases and connections ──────────────────────────────── */
             case 'conn_string':
             case 'wp_db':
@@ -11315,13 +11689,10 @@ class FileManager {
                             'detail' => 'The file is a readable private key' . (isset($d['bits']) ? ' (' . $d['bits'] . ' bits)' : '') . '.'];
                 }
                 return ['verdict' => 'rejected', 'type' => 'Private key', 'detail' => 'OpenSSL cannot read this as a private key.'];
-            case 'metadata_temp':
-                return ['verdict' => 'unverified', 'type' => 'Metadata', 'detail' => 'Not a key.'];
             case 'wordpress_salt':
             case 'gcp_service_account':
             case 'google_oauth_client':
             case 'netrc_login':
-            case 'basic_auth_url':
             case 'openai_project':
             case 'env_pointer':
             case 'env_named':
@@ -11560,6 +11931,15 @@ class FileManager {
             'telegram' => 'telegram_bot', 'sendgrid' => 'sendgrid', 'mailgun' => 'mailgun', 'twilio' => 'twilio',
             'database_url' => 'conn_string', 'redis_url' => 'conn_string', 'mysql' => 'conn_string',
             'postgres' => 'conn_string', 'dsn' => 'conn_string',
+            'google_maps' => 'google_maps', 'gmaps' => 'google_maps', 'maps_api' => 'google_maps',
+            'mapbox' => 'mapbox', 'twilio' => 'twilio_key', 'shopify' => 'shopify_token',
+            'woocommerce' => 'woocommerce', 'notion' => 'notion', 'airtable' => 'airtable',
+            'linear' => 'linear', 'figma' => 'figma', 'clickup' => 'clickup', 'trello' => 'trello',
+            'postman' => 'postman', 'netlify' => 'netlify', 'heroku' => 'heroku', 'cloudinary' => 'cloudinary',
+            'deepgram' => 'deepgram', 'elevenlabs' => 'elevenlabs', 'assemblyai' => 'assemblyai',
+            'datadog' => 'datadog', 'new_relic' => 'newrelic', 'sentry' => 'sentry_auth',
+            'tavily' => 'tavily', 'firecrawl' => 'firecrawl', 'nvidia' => 'nvidia', 'cerebras' => 'cerebras',
+            'runpod' => 'runpod', 'grafana' => 'grafana',
         ];
         foreach ($byName as $needle => $kind) {
             if (strpos($w, $needle) !== false) return $kind;
@@ -11570,7 +11950,15 @@ class FileManager {
                            'telegram_bot', 'sendgrid', 'mailgun', 'npm_token', 'pypi_token',
                            'digitalocean', 'terraform', 'cloudflare', 'vault', 'jwt', 'conn_string',
                            'private_key_pem', 'aws_access_key', 'aws_secret_key', 'aws_session_token',
-                           'metadata_temp', 'slack_webhook', 'stripe_webhook', 'basic_auth_url'], true)) {
+                           'metadata_temp', 'slack_webhook', 'stripe_webhook', 'basic_auth_url',
+                           'google_maps', 'gcp_api_key', 'mapbox', 'twilio_key', 'shopify_token',
+                           'secret_shopify', 'notion', 'airtable', 'linear', 'figma', 'clickup',
+                           'trello', 'postman', 'netlify', 'heroku', 'cloudinary', 'deepgram',
+                           'elevenlabs', 'assemblyai', 'datadog', 'newrelic', 'sentry_auth',
+                           'tavily', 'firecrawl', 'nvidia', 'cerebras', 'runpod', 'woocommerce',
+                           'square', 'razorpay', 'flutterwave', 'paystack', 'mollie', 'paypal',
+                           'binance', 'kraken', 'bybit', 'terraform_cloud_token', 'stripe_restricted',
+                           'rubygems', 'sonar', 'docker_auth', 'kubernetes_token'], true)) {
             return $id;
         }
         return '';
@@ -39020,7 +39408,7 @@ input.inp,select.inp{height:32px}
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="guardBtn" title="Keep a backup of this file manager and put it back if it is deleted or replaced"><svg viewBox="0 0 24 24"><path d="M12 21.5s7.5-3.6 7.5-9.5V5.6L12 2.5 4.5 5.6V12c0 5.9 7.5 9.5 7.5 9.5z"/></svg></svg>File Guardian</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><button class="sb-item" id="dupBtn" title="Find files with identical content, wasting disk space"><svg viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5v-3a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/></svg></svg>Find Duplicates</button><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="wpImagesBtn" title="Replace images on a WordPress page and dashboard"><svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2"/><circle cx="8.2" cy="9.5" r="1.7"/><path d="m4 17.4 4.6-4.3 3.2 3 2.6-2.3 5.4 5"/></svg></svg>Images Replacer</button><?php endif;?><?php endif;?>
-              <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])&&fm_can('keys')):?><button class="sb-item" id="keysBtn" title="Find the credentials a stranger must not read: cloud keys, AI provider keys, tokens, database passwords and private keys - where they sit, what kind they are, never the value itself"><svg viewBox="0 0 24 24"><circle cx="8.2" cy="8.2" r="4.6"/><path d="m11.6 11.6 8.2 8.2"/><path d="M16.4 14.2 18.9 11.7"/><path d="M19.1 16.9l2.2-2.2"/></svg></svg><span class="sb-tool-name">Keys Finder</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?><?php endif;?>
+              <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])&&fm_can('keys')):?><button class="sb-item" id="keysBtn" title="Find the credentials a stranger must not read: cloud keys, AI provider keys, tokens, database passwords and private keys - where they sit, what kind they are, never the value itself"><svg viewBox="0 0 24 24"><circle cx="8.2" cy="8.2" r="4.6"/><path d="m11.6 11.6 8.2 8.2"/><path d="M16.4 14.2 18.9 11.7"/><path d="M19.1 16.9l2.2-2.2"/></svg><span class="sb-tool-name">Keys Finder</span></button><?php endif;?><?php endif;?>
 <?php if(!$fm->isRO()):?><button class="sb-item" id="largeBtn" title="Every big file on this server, largest first, so space can be freed"><svg viewBox="0 0 24 24"><path d="M12.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4.5"/><path d="M12.5 3 18 8.5h-5.5z"/><circle cx="16.5" cy="16.5" r="4"/><path d="m19.4 19.4 2 2"/></svg></svg>Large Files</button><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="errLogBtn" title="Read the PHP error log without leaving the browser"><svg viewBox="0 0 24 24"><path d="M6 2.8h9l4.5 4.5v13a1.8 1.8 0 0 1-1.8 1.8H6a1.8 1.8 0 0 1-1.8-1.8V4.6A1.8 1.8 0 0 1 6 2.8z"/><path d="M14.5 2.8v5h5"/><path d="M8 12h7M8 15.5h7M8 8.5h3"/></svg></svg>Log Viewer</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="wpNumbersBtn" title="Change displayed WordPress dashboard numbers without changing site data"><svg viewBox="0 0 24 24"><path d="M3.5 20.5h17"/><rect x="5.5" y="12" width="3.2" height="6"/><rect x="10.4" y="8.5" width="3.2" height="9.5"/><rect x="15.3" y="4.5" width="3.2" height="13.5"/></svg></svg>Numbers control</button><?php endif;?><?php endif;?>
