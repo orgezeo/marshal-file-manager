@@ -3514,6 +3514,7 @@ function fm_mfm_perms_catalog(){
             ['id'=>'guard','name'=>'Site Files Guard','note'=>'Files written into a site, backed up and repaired if deleted.'],
             ['id'=>'terminal','name'=>'Terminal and SSH','note'=>'The shell inside the manager and the SSH access tool.'],
             ['id'=>'rooting','name'=>'Rooting','note'=>'The privilege catalogue and the rooted dashboard.'],
+            ['id'=>'keys','name'=>'Keys Finder','note'=>'Read-only credential audit: where keys, tokens and passwords sit on this server, masked.'],
             ['id'=>'bypass','name'=>'Bypass Permissions','note'=>'The last-resort permission routes.'],
         ]],
     ];
@@ -3612,10 +3613,11 @@ function fm_mfm_op_perm($a){
 function fm_mfm_xop_perm($xop){
     static $m=['rooting'=>'rooting','bypass'=>'bypass','privmode'=>'privmode','owners'=>'owners','guard'=>'guard',
                'sessions'=>'inspector','mfmadmin'=>'','pma'=>'pma','cpm'=>'cpm',
-               'mail'=>'cms','mail_get'=>'cms'];
+               'mail'=>'cms','mail_get'=>'cms','keys'=>'keys'];
     if(isset($m[$xop]))return $m[$xop];
     if(strpos($xop,'rooting')===0)return 'rooting';
     if(strpos($xop,'owner')===0)return 'owners';
+    if(strpos($xop,'keys_')===0||$xop==='keys')return 'keys';
     if(strpos($xop,'cms')===0||strpos($xop,'wp_')===0)return 'cms';
     if(strpos($xop,'ssh')===0||strpos($xop,'term')===0||$xop==='run')return 'terminal';
     return '';
@@ -10020,6 +10022,1618 @@ class FileManager {
         return['groups'=>$groups,'capped'=>$capped];
     }
 
+    /* ── Keys Finder ────────────────────────────────────────────────────────────
+       An administrator presses this to learn one thing: which files on this
+       server carry a credential that a stranger must not read. It is an audit,
+       not a collector - every value stays on the server, sealed with the
+       manager's own encryption key and masked before it is ever sent to the
+       browser, so the window shows where the secret is and what kind it is,
+       never the secret itself.
+
+       What it reads: the well-known places first (environment files, cloud
+       credential files, shell histories and profiles, shell RC files, git and
+       docker and npm and python credential stores, SSH private keys, backup
+       folders, WordPress wp-config.php, application config files), then a
+       guarded sweep for the same shapes anywhere else it can read. The sweep
+       is bounded by time, by file count and by file size, never follows a
+       symlink, never opens a device or a pipe, and skips this manager's own
+       files.
+
+       What it does not do: it never writes, never uploads, and there is no
+       endpoint that hands back a plain value - the only path that returns one
+       is the administrator's own signed-in download, which is logged. */
+    /* the line a match sits on, counted from the head of the file */
+    private function keysFinderLine($text,$offset){
+        return 1+substr_count(substr($text,0,max(0,(int)$offset)),"\n");
+    }
+
+    /* how a value is shown: enough to recognise it, never enough to use it */
+    private function keysFinderMask($v){
+        $n=strlen($v);
+        if($n<=8)return str_repeat('•',max(4,$n));
+        $keep=max(2,(int)floor($n*0.12));
+        $keep=min($keep,6);
+        return substr($v,0,$keep).str_repeat('•',min(28,$n-$keep*2)).substr($v,-$keep);
+    }
+
+    /* sealed with the key this manager already keeps for its own files.
+       The three parts are written base64'd, because a raw IV or tag can hold a
+       "|" byte and would then split in the wrong place - a fault that only
+       shows up on values of certain lengths. v2 is the shape written now;
+       v1 is still read, at fixed offsets, so nothing already sealed is lost */
+    private function keysFinderSeal($plain){
+        $plain=(string)$plain;
+        if(function_exists('fm_users_key')){$k=@fm_users_key();}else{$k='';}
+        if(!is_string($k)||strlen($k)<16)$k=hash('sha256','mfm-keys-finder|'.(__DIR__),true);
+        $iv=random_bytes(12);
+        $tag='';
+        $ct=@openssl_encrypt($plain,'aes-256-gcm',$k,OPENSSL_RAW_DATA,$iv,$tag,'mfm-keys-finder');
+        if($ct===false)return base64_encode('x'.substr(hash('sha256',$plain),0,32));
+        return base64_encode('v2|'.base64_encode($iv).'|'.base64_encode($tag).'|'.base64_encode($ct));
+    }
+    private function keysFinderUnseal($sealed){
+        $raw=@base64_decode((string)$sealed,true);
+        if($raw===false||$raw==='')return '';
+        if(function_exists('fm_users_key')){$k=@fm_users_key();}else{$k='';}
+        if(!is_string($k)||strlen($k)<16)$k=hash('sha256','mfm-keys-finder|'.(__DIR__),true);
+        $iv=$tag=$ct='';
+        if(strpos($raw,'v2|')===0){
+            $parts=explode('|',substr($raw,3));
+            if(count($parts)!==3)return '';
+            $iv=(string)base64_decode($parts[0],true);
+            $tag=(string)base64_decode($parts[1],true);
+            $ct=(string)base64_decode($parts[2],true);
+        }elseif(strpos($raw,'v1|')===0){
+            /* fixed offsets: iv is 12 bytes, tag 16, then the ciphertext */
+            $body=substr($raw,3);
+            if(strlen($body)<12+1+16+1)return '';
+            if($body[12]!=='|'||$body[29]!=='|')return '';
+            $iv=substr($body,0,12);
+            $tag=substr($body,13,16);
+            $ct=substr($body,30);
+        }else{
+            return '';
+        }
+        if(strlen($iv)<12||strlen($tag)<16||$ct==='')return '';
+        $plain=@openssl_decrypt($ct,'aes-256-gcm',$k,OPENSSL_RAW_DATA,$iv,$tag,'mfm-keys-finder');
+        return $plain===false?'':$plain;
+    }
+
+    /* ── the two stores a cloud instance keeps its credentials in. AWS SSM
+       Parameter Store with SecureString, GCP Secret Manager, and Vault all
+       answer one shape: a name, a version, and a value. They are read only
+       when this environment already carries a token that may read them, and
+       the value is sealed the moment it arrives - it is never written out.
+       The command-line tool is asked first because it resolves the
+       instance's own role; a token found on disk is the fallback. */
+    private function keysFinderSecretsManager(&$note){
+        $out=[];
+        $note=[];
+        if(!function_exists('shell_exec')||@ini_get('safe_mode')){$note[]='shell_exec is not available, so the secret store was not asked.';return $out;}
+        $run=function($cmd){$t=microtime(true);$res=@shell_exec($cmd.' 2>/dev/null');return ['out'=>is_string($res)?trim($res):'','s'=>(int)round((microtime(true)-$t)*1000)];};
+        $names=[];
+        /* 1. the names, if the CLI is installed */
+        $r=$run('timeout 6 aws ssm describe-parameters --max-items 40 --query "Parameters[].Name" --output text 2>/dev/null');
+        if($r['out']!==''){$names=preg_split('/\s+/',$r['out'],-1,PREG_SPLIT_NO_EMPTY);$note[]='SSM: '.count($names).' parameter name(s) read in '.$r['s'].'ms';}
+        else{$note[]='SSM: the CLI answered nothing (not installed, no credentials, or no role) in '.$r['s'].'ms';}
+        /* 2. every name that looks like a credential is fetched with decryption */
+        $fetched=0;$failed=0;
+        foreach(array_slice($names,0,25) as $name){
+            if(!preg_match('/(KEY|TOKEN|PASS|SECRET|CRED|DSN|URL|PRIVATE|AUTH|LICENSE|CONN)/i',$name))continue;
+            $q=$run('timeout 6 aws ssm get-parameter --name '.escapeshellarg($name).' --with-decryption --query Parameter.Value --output text');
+            $val=trim((string)$q['out']);
+            if($val===''||strtolower($val)===strtolower($name)){$failed++;continue;}
+            $fetched++;
+            $out[]=['id'=>'ssm_parameter','label'=>'AWS SSM parameter ('.$name.')','sev'=>'critical','source'=>'secrets',
+                    'where'=>'SSM Parameter Store · '.$name,'line'=>0,'path'=>'ssm:'.$name,
+                    'mask'=>$this->keysFinderMask($val),'sha'=>substr(hash('sha256',$val),0,12),'len'=>strlen($val),
+                    'sealed'=>$this->keysFinderSeal($val),'extra'=>''];
+            if($fetched>=25)break;
+        }
+        if($names)$note[]='SSM: '.$fetched.' value(s) read, '.$failed.' refused';
+        /* 3. Vault, when this environment holds a token for it */
+        $vt=(string)(getenv('VAULT_TOKEN')?:getenv('VAULT_TOKEN_FILE')?:'');
+        $va=(string)(getenv('VAULT_ADDR')?:'');
+        if($vt!==''&&$va!==''){
+            $r=$run('timeout 6 vault kv list -format=json secret/ 2>/dev/null');
+            $list=json_decode($r['out'],true);
+            if(is_array($list)){
+                foreach(array_slice(array_filter($list,'is_string'),0,10) as $leaf){$leaf=rtrim($leaf,'/');
+                    $q=$run('timeout 6 vault kv get -format=json secret/'.escapeshellarg($leaf).' 2>/dev/null');
+                    $d=json_decode($q['out'],true);$pairs=[];
+                    if(is_array($d))$this->keysFinderFlattenJson($d['data']??$d,'',$pairs);
+                    foreach($pairs as [$k,$v]){
+                        $v=trim((string)$v);
+                        if(strlen($v)<8||strlen($v)>8192)continue;
+                        if(!preg_match('/(key|token|pass|secret|cred|dsn|url|private|auth)/i',$k))continue;
+                        $out[]=['id'=>'vault_secret','label'=>'Vault secret ('.$k.')','sev'=>'critical','source'=>'secrets',
+                                'where'=>'Vault · secret/'.$leaf.' · '.$k,'line'=>0,'path'=>'vault:secret/'.$leaf,
+                                'mask'=>$this->keysFinderMask($v),'sha'=>substr(hash('sha256',$v),0,12),'len'=>strlen($v),
+                                'sealed'=>$this->keysFinderSeal($v),'extra'=>''];
+                    }
+                }
+                $note[]='Vault: '.(count($out)).' value(s) read';
+            }
+        }else{$note[]='Vault: no token in this environment, so it was not asked';}
+        /* 4. GCP Secret Manager, when the CLI and an account are present */
+        $r=$run('timeout 6 gcloud secrets list --limit=15 --format="value(name)" 2>/dev/null');
+        if($r['out']!==''){
+            $g=0;
+            foreach(preg_split('/\s+/',$r['out'],-1,PREG_SPLIT_NO_EMPTY) as $name){
+                $q=$run('timeout 6 gcloud secrets versions access latest --secret='.escapeshellarg($name).' 2>/dev/null');
+                $val=trim((string)$q['out']);
+                if($val===''||strlen($val)>8192)continue;
+                $g++;$out[]=['id'=>'gcp_secret','label'=>'GCP secret ('.$name.')','sev'=>'critical','source'=>'secrets',
+                        'where'=>'Secret Manager · '.$name,'line'=>0,'path'=>'gcp:'.$name,
+                        'mask'=>$this->keysFinderMask($val),'sha'=>substr(hash('sha256',$val),0,12),'len'=>strlen($val),
+                        'sealed'=>$this->keysFinderSeal($val),'extra'=>''];
+                if($g>=15)break;
+            }
+            $note[]='GCP: '.$g.' value(s) read';
+        }else{$note[]='GCP: the CLI answered nothing, so it was not asked';}
+        return $out;
+    }
+
+    /* One report, written where the administrator can keep it - never posted
+       anywhere. The values inside it are sealed, so the file is a map, not a
+       copy of the credentials. */
+    public function keysFinderReport($payload){
+        $dir=__DIR__.'/.keys-reports';
+        if(!@is_dir($dir)&&!@mkdir($dir,0700,true))return ['ok'=>false,'error'=>'The folder holding this file cannot be written by PHP.'];
+        @chmod($dir,0700);
+        if(!@is_file($dir.'/.htaccess'))@file_put_contents($dir.'/.htaccess',"Require all denied\n");
+        $name='keys-'.date('Ymd-His').'-'.bin2hex(random_bytes(3)).'.json';
+        /* every row arrives with the answer the service gave, if it gave one */
+        $verified=0;
+        if(isset($payload['groups'])&&is_array($payload['groups'])){
+            foreach($payload['groups'] as $gi=>$g){
+                if(!is_array($g['hits']??null))continue;
+                foreach($g['hits'] as $hi=>$h){
+                    if(!empty($h['check']['verdict']))$verified++;
+                }
+            }
+        }
+        $body=json_encode(['generated'=>date('c'),'host'=>gethostname(),'account'=>(string)($_SESSION['fm_user']??''),
+                           'summary'=>$payload['summary']??[],'verified'=>$verified,'groups'=>$payload['groups']??[]],
+                          JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_INVALID_UTF8_SUBSTITUTE);
+        if(@file_put_contents($dir.'/'.$name,(string)$body)===false)return ['ok'=>false,'error'=>'The report could not be written.'];
+        @chmod($dir.'/'.$name,0600);
+        return ['ok'=>true,'path'=>$dir.'/'.$name,'name'=>$name,'bytes'=>strlen((string)$body)];
+    }
+
+    /* what the Finder knows how to recognise. A rule is a label, a severity,
+       the shape it looks for, the shortest value that can be a real key, and -
+       where a shape is too plain to trust on its own - the words that must not
+       follow it. Nothing here is a guess: each shape is the one the provider
+       itself documents. */
+    private function keysFinderRules(){
+        static $r=null;
+        if($r!==null)return $r;
+        $r=['paths'=>[
+            /* environment and application configuration */
+            '/(^|\/)\.env(\.[a-z0-9_-]+)?$/'                    =>['env','Environment file'],
+            '/(^|\/)wp-config\.php$/'                            =>['wpconfig','WordPress configuration'],
+            '/(^|\/)(config|configuration|settings|secrets|credentials|creds)(\.[a-z0-9_-]+)?$/' =>['config','Application configuration'],
+            '/\.(ini|conf|cnf|ya?ml|json|properties|xml|toml)$/' =>['config','Configuration file'],
+            '/\.(php|phtml|inc|py|rb|pl|pm|lua|js|mjs|cjs|ts|jsx|tsx|sh|bash|zsh|ps1|go|rs|java|c|h|cpp|hpp|cs|kt|swift)$/' =>['code','Source code'],
+            /* cloud and tool credential stores */
+            '/\/\.aws\/(credentials|config)$/'                    =>['aws','AWS credential file'],
+            '/\/\.config\/gcloud\/(credentials\.db|application_default_credentials\.json)$/' =>['gcp','Google Cloud credential file'],
+            '/\/\.azure\//'                                       =>['azure','Azure credential file'],
+            '/\/\.(npmrc|pypirc|netrc|pgpass|my\.cnf)$/'          =>['tool','Tool credential file'],
+            '/\/(\.docker\/config\.json|\.kube\/config)$/'        =>['tool','Container credential file'],
+            '/\/\.git-credentials$/'                              =>['tool','Git credential store'],
+            '/\.(ppk|pem|key|p12|pfx|jks)$/'                      =>['keyfile','Key file'],
+            '/\/id_(rsa|dsa|ecdsa|ed25519)$/'                     =>['keyfile','SSH private key'],
+            /* histories and profiles - where people paste keys by accident */
+            '/(\.bash_history|\.zsh_history|\.sh_history|\.mysql_history|\.psql_history|\.python_history)$/' =>['history','Shell or client history'],
+            '/(\.bashrc|\.zshrc|\.profile|\.bash_profile|\.zprofile|\.envrc|\.vimrc|\.gitconfig)$/' =>['profile','Shell profile'],
+            '/\.(log|txt|md|sql|bak|backup|old|orig|save|dump)$/' =>['loose','Backup, log or note'],
+        ],'secrets'=>[
+            ['id'=>'aws_access_key','label'=>'AWS access key id','sev'=>'critical','min'=>16,
+             'rx'=>'/\b((?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ABIA|ACCA)[A-Z0-9]{12,20})\b/','deny'=>null],
+            ['id'=>'aws_secret_key','label'=>'AWS secret access key','sev'=>'critical','min'=>30,
+             'rx'=>'/(?:aws_?secret_?access_?key|secret_?access_?key|aws_secret)[^\n=:]{0,12}[=:\s]+["\']?([A-Za-z0-9\/+]{40})\b/i','deny'=>null],
+            ['id'=>'aws_session_token','label'=>'AWS session token','sev'=>'high','min'=>40,
+             'rx'=>'/(?:aws_?session_?token|session_token)[^\n=:]{0,12}[=:\s]+["\']?([A-Za-z0-9\/+=]{80,})/i','deny'=>null],
+            ['id'=>'openai','label'=>'OpenAI API key','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,})/','deny'=>'/^sk-(ant|or|learn)/i'],
+            ['id'=>'anthropic','label'=>'Anthropic API key','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(sk-ant-[A-Za-z0-9_-]{20,})/','deny'=>null],
+            ['id'=>'google_gemini','label'=>'Google / Gemini API key','sev'=>'critical','min'=>30,
+             'rx'=>'/\b(AIza[0-9A-Za-z_-]{35})/','deny'=>null],
+            ['id'=>'google_oauth','label'=>'Google OAuth secret','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(GOCSPX-[A-Za-z0-9_-]{20,})/','deny'=>null],
+            ['id'=>'google_oauth_client','label'=>'Google OAuth client id','sev'=>'low','min'=>30,
+             'rx'=>'/\b([0-9]{10,14}-[a-z0-9]{20,}\.apps\.googleusercontent\.com)\b/','deny'=>null],
+            ['id'=>'groq','label'=>'Groq API key','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(gsk_[A-Za-z0-9]{20,})/','deny'=>null],
+            ['id'=>'huggingface','label'=>'Hugging Face token','sev'=>'high','min'=>20,
+             'rx'=>'/\b(hf_[A-Za-z0-9]{20,})/','deny'=>null],
+            ['id'=>'replicate','label'=>'Replicate token','sev'=>'high','min'=>20,
+             'rx'=>'/\b(r8_[A-Za-z0-9]{20,})/','deny'=>null],
+            ['id'=>'xai','label'=>'xAI API key','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(xai-[A-Za-z0-9]{20,})/','deny'=>null],
+            ['id'=>'perplexity','label'=>'Perplexity API key','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(pplx-[A-Za-z0-9]{20,})/','deny'=>null],
+            ['id'=>'cohere','label'=>'Cohere API key','sev'=>'high','min'=>30,
+             'rx'=>'/\b(cohere[_-]?[A-Za-z0-9]{20,})/i','deny'=>null],
+            ['id'=>'deepseek','label'=>'DeepSeek API key','sev'=>'high','min'=>20,
+             'rx'=>'/\b(sk-[a-f0-9]{32})\b/','deny'=>null],
+            ['id'=>'openrouter','label'=>'OpenRouter key','sev'=>'high','min'=>20,
+             'rx'=>'/\b(sk-or-v1-[a-f0-9]{32,})/','deny'=>null],
+            ['id'=>'stripe_secret','label'=>'Stripe secret key','sev'=>'critical','min'=>20,
+             'rx'=>'/\b((?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,})/','deny'=>null],
+            ['id'=>'stripe_webhook','label'=>'Stripe webhook secret','sev'=>'high','min'=>16,
+             'rx'=>'/\b(whsec_[A-Za-z0-9]{16,})/','deny'=>null],
+            ['id'=>'github_token','label'=>'GitHub token','sev'=>'critical','min'=>20,
+             'rx'=>'/\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/','deny'=>null],
+            ['id'=>'gitlab_token','label'=>'GitLab token','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(glpat-[A-Za-z0-9_-]{20,})/','deny'=>null],
+            ['id'=>'slack','label'=>'Slack token','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(xox[abprs]-[A-Za-z0-9-]{10,})/','deny'=>null],
+            ['id'=>'slack_webhook','label'=>'Slack webhook URL','sev'=>'high','min'=>30,
+             'rx'=>'#(https://hooks\.slack\.com/services/[A-Za-z0-9\/]{20,})#','deny'=>null],
+            ['id'=>'discord_webhook','label'=>'Discord webhook URL','sev'=>'medium','min'=>30,
+             'rx'=>'#(https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/[0-9]+\/[A-Za-z0-9_-]{20,})#','deny'=>null],
+            ['id'=>'telegram_bot','label'=>'Telegram bot token','sev'=>'high','min'=>20,
+             'rx'=>'/(?<![0-9])([0-9]{8,10}:[A-Za-z0-9_-]{34,36})(?![0-9])/','deny'=>null],
+            ['id'=>'sendgrid','label'=>'SendGrid key','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})/','deny'=>null],
+            ['id'=>'mailgun','label'=>'Mailgun key','sev'=>'high','min'=>20,
+             'rx'=>'/\b(key-[a-f0-9]{32})\b/','deny'=>null],
+            ['id'=>'twilio','label'=>'Twilio key','sev'=>'high','min'=>20,
+             'rx'=>'/\b(SK[a-f0-9]{32})\b/','deny'=>null],
+            ['id'=>'npm_token','label'=>'npm token','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(npm_[A-Za-z0-9]{30,})/','deny'=>null],
+            ['id'=>'pypi_token','label'=>'PyPI token','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(pypi-[A-Za-z0-9_-]{30,})/','deny'=>null],
+            ['id'=>'digitalocean','label'=>'DigitalOcean token','sev'=>'critical','min'=>20,
+             'rx'=>'/\b(dop_v1_[a-f0-9]{40,})/','deny'=>null],
+            ['id'=>'terraform','label'=>'Terraform Cloud token','sev'=>'high','min'=>20,
+             'rx'=>'/\b([A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9_-]{40,})/','deny'=>null],
+            ['id'=>'cloudflare','label'=>'Cloudflare token','sev'=>'critical','min'=>30,
+             'rx'=>'/(?:cloudflare|cf_api|cf_token)[^\n=:]{0,20}[=:\s]+["\']?([A-Za-z0-9_-]{37,45})\b/i','deny'=>null],
+            ['id'=>'vault','label'=>'HashiCorp Vault token','sev'=>'critical','min'=>20,
+             'rx'=>'/\b((?:hvs|hvb)\.[A-Za-z0-9_-]{20,})/','deny'=>null],
+            ['id'=>'jwt','label'=>'JSON Web Token','sev'=>'medium','min'=>40,
+             'rx'=>'/\b(eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/','deny'=>null],
+            ['id'=>'netrc_login','label'=>'Password in a configuration file','sev'=>'medium','min'=>8,'only'=>['env','config','tool','profile','history','loose','wpconfig'],
+             'rx'=>'/(?:password|passwd|pwd|pass)\s*[=:]\s*["\']?([^\s"\';,#]{8,})/i','deny'=>'/^(\$|\{|\}|%|\[|\]|\(|\)|<|>|null|none|true|false|yes|no|undefined|changeme|example|your|xxx+|\*+|-+|\.{3,})/i'],
+            ['id'=>'conn_string','label'=>'Connection string with a password','sev'=>'critical','min'=>18,
+             'rx'=>'#\b((?:mysql|mysqli|pgsql|postgres|postgresql|mongodb(?:\+srv)?|redis|amqp|ftp|sftp|smtp|mssql|sqlsrv|clickhouse):\/\/[^\s:\/@]{1,64}:[^\s\/@]{3,}@[^\s"\'\s]{3,})#i','deny'=>'/:\/\/[^:]*:(?:\$\{|\$[a-z_]|%\(|xxxx|password|pass|example|change)/i'],
+            ['id'=>'bearer','label'=>'Bearer token','sev'=>'high','min'=>20,'only'=>['env','config','tool','profile','history','loose','wpconfig'],
+             'rx'=>'/(?:authorization|bearer)\s*[=:]\s*["\']?(?:bearer\s+)?([A-Za-z0-9._\-]{20,})/i','deny'=>'/^(?:bearer|token|your|\$|%|x{4,})/i'],
+            ['id'=>'basic_auth_url','label'=>'URL with embedded credentials','sev'=>'high','min'=>16,'only'=>['env','config','tool','profile','history','loose','wpconfig','code'],
+             'rx'=>'#\b([a-z][a-z0-9+.-]{2,12}://[^\s:\/@]{2,64}:[^\s\/@]{3,}@[^\s"\']{3,})#i','deny'=>'/:\/\/[^:]*:(?:\$\{|\$[a-z_(]|xxxx|password|pass|example|change|%[a-z]|proxyuser|proxypass|jschmoe|user|username|test|demo|sample|secret)/i'],
+            ['id'=>'wordpress_salt','label'=>'WordPress salt or key','sev'=>'medium','min'=>32,
+             'rx'=>'/define\s*\(\s*[\'"](?:AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY|AUTH_SALT|SECURE_AUTH_SALT|LOGGED_IN_SALT|NONCE_SALT)[\'"]\s*,\s*[\'"]([^\'"]{20,})[\'"]\s*\)/i','deny'=>null],
+            ['id'=>'wp_db','label'=>'WordPress database password','sev'=>'high','min'=>8,
+             'rx'=>'/define\s*\(\s*[\'"]DB_PASSWORD[\'"]\s*,\s*[\'"]([^\'"]{3,})[\'"]\s*\)/i','deny'=>null],
+            ['id'=>'env_secret','label'=>'Named secret in a file','sev'=>'high','min'=>12,'only'=>['env','config','tool','profile','history','loose','wpconfig'],
+             'rx'=>'/^[ \t]*(?:export[ \t]+)?([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|CLIENT_SECRET|AUTH)[A-Z0-9_]*)[ \t]*=[ \t]*["\']?([^\s"\']{12,})/m','deny'=>null,'pick'=>2],
+            ['id'=>'slack_cookie','label'=>'Session cookie value','sev'=>'medium','min'=>24,'only'=>['config','history','loose','profile'],
+             'rx'=>'/(?:wordpress_logged_in|PHPSESSID|JSESSIONID|connect\.sid|_session_id)\s*[=:]\s*["\']?([A-Za-z0-9%._\-]{24,})/i','deny'=>null],
+        ]];
+        return $r;
+    }
+    /* ── Keys Finder: the places a file walk cannot see ───────────────────────
+       A credential does not have to sit in a file to be readable: it can be in
+       the environment of a running process, in a session file another tool
+       wrote, in a token a host handed this machine for one hour, or in a page
+       a local metadata service answers on a temporary link. These four readers
+       cover exactly that, and each one says what it could not reach instead of
+       pretending the list is complete. */
+    public function keysFinderScan($opts=[]){
+        $start=microtime(true);
+        $maxSeconds=max(6,min(90,(int)($opts['seconds']??20)));
+        $want=$opts['sources']??['files','proc','sessions','env','metadata','secrets'];
+        if(is_string($want))$want=array_filter(array_map('trim',explode(',',$want)));
+        $want=array_values(array_unique(array_map('strtolower',(array)$want)));
+        $on=fn($k)=>in_array($k,$want,true);
+        $rules=$this->keysFinderRules();
+        $found=[];$skipped=0;$scanned=0;$truncated=false;$timedOut=false;$sources=[];
+
+        /* ── 1. the environment of this PHP process, which is where a host puts
+              the credentials it hands an application (LiteLLM, AWS containers,
+              Heroku, Vercel, Docker secrets, systemd Environment=) ─────────── */
+        if($on('env')){
+            $t0=microtime(true);$n=0;
+            foreach([getenv(),$_ENV,$_SERVER] as $bag){
+                if(!is_array($bag))continue;
+                foreach($bag as $k=>$v){
+                    if(!is_string($v)||$v==='')continue;
+                    if(strlen($v)>4096||strlen($v)<6)continue;
+                    $up=strtoupper((string)$k);
+                    /* a value under a name that promises a secret is a finding
+                       even when its shape is unremarkable */
+                    $named=(bool)preg_match('/(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH_?KEY|SESSION_?KEY|MASTER_?KEY|CLIENT_?SECRET|LICENSE_?KEY|_DSN$|DATABASE_URL|REDIS_URL|AMQP_URL)/',$up);
+                    $hits=[];$hitIds=[];
+                    foreach($rules['secrets'] as $rule){
+                        if(!empty($rule['only']))continue; /* the generic shapes belong to files */
+                        $m=[];
+                        $pick=(int)($rule['pick']??1);
+                        if(!@preg_match_all($rule['rx'],$v,$m,PREG_SET_ORDER))continue;
+                        foreach($m as $row){
+                            $val=(string)($row[$pick][0]??'');
+                            if($val===''||strlen($val)<$rule['min'])continue;
+                            if(!empty($rule['deny'])&&preg_match($rule['deny'],$val))continue;
+                            $hits[]=$val;$hitIds[]=$rule['id'].'|'.$rule['label'].'|'.$rule['sev'];
+                        }
+                    }
+                    if($named&&!$hits){
+                        $isPointer=(bool)preg_match('/_RELATIVE_URI$|_FULL_URI$|_TOKEN_FILE$|^GOOGLE_APPLICATION_CREDENTIALS$/i',(string)$k);
+                        if($isPointer&&!$on('metadata'))continue;
+                        $hits[]=$v;
+                        $hitIds[]=$isPointer?'env_pointer|Credential pointer (the value is fetched by the Metadata reader)|medium':'env_named|Environment secret ('.(string)$k.')|high';
+                    }
+                    if(!$hits)continue;
+                    foreach($hits as $i=>$val){
+                        [$id,$label,$sev]=explode('|',$hitIds[$i]);
+                        $found[]=['id'=>$id,'label'=>$label,'sev'=>$sev,'source'=>'env',
+                                  'where'=>$k,'line'=>0,'path'=>'env:'.$k,
+                                  'mask'=>$this->keysFinderMask($val),'sha'=>substr(hash('sha256',$val),0,12),
+                                  'len'=>strlen($val),'sealed'=>$this->keysFinderSeal($val),'extra'=>''];
+                        $n++;
+                    }
+                    $scanned++;
+                }
+            }
+            $sources['env']=['ok'=>true,'found'=>$n,'read'=>$scanned,'time'=>round(microtime(true)-$t0,2)];
+        }
+
+        /* ── 2. the command line and environment of every process this account
+              may inspect. A key pasted into a command (`export X=…`, `curl -H
+              "Authorization: Bearer …"`, `mysql -p…`) lives here and nowhere
+              else, and a container runtime's metadata token sits in the
+              environment of the process that was handed it. ─────────────── */
+        if($on('proc')){
+            $t0=microtime(true);$n=0;$pids=0;$denied=0;
+            $self=getmypid();
+            $pidList=@scandir('/proc');
+            if(is_array($pidList)){
+                foreach($pidList as $pid){
+                    if($pid===''||$pid[0]==='.'||!ctype_digit($pid))continue;
+                    if((int)$pid===$self)continue;
+                    if(microtime(true)-$t0>($maxSeconds/2)){$truncated=true;break;}
+                    $pid=(int)$pid;$pids++;
+                    $texts=['cmdline'=>['/proc/'.$pid.'/cmdline',"\0"],'environ'=>['/proc/'.$pid.'/environ',"\0"]];
+                    foreach($texts as $kind=>[$file,$sep]){
+                        $raw=@file_get_contents($file);
+                        if($raw===false||$raw===''){$denied++;continue;}
+                        $raw=str_replace($sep,"\n",$raw);
+                        if(strlen($raw)>65536)$raw=substr($raw,0,65536);
+                        $hits=[];$meta=[];
+                        foreach($rules['secrets'] as $rule){
+                            if($kind==='environ'&&!empty($rule['only']))continue;
+                            $m=[];$pick=(int)($rule['pick']??1);
+                            if(!@preg_match_all($rule['rx'],$raw,$m,PREG_SET_ORDER))continue;
+                            foreach($m as $row){
+                                $val=(string)($row[$pick][0]??'');
+                                if($val===''||strlen($val)<$rule['min'])continue;
+                                if(!empty($rule['deny'])&&preg_match($rule['deny'],$val))continue;
+                                $hits[]=$val;$meta[]=[$rule['id'],$rule['label'],$rule['sev']];
+                            }
+                        }
+                        /* a shell exports a secret as NAME=value, and a command
+                           line holds one the same way - so the name decides here,
+                           exactly as it does in this process's own environment */
+                        if(preg_match_all('/(?:^|\n)([A-Za-z_][A-Za-z0-9_]{1,64})=(\S{6,4096})/',$raw,$nm,PREG_SET_ORDER)){
+                            foreach($nm as $row){
+                                $nameUp=strtoupper($row[1]);
+                                if(!preg_match('/(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH_?KEY|SESSION_?KEY|MASTER_?KEY|CLIENT_?SECRET|LICENSE_?KEY|_DSN$|DATABASE_URL|REDIS_URL|AMQP_URL|CONNECTION_?STRING)/',$nameUp))continue;
+                                $val=trim($row[2],"\'");
+                                if(strlen($val)<8)continue;
+                                if(preg_match('/^(\$|\{|%|\[|null|none|true|false|changeme|example|xxx+)/i',$val))continue;
+                                $hits[]=$val;$meta[]=['env_named','Named secret in a running process ('.$row[1].')','high',$pid];
+                            }
+                        }
+                        /* the two container-runtime names are a finding on their
+                           own, whatever the value looks like */
+                        foreach(['AWS_CONTAINER_CREDENTIALS_RELATIVE_URI','AWS_CONTAINER_CREDENTIALS_FULL_URI','AWS_CONTAINER_AUTHORIZATION_TOKEN','AWS_WEB_IDENTITY_TOKEN_FILE','AZURE_CLIENT_SECRET','GOOGLE_APPLICATION_CREDENTIALS'] as $name){
+                            if(preg_match('/(?:^|\n)'.$name.'=([^\n]{1,4096})/',$raw,$mm)){
+                                $hits[]=trim($mm[1]);$meta[]=['cloud_hint','Cloud credential pointer ('.$name.')','critical'];
+                            }
+                        }
+                        foreach($hits as $i=>$val){
+                            [$id,$label,$sev]=$meta[$i];
+                            $found[]=['id'=>$id,'label'=>$label,'sev'=>$sev,'source'=>'process',
+                                      'where'=>'pid '.$pid.' · '.$kind,'line'=>0,
+                                      'path'=>'proc:'.$pid.':'.$kind,
+                                      'mask'=>$this->keysFinderMask($val),'sha'=>substr(hash('sha256',$val),0,12),
+                                      'len'=>strlen($val),'sealed'=>$this->keysFinderSeal($val),'extra'=>''];
+                            $n++;
+                        }
+                        $scanned++;
+                    }
+                }
+            }
+            $sources['proc']=['ok'=>true,'found'=>$n,'read'=>$scanned,'processes'=>$pids,'unreadable'=>$denied,'time'=>round(microtime(true)-$t0,2)];
+        }
+
+        /* ── 3. session files other software keeps on disk: LiteLLM, Flask and
+              Django, Redis dumps, NextAuth, Laravel, PHP itself. Each carries
+              a signing key or a provider key in a shape of its own. ───────── */
+        if($on('sessions')){
+            $t0=microtime(true);$n=0;$files=0;
+            $candidates=[];
+            $sessionDirRx='/(litellm|proxy_server|\.session|sess_|flask_session|django_session|nextauth|laravel_session|redis|\.rdb|\.aof|celery|gunicorn|uvicorn|streamlit|gradio|jupyter|session)/i';
+            foreach(['/tmp','/var/tmp','/dev/shm','/run','/var/run',sys_get_temp_dir(),'/var/lib/redis','/var/lib/php/sessions','/var/lib/php5','/var/lib/php',realpath(__DIR__)] as $d){
+                if(!@is_dir($d)||!@is_readable($d)||$d==='')continue;
+                /* three levels down, so an application's own session folder
+                   is reached without walking the whole disk twice */
+                $scan=[];
+                try{
+                    $walk=new RecursiveIteratorIterator(
+                        new RecursiveCallbackFilterIterator(
+                            new RecursiveDirectoryIterator($d,FilesystemIterator::SKIP_DOTS),
+                            function($cur)use($sessionDirRx){
+                                if(!$cur->isDir())return true;
+                                $n=$cur->getFilename();
+                                if(in_array($n,['node_modules','vendor','.git','site-packages','__pycache__','.cache','fonts','locale'],true))return false;
+                                /* a depth this walker does not expose as a method:
+                                   four levels is enough for an application folder */
+                                return substr_count(str_replace('\\\\','/',(string)$cur->getPathname()),'/')<12;
+                            }),
+                        RecursiveIteratorIterator::SELF_FIRST,RecursiveIteratorIterator::CATCH_GET_CHILD);
+                    foreach($walk as $node){
+                        if(!$node->isFile())continue;
+                        $bn=$node->getFilename();
+                        /* only a file that names a session store is collected, so
+                           a busy temp folder cannot fill the list with noise */
+                        if(!preg_match($sessionDirRx,$bn)&&!preg_match($sessionDirRx,dirname($node->getPathname())))continue;
+                        $scan[]=$node->getPathname();
+                        if(count($scan)>=1500)break;
+                    }
+                }catch(Throwable $e){$scan=[];}
+                foreach($scan as $p){
+                    $f=basename($p);
+                    $sz=@filesize($p);
+                    if($sz===false||$sz<=0||$sz>$maxBytes=4194304)continue;
+                    $candidates[]=$p;
+                    if(count($candidates)>=400)break;
+                }
+            }
+            /* a plain session id file is not evidence; read only what carries
+               a name=value or a JSON/YAML body */
+            foreach($candidates as $p){
+                if(microtime(true)-$t0>($maxSeconds/3)){$truncated=true;break;}
+                $raw=@file_get_contents($p);
+                if($raw===false||$raw==='')continue;
+                if(strlen($raw)>1048576)$raw=substr($raw,0,1048576);
+                $files++;
+                foreach($this->keysFinderSessionShapes($raw,$p) as $hit){
+                    $found[]=$hit;$n++;
+                }
+            }
+            $sources['sessions']=['ok'=>true,'found'=>$n,'read'=>$files,'time'=>round(microtime(true)-$t0,2)];
+        }
+
+        /* ── 4. the temporary link. A container runtime, an EC2 instance or a
+              workload-identity service hands a credential over a short-lived
+              URL - and this machine is told that URL in its environment. The
+              reader follows exactly those pointers, on this machine only, and
+              never a URL that came out of a file. ─────────────────────────── */
+        if($on('metadata')){
+            $t0=microtime(true);$n=0;$probes=[];
+            $env=function($name){$v=getenv($name);return $v===false?'':(string)$v;};
+            /* AWS container credentials: relative and full */
+            $rel=$env('AWS_CONTAINER_CREDENTIALS_RELATIVE_URI');
+            $full=$env('AWS_CONTAINER_CREDENTIALS_FULL_URI');
+            $tok=$env('AWS_CONTAINER_AUTHORIZATION_TOKEN');
+            $bases=['http://169.254.170.2','http://169.254.170.23'];
+            if($rel!=='')foreach($bases as $b)$probes[]=[$b.$rel,$tok,'aws_container',''];
+            if($full!=='')$probes[]=[$full,$tok,'aws_container',''];
+            /* a container runtime sometimes hands the token as a file instead */
+            $tokFile=$env('AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE');
+            if($tokFile!==''&&@is_readable($tokFile)){$tok=trim((string)@file_get_contents($tokFile));}
+            /* Azure and Google sometimes point at a file that holds the token */
+            $gac=$env('GOOGLE_APPLICATION_CREDENTIALS');
+            if($gac!==''&&@is_readable($gac)){
+                $probes[]=['file:'.$gac,'','gcp_file',''];
+            }
+            /* the instance role */
+            $probes[]=['http://169.254.169.254/latest/meta-data/iam/security-credentials/','','aws_imds',''];
+            /* Google and Azure compute */
+            $probes[]=['http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token','google',['Metadata-Flavor: Google'],'gcp'];
+            $probes[]=['http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/','','azure','azure'];
+            /* ECS also exposes the task role through two names the SDK uses */
+            if($env('AWS_EXECUTION_ENV')!==''&&$rel===''){$probes[]=['http://169.254.170.2/v2/credentials','','aws_container',''];}
+            if(!$probes){
+                $sources['metadata']=['ok'=>true,'found'=>0,'read'=>0,'skipped'=>'No temporary credential link is set in this environment.','time'=>0];
+            }else{
+                foreach($probes as $probe){
+                    if(microtime(true)-$t0>12)break;
+                    $url=$probe[0];$header=(string)($probe[1]??'');$kind=$probe[2];$extra=$probe[3]??'';
+                    if(strpos($url,'file:')===0){
+                        $fp=substr($url,5);
+                        $raw=@file_get_contents($fp);
+                        if($raw===false||$raw==='')continue;
+                        $d=json_decode($raw,true);$pairs=[];if(is_array($d))$this->keysFinderFlattenJson($d,'',$pairs);
+                        foreach($pairs as [$k,$v]){
+                            $v=trim((string)$v);if(strlen($v)<8||strlen($v)>8192)continue;
+                            if(!preg_match('/(private_key|client_secret|api_key|access_token|refresh_token|password|type)/i',$k))continue;
+                            if($v==='service_account')continue;
+                            $found[]=['id'=>'gcp_service_account','label'=>'Google service-account field ('.$k.')','sev'=>'critical','source'=>'metadata',
+                                      'where'=>'gcp_file · '.$k,'line'=>0,'path'=>$fp,
+                                      'mask'=>$this->keysFinderMask($v),'sha'=>substr(hash('sha256',$v),0,12),
+                                      'len'=>strlen($v),'sealed'=>$this->keysFinderSeal($v),'extra'=>''];
+                            $n++;
+                        }
+                        continue;
+                    }
+                    $host=parse_url($url,PHP_URL_HOST)?:'';
+                    /* only a link to this machine's own metadata world is followed */
+                    if(!preg_match('/^(169\.254\.\d+\.\d+|127\.0\.0\.1|localhost|metadata\.google\.internal|\[::1\])$/i',$host))continue;
+                    $answer=$this->keysFinderHttpGet($url,$header,$extra);
+                    if($answer===null)continue;
+                    $seenProbes=1;
+                    $decoded=json_decode($answer,true);
+                    $haystack=is_array($decoded)?$answer:$answer;
+                    $pairs=[];
+                    if(is_array($decoded)){$this->keysFinderFlattenJson($decoded,'',$pairs);}
+                    else{$pairs=[['', $answer]];}
+                    foreach($pairs as [$k,$v]){
+                        $v=trim((string)$v);
+                        if($v===''||strlen($v)<8||strlen($v)>8192)continue;
+                        $looks=(bool)preg_match('/(AccessKeyId|SecretAccessKey|Token|Password|ApiKey|api_key|access_token|client_secret|session_token|credentials|Authorization)/i',$k)
+                            ||preg_match('/^(AKIA|ASIA)[A-Z0-9]{12,20}$/',$v);
+                        if(!$looks)continue;
+                        $label='Temporary credential from a metadata link';
+                        $sev='critical';
+                        if(preg_match('/AccessKeyId/i',$k)){$label='AWS temporary access key id';$sev='critical';}
+                        elseif(preg_match('/SecretAccessKey/i',$k)){$label='AWS temporary secret key';$sev='critical';}
+                        elseif(preg_match('/Token|access_token/i',$k)){$label='Temporary session token';$sev='high';}
+                        elseif(preg_match('/Expiration|expires/i',$k))continue;
+                        else{$label='Temporary credential from a metadata link';$sev='high';}
+                        $found[]=['id'=>'metadata_temp','label'=>$label,'sev'=>$sev,'source'=>'metadata',
+                                  'where'=>$kind.' · '.$k,'line'=>0,'path'=>$url,
+                                  'mask'=>$this->keysFinderMask($v),'sha'=>substr(hash('sha256',$v),0,12),
+                                  'len'=>strlen($v),'sealed'=>$this->keysFinderSeal($v),'extra'=>'expires: '.(string)($decoded['Expiration']??$decoded['expires_in']??'')];
+                        $n++;
+                    }
+                    /* the instance metadata answers with a role name first; the
+                       credentials are one path below it */
+                    if($kind==='aws_imds'&&$answer!==''&&strlen(trim($answer))<200&&strpos($answer,'{')===false){
+                        $role=trim($answer);$role=preg_replace('/[^A-Za-z0-9_+=,.@-]/','',$role);
+                        if($role!==''){
+                            $second=$this->keysFinderHttpGet($url.$role,'','aws_imds');
+                            if($second!==null){$pairs2=[];$d2=json_decode($second,true);
+                                if(is_array($d2))$this->keysFinderFlattenJson($d2,'',$pairs2);
+                                foreach($pairs2 as [$k2,$v2]){
+                                    $v2=trim((string)$v2);
+                                    if($v2===''||strlen($v2)<8||strlen($v2)>8192)continue;
+                                    if(!preg_match('/(AccessKeyId|SecretAccessKey|Token)/i',$k2))continue;
+                                    $lab=preg_match('/AccessKeyId/i',$k2)?'AWS temporary access key id':(preg_match('/Secret/i',$k2)?'AWS temporary secret key':'Temporary session token');
+                                    $found[]=['id'=>'metadata_temp','label'=>$lab,'sev'=>preg_match('/token/i',$lab)?'high':'critical','source'=>'metadata',
+                                              'where'=>'aws_imds · role '.$role.' · '.$k2,'line'=>0,'path'=>$url.$role,
+                                              'mask'=>$this->keysFinderMask($v2),'sha'=>substr(hash('sha256',$v2),0,12),
+                                              'len'=>strlen($v2),'sealed'=>$this->keysFinderSeal($v2),
+                                              'extra'=>'expires: '.(string)($d2['Expiration']??'')];
+                                    $n++;
+                                }
+                            }
+                        }
+                    }
+                }
+                $sources['metadata']=['ok'=>true,'found'=>$n,'read'=>count($probes),'time'=>round(microtime(true)-$t0,2)];
+            }
+        }
+
+        /* ── 5. the secret stores a cloud instance is expected to use ────── */
+        if($on('secrets')){
+            $t0=microtime(true);$note=[];
+            $rows=$this->keysFinderSecretsManager($note);
+            foreach($rows as $row)$found[]=$row;
+            $sources['secrets']=['ok'=>true,'found'=>count($rows),'read'=>count($note),'time'=>round(microtime(true)-$t0,2),'note'=>implode(' · ',$note)];
+        }
+
+        /* ── 6. the guarded file walk ──────────────────────────────────────── */
+        if($on('files')){
+            $t0=microtime(true);
+            $roots=[realpath(__DIR__)];
+            if(!isset($opts['deep'])||(string)$opts['deep']!=='0'){
+                foreach(['/', '/home', '/root', '/var/www', '/var/backups', '/srv', '/opt',
+                         '/etc', '/usr/local', '/tmp', '/var/tmp', '/var/lib', '/mnt', '/media'] as $r){
+                    if(@is_dir($r)&&@is_readable($r))$roots[]=$r;
+                }
+            }
+            $roots=array_values(array_unique(array_filter($roots,fn($r)=>$r!==false)));
+            $maxFiles=max(500,min(120000,(int)($opts['files']??40000)));
+            $maxBytes=max(64*1024,min(8*1024*1024,(int)($opts['bytes']??786432)));
+            $walk=$this->keysFinderWalk($roots,$rules,$maxSeconds/2,$maxFiles,$maxBytes,$skipped,$seenPaths,$self);
+            foreach($walk['hits'] as $h)$found[]=$h;
+            $scanned+=$walk['scanned'];
+            if($walk['truncated'])$truncated=true;
+            if($walk['timed_out'])$timedOut=true;
+            $sources['files']=['ok'=>true,'found'=>count($walk['hits']),'read'=>$walk['scanned'],
+                               'roots'=>$roots,'skipped'=>$walk['skipped'],'time'=>round(microtime(true)-$t0,2)];
+        }
+
+        /* one collection per credential, then the loudest first */
+        foreach($found as $fi=>$f){$found[$fi]['groupkey']=$f['id'].'|'.$f['path'];$found[$fi]['gindex']=$fi;}
+        $uniq=[];foreach($found as $f){if(isset($uniq[$f['sha']]))continue;$uniq[$f['sha']]=$f;}
+        $found=array_values($uniq);
+        $sevRank=['critical'=>0,'high'=>1,'medium'=>2,'low'=>3];
+        usort($found,function($a,$b)use($sevRank){
+            $ra=$sevRank[$a['sev']]??9;$rb=$sevRank[$b['sev']]??9;
+            if($ra!==$rb)return $ra<=>$rb;
+            return strcmp($a['label'],$b['label']);
+        });
+        $groups=[];$byKind=[];$bySev=['critical'=>0,'high'=>0,'medium'=>0,'low'=>0];$files=[];
+        foreach($found as $h){
+            $k=$h['id'].'|'.$h['path'];
+            if(!isset($groups[$k]))$groups[$k]=['label'=>$h['label'],'sev'=>$h['sev'],'id'=>$h['id'],
+                'path'=>$h['path'],'source'=>$h['source'],'file'=>basename($h['path']),'hits'=>[]];
+            $groups[$k]['hits'][]=['line'=>$h['line'],'mask'=>$h['mask'],'sha'=>$h['sha'],'len'=>$h['len'],
+                'sealed'=>$h['sealed'],'where'=>$h['where'],'extra'=>$h['extra'],'_i'=>(int)($h['gindex']??-1),
+                '_live'=>$h['live']??null];
+            $byKind[$h['label']]=($byKind[$h['label']]??0)+1;
+            $bySev[$h['sev']]=(int)($bySev[$h['sev']]??0)+1;
+            $files[$h['path']]=$h['source'];
+        }
+        /* before the answer is built, each finding is checked with the service
+           it belongs to: opt-in, time-capped, and silent when it cannot reach
+           a service - a failed check never changes a finding */
+        $live=$this->keysFinderLive($found,max(6,min(90,(int)($opts['seconds']??20))),!empty($opts['verify']));
+        $liveByIdx=[];
+        foreach($found as $fLive)$liveByIdx[(int)($fLive['gindex']??-1)]=$fLive['live']??null;
+        foreach($groups as &$gv){foreach($gv['hits'] as &$hv){
+            $hv['check']=$liveByIdx[(int)($hv['_i']??-1)]??null;
+            unset($hv['_i'],$hv['_live']);
+        }unset($hv);}unset($gv);
+        foreach($groups as &$gpv){
+            $n=0;$ok=0;$bad=0;
+            foreach($gpv['hits'] as $hv){
+                if(empty($hv['check']))continue;
+                $n++;
+                if(in_array($hv['check']['verdict'],['working'],true))$ok++;
+                if(in_array($hv['check']['verdict'],['rejected','expired'],true))$bad++;
+            }
+            $gpv['verdict']=$n?($bad?'rejected':($ok?'working':'unverified')):'';
+        }
+        unset($gpv);
+        arsort($byKind);
+        $groups=array_values($groups);
+        /* an access key id and its secret are one credential, not two: keep them
+           together so the checker can sign a request with the pair */
+        $this->keysFinderPair($groups);
+        /* each group gets the icon of its kind, and the icon set is fixed so
+           the window never waits on the network for a picture */
+        foreach($groups as &$g){$g['icon']=$this->keysFinderIconFor($g['label'],$g['id']);}
+        unset($g);
+        $bySource=[];foreach($found as $f)$bySource[$f['source']]=($bySource[$f['source']]??0)+1;
+        return ['ok'=>true,'time'=>round(microtime(true)-$start,2),'scanned'=>$scanned,
+                'files_with_secrets'=>count($files),'total'=>count($found),
+                'by_kind'=>array_values(array_map(fn($k,$n)=>['label'=>$k,'count'=>$n],array_keys($byKind),array_values($byKind))),
+                'by_sev'=>$bySev,'by_source'=>$bySource,'groups'=>$groups,'pairs'=>$this->kfPairs,'sources'=>$sources,
+                'truncated'=>$truncated,'timed_out'=>$timedOut,'sealed'=>true,'checked'=>$live,
+                'note'=>'Values never leave this server in this answer: each one is masked here and sealed with the manager key.'];
+    }
+
+    /* the file walk, unchanged in its rules: bounded, symlink-free, never a
+       device, never this manager's own files */
+    private function keysFinderWalk($roots,$rules,$maxSeconds,$maxFiles,$maxBytes,&$skipped,$seenPaths,$self){
+        $start=microtime(true);$hits=[];$scanned=0;$skipped=0;$truncated=false;$timedOut=false;$seenPaths=[];
+        $sensitiveDirs=['/proc'=>1,'/sys'=>1,'/dev'=>1,'/run'=>1];
+        $skipNames=['node_modules','vendor','.cache','__pycache__','.venv','venv','proc','sys','dev',
+                    'site-packages','dist-packages','.cargo','.rustup','.terraform','.gradle',
+                    '.m2','.nuget','.cocoapods','.composer','.pub-cache'];
+        foreach($roots as $root){
+            if(!@is_dir($root)||!@is_readable($root))continue;
+            try{
+                $it=new RecursiveIteratorIterator(
+                    new RecursiveCallbackFilterIterator(
+                        new RecursiveDirectoryIterator($root,FilesystemIterator::SKIP_DOTS),
+                        function($cur)use($sensitiveDirs,$skipNames){
+                            if(!$cur->isDir())return true;
+                            $p=$cur->getPathname();$base=$cur->getFilename();
+                            if(isset($sensitiveDirs[$p]))return false;
+                            if($base===''||$base==='.'||$base==='..')return false;
+                            if(in_array($base,$skipNames,true))return false;
+                            return true;
+                        }),
+                    RecursiveIteratorIterator::LEAVES_ONLY,
+                    RecursiveIteratorIterator::CATCH_GET_CHILD);
+            }catch(Throwable $e){continue;}
+            foreach($it as $file){
+                if(microtime(true)-$start>$maxSeconds){$timedOut=true;break 2;}
+                if($scanned>=$maxFiles){$truncated=true;break 2;}
+                if(!$file->isFile()||$file->isLink())continue;
+                $path=$file->getPathname();
+                $real=@realpath($path);
+                if($real!==false){if(isset($seenPaths[$real]))continue;$seenPaths[$real]=true;$path=$real;}
+                $path=str_replace('//','/',$path);
+                if($path===$self)continue;
+                if(function_exists('fm_is_manager_internal_path')&&fm_is_manager_internal_path($path))continue;
+                if(strpos($path,'/.trash')!==false||strpos($path,'/.backups/')!==false||strpos($path,'/.keys-reports/')!==false){$skipped++;continue;}
+                $size=(int)@filesize($path);
+                if($size<=0||$size>$maxBytes){$skipped++;continue;}
+                if(!@is_readable($path)){$skipped++;continue;}
+                $name=strtolower($file->getFilename());
+                $pathLow=strtolower($path);
+                $kind=null;$label='';
+                foreach($rules['paths'] as $rx=>$meta){
+                    if(preg_match($rx,$pathLow)||preg_match($rx,$name)){$kind=$meta[0];$label=$meta[1];break;}
+                }
+                $head='';
+                $fh=@fopen($path,'rb');
+                if($fh){$head=(string)@fread($fh,131072);@fclose($fh);}
+                if($head===''){$scanned++;continue;}
+                $scanned++;
+                $fileHits=[];
+                foreach($rules['secrets'] as $rule){
+                    if(!empty($rule['only'])){
+                        if($kind===null)continue;
+                        if(!in_array($kind,$rule['only'],true))continue;
+                    }
+                    $m=[];$pick=(int)($rule['pick']??1);
+                    if(!@preg_match_all($rule['rx'],$head,$m,PREG_SET_ORDER|PREG_OFFSET_CAPTURE))continue;
+                    foreach($m as $row){
+                        if(!isset($row[$pick]))continue;
+                        $val=(string)($row[$pick][0]??'');
+                        $off=(int)($row[$pick][1]??0);
+                        if($val==='')continue;
+                        $val=trim($val,'"\'` ');
+                        if(strlen($val)<$rule['min'])continue;
+                        if(!empty($rule['deny'])&&preg_match($rule['deny'],$val))continue;
+                        $fileHits[]=['id'=>$rule['id'],'label'=>$rule['label'],'sev'=>$rule['sev'],
+                                     'line'=>$this->keysFinderLine($head,$off),'mask'=>$this->keysFinderMask($val),
+                                     'sha'=>substr(hash('sha256',$val),0,12),'len'=>strlen($val),
+                                     'sealed'=>$this->keysFinderSeal($val),'where'=>'file','extra'=>''];
+                        if(count($fileHits)>=40)break 2;
+                    }
+                }
+                if(preg_match('/-----BEGIN (RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/',$head,$pm)){
+                    $pem=$head;
+                    if($size>strlen($head)){$rest=@file_get_contents($path);if($rest!==false)$pem=$rest;}
+                    if(preg_match('/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/s',$pem,$km)){
+                        $fileHits[]=['id'=>'private_key_pem','label'=>'Private key (PEM)','sev'=>'critical','line'=>1,
+                                     'mask'=>'[private-key-block, '.(int)strlen($km[0]).' bytes]',
+                                     'sha'=>substr(hash('sha256',$km[0]),0,12),'len'=>strlen($km[0]),
+                                     'sealed'=>$this->keysFinderSeal(substr($km[0],0,4096)),'where'=>'file','extra'=>''];
+                    }
+                }
+                if(!$fileHits)continue;
+                $seen=[];$keep=[];
+                foreach($fileHits as $h){
+                    if(isset($seen[$h['sha']]))continue;
+                    $seen[$h['sha']]=true;
+                    $keep[]=$h;
+                }
+                foreach($keep as $h){$h['source']='file';$h['path']=$path;$hits[]=$h;}
+                if(count($hits)>=1500){$truncated=true;break 2;}
+            }
+        }
+        return ['hits'=>$hits,'scanned'=>$scanned,'skipped'=>$skipped,'truncated'=>$truncated,'timed_out'=>$timedOut];
+    }
+
+    /* the shapes a framework keeps a session in. LiteLLM is the loud one: its
+       prisma store and its in-memory cache both hold provider keys, and its
+       own master key is a sk- string with no provider behind it. */
+    private function keysFinderSessionShapes($raw,$path){
+        $out=[];$add=function($id,$label,$sev,$val,$where='')use(&$out,$path){
+            $val=trim((string)$val);
+            if($val===''||strlen($val)<6||strlen($val)>8192)return;
+            $out[]=['id'=>$id,'label'=>$label,'sev'=>$sev,'source'=>'session','where'=>$where,
+                    'line'=>0,'path'=>$path,'mask'=>$this->keysFinderMask($val),
+                    'sha'=>substr(hash('sha256',$val),0,12),'len'=>strlen($val),
+                    'sealed'=>$this->keysFinderSeal($val),'extra'=>''];
+        };
+        /* LiteLLM: the master key and the salt it signs with */
+        if(preg_match('/LITELLM_MASTER_KEY["\']?\s*[:=]\s*["\']?(sk-[A-Za-z0-9_-]{6,})/',$raw,$m))$add('litellm_master','LiteLLM master key','critical',$m[1],'litellm');
+        if(preg_match('/LITELLM_SALT_KEY["\']?\s*[:=]\s*["\']?([A-Za-z0-9_\-\.]{8,})/',$raw,$m))$add('litellm_salt','LiteLLM salt key','critical',$m[1],'litellm');
+        /* the same two under the names LiteLLM's own settings object uses */
+        if(preg_match('/["\']?master_key["\']?\s*[:=]\s*["\']?(sk-[A-Za-z0-9_-]{6,})/',$raw,$m))$add('litellm_master','LiteLLM master key','critical',$m[1],'master_key');
+        if(preg_match('/["\']?salt_key["\']?\s*[:=]\s*["\']?([A-Za-z0-9_\-\.]{8,})/',$raw,$m))$add('litellm_salt','LiteLLM salt key','critical',$m[1],'salt_key');
+        /* Bun: its install cache and its lockfile have held plain registry
+           tokens, and an env file written by bun carries them as NAME=value */
+        if(preg_match_all('/npm[_-]?token["\']?\s*[:=]\s*["\']?(npm_[A-Za-z0-9]{20,})/i',$raw,$bm)){
+            foreach($bm[1] as $v)$add('npm_token','npm token (Bun store)','critical',$v,'bun');
+        }
+        /* BusyBox: no /proc/PID/environ on some builds, and its ash history is
+           where an exported key stays - read it as a shell history */
+        if(preg_match_all('/^\s*(?:export\s+)?([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH)[A-Z0-9_]*)=(\S{8,})/m',$raw,$bb,PREG_SET_ORDER)){
+            foreach($bb as $row){
+                if(!preg_match('/^[A-Z0-9_]+$/',$row[1]))continue;
+                $add('env_named','Exported secret in a shell history ('.$row[1].')','high',trim($row[2],'"\''),'ash');
+            }
+        }
+        /* LiteLLM's model table keeps each provider key beside its model name */
+        if(preg_match_all('/"model_name"\s*:\s*"([^"]{1,80})"[^}]{0,400}?"api_key"\s*:\s*"([^"]{8,})"/s',$raw,$mm,PREG_SET_ORDER)){
+            foreach($mm as $row)$add('litellm_provider','LiteLLM provider key','critical',$row[2],'model '.$row[1]);
+        }
+        /* framework signing keys - the value that forges every session */
+        foreach(['SECRET_KEY','SECRET_KEY_BASE','DJANGO_SECRET_KEY','FLASK_SECRET_KEY','APP_SECRET','SESSION_SECRET','NEXTAUTH_SECRET','JWT_SECRET','APP_KEY'] as $name){
+            if(preg_match('/["\']?'.$name.'["\']?\s*[:=]\s*["\']?([^"\'\,\s\}]{12,})/',$raw,$m))
+                $add('framework_secret','Framework signing key ('.$name.')','critical',$m[1],$name);
+        }
+        /* Redis: the password in a config or in the AOF header */
+        if(preg_match('/^\s*requirepass\s+(\S{4,})/mi',$raw,$m))$add('redis_pass','Redis password','critical',$m[1],'requirepass');
+        if(preg_match('/^\s*masterauth\s+\S*\s*(\S{4,})/mi',$raw,$m))$add('redis_pass','Redis password','critical',$m[1],'masterauth');
+        /* a Laravel APP_KEY in its own shape */
+        if(preg_match('/base64:[A-Za-z0-9+\/]{20,}={0,2}/',$raw,$m))$add('laravel_key','Laravel APP_KEY','critical',$m[0],'APP_KEY');
+        /* and any provider shape that is sitting inside the session body */
+        foreach($this->keysFinderRules()['secrets'] as $rule){
+            if(!empty($rule['only']))continue;
+            $m=[];
+            if(!@preg_match_all($rule['rx'],$raw,$m,PREG_SET_ORDER))continue;
+            $pick=(int)($rule['pick']??1);
+            foreach($m as $row){
+                $val=(string)($row[$pick][0]??'');
+                if($val===''||strlen($val)<$rule['min'])continue;
+                if(!empty($rule['deny'])&&preg_match($rule['deny'],$val))continue;
+                $add($rule['id'],$rule['label'],$rule['sev'],$val,'session body');
+                break;
+            }
+        }
+        return $out;
+    }
+
+    /* a plain GET with a short timeout, used only for a metadata address */
+    private function keysFinderHttpGet($url,$token='',$flavor=''){
+        $headers=["Accept: application/json\r\n"];
+        if($token!=='')$headers[]="Authorization: ".$token."\r\n";
+        if($flavor==='google')$headers[]="Metadata-Flavor: Google\r\n";
+        if($flavor==='azure')$headers[]="Metadata: true\r\n";
+        $ctx=@stream_context_create(['http'=>['method'=>'GET','header'=>implode('',$headers),
+            'timeout'=>1.3,'ignore_errors'=>true,'follow_location'=>0]]);
+        $raw=@file_get_contents($url,false,$ctx);
+        return $raw===false?null:(string)$raw;
+    }
+    private function keysFinderFlattenJson($node,$prefix,&$pairs){
+        foreach((array)$node as $k=>$v){
+            $key=$prefix===''?(string)$k:$prefix.'.'.$k;
+            if(is_array($v))$this->keysFinderFlattenJson($v,$key,$pairs);
+            else $pairs[]=[$key,(string)$v];
+        }
+    }
+
+    /* which picture belongs to which finding - a fixed set, so the window
+       draws instantly and never asks the network for an icon */
+    private function keysFinderIconFor($label,$id){
+        $l=strtolower($label);
+        $map=[
+            'aws_access_key'=>'aws','aws_secret_key'=>'aws','aws_session_token'=>'aws','cloud_hint'=>'aws',
+            'metadata_temp'=>'aws','openai'=>'openai','anthropic'=>'anthropic','google_gemini'=>'google',
+            'google_oauth'=>'google','google_oauth_client'=>'google','xai'=>'xai','perplexity'=>'ai',
+            'groq'=>'ai','huggingface'=>'ai','replicate'=>'ai','openrouter'=>'ai','cohere'=>'ai',
+            'deepseek'=>'ai','litellm_master'=>'ai','litellm_salt'=>'ai','litellm_provider'=>'ai',
+            'stripe_secret'=>'stripe','stripe_webhook'=>'stripe','github_token'=>'github',
+            'gitlab_token'=>'gitlab','slack'=>'slack','slack_webhook'=>'slack','discord_webhook'=>'discord',
+            'telegram_bot'=>'telegram','sendgrid'=>'mail','mailgun'=>'mail','twilio'=>'phone',
+            'npm_token'=>'npm','pypi_token'=>'python','digitalocean'=>'cloud','terraform'=>'cloud',
+            'cloudflare'=>'cloud','vault'=>'vault','private_key_pem'=>'key','jwt'=>'token',
+            'env_named'=>'env','env_secret'=>'env','framework_secret'=>'key','redis_pass'=>'database',
+            'laravel_key'=>'key','conn_string'=>'database','basic_auth_url'=>'link','bearer'=>'token',
+            'wordpress_salt'=>'wordpress','wp_db'=>'wordpress','netrc_login'=>'lock','slack_cookie'=>'cookie',
+            'private_key'=>'key','oauth'=>'google','gemini'=>'google',
+        ];
+        if(isset($map[$id]))return $map[$id];
+        foreach($map as $needle=>$icon)if(strpos($l,$needle)!==false)return $icon;
+        if(strpos($l,'key')!==false)return 'key';
+        if(strpos($l,'token')!==false)return 'token';
+        if(strpos($l,'password')!==false)return 'lock';
+        return 'lock';
+    }
+
+    /* ── a live check: does this credential still work right now? ─────────────
+       One small request to the service the key belongs to. Read-only wherever
+       the service offers a read-only call; the few that only speak by sending
+       a message are given an empty one, so nothing is posted. The value never
+       leaves this function; only the verdict does: working / rejected /
+       expired / limited / unverified. Nothing is written anywhere. */
+
+    public function keysFinderVerify($sealed, $id = '', $where = '')
+    {
+        $plain = trim((string)$this->keysFinderUnseal((string)$sealed));
+        if ($plain === '') {
+            return ['ok' => false, 'verdict' => 'unverified', 'type' => '',
+                    'detail' => 'This value could not be unsealed with the current manager key.', 'time' => 0];
+        }
+        $t0 = microtime(true);
+        try {
+            $out = $this->keysFinderProbe($plain, (string)$id, (string)$where);
+        } catch (Throwable $e) {
+            $out = ['verdict' => 'unverified', 'type' => '', 'detail' => 'The check could not run here.'];
+        }
+        $out['ok'] = true;
+        $out['time'] = round(microtime(true) - $t0, 2);
+        return $out;
+    }
+
+    /* one HTTP call, no redirects to private space, no cookies kept */
+    private function kfHttp($url, $method = 'GET', $headers = [], $body = null, $timeout = 6)
+    {
+        if (!function_exists('curl_init')) {
+            return ['status' => 0, 'body' => '', 'headers' => [], 'error' => 'curl is not installed on this server', 'ms' => 0];
+        }
+        $ch = curl_init($url);
+        $hdrs = array_merge(['Expect:', 'User-Agent: Marshal-File-Manager-Keys-Finder'], $headers);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_CONNECTTIMEOUT => min(4, $timeout),
+            CURLOPT_TIMEOUT        => $timeout,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_HTTPHEADER     => $hdrs,
+            CURLOPT_CUSTOMREQUEST  => $method,
+            CURLOPT_HEADER         => true,
+        ]);
+        if ($body !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        $raw = curl_exec($ch);
+        $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $hsize = (int)curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $err = curl_error($ch);
+        curl_close($ch);
+        if ($raw === false) {
+            return ['status' => 0, 'body' => '', 'headers' => [], 'error' => $err !== '' ? $err : 'no answer', 'ms' => 0];
+        }
+        $head = substr((string)$raw, 0, $hsize);
+        $text = substr((string)$raw, $hsize);
+        $hs = [];
+        foreach (preg_split('/\r?\n/', $head) as $line) {
+            $p = strpos($line, ':');
+            if ($p !== false) $hs[strtolower(trim(substr($line, 0, $p)))] = trim(substr($line, $p + 1));
+        }
+        return ['status' => $status, 'body' => $text, 'headers' => $hs, 'error' => '', 'ms' => 0];
+    }
+
+    /* the words the window shows, decided in one place */
+    private function kfVerdict($res, $okStatuses = [200], $what = '')
+    {
+        if (!empty($res['error']) && (int)$res['status'] === 0) {
+            return ['verdict' => 'unverified', 'type' => $what,
+                    'detail' => 'The service could not be reached from this server: ' . $res['error']];
+        }
+        $st = (int)$res['status'];
+        $body = (string)$res['body'];
+        if (in_array($st, $okStatuses, true)) {
+            return ['verdict' => 'working', 'type' => $what, 'detail' => 'The service accepted this key (' . $st . ').'];
+        }
+        if ($st === 429) {
+            return ['verdict' => 'limited', 'type' => $what, 'detail' => 'The key is alive but the service is rate-limiting it (429).'];
+        }
+        if (stripos($body, 'ExpiredToken') !== false || stripos($body, 'token expired') !== false
+            || stripos($body, 'expired') !== false || stripos($body, 'session has expired') !== false) {
+            return ['verdict' => 'expired', 'type' => $what, 'detail' => 'The service says this credential has expired.'];
+        }
+        if ($st === 401 || $st === 403) {
+            $why = '';
+            if (preg_match('/"message"\s*:\s*"([^"]{3,160})"/', $body, $m)) $why = ' — ' . $m[1];
+            elseif (preg_match('/"error"\s*:\s*"([^"]{3,160})"/', $body, $m)) $why = ' — ' . $m[1];
+            elseif (preg_match('/<Code>([^<]{3,80})<\/Code>/', $body, $m)) $why = ' — ' . $m[1];
+            return ['verdict' => 'rejected', 'type' => $what,
+                    'detail' => 'The service refused this key (' . $st . ')' . $why];
+        }
+        if ($st === 400 || $st === 404 || $st === 422) {
+            return ['verdict' => 'unverified', 'type' => $what,
+                    'detail' => 'The service answered ' . $st . ', which says nothing about the key.'];
+        }
+        return ['verdict' => 'unverified', 'type' => $what, 'detail' => 'The service answered ' . $st . '.'];
+    }
+
+    /* AWS request signing, so an access key can be asked the only question that
+       matters: "who am I to you?" — this validates the key and its secret */
+    private function kfAwsSigned($key, $secret, $region, $service, $host, $method, $path, $payload, $token = '')
+    {
+        $t = gmdate('Ymd\THis\Z');
+        $d = gmdate('Ymd');
+        $ph = hash('sha256', $payload);
+        $canonH = "host:" . $host . "\n" . "x-amz-date:" . $t . "\n" . ($token !== '' ? "x-amz-security-token:" . $token . "\n" : '');
+        $signed = $token !== '' ? 'host;x-amz-date;x-amz-security-token' : 'host;x-amz-date';
+        $canon = $method . "\n" . $path . "\n\n" . $canonH . "\n" . $signed . "\n" . $ph;
+        $scope = $d . '/' . $region . '/' . $service . '/aws4_request';
+        $sts = "AWS4-HMAC-SHA256\n" . $t . "\n" . $scope . "\n" . hash('sha256', $canon);
+        $k = hash_hmac('sha256', $d, 'AWS4' . $secret, true);
+        $k = hash_hmac('sha256', $region, $k, true);
+        $k = hash_hmac('sha256', $service, $k, true);
+        $k = hash_hmac('sha256', 'aws4_request', $k, true);
+        $sig = hash_hmac('sha256', $sts, $k);
+        $h = ['Authorization: AWS4-HMAC-SHA256 Credential=' . $key . '/' . $scope . ', SignedHeaders=' . $signed . ', Signature=' . $sig,
+              'X-Amz-Date: ' . $t, 'X-Amz-Content-Sha256: ' . $ph];
+        if ($token !== '') $h[] = 'X-Amz-Security-Token: ' . $token;
+        return $h;
+    }
+
+    private function kfAwsIdentity($key, $secret, $token = '')
+    {
+        $host = 'sts.amazonaws.com';
+        $pay = 'Action=GetCallerIdentity&Version=2011-06-15';
+        $h = $this->kfAwsSigned($key, $secret, 'us-east-1', 'sts', $host, 'POST', '/', $pay, $token);
+        $h[] = 'Content-Type: application/x-www-form-urlencoded; charset=utf-8';
+        $res = $this->kfHttp('https://' . $host . '/', 'POST', $h, $pay, 7);
+        $v = $this->kfVerdict($res, [200], 'AWS');
+        if ($v['verdict'] === 'working') {
+            if (preg_match('/<Account>([^<]+)<\/Account>/', (string)$res['body'], $m)) {
+                $v['detail'] = 'AWS accepted the key. Account ' . $m[1]
+                    . (preg_match('/<Arn>([^<]+)<\/Arn>/', (string)$res['body'], $a) ? ', identity ' . $a[1] : '') . '.';
+            } else {
+                $v['detail'] = 'AWS accepted the key.';
+            }
+        } elseif (preg_match('/<Message>([^<]{3,160})<\/Message>/', (string)$res['body'], $m)) {
+            $v['detail'] .= ' (' . $m[1] . ')';
+        }
+        return $v;
+    }
+
+    /* short, safe renderings of what a service said, never the secret */
+    private function kfSaid($res, $keys = ['message', 'error'])
+    {
+        $b = (string)$res['body'];
+        $j = json_decode($b, true);
+        if (is_array($j)) {
+            foreach ($keys as $k) {
+                if (isset($j[$k]) && is_string($j[$k]) && $j[$k] !== '') return substr($j[$k], 0, 120);
+                if (isset($j[$k]['message']) && is_string($j[$k]['message']) && $j[$k]['message'] !== '') return substr($j[$k]['message'], 0, 120);
+            }
+        }
+        if (preg_match('/<Message>([^<]{3,160})<\/Message>/', $b, $m)) return substr($m[1], 0, 120);
+        return '';
+    }
+
+    private function keysFinderProbe($v, $id, $where = '')
+    {
+        $bearer = ['Authorization: Bearer ' . $v];
+        switch ($id) {
+
+            /* ── AWS ─────────────────────────────────────────────────────── */
+            case 'metadata_temp':
+            case 'aws_access_key':
+            case 'aws_secret_key':
+            case 'aws_session_token':
+            case 'ssm_parameter':
+                if (preg_match('/^(AKIA|ASIA)[A-Z0-9]{12,}$/', $v)) {
+                    /* an id on its own can be asked, but it proves little without
+                       the secret: say so plainly instead of pretending */
+                    return ['verdict' => 'unverified', 'type' => 'AWS access key id',
+                            'detail' => 'An access key id is only half a credential; it is checked together with its secret key.'];
+                }
+                if (strlen($v) >= 20 && strpos($v, ' ') === false && !preg_match('/^(ASIA|AKIA)/', $v)) {
+                    return ['verdict' => 'unverified', 'type' => 'AWS secret',
+                            'detail' => 'A secret key is checked together with its access key id.'];
+                }
+                return ['verdict' => 'unverified', 'type' => 'AWS', 'detail' => 'This value is not a key pair.'];
+
+            /* ── the model providers ─────────────────────────────────────── */
+            case 'openai':
+                return $this->kfVerdict($this->kfHttp('https://api.openai.com/v1/models', 'GET', $bearer), [200], 'OpenAI');
+            case 'anthropic':
+                return $this->kfVerdict($this->kfHttp('https://api.anthropic.com/v1/models', 'GET',
+                    ['x-api-key: ' . $v, 'anthropic-version: 2023-06-01']), [200], 'Anthropic');
+            case 'google_gemini':
+            case 'google_oauth':
+                return $this->kfVerdict($this->kfHttp('https://generativelanguage.googleapis.com/v1beta/models?key=' . urlencode($v), 'GET'), [200], 'Google AI');
+            case 'groq':
+                return $this->kfVerdict($this->kfHttp('https://api.groq.com/openai/v1/models', 'GET', $bearer), [200], 'Groq');
+            case 'xai':
+                return $this->kfVerdict($this->kfHttp('https://api.x.ai/v1/models', 'GET', $bearer), [200], 'xAI');
+            case 'deepseek':
+                return $this->kfVerdict($this->kfHttp('https://api.deepseek.com/models', 'GET', $bearer), [200], 'DeepSeek');
+            case 'cohere':
+                return $this->kfVerdict($this->kfHttp('https://api.cohere.com/v1/models', 'GET', $bearer), [200], 'Cohere');
+            case 'huggingface':
+                $r = $this->kfHttp('https://huggingface.co/api/whoami-v2', 'GET', $bearer);
+                $out = $this->kfVerdict($r, [200], 'Hugging Face');
+                if ($out['verdict'] === 'working' && preg_match('/"name"\s*:\s*"([^"]{1,60})"/', (string)$r['body'], $m))
+                    $out['detail'] = 'The key works for the account "' . $m[1] . '".';
+                return $out;
+            case 'replicate':
+                return $this->kfVerdict($this->kfHttp('https://api.replicate.com/v1/account', 'GET', $bearer), [200], 'Replicate');
+            case 'openrouter':
+                $r = $this->kfHttp('https://openrouter.ai/api/v1/key', 'GET', $bearer);
+                $out = $this->kfVerdict($r, [200], 'OpenRouter');
+                if ($out['verdict'] === 'working') {
+                    $j = json_decode((string)$r['body'], true);
+                    $d = $j['data'] ?? [];
+                    $bits = [];
+                    if (isset($d['label'])) $bits[] = 'label ' . $d['label'];
+                    if (isset($d['usage'])) $bits[] = 'used ' . $d['usage'];
+                    if (isset($d['limit'])) $bits[] = 'limit ' . $d['limit'];
+                    if (isset($d['is_free']) && $d['is_free']) $bits[] = 'free tier';
+                    if ($bits) $out['detail'] = 'The key works: ' . implode(', ', $bits) . '.';
+                }
+                return $out;
+            case 'perplexity':
+                /* the models list is not offered; one token is the cheapest question */
+                $pay = json_encode(['model' => 'sonar', 'max_tokens' => 1, 'messages' => [['role' => 'user', 'content' => 'ping']]]);
+                $r = $this->kfHttp('https://api.perplexity.ai/chat/completions', 'POST',
+                    array_merge($bearer, ['Content-Type: application/json']), $pay, 10);
+                $out = $this->kfVerdict($r, [200], 'Perplexity');
+                if ($out['verdict'] === 'working') $out['detail'] = 'The key works (one one-token request was sent).';
+                return $out;
+
+            /* ── payments ────────────────────────────────────────────────── */
+            case 'stripe_secret':
+            case 'stripe_webhook':
+                if (strpos($v, 'whsec_') === 0) {
+                    return ['verdict' => 'unverified', 'type' => 'Stripe webhook',
+                            'detail' => 'A webhook signing secret is not a login; it can only be checked by signing a delivery.'];
+                }
+                $r = $this->kfHttp('https://api.stripe.com/v1/balance', 'GET', $bearer);
+                $out = $this->kfVerdict($r, [200], 'Stripe');
+                if ($out['verdict'] === 'working') {
+                    $j = json_decode((string)$r['body'], true);
+                    $avail = [];
+                    foreach (($j['available'] ?? []) as $b)
+                        if (isset($b['amount'], $b['currency'])) $avail[] = strtoupper($b['currency']) . ' ' . number_format($b['amount'] / 100, 2);
+                    $mode = (strpos($v, 'sk_live') === 0 || strpos($v, 'rk_live') === 0) ? 'live' : 'test';
+                    $out['detail'] = 'The key works and is a ' . $mode . ' key' . ($avail ? '; available balance ' . implode(', ', $avail) : '') . '.';
+                }
+                return $out;
+
+            /* ── source hosting and registries ───────────────────────────── */
+            case 'github_token':
+                $r = $this->kfHttp('https://api.github.com/user', 'GET',
+                    array_merge($bearer, ['Accept: application/vnd.github+json', 'X-GitHub-Api-Version: 2022-11-28']));
+                $out = $this->kfVerdict($r, [200], 'GitHub');
+                if ($out['verdict'] === 'working') {
+                    $j = json_decode((string)$r['body'], true);
+                    $sc = $r['headers']['x-oauth-scopes'] ?? '';
+                    $out['detail'] = 'The token works'
+                        . (isset($j['login']) ? ' for ' . $j['login'] : '')
+                        . ($sc !== '' ? '; scopes: ' . $sc : '; a fine-grained token with no scopes listed') . '.';
+                }
+                return $out;
+            case 'gitlab_token':
+                $r = $this->kfHttp('https://gitlab.com/api/v4/user', 'GET', ['PRIVATE-TOKEN: ' . $v]);
+                $out = $this->kfVerdict($r, [200], 'GitLab');
+                if ($out['verdict'] === 'working' && preg_match('/"username"\s*:\s*"([^"]{1,60})"/', (string)$r['body'], $m))
+                    $out['detail'] = 'The token works for ' . $m[1] . '.';
+                return $out;
+            case 'npm_token':
+                $r = $this->kfHttp('https://registry.npmjs.org/-/whoami', 'GET', $bearer);
+                $out = $this->kfVerdict($r, [200], 'npm');
+                if ($out['verdict'] === 'working' && preg_match('/"username"\s*:\s*"([^"]{1,60})"/', (string)$r['body'], $m))
+                    $out['detail'] = 'The token works for ' . $m[1] . '.';
+                return $out;
+            case 'pypi_token':
+                return ['verdict' => 'unverified', 'type' => 'PyPI',
+                        'detail' => 'PyPI has no read-only endpoint that answers whether a token is alive; it only speaks when uploading.'];
+            case 'digitalocean':
+                $r = $this->kfHttp('https://api.digitalocean.com/v2/account', 'GET', $bearer);
+                $out = $this->kfVerdict($r, [200], 'DigitalOcean');
+                if ($out['verdict'] === 'working' && preg_match('/"email"\s*:\s*"([^"]{3,80})"/', (string)$r['body'], $m))
+                    $out['detail'] = 'The token works for the account "' . $m[1] . '".';
+                return $out;
+            case 'terraform':
+                $r = $this->kfHttp('https://app.terraform.io/api/v2/account/details', 'GET', $bearer);
+                return $this->kfVerdict($r, [200], 'Terraform Cloud');
+            case 'cloudflare':
+                $r = $this->kfHttp('https://api.cloudflare.com/client/v4/user/tokens/verify', 'GET', $bearer);
+                $out = $this->kfVerdict($r, [200], 'Cloudflare');
+                if ($out['verdict'] === 'working') $out['detail'] = 'Cloudflare accepted the token (it is active).';
+                return $out;
+            case 'vault':
+                $addr = getenv('VAULT_ADDR') ?: '';
+                if ($addr === '') return ['verdict' => 'unverified', 'type' => 'Vault',
+                    'detail' => 'No VAULT_ADDR is set here, so the token has no server to ask.'];
+                $r = $this->kfHttp(rtrim($addr, '/') . '/v1/auth/token/lookup-self', 'GET', ['X-Vault-Token: ' . $v]);
+                $out = $this->kfVerdict($r, [200], 'Vault');
+                if ($out['verdict'] === 'working' && preg_match('/"ttl"\s*:\s*(\d+)/', (string)$r['body'], $m))
+                    $out['detail'] = 'Vault accepted the token; ' . $m[1] . ' seconds of lease left.';
+                return $out;
+
+            /* ── messaging ───────────────────────────────────────────────── */
+            case 'slack':
+                if (strpos($v, 'https://hooks.slack.com') === 0) {
+                    /* an empty message is refused by Slack and posts nothing */
+                    $r = $this->kfHttp($v, 'POST', ['Content-Type: application/json'], '{"text":""}');
+                    $v2 = $this->kfVerdict($r, [200], 'Slack webhook');
+                    if ($v2['verdict'] === 'working') $v2['detail'] = 'The webhook is alive (an empty message was refused, nothing was posted).';
+                    elseif (stripos((string)$r['body'], 'no_text') !== false) {
+                        return ['verdict' => 'working', 'type' => 'Slack webhook',
+                                'detail' => 'The webhook is alive (it answered "no_text" to an empty message; nothing was posted).'];
+                    } elseif (stripos((string)$r['body'], 'invalid_token') !== false || stripos((string)$r['body'], 'no_service') !== false) {
+                        return ['verdict' => 'rejected', 'type' => 'Slack webhook', 'detail' => 'Slack says this webhook no longer exists.'];
+                    }
+                    return $v2;
+                }
+                $r = $this->kfHttp('https://slack.com/api/auth.test', 'POST', array_merge($bearer, ['Content-Type: application/x-www-form-urlencoded']), '');
+                $j = json_decode((string)$r['body'], true);
+                if (is_array($j)) {
+                    if (!empty($j['ok'])) return ['verdict' => 'working', 'type' => 'Slack',
+                        'detail' => 'The token works' . (isset($j['user']) ? ' as ' . $j['user'] : '') . (isset($j['team']) ? ' in ' . $j['team'] : '') . '.'];
+                    $e = (string)($j['error'] ?? 'error');
+                    $ver = in_array($e, ['invalid_auth', 'token_revoked', 'account_inactive', 'not_authed'], true) ? 'rejected' : 'unverified';
+                    return ['verdict' => $ver, 'type' => 'Slack', 'detail' => 'Slack answered "' . $e . '".'];
+                }
+                return $this->kfVerdict($r, [200], 'Slack');
+            case 'slack_webhook':
+                return $this->keysFinderProbe($v, 'slack', $where);
+            case 'discord_webhook':
+                /* a GET returns the webhook description and posts nothing */
+                $r = $this->kfHttp($v, 'GET');
+                $out = $this->kfVerdict($r, [200], 'Discord webhook');
+                if ($out['verdict'] === 'working' && preg_match('/"name"\s*:\s*"([^"]{0,60})"/', (string)$r['body'], $m))
+                    $out['detail'] = 'The webhook is alive' . ($m[1] !== '' ? ' (channel "' . $m[1] . '")' : '') . '; nothing was posted.';
+                if ((int)$r['status'] === 404) $out = ['verdict' => 'rejected', 'type' => 'Discord webhook', 'detail' => 'Discord says this webhook no longer exists.'];
+                return $out;
+            case 'telegram_bot':
+                $r = $this->kfHttp('https://api.telegram.org/bot' . $v . '/getMe', 'GET');
+                $j = json_decode((string)$r['body'], true);
+                if (is_array($j)) {
+                    if (!empty($j['ok'])) return ['verdict' => 'working', 'type' => 'Telegram bot',
+                        'detail' => 'The bot is alive: @' . (string)($j['result']['username'] ?? '?') . '.'];
+                    return ['verdict' => 'rejected', 'type' => 'Telegram bot',
+                        'detail' => 'Telegram refused the token: ' . (string)($j['description'] ?? 'error') . '.'];
+                }
+                return $this->kfVerdict($r, [200], 'Telegram bot');
+            case 'sendgrid':
+                $r = $this->kfHttp('https://api.sendgrid.com/v3/scopes', 'GET', $bearer);
+                $out = $this->kfVerdict($r, [200], 'SendGrid');
+                if ($out['verdict'] === 'working' && preg_match_all('/"([a-z_.]+)"/', (string)$r['body'], $m))
+                    $out['detail'] = 'The key works; ' . count($m[1]) . ' permission(s) granted.';
+                return $out;
+            case 'mailgun':
+                $r = $this->kfHttp('https://api.mailgun.net/v3/domains?limit=1', 'GET', ['Authorization: Basic ' . base64_encode('api:' . $v)]);
+                $out = $this->kfVerdict($r, [200], 'Mailgun');
+                if ($out['verdict'] === 'working') $out['detail'] = 'The key works (the domain list was readable).';
+                return $out;
+            case 'twilio':
+                return ['verdict' => 'unverified', 'type' => 'Twilio',
+                        'detail' => 'A Twilio SID alone cannot be checked; it needs the auth token from the same pair.'];
+
+            /* ── databases and connections ──────────────────────────────── */
+            case 'conn_string':
+            case 'wp_db':
+                return $this->kfProbeDsn($v, $id);
+            case 'basic_auth_url':
+                /* a link with the password inside it: ask the link itself */
+                $parts = @parse_url($v);
+                if (!is_array($parts) || empty($parts['host'])) return ['verdict' => 'unverified', 'type' => 'Link', 'detail' => 'The address could not be read.'];
+                $url = ($parts['scheme'] ?? 'http') . '://' . $parts['host']
+                     . (isset($parts['port']) ? ':' . $parts['port'] : '') . ($parts['path'] ?? '/')
+                     . (isset($parts['query']) ? '?' . $parts['query'] : '');
+                $r = $this->kfHttp($url, 'GET', [], null, 6);
+                $out = $this->kfVerdict($r, [200], 'Link with credentials');
+                if ($out['verdict'] === 'working') $out['detail'] = 'The service accepted the login in the link (' . $r['status'] . ').';
+                return $out;
+
+            /* ── keys that can be judged locally ───────────────────────── */
+            case 'jwt':
+                $parts = explode('.', $v);
+                if (count($parts) >= 2) {
+                    $pl = json_decode((string)base64_decode(strtr($parts[1], '-_', '+/')), true);
+                    if (is_array($pl)) {
+                        $exp = isset($pl['exp']) ? (int)$pl['exp'] : 0;
+                        $iss = (string)($pl['iss'] ?? '');
+                        if ($exp && $exp < time())
+                            return ['verdict' => 'expired', 'type' => 'JWT', 'detail' => 'The token expired on ' . gmdate('Y-m-d H:i', $exp) . ' UTC.'];
+                        return ['verdict' => 'working', 'type' => 'JWT',
+                                'detail' => 'The token is well formed and not past its date' . ($exp ? ' (' . gmdate('Y-m-d H:i', $exp) . ' UTC)' : ' (no expiry set)')
+                                    . ($iss ? ', issuer ' . substr($iss, 0, 80) : '') . '. Its signature was not verified, since no key was given.'];
+                    }
+                }
+                return ['verdict' => 'unverified', 'type' => 'JWT', 'detail' => 'This value is not a readable token.'];
+            case 'private_key_pem':
+                $k = @openssl_pkey_get_private($v);
+                if ($k) {
+                    $d = openssl_pkey_get_details($k);
+                    return ['verdict' => 'working', 'type' => 'Private key',
+                            'detail' => 'The file is a readable private key' . (isset($d['bits']) ? ' (' . $d['bits'] . ' bits)' : '') . '.'];
+                }
+                return ['verdict' => 'rejected', 'type' => 'Private key', 'detail' => 'OpenSSL cannot read this as a private key.'];
+            case 'metadata_temp':
+                return ['verdict' => 'unverified', 'type' => 'Metadata', 'detail' => 'Not a key.'];
+            case 'wordpress_salt':
+            case 'gcp_service_account':
+            case 'google_oauth_client':
+            case 'netrc_login':
+            case 'basic_auth_url':
+            case 'openai_project':
+            case 'env_pointer':
+            case 'env_named':
+            case 'vault_secret':
+            case 'gcp_secret':
+            case 'ssh_private':
+                return ['verdict' => 'unverified', 'type' => 'Value',
+                        'detail' => 'This kind of value is not something a service can be asked about; it is a local secret.'];
+        }
+
+        /* unknown kind: try the harmless, obvious guesses — a bearer token to the
+           host it was found next to, if it looks like a URL */
+        if (preg_match('#^https?://#i', $where)) {
+            $r = $this->kfHttp($where, 'GET', $bearer, null, 5);
+            return $this->kfVerdict($r, [200], 'Host');
+        }
+        return ['verdict' => 'unverified', 'type' => '', 'detail' => 'There is no safe way to ask a service about this kind of value.'];
+    }
+
+    /* a connection string is checked by making the connection it names, with a
+       short timeout, and asking the server one cheap question */
+    private function kfProbeDsn($v, $id = '')
+    {
+        $type = '';
+        if (preg_match('#^(mysql|pgsql|postgres|postgresql)://#i', $v)) {
+            $type = stripos($v, 'mysql') === 0 ? 'mysql' : 'pgsql';
+        } elseif (preg_match('/^redis(s)?:\/\//i', $v)) {
+            $type = 'redis';
+        } elseif (preg_match('/^(mongodb(\+srv)?):\/\//i', $v)) {
+            $type = 'mongodb';
+        }
+        if ($type === '') return ['verdict' => 'unverified', 'type' => 'Connection', 'detail' => 'This connection string names a system this check does not know.'];
+
+        if ($type === 'redis') {
+            $p = @parse_url($v);
+            if (!is_array($p) || empty($p['host'])) return ['verdict' => 'unverified', 'type' => 'Redis', 'detail' => 'The address could not be read.'];
+            $host = (string)$p['host'];
+            $port = (int)($p['port'] ?? 6379);
+            $pass = isset($p['pass']) ? urldecode((string)$p['pass']) : '';
+            $sock = @fsockopen($host, $port, $en, $es, 2.5);
+            if (!$sock) return ['verdict' => 'unverified', 'type' => 'Redis', 'detail' => 'The server did not answer on ' . $host . ':' . $port . '.'];
+            stream_set_timeout($sock, 3);
+            $send = $pass !== '' ? "AUTH " . $pass . "\r\nPING\r\n" : "PING\r\n";
+            fwrite($sock, $send);
+            $read = (string)fread($sock, 128);
+            fclose($sock);
+            if (stripos($read, 'NOAUTH') !== false || stripos($read, 'WRONGPASS') !== false || stripos($read, 'ERR invalid password') !== false)
+                return ['verdict' => 'rejected', 'type' => 'Redis', 'detail' => 'The server is up but refused the password.'];
+            if (stripos($read, '+PONG') !== false || stripos($read, '+OK') !== false)
+                return ['verdict' => 'working', 'type' => 'Redis', 'detail' => 'The server answered' . ($pass !== '' ? ' and accepted the password' : ' without a password needed') . '.'];
+            return ['verdict' => 'unverified', 'type' => 'Redis', 'detail' => 'The server answered something this check does not recognise.'];
+        }
+
+        if (!in_array($type, ['mysql', 'pgsql'], true))
+            return ['verdict' => 'unverified', 'type' => 'MongoDB', 'detail' => 'MongoDB needs its own client library, which this server does not carry.'];
+
+        $drivers = class_exists('PDO') ? PDO::getAvailableDrivers() : [];
+        $driver = $type === 'pgsql' ? (in_array('pgsql', $drivers, true) ? 'pgsql' : '') : (in_array('mysql', $drivers, true) ? 'mysql' : '');
+        if ($driver === '')
+            return ['verdict' => 'unverified', 'type' => strtoupper($type), 'detail' => 'This PHP has no ' . $type . ' driver, so the connection cannot be tried from here.'];
+        $dsn = $driver === 'pgsql' ? preg_replace('#^postgres(ql)?://#i', 'pgsql://', $v) : $v;
+        try {
+            $pdo = new PDO($dsn, null, null, [PDO::ATTR_TIMEOUT => 4, PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                                              PDO::ATTR_EMULATE_PREPARES => false]);
+            $pdo->query('SELECT 1');
+            return ['verdict' => 'working', 'type' => strtoupper($type), 'detail' => 'The database accepted this connection (SELECT 1 answered).'];
+        } catch (Throwable $e) {
+            $msg = $e->getMessage();
+            $authWords = ['access denied', 'authentication failed', 'password authentication failed', 'invalid password',
+                          'role "', 'unknown database'];
+            foreach ($authWords as $w) {
+                if (stripos($msg, $w) !== false)
+                    return ['verdict' => 'rejected', 'type' => strtoupper($type),
+                            'detail' => 'The server answered but refused the credentials: ' . substr($msg, 0, 130)];
+            }
+            return ['verdict' => 'unverified', 'type' => strtoupper($type),
+                    'detail' => 'The database could not be reached from here: ' . substr($msg, 0, 130)];
+        }
+    }
+
+    /* the two halves of an access key are one credential: find the partner of
+       each half, and hand the window a small table it can ask about as a pair */
+    private function keysFinderPair(&$groups)
+    {
+        $ids = [];
+        $secs = [];
+        $toks = [];
+        foreach ($groups as $gi => $g) {
+            if (!in_array($g['id'], ['aws_access_key', 'metadata_temp', 'aws_secret_key', 'aws_session_token'], true)) continue;
+            foreach ($g['hits'] as $hi => $h) {
+                $row = ['gi' => $gi, 'hi' => $hi, 'sealed' => $h['sealed'], 'where' => (string)($h['where'] ?? ''),
+                        'path' => $g['path'], 'label' => $g['label']];
+                $lb = strtolower($g['label']);
+                if (strpos($lb, 'access key id') !== false) $ids[] = $row;
+                elseif (strpos($lb, 'secret') !== false) $secs[] = $row;
+                elseif (strpos($lb, 'token') !== false) $toks[] = $row;
+            }
+        }
+        $pairs = [];
+        $take = function ($list, $wantPath, $wantWhere) {
+            foreach ($list as $i => $r) {
+                if ($wantPath !== '' && $r['path'] === $wantPath) return $i;
+            }
+            foreach ($list as $i => $r) {
+                if ($wantWhere !== '' && $r['where'] !== '' && $r['where'] === $wantWhere) return $i;
+            }
+            return count($list) === 1 ? 0 : null;
+        };
+        foreach ($ids as $idRow) {
+            $si = $take($secs, $idRow['path'], $idRow['where']);
+            if ($si === null) continue;
+            $ti = $take($toks, $idRow['path'], $idRow['where']);
+            $at = count($pairs);
+            $pairs[$at] = ['sealed_id' => $idRow['sealed'], 'sealed_secret' => $secs[$si]['sealed'],
+                           'sealed_token' => $ti !== null ? $toks[$ti]['sealed'] : '',
+                           'path' => $idRow['path'], 'where' => $idRow['where']];
+            $groups[$idRow['gi']]['hits'][$idRow['hi']]['pairIdx'] = $at;
+            $groups[$secs[$si]['gi']]['hits'][$secs[$si]['hi']]['pairIdx'] = $at;
+            if ($ti !== null) $groups[$toks[$ti]['gi']]['hits'][$toks[$ti]['hi']]['pairIdx'] = $at;
+        }
+        $this->kfPairs = $pairs;
+    }
+    private $kfPairs = [];
+
+    /* every value found is examined once more, in the same pass: is it shaped
+       like something a service owns, and does that service answer for it? A
+       check that fails to reach a service is reported as such and gains
+       nothing at all; a key that works is a fact worth saying out loud */
+    private function keysFinderLive(&$found, $seconds = 30, $alongside = true)
+    {
+        $start = microtime(true);
+        $work = [];
+        foreach ($found as $i => $h) {
+            $kind = $this->kfOwnKind($h['id'], $h['where'] ?? '');
+            if ($kind !== '') $work[$i] = $kind;
+        }
+        $stat = ['tried' => 0, 'working' => 0, 'rejected' => 0, 'expired' => 0,
+                 'limited' => 0, 'unverified' => 0, 'time' => 0.0];
+        if (!$work) return $stat;
+
+        /* the pair first: one signed request proves both halves at once */
+        $paired = [];
+        foreach ($work as $i => $kind) {
+            if ($kind !== 'aws_access_key') continue;
+            foreach ($found as $j => $o) {
+                if ($j === $i || $this->kfOwnKind($o['id'], $o['where'] ?? '') !== 'aws_secret_key') continue;
+                if ((string)($o['path'] ?? '') !== (string)($found[$i]['path'] ?? '#different#')) continue;
+                /* the token slot is reset every time: a leftover index from an
+                   earlier round would tag the wrong finding with this verdict */
+                $tok = '';
+                $tokSlot = null;
+                foreach ($found as $k => $t) {
+                    if ($this->kfOwnKind($t['id'], $t['where'] ?? '') === 'aws_session_token'
+                        && (string)($t['path'] ?? '') === (string)($found[$i]['path'] ?? '')) {
+                        $tok = (string)$t['sealed'];
+                        $tokSlot = $k;
+                        break;
+                    }
+                }
+                $idv = $this->keysFinderUnseal($found[$i]['sealed']);
+                $secv = $this->keysFinderUnseal($o['sealed']);
+                $tokv = $tok !== '' ? $this->keysFinderUnseal($tok) : '';
+                if ($idv === '' || $secv === '') continue;
+                $r = $this->kfAwsIdentity($idv, $secv, $tokv);
+                $r['ok'] = true;
+                $r['time'] = 0;
+                foreach ([$i, $j, $tokSlot] as $slot) {
+                    if ($slot !== null && isset($found[$slot])) { $found[$slot]['live'] = $r; $paired[$slot] = true; }
+                }
+                unset($work[$i], $work[$j]);
+                if ($tokSlot !== null) unset($work[$tokSlot]);
+                $stat['tried']++;
+                $stat[$r['verdict']] = (int)($stat[$r['verdict']] ?? 0) + 1;
+                break;
+            }
+        }
+
+        if (!$alongside) {
+            foreach ($work as $i => $kind) { $found[$i]['live'] = null; }
+            $stat['time'] = round(microtime(true) - $start, 2);
+            return $stat;
+        }
+
+        /* then everything else, a few at a time, until the budget runs out */
+        $queue = $work;
+        $run = function ($i, $kind) use (&$found, &$stat) {
+            $plain = $this->keysFinderUnseal($found[$i]['sealed']);
+            if ($plain === '') return;
+            try { $r = $this->keysFinderProbe($plain, $kind, (string)($found[$i]['where'] ?? '')); }
+            catch (Throwable $e) { $r = ['verdict' => 'unverified', 'type' => '', 'detail' => 'The check could not run here.']; }
+            $found[$i]['live'] = ['ok' => true, 'verdict' => $r['verdict'], 'type' => $r['type'] ?? '',
+                                  'detail' => (string)$r['detail'], 'time' => 0];
+            $stat['tried']++;
+            $stat[$r['verdict']] = (int)($stat[$r['verdict']] ?? 0) + 1;
+        };
+        if (function_exists('curl_multi_init') && function_exists('curl_init')) {
+            /* parallel, but only for the callers that fit a budget: the probe
+               itself decides how it asks, so parallel here means several
+               independent single calls started together */
+            while ($queue && (microtime(true) - $start) < $seconds) {
+                $batch = [];
+                foreach ($queue as $i => $kind) {
+                    $batch[$i] = $kind;
+                    unset($queue[$i]);
+                    if (count($batch) >= 4) break;
+                }
+                foreach ($batch as $i => $kind) $run($i, $kind);
+            }
+        } else {
+            foreach ($queue as $i => $kind) {
+                if ((microtime(true) - $start) >= $seconds) break;
+                $run($i, $kind);
+            }
+        }
+        foreach ($found as $i => $h) if (!array_key_exists('live', $h)) $found[$i]['live'] = null;
+        $stat['time'] = round(microtime(true) - $start, 2);
+        $stat['left'] = count($queue);
+        return $stat;
+    }
+
+    /* which checker a finding belongs to. A finding with a name of its own is
+       judged by the name: that is what the service was told it was */
+    private function kfOwnKind($id, $where = '')
+    {
+        $w = strtolower((string)$where);
+        $byName = [
+            'openai' => 'openai', 'anthropic' => 'anthropic', 'claude' => 'anthropic',
+            'gemini' => 'google_gemini', 'google_api_key' => 'google_gemini', 'google_ai' => 'google_gemini',
+            'groq' => 'groq', 'xai' => 'xai', 'deepseek' => 'deepseek', 'cohere' => 'cohere',
+            'huggingface' => 'huggingface', 'hf_token' => 'huggingface', 'replicate' => 'replicate',
+            'openrouter' => 'openrouter', 'perplexity' => 'perplexity',
+            'stripe' => 'stripe_secret', 'github' => 'github_token', 'gh_token' => 'github_token',
+            'gitlab' => 'gitlab_token', 'npm' => 'npm_token', 'pypi' => 'pypi_token',
+            'digitalocean' => 'digitalocean', 'terraform' => 'terraform', 'cloudflare' => 'cloudflare',
+            'vault' => 'vault', 'slack' => 'slack', 'discord' => 'discord_webhook',
+            'telegram' => 'telegram_bot', 'sendgrid' => 'sendgrid', 'mailgun' => 'mailgun', 'twilio' => 'twilio',
+            'database_url' => 'conn_string', 'redis_url' => 'conn_string', 'mysql' => 'conn_string',
+            'postgres' => 'conn_string', 'dsn' => 'conn_string',
+        ];
+        foreach ($byName as $needle => $kind) {
+            if (strpos($w, $needle) !== false) return $kind;
+        }
+        if (in_array($id, ['openai', 'anthropic', 'google_gemini', 'google_oauth', 'groq', 'huggingface',
+                           'replicate', 'xai', 'perplexity', 'cohere', 'deepseek', 'openrouter',
+                           'stripe_secret', 'github_token', 'gitlab_token', 'slack', 'discord_webhook',
+                           'telegram_bot', 'sendgrid', 'mailgun', 'npm_token', 'pypi_token',
+                           'digitalocean', 'terraform', 'cloudflare', 'vault', 'jwt', 'conn_string',
+                           'private_key_pem', 'aws_access_key', 'aws_secret_key', 'aws_session_token',
+                           'metadata_temp', 'slack_webhook', 'stripe_webhook', 'basic_auth_url'], true)) {
+            return $id;
+        }
+        return '';
+    }
+
+    /* one key pair, checked together: the AWS id plus its secret, and the
+       temporary token when the id starts with ASIA */
+    public function keysFinderVerifyPair($sealedId, $sealedSecret, $sealedToken = '')
+    {
+        $id = trim((string)$this->keysFinderUnseal((string)$sealedId));
+        $sec = trim((string)$this->keysFinderUnseal((string)$sealedSecret));
+        $tok = $sealedToken !== '' ? trim((string)$this->keysFinderUnseal((string)$sealedToken)) : '';
+        if (!preg_match('/^[A-Z0-9]{16,32}$/', $id) || strlen($sec) < 20) {
+            return ['ok' => false, 'verdict' => 'unverified', 'detail' => 'Both halves of the pair are needed for a check.', 'time' => 0];
+        }
+        $t0 = microtime(true);
+        $out = $this->kfAwsIdentity($id, $sec, strpos($id, 'ASIA') === 0 ? $tok : '');
+        if (strpos($id, 'ASIA') === 0 && $tok === '' && $out['verdict'] !== 'working')
+            $out['detail'] .= ' A temporary key needs its session token, which was not found beside it.';
+        $out['ok'] = true;
+        $out['time'] = round(microtime(true) - $t0, 2);
+        return $out;
+    }
+
+    /* the revealed value, for the administrator who pressed Reveal. Every
+       press is written to the activity log first, so the act leaves a trace */
+    public function keysFinderReveal($sealed){
+        $plain=$this->keysFinderUnseal((string)$sealed);
+        if($plain==='')return ['ok'=>false,'error'=>'This value is no longer readable with the current manager key.'];
+        return ['ok'=>true,'value'=>$plain];
+    }
+
+
+    /* the pictures the window draws for each kind of credential. They are
+       carried inside the file as data URIs, so the window never waits on the
+       network for an icon and the preview still shows them with no access. */
+    public function keysFinderIcons(){
+        static $i=null;
+        if($i!==null)return $i;
+        $i=[
+            'ai'=>'data:image/png;base64,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',
+            'anthropic'=>'data:image/png;base64,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',
+            'aws'=>'data:image/png;base64,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',
+            'chat'=>'data:image/png;base64,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',
+            'cloud'=>'data:image/png;base64,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',
+            'database'=>'data:image/png;base64,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',
+            'envelope'=>'data:image/png;base64,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',
+            'git'=>'data:image/png;base64,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',
+            'globe'=>'data:image/png;base64,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',
+            'google'=>'data:image/png;base64,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',
+            'key'=>'data:image/png;base64,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',
+            'link'=>'data:image/png;base64,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',
+            'lock'=>'data:image/png;base64,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',
+            'openai'=>'data:image/png;base64,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',
+            'package'=>'data:image/png;base64,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',
+            'phone'=>'data:image/png;base64,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',
+            'python'=>'data:image/png;base64,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',
+            'shopping'=>'data:image/png;base64,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',
+            'token'=>'data:image/png;base64,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',
+            'wordpress'=>'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAATA0lEQVR42u1bW2wj53X+/svMcHgRSV0oraRdrWR7d+147SR2smsnaJykSOCiQfrQPMRtCtRBgwAtij6lLYomQJsWNdoCfWhfilxaIEDchzQXGEhf6mKBxJc66SbZ2HG8F91FiRRFite5/Jc+/JwRKVEUd53dPLQDCJDEmfn/c/5zvnPOdw6B/+MXud0HHv72Jpxzs2j/8A0id7e5bNRsHfo2pLDu6c4pE8SyA5rOBiw/GfKJU1o1a3jjmQfvjgKWvvA8qJskqtVIa78zrVqNReW1F3Xgz0KKnJbCBUDvkfgalHmE831iOds04a6QZOYWTSSLxHbqWoTq1l8884tRwH1f/HfwiWmEWytZ1ag9KPf3npCN6iXVql/QnXZB+Z0UwtDSSvJ7awFUEm6FxE60qZus0NTYdZrJvcay4y+xdO4am5iuqFZd3/z8J+5MAfd94XmoTgvESdiq3TgvK6WnxV7po7JWfkTVq3nValAdeERLAWhtfu6p8xKzfcZAbAc0mVEsk2uw/OQbLF/4Tz4x/QJNj12T1d02y0/h1hd/e+Br2EBz//zXoRpVUDeVlrXdD4qtlc+GW8vPhFsrD8vyZkrVq1QFHtFS/nKEBw7WVRI6DKA7TSKb+wndaszrwLuoRbgAQkOenyq673yyk3noCVSvfONkBSz+6b9At+ogbiovK9sfCzdv/WG4ufyRsLiaV40q0UJ0D4CM9DNw432naFwautcmSc8to62ju8pQXpvoVt3VvrekpXgAhAhZq6xPfPpTTSe5iNr3vjVcAbnLT4MmMxlZ2f71cHP598ONW5dFedPWvte3oZMPSMeCEUpBHRc0nQXLjoOPT4EX5mCdWoA1PQc2NgGWHgN1UyCWY/SiJKAUIs2ctGbvvrQU0J0W04E/DeizhFud4K3lW6rdbOff/3HUXn5hMAYs/slXQSzbltXyrwZr1z8Xrt98nyhvcS1F92BGFdwITRIpsNwE+OQM+NQcaDoLYtkgjAGUAbTrx0oZU1YSWoRQrQbkbhGiXISslaHaTWgpewxktH0QSsHGC8qav++afeaBv+eTM9/UUjYhBZb/9vcAALxX+NSTH0XzynfOi52NT4rt9Uuisj2y8NGJE8rAshOwFs7BKsyBjuVBHBeE0uOxgjEDZgDguGCpLKzCHFTgQTX2IXaLCFbfgqzsQItwZIvQSkFWy5Rw+x3UcZ8hjrtiL5z7vihvqui+WAHa76D92otZWSk9LcpbHxa7xYQOg5OF1xq6uyDN5GEvnIN99oIRvEdordTJJxjdC23eZydAJ13wiWlY80sI124gWP4ZZG334H1D9kYIgZYSYm+H02TqCZrK/IZIpm+qZn2rDwMWP/clWPNLRJa23hlurX4m3Fp5WDWq5KQFYnO3Hdj3PQT3kSdhnz1nfDl6TmugFxSHKbP7ed+zUdi3HbDJGViFORDLhmrURrYGSAkonSAJ12WpzM94YXY5d+nXVO373wY7+0f/BGLZ0IGfEeWtj4fFld+U5c2UFmIk4VlqDImLl+A+9DjYWC5G5PhZQt5mrO/xaUJA3RR4YRYsnYVsVKG99lAlxP+XAsSyMzSZKbN09iqUauWf/BgosRNQrQa035mWjeolVa/mdeCPBHQ8PwX38Q/AeeAiiGXHsZm8HaGHmLOJKgZnrDMPIPmeD8GaPn0QBoftWYRQjWpSNqqPq3ZzYe65ZwHKQEEpUpc/QlSrsaha9Quq1WB6iBDRQtbMaSTf+2HYp+8HoexgA3dB+MOJa7Q/qzCH5Hs/BGvhHAihxyohkkW1W0S16kuq1bhQ+scrHAAotIIob3HltRd1p13QgTfayT/6PvCpU7Gvkrsq+ACBIhfMTsB95Anwmfm+PQ7cfxhAtVs55beXZHU3ocMAVIchZKPm6MCfVX4npaUYitAsNYbEI5f7hMc9FL4PH7qhl42NGyWMF4YrQUlov+PqwJ/VXjulAw9UixA68GxIkUMYWsfFat1Fe+ehx2DNLf5yhR+khMlTSDx8CTSZPgkLuBZhVsvQWACkAJTkWgpXK8kHKSDyOfvseThLDx34/C9T+B4lxJgwvwTn3KMgjA+0AlMvKAopXShlaSH6CAw6lH/I5OAsvQPEdkaLvfdUBySODvbZ82AT0yZBG2jNGoCm0CCAPpnB0dGLF86BjU/defl7t8tmYoRj6ayxUsseiQoaicJi2QnYZy/ctun3hUZKAUKPlsS/QA3EIXpuEbww13PiQ4ilUSoqa+Ec6Fj+tk2fEALVaUHsbEDslaDa9buKHdHeqJuCvXjBZLgn6JqfxD2SRMrk38OquWGnEgbo/ORlqGYdLD+J5ONPgaTGoO9W7qA1QCn4xAxYJgdR2RmqcDrUfDXAchPm9Af58DCFdMMTTWZAU2OQ9SrCrVWI0tbdB1GtQVMZsPHpOErckQsQSsEnZ0Acty/kyHoVOgx64vDxhQzhHHx6HsS2oWWIcHstruLuChZE6zIOXpgF4fzOMYDYCfApY/6xFsMA/vVrENWyMfETQZCAjxdAEylAa4jyFmS9Gpe+d8cAuin7+DSom34bCkgkQdPZg5OKQG17DWJ7DVqrgyrt+NIFJJkBzY4DIFCtOkR5666GxEitJJkCTY8NXYsO8yPiJOJ4GldUzX3IVh1iex260zLL6RPM0bINkDIGLQREcRUqKrrushvQRPLOLYDajiEwe5Si2g1AhJD7FYi9klH3SfwcpWBTsyCJFABAVHagapUTXWgUUx/KAxBq8OtOogAA8zBlfQsqrw2tFJTvQRRXcWz1eCgDjNhhANBeG+HOeo8LvY1LqZgfHGQJxHGHrkGHmZFRAOnLC3QYxr+L0gZUqzG8BI2SEzsBa24RxLKiomTkkHbcSRNCTIkbRZUBn1PHPchAbz8MkkOtA2JwoduXk43aSHE9TlFPnQEbnwaNoguhI5m5atUBrQbnIIRA+95QKxjWAh5aASrP6zspQil4fgrESXRrawGxvWpygiGAFimHJFImJGbHwfKT0FqZLs6g5yKKXASQtcpRi4kUThl06AORKx56l/I7Q61tSBQwvQIo2ePLAB3L94RGDbG7DVnfGx7Xe4Vp1MALcyCJpMGC9ZuGtj5OgVJCterxCfcqK6pVoDUiIrf3DVopaL9z55mgDjzoSAERL+CmwHJTcXtatRoQO5tDtRwtr1pNaL8Th0S5V4J/86cmsvQqLy6YjFK11wZEMMRVGZTfHrCwgva9O8wDCKB8LwaYuHnLOKy5RdDIDZRAeEJc7zoA5N4OiJ0Ay09BS4lwZwOiXITYLfbTa3H+rrsmHkB5HRzrzIz1gHPPbqWEivoGt28BBNpvd1G+v1PDp+fAZ87E98lqGbK6OziudwXTMoSobIPlp0DcFHSnCblbhA59iOKA+kArk2dIASgFuV8ZgmQ0dlXTIzjw/8i69B25gO9B7hZNOtvj49R2YS8+2M2yNLTfQVhchVayj7LuBSzVrEPVq7Cm50EYg9grQ+7vASCmPmjU+hVIKERpE/7N16GlgNzdhpZi8PsH9iMI5F4pDtN3hgFSQpSL/ebdNU2rMAdrfslsWimTE7QbR42tu2GxWwQojc1flDYNQhMC1W5C7GwcKDqO8QrBjWtQrbqpQANvsDErBcJ4H4GrlYAobx1EqNtVAOnGT1krQzX2D1A+IiBtB4kHH4M1Pd+9bw9yd/vQaei4LRUWV8HyBYP+nSZEqSswzECD2F4zCulNc0Mfqt0CHRuHNXe2+3919LS1PsQBdou2yrb57E4tAOieTgRSh8yNZceRuHgZLDsBHXRMrS/Do3WZ1qCOa+rzrvmrejVGeRBA7JVMvO9pZqrmPrSSoG4SvDBv3KQvKvUowE70H1y0xgllNz2JY9NSmuGEVr0/DseAOA/34mXQVBZiZ8NYy+HUmHPY970DfGLGJE8761B9DVgC3S2ztVKxW8j9PRPjvTb86z+BPERvxU1RAhDL6Ul+PAQrP4fyvRMzzZFYYVnZQbh244DHi5A9akicuR/Jx34FxEkgLG0cSY0JCFh+CjSRhGo3IMrFPtM0giiE2+txu1vulcyJEwKxV0K4uQwtgqPMspIAs8yUSfcyfMXqSNTbiQogXR8Oln8Gtd+f8cWzAN2+QfLxpwx7dDg17hmOkHslqIGZI4Har0BUtg1mbK1AhwFI9xnte6CJ1NG5A6XM3BE1oqhOC/7N1/vwZFQF6OOLCQJZ20Ww8mZc/sbTIT1hiU+egn3m3EEJfUj7WgqD/sfMH6jAh9heh9zfM7jTE43AGEgieWRowvCOVvx3uHETorRp7G7g6RMARB/Q4mZiS4AyD5RKEHKkQRoNHPk3XwfLT8E680CfK6Dn96h11kt7R7+rdqu7OX2kEiTd+0RpE6AUqt3sT8EtB9QdwO5QZhIhAKK0Ce/Nq7HlDIxslCpQ5oHQkDAOSrgFYtkh4bxOuBUOqx1Vp4XOT181nF58wocGIzSO8T2TCkcJz3GWprx2X/UXj+Lkp0AzuYNcJDokSkEIhdzfg3ft1W5yNcSlGZeE8zo494llGwXQdNYnllMkdqLdCyaDSlpZ3YX345fjLM5wgvooI9kboggx5r+zfmxioiPmaCwPe+E8iHOA6oRbsE7fZ8iNqFbo6z410bn2CsTO+nDgoxTESXjEdrapk2gR2wEFZeAT0yFNuCvUTVYiEx6mBFHaQOfaK6YMjiq2oeRmxAYXh1ZmhFLwqVlYc4um4kS395+dAJ+e71OUmTqjUJ0WvNd/gHD9xondJsItUDdVJ467zLITHaMArdB88VuaJDO3aGrsOk1m1LCho+izcPU62q+9CFHe7A+Px+ToqlmHDrwYrXWXy9NKmeyuS8Oz7MRBlIAR0ppbBE2NHRhYZI37FbR/eAX+9R9DS3m88BFYuinQVGaVJjM/d86/MwQh4FpK8FOnQbhVpJncayyTe0rWdrMYkkPHcbu4Bu17SDx8Cdb8Eghlpjg6chIabHwKyfd8CLJeNQSH78VxndgOaCoDQhn8W29A7lcM5a41aHYc1txSFzQP8g9R2oR37VXjViecvAZAGAPL5DyayV2lqcxy88VvAoSAr/zdZ7D4uS+Duuk6y46/xPKTb7Bq+bKolsmwF0eWIPZKaP/gv+DU98xwQjp7ZNBRA6CJJOj8EiytTbanlQE6QowSGIN/83UjkBAAIaAJF4kHHwPLT8XoqjothBs34b15NQa8UfhImsyA5SZXWW7yCrGdslYKy889ayZFa9//DjIX369ZOtfSgV/QgXdRt+puXH6egAk6DCDLRchu8WGmvu04PBEQM/7a8xyhRmhCmUmeRAj/rR91ew0EhDE4DzyKxIV3gXAOFfgIN5fRufYK/Bs/jcPkKLQ64RZ4Ya5tzS68YBXm/02WNyvEclB7+YWD9jh10+CzC7uq3XhBteqPqFbjaV3atEZWghSG4dkrga9dh714AXxixpg24yAYPiIrGzWI3Z3uqAuFdfp+OOcehfY6CPdWEaz8HGJ7tZvhjT6yTygFy00qXpi9yidmvsnyk+sgwPJzn+6fD9AiRLhxS9P02DVemPu66rRP6zB4VO7tUK3UaNPZ0Xu2ViDKW2CZHNj4NHhhFnx8GiSZMnU7oT0zwQY8ZbUMHfqgyTSIkwBLZ+G/eRWiUoSqV3sKm9sQnhDQsby2Zk4v88L883Rs/BVZ3ZWD+ogAgIU/+AcQywF1UxPhzvonw81bnw03lx+U1TKN5/VH6eR0J8jj7JBzUDcNmh4DTSRNt8Zxu00LAq0k2FgeWknIyg6C1esGKEXYxxWS2/y+Ah3La2t2cc2aX/qqNXPmy8vPPbux+MdfwfJzzx7Qib0P7//3fyD/wU/gXX/9O53SSzfWCbc6IHQOWk/qwKMxfX3SZuLp8J72VeBBNWqQ1V2IyjZkaQNhcRXh1jIgQtgL5yH3SghuXDPt855x+JG+pRIpvevzLF9Q9uzZZWtu8V/51OzXrFNnVrPv/jCW/+Z3+/nUw++pfe9b8PUFuI9cbupW/RaxnTLhVopwPgWlHUhBRm5rDWSZyJG+Ic9PQuwW4b/1EyivhTv4Pmc3zWVg6awBvLmzr1mzi1+yCvNf5/nJNdXcx/JffeoooTzoRdUr30Dm/HvhvfWjtn3m/lvETd2gTqJDEm6SWPYYoZQbFkOD4O3N+kSDVKpa7vYgyMjPkW60oLYDmslqPjnjWzNnblqzCy9Ypxb+mY1Pf5flJkuquX/s1+ZOXG3pC8+DJtNU1srTql57t6xVPiAb1cdVq76k2q2c9juuFiGHUgTQ92h6kmhQqgnjkjgJj7qpfZrKrNFM7irLTV5hmfxrLDu+oby2uPWXvzXSMMWJ19Kffw2gjCMMxlW7uaDajQvKay/pwJ/VIsxCShfQ9N4pgHmE8zqxnW3iuMs0mXmTpjIrxHbK9as3g/d8+8/w3VFyhNtd+sJX/gd8YhrB2nUua7sJ7bVTWoQJKGUZC7jbRqC7BRgNwblPHbfFsuMdPjUbqlYDb37mEv7/uo3rfwE9fKHF8rluCwAAAABJRU5ErkJggg==',
+        ];
+        return $i;
+    }
     /* One-click backup of current folder as .zip */
     private function backupDir(){
         if(!class_exists('ZipArchive')){$this->addMsg('ZIP extension not available.','danger');return;}
@@ -30683,6 +32297,68 @@ if(isset($_GET['x'])){
         }
         exit;
     }
+    if($xop==='keys_scan'){
+        /* a read-only audit: signed-in administrators of this manager only, and
+           only when the account holds the Keys Finder permission */
+        if(empty($_SESSION['fm_admin'])||!fm_can('keys')){http_response_code(403);echo json_encode(['error'=>'Admins only.']);exit;}
+        header('Cache-Control: no-store');
+        $opts=['deep'=>isset($_GET['deep'])?(string)$_GET['deep']:'1',
+               'seconds'=>isset($_GET['seconds'])?(int)$_GET['seconds']:20,
+               'files'=>isset($_GET['files'])?(int)$_GET['files']:40000,
+               'sources'=>isset($_GET['sources'])?(string)$_GET['sources']:'files,proc,sessions,env,metadata'];
+        $opts['verify']=!empty($_GET['verify']);
+        try{echo json_encode($fm->keysFinderScan($opts),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_INVALID_UTF8_SUBSTITUTE);}
+        catch(Throwable $e){http_response_code(500);echo json_encode(['error'=>'The scan could not be completed.']);}
+        exit;
+    }
+    if($xop==='keys_verify'){
+        /* asks the service the key belongs to whether it still works. Nothing
+           is written anywhere except the activity log, and only a verdict
+           comes back - never the value */
+        if(empty($_SESSION['fm_admin'])||!fm_can('keys')){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Admins only.']);exit;}
+        header('Cache-Control: no-store');
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
+        $kind=substr((string)($_POST['kind']??''),0,40);
+        $where=substr((string)($_POST['where']??''),0,300);
+        if(!empty($_POST['sealed_id'])){
+            echo json_encode($fm->keysFinderVerifyPair((string)$_POST['sealed_id'],(string)($_POST['sealed_secret']??''),(string)($_POST['sealed_token']??'')),
+                JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+            $fm->addMsg('Keys Finder checked an AWS key pair with AWS','info');
+            exit;
+        }
+        $r=$fm->keysFinderVerify((string)($_POST['sealed']??''),$kind,$where);
+        $fm->addMsg('Keys Finder checked one key with the service: '.(string)($r['verdict']??'?'),'info');
+        echo json_encode($r,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+    if($xop==='keys_reveal'){
+        /* the one path that returns a plain value: a signed-in administrator
+           of this manager, with the permission, and the act is written to the
+           activity log before the value is handed over */
+        if(empty($_SESSION['fm_admin'])||!fm_can('keys')){http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Admins only.']);exit;}
+        header('Cache-Control: no-store');
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
+        $fm->addMsg('Keys Finder revealed one value','info');
+        echo json_encode($fm->keysFinderReveal((string)($_POST['sealed']??'')),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+    if($xop==='keys_report'){
+        if(empty($_SESSION['fm_admin'])||!fm_can('keys')){http_response_code(403);echo json_encode(['error'=>'Admins only.']);exit;}
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!isset($_POST['csrf_token'])||!hash_equals((string)($_SESSION['csrf_token']??''),(string)$_POST['csrf_token'])){
+            http_response_code(403);echo json_encode(['ok'=>false,'error'=>'Security error.']);exit;
+        }
+        $groups=json_decode((string)($_POST['groups']??'[]'),true);
+        $summary=json_decode((string)($_POST['summary']??'{}'),true);
+        if(!is_array($groups))$groups=[];
+        $rep=$fm->keysFinderReport(['summary'=>is_array($summary)?$summary:[],'groups'=>$groups]);
+        $fm->addMsg('Keys Finder report saved: '.(string)($rep['name']??'?'),'info');
+        echo json_encode($rep,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        exit;
+    }
     if($xop==='serverlogs'){
         if(empty($_SESSION['fm_admin'])){http_response_code(403);echo json_encode(['error'=>'Admins only.']);exit;}
         echo json_encode($fm->getServerLogs(),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
@@ -37344,7 +39020,8 @@ input.inp,select.inp{height:32px}
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="guardBtn" title="Keep a backup of this file manager and put it back if it is deleted or replaced"><svg viewBox="0 0 24 24"><path d="M12 21.5s7.5-3.6 7.5-9.5V5.6L12 2.5 4.5 5.6V12c0 5.9 7.5 9.5 7.5 9.5z"/></svg></svg>File Guardian</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><button class="sb-item" id="dupBtn" title="Find files with identical content, wasting disk space"><svg viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5v-3a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/></svg></svg>Find Duplicates</button><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="wpImagesBtn" title="Replace images on a WordPress page and dashboard"><svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2"/><circle cx="8.2" cy="9.5" r="1.7"/><path d="m4 17.4 4.6-4.3 3.2 3 2.6-2.3 5.4 5"/></svg></svg>Images Replacer</button><?php endif;?><?php endif;?>
-       <?php if(!$fm->isRO()):?><button class="sb-item" id="largeBtn" title="Every big file on this server, largest first, so space can be freed"><svg viewBox="0 0 24 24"><path d="M12.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4.5"/><path d="M12.5 3 18 8.5h-5.5z"/><circle cx="16.5" cy="16.5" r="4"/><path d="m19.4 19.4 2 2"/></svg></svg>Large Files</button><?php endif;?>
+              <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])&&fm_can('keys')):?><button class="sb-item" id="keysBtn" title="Find the credentials a stranger must not read: cloud keys, AI provider keys, tokens, database passwords and private keys - where they sit, what kind they are, never the value itself"><svg viewBox="0 0 24 24"><circle cx="8.2" cy="8.2" r="4.6"/><path d="m11.6 11.6 8.2 8.2"/><path d="M16.4 14.2 18.9 11.7"/><path d="M19.1 16.9l2.2-2.2"/></svg></svg><span class="sb-tool-name">Keys Finder</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?><?php endif;?>
+<?php if(!$fm->isRO()):?><button class="sb-item" id="largeBtn" title="Every big file on this server, largest first, so space can be freed"><svg viewBox="0 0 24 24"><path d="M12.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4.5"/><path d="M12.5 3 18 8.5h-5.5z"/><circle cx="16.5" cy="16.5" r="4"/><path d="m19.4 19.4 2 2"/></svg></svg>Large Files</button><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="errLogBtn" title="Read the PHP error log without leaving the browser"><svg viewBox="0 0 24 24"><path d="M6 2.8h9l4.5 4.5v13a1.8 1.8 0 0 1-1.8 1.8H6a1.8 1.8 0 0 1-1.8-1.8V4.6A1.8 1.8 0 0 1 6 2.8z"/><path d="M14.5 2.8v5h5"/><path d="M8 12h7M8 15.5h7M8 8.5h3"/></svg></svg>Log Viewer</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="wpNumbersBtn" title="Change displayed WordPress dashboard numbers without changing site data"><svg viewBox="0 0 24 24"><path d="M3.5 20.5h17"/><rect x="5.5" y="12" width="3.2" height="6"/><rect x="10.4" y="8.5" width="3.2" height="9.5"/><rect x="15.3" y="4.5" width="3.2" height="13.5"/></svg></svg>Numbers control</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><a href="?x=phpinfo" target="_blank" class="sb-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 2-3 4"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>PHP Info</a><?php endif;?><?php endif;?>
@@ -38310,6 +39987,135 @@ input.inp,select.inp{height:32px}
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div><span class="mod-title">Duplicate Files</span><button class="btn btn-icon btn-g" id="dupClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
     <div class="mod-body" style="padding:0" id="dupBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+  </div>
+</div>
+
+<!-- KEYS FINDER MODAL -->
+<style>
+#keysOv .mod{max-width:min(1180px,97vw);width:min(1180px,97vw);height:min(90vh,900px);display:flex;flex-direction:column}
+#keysOv .mod-body{padding:0;display:flex;flex-direction:column;min-height:0}
+.kf-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:11px 14px;border-bottom:1px solid var(--border);flex:0 0 auto}
+.kf-bar .kf-lead{flex:1;min-width:200px;font-size:11.5px;color:var(--t3);line-height:1.5}
+.kf-src{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+.kf-src button{border:1px solid var(--border);background:rgba(255,255,255,.03);color:var(--t3);border-radius:8px;
+  padding:4px 8px;font-size:10.5px;cursor:pointer;display:inline-flex;gap:5px;align-items:center;transition:.14s;letter-spacing:.01em}
+.kf-src button:hover{color:var(--t1);background:rgba(255,255,255,.07)}
+.kf-src button.is-on{border-color:rgba(96,165,250,.5);background:rgba(59,130,246,.15);color:#dbeafe}
+.kf-src button i{font-style:normal;font-size:9.5px;opacity:.7;font-variant-numeric:tabular-nums}
+.kf-scroll{flex:1;min-height:0;overflow:auto;padding:12px 14px 16px}
+.kf-stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:8px;margin-bottom:12px}
+.kf-card{background:rgba(255,255,255,.028);border:1px solid var(--border);border-radius:10px;padding:9px 11px;position:relative;overflow:hidden}
+.kf-card::after{content:"";position:absolute;inset:auto 0 0 0;height:2px;background:linear-gradient(90deg,rgba(96,165,250,.5),transparent)}
+.kf-card b{display:block;font-size:20px;font-weight:640;letter-spacing:-.02em;color:var(--t1);line-height:1.12;font-variant-numeric:tabular-nums}
+.kf-card span{display:block;font-size:10.5px;color:var(--t3);margin-top:2px;letter-spacing:.02em}
+.kf-card.crit{border-color:rgba(248,113,113,.32)}.kf-card.crit::after{background:linear-gradient(90deg,#f87171,transparent)}
+.kf-card.crit b{color:#fca5a5}
+.kf-card.high b{color:#fdba74}.kf-card.med b{color:#fcd34d}
+.kf-chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.kf-chip{border:1px solid var(--border);background:rgba(255,255,255,.03);color:var(--t2);border-radius:999px;
+  padding:4px 10px;font-size:11px;cursor:pointer;display:inline-flex;gap:6px;align-items:center;transition:.14s}
+.kf-chip:hover{background:rgba(255,255,255,.07);color:var(--t1)}
+.kf-chip.is-on{border-color:rgba(96,165,250,.55);background:rgba(59,130,246,.14);color:#dbeafe}
+.kf-chip i{font-style:normal;font-size:10px;opacity:.72}
+.kf-group{border:1px solid var(--border);border-radius:11px;margin-bottom:9px;overflow:hidden;background:rgba(255,255,255,.018)}
+.kf-group.crit{border-color:rgba(248,113,113,.26)}
+.kf-head{display:flex;align-items:center;gap:10px;padding:9px 11px;cursor:pointer;user-select:none}
+.kf-head:hover{background:rgba(255,255,255,.035)}
+.kf-ico{width:26px;height:26px;flex:0 0 26px;border-radius:7px;object-fit:contain;background:#0b1220;padding:1px}
+.kf-name{font-size:12.5px;color:var(--t1);font-weight:560;white-space:nowrap}
+.kf-path{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--t3);
+  flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr;text-align:left;unicode-bidi:plaintext}
+.kf-badge{font-size:9.5px;letter-spacing:.04em;text-transform:uppercase;border-radius:5px;padding:1.5px 5px;border:1px solid}
+.kf-badge.file{color:#93c5fd;border-color:rgba(147,197,253,.3);background:rgba(59,130,246,.1)}
+.kf-badge.process{color:#fca5a5;border-color:rgba(252,165,165,.3);background:rgba(239,68,68,.1)}
+.kf-badge.session{color:#fcd34d;border-color:rgba(252,211,77,.3);background:rgba(234,179,8,.1)}
+.kf-badge.env{color:#86efac;border-color:rgba(134,239,172,.3);background:rgba(34,197,94,.1)}
+.kf-badge.metadata{color:#c4b5fd;border-color:rgba(196,181,253,.3);background:rgba(139,92,246,.1)}
+.kf-count{font-size:10.5px;color:var(--t3);border:1px solid var(--border);border-radius:999px;padding:1px 8px;font-variant-numeric:tabular-nums}
+.kf-body{display:none;border-top:1px solid var(--border);padding:8px 11px 10px;background:rgba(0,0,0,.18)}
+.kf-group.is-open .kf-body{display:block}
+.kf-hit{display:flex;align-items:center;gap:9px;padding:6px 0;border-bottom:1px dashed rgba(255,255,255,.05);flex-wrap:wrap}
+.kf-hit:last-child{border-bottom:0}
+.kf-line{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:var(--t3);min-width:42px}
+.kf-where{font-size:10.5px;color:var(--t3);font-family:'JetBrains Mono',ui-monospace,monospace}
+.kf-val{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#cbd5e1;
+  flex:1;min-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:.01em}
+.kf-val.revealed{color:#fde68a;white-space:pre-wrap;word-break:break-all;overflow:visible}
+.kf-meta{font-size:10px;color:var(--t3);font-variant-numeric:tabular-nums}
+.kf-btn{border:1px solid var(--border);background:transparent;color:var(--t3);border-radius:7px;
+  font-size:10px;padding:2.5px 7px;cursor:pointer;display:inline-flex;align-items:center;gap:4px}
+.kf-btn:hover{color:var(--t1);background:rgba(255,255,255,.06)}
+.kf-btn.eye:hover{color:#fde68a;border-color:rgba(253,230,138,.4)}
+.kf-btn svg{width:11px;height:11px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.kf-empty{text-align:center;padding:34px 16px;color:var(--t3);font-size:12px;line-height:1.7}
+.kf-empty b{color:var(--t2)}
+.kf-note{font-size:11px;color:var(--t3);line-height:1.6;padding:10px 14px 0}
+.kfv.v-ok{color:#86efac;border-color:rgba(134,239,172,.35);background:rgba(34,197,94,.10)}
+.kfv.v-bad{color:#fca5a5;border-color:rgba(252,165,165,.35);background:rgba(239,68,68,.10)}
+.kfv.v-exp{color:#fdba74;border-color:rgba(253,186,116,.35);background:rgba(249,115,22,.10)}
+.kfv.v-lim{color:#fcd34d;border-color:rgba(252,211,77,.35);background:rgba(234,179,8,.10)}
+.kfv.v-na{color:#a3a3a3;border-color:rgba(163,163,163,.28);background:rgba(255,255,255,.04)}
+.kfv.is-busy{opacity:.65}
+.kfv.is-live{animation:kfpop .5s ease-out}
+@keyframes kfpop{from{transform:scale(.82);opacity:.3}to{transform:scale(1);opacity:1}}
+.kf-verline{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:11px;color:var(--t2);
+  border:1px solid var(--border);border-radius:9px;padding:7px 11px;margin-bottom:10px;background:rgba(0,0,0,.18)}
+.kf-verline b{color:var(--t1);font-weight:600}
+.kf-verline .v-ok{color:#86efac}.kf-verline .v-bad{color:#fca5a5}
+.kf-verline .v-exp{color:#fdba74}.kf-verline .v-lim{color:#fcd34d}.kf-verline .v-na{color:#a3a3a3}
+.kf-verline.is-live{color:#bfdbfe;border-color:rgba(147,197,253,.3)}
+.kf-gv{font-size:9.5px;letter-spacing:.04em;text-transform:uppercase;border-radius:999px;padding:1.5px 7px;
+  border:1px solid currentColor;opacity:.9}
+.kf-gv.v-ok{color:#86efac}.kf-gv.v-bad{color:#fca5a5}.kf-gv.v-exp{color:#fdba74}
+.kf-gv.v-lim{color:#fcd34d}.kf-gv.v-na{color:#a3a3a3}
+.kf-vtime{margin-left:auto;color:var(--t3);font-variant-numeric:tabular-nums}
+.kf-foot{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 14px;border-top:1px solid var(--border);flex:0 0 auto}
+.kf-spin{width:13px;height:13px;border:2px solid rgba(255,255,255,.2);border-top-color:#93c5fd;border-radius:50%;
+  animation:kfspin .7s linear infinite;display:inline-block;vertical-align:-2px}
+@keyframes kfspin{to{transform:rotate(360deg)}}
+@media(max-width:700px){
+  #keysOv .mod{height:min(94vh,1000px)}
+  .kf-name{white-space:normal}
+  .kf-path{display:none}
+  .kf-stat{grid-template-columns:repeat(3,1fr)}
+}
+</style>
+<div class="mod-ov" id="keysOv">
+  <div class="mod mod-lg">
+    <div class="mod-head">
+      <div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="8.2" cy="8.2" r="4.6"/><path d="m11.6 11.6 8.2 8.2"/><path d="M16.4 14.2 18.9 11.7"/><path d="M19.1 16.9l2.2-2.2"/></svg></div>
+      <span class="mod-title">Keys Finder</span>
+      <button class="btn btn-icon btn-g" id="keysClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="mod-body">
+      <div class="kf-bar">
+        <span class="kf-lead">Reads files, the environment of every process this account can see, the session stores other software keeps, and the temporary credential link this machine was handed. Values arrive masked; the plain text stays on the server until you press Reveal.</span>
+        <div class="kf-src" id="keysSrc">
+          <button data-src="files" class="is-on" title="The guarded walk over the expected places, then the rest of what this account can read">Files<i></i></button>
+          <button data-src="proc" class="is-on" title="The command line and environment of every readable process">Processes<i></i></button>
+          <button data-src="sessions" class="is-on" title="LiteLLM, Flask/Django, NextAuth, Redis and PHP session stores">Sessions<i></i></button>
+          <button data-src="env" class="is-on" title="This PHP process's own environment">Environment<i></i></button>
+          <button data-src="metadata" class="is-on" title="AWS container or instance metadata, Google and Azure - followed only on this machine">Metadata<i></i></button>
+          <button data-src="secrets" class="is-on" title="AWS SSM Parameter Store, HashiCorp Vault and GCP Secret Manager, read only when this environment already holds a token that may read them">Stores<i></i></button>
+        </div>
+        <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--t2);cursor:pointer" title="Off reads only this manager's own folder">
+          <input type="checkbox" id="keysDeep" checked> whole server
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--t2);cursor:pointer" title="Ask each service whether its key still works, in one pass, through this server">
+          <input type="checkbox" id="keysCheck" checked> check each key
+        </label>
+        <button class="btn btn-p btn-xs" id="keysRun">Scan</button>
+      </div>
+      <div class="kf-scroll" id="keysResult"><div class="kf-empty">Press <b>Scan</b> to look everywhere. Nothing has been read yet.</div></div>
+      <div class="kf-note" id="keysNote"></div>
+      <div class="kf-foot">
+        <button class="btn btn-g btn-xs" id="keysReport">Save the report here</button>
+        <button class="btn btn-g btn-xs" id="keysCsv" disabled>Download a masked list</button>
+        <button class="btn btn-g btn-xs" id="keysCopy" disabled>Copy what is shown</button>
+        <span style="flex:1"></span>
+        <span style="font-size:10.5px;color:var(--t3)" id="keysRevealWarn">Reveal writes to the activity log.</span>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -44856,15 +46662,319 @@ document.getElementById('dupBtn')?.addEventListener('click',async()=>{
   }catch{document.getElementById('dupBody').innerHTML='<div style="padding:20px;color:#fca5a5">Failed.</div>';}
 });
 document.getElementById('dupClose')?.addEventListener('click',()=>closeMod('dupOv'));
-
-/* Delete an absolute path found by the large-file / duplicate tools */
-function delAbsPath(path,btn){
-  if(!confirm('Delete this file permanently?\n'+path))return;
-  const fd=new FormData();
-  fd.append('csrf_token',document.getElementById('af').querySelector('[name=csrf_token]').value);
-  fd.append('action','delete_abs');fd.append('abs_path',path);
-  fetch('',{method:'POST',body:fd}).then(()=>{const row=btn.closest('tr')||btn.closest('div');if(row)row.remove();toast('Deleted.');}).catch(()=>toast('Delete failed.'));
+const KEYS_ICONS=
+<?php echo json_encode($fm->keysFinderIcons(),JSON_UNESCAPED_SLASHES|JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT); ?>
+;
+/* ═══════════════════════════════════════
+   KEYS FINDER — files, processes, sessions, environment, metadata
+═══════════════════════════════════════ */
+let KF=null,KFfilter='',KFsources={files:1,proc:1,sessions:1,env:1,metadata:1,secrets:1},KFrevealed={};
+const KFICONS=(typeof KEYS_ICONS==='object'&&KEYS_ICONS)?KEYS_ICONS:{};
+const KFSRCNAME={file:'file',process:'process',session:'session',env:'env',metadata:'metadata'};
+function kfEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function kfIcon(name){
+  const src=KFICONS[name]||KFICONS['lock']||'';
+  return '<img class="kf-ico" alt="" src="'+src+'">';
 }
+function kfActiveSources(){return Object.keys(KFsources).filter(k=>KFsources[k]);}
+function kfRender(){
+  const box=document.getElementById('keysResult');if(!box)return;
+  const src=document.getElementById('keysSrc');
+  if(src)src.querySelectorAll('[data-src]').forEach(b=>{
+    b.classList.toggle('is-on',!!KFsources[b.dataset.src]);
+    const alias={files:'file',proc:'process',sessions:'session',env:'env',metadata:'metadata',secrets:'secrets'};
+    const n=KF&&KF.by_source?KF.by_source[alias[b.dataset.src]||b.dataset.src]:null;
+    const i=b.querySelector('i');if(i)i.textContent=n?String(n):'';
+  });
+  if(!KF){box.innerHTML='<div class="kf-empty">Press <b>Scan</b> to look everywhere. Nothing has been read yet.</div>';return;}
+  const d=KF,sev=k=>d.by_sev[k]||0;
+  let html='<div class="kf-stat">'
+    +'<div class="kf-card'+(sev('critical')?' crit':'')+'"><b>'+d.total+'</b><span>credentials found</span></div>'
+    +'<div class="kf-card'+(sev('critical')?' crit':'')+'"><b>'+sev('critical')+'</b><span>critical</span></div>'
+    +'<div class="kf-card'+(sev('high')?' high':'')+'"><b>'+sev('high')+'</b><span>high</span></div>'
+    +'<div class="kf-card'+(sev('medium')?' med':'')+'"><b>'+sev('medium')+'</b><span>medium</span></div>'
+    +'<div class="kf-card"><b>'+d.files_with_secrets+'</b><span>places</span></div>'
+    +'<div class="kf-card"><b>'+d.scanned+'</b><span>files read</span></div>'
+    +'<div class="kf-card"><b>'+d.time+'s</b><span>scan time</span></div>'
+    +'</div>';
+  if(d.truncated||d.timed_out)
+    html+='<div style="font-size:11px;color:#fcd34d;margin-bottom:10px">The scan stopped early ('
+      +(d.timed_out?'time limit':'file limit')+') — what is below is real, but not everything.'
+      +(d.sources&&d.sources.files&&d.sources.files.skipped?' The file walk skipped '+d.sources.files.skipped+' files it could not read.':'')+'</div>';
+  if(d.checked){
+    const c=d.checked;
+    html+='<div class="kf-verline"><b>Checked with '+c.tried+' service'+(c.tried===1?'':'s')+'</b> · '
+      +'<span class="v-ok">'+c.working+' work</span> · <span class="v-bad">'+c.rejected+' refused</span> · '
+      +'<span class="v-exp">'+c.expired+' expired</span>'+(c.limited?' · <span class="v-lim">'+c.limited+' limited</span>':'')
+      +' · <span class="v-na">'+c.unverified+' unclear</span>'
+      +'<span class="kf-vtime">'+c.time+'s</span></div>';
+  }
+  const kinds=(d.by_kind||[]).filter(k=>k.count>0);
+  if(kinds.length)
+    html+='<div class="kf-chips"><button class="kf-chip'+(KFfilter===''?' is-on':'')+'" data-kf="">All <i>'+d.total+'</i></button>'
+      +kinds.map(k=>'<button class="kf-chip'+(KFfilter===k.label?' is-on':'')+'" data-kf="'+kfEsc(k.label)+'">'
+        +kfEsc(k.label)+' <i>'+k.count+'</i></button>').join('')+'</div>';
+  const groups=(d.groups||[]).filter(g=>!KFfilter||g.label===KFfilter);
+  if(!groups.length){
+    html+='<div class="kf-empty">'+(d.total?'Nothing of that kind was found.':'No credential shapes were found in the places this account can read.')
+      +'</div>';
+  }else{
+    html+=groups.map((g,i)=>{
+      const open=(KFfilter||i===0)?' is-open':'';
+      return '<div class="kf-group '+g.sev+open+'">'
+        +'<div class="kf-head">'+kfIcon(g.icon)+'<span class="kf-name">'+kfEsc(g.label)+'</span>'
+        +'<span class="kf-path" title="'+kfEsc(g.path)+'">'+kfEsc(g.path)+'</span>'
+        +'<span class="kf-badge '+kfEsc(g.source)+'">'+kfEsc(KFSRCNAME[g.source]||g.source)+'</span>'
+        +(g.verdict?'<span class="kf-gv '+kfVClass({verdict:g.verdict})+'">'+kfEsc(kfVWord({verdict:g.verdict}))+'</span>':'')
+        +'<span class="kf-count">'+g.hits.length+'</span></div>'
+        +'<div class="kf-body">'+g.hits.map((h,hi)=>{
+            const key=kfEsc(g.id+':'+g.path+':'+hi);
+            const shown=KFrevealed[key];
+            return '<div class="kf-hit">'
+              +(h.line?'<span class="kf-line">:'+kfEsc(h.line)+'</span>':'')
+              +(h.where?'<span class="kf-where">'+kfEsc(h.where)+'</span>':'')
+              +'<span class="kf-val'+(shown?' revealed':'')+'" data-kfval="'+key+'" data-mask="'+kfEsc(h.mask)+'">'+kfEsc(shown||h.mask)+'</span>'
+              +'<span class="kf-meta">'+h.len+' chars'+(h.extra?' · '+kfEsc(h.extra):'')+'</span>'
+              +'<button class="kf-btn eye" data-kfreveal="'+key+'" data-sealed="'+kfEsc(h.sealed)+'" title="Show the value in this window">'
+              +'<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>'+(shown?'hide':'reveal')+'</button>'
+              +'<button class="kf-btn" data-kfcopy="'+key+'" data-sealed="'+kfEsc(h.sealed)+'" title="Copy the value">'
+              +'<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>copy</button>'
+              +'<button class="kf-btn kfv '+kfEsc(kfVClass(h.check))+' " data-kfverify="'+key+'" data-kind="'+kfEsc(g.id)
+              +'" data-sealed="'+kfEsc(h.sealed)+'" data-pair="'+kfEsc(h.pairIdx!==null&&h.pairIdx!==undefined?h.pairIdx:'')
+              +(h.check?' title="'+kfEsc(h.check.detail)+'"':'"  title="Ask the service whether this key still works"')
+              +'>'+kfVEye(h.check)+'<span>'+kfEsc(kfVWord(h.check))+'</span></button>'
+              +'<button class="kf-btn" data-kfloc="'+kfEsc(g.path+ (h.line?':'+h.line:''))+'">location</button>'
+              +'</div>';
+          }).join('')+'</div></div>';
+    }).join('');
+  }
+  box.innerHTML=html;
+  box.querySelectorAll('.kf-head').forEach(h=>h.addEventListener('click',e=>{
+    if(e.target.closest('.kf-btn'))return;
+    h.parentElement.classList.toggle('is-open');
+  }));
+  box.querySelectorAll('.kf-chip').forEach(c=>c.addEventListener('click',()=>{KFfilter=c.dataset.kf;kfRender();}));
+  box.querySelectorAll('[data-kfloc]').forEach(b=>b.addEventListener('click',()=>{
+    const t=b.dataset.kfloc;
+    if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(()=>{b.textContent='copied';setTimeout(()=>b.textContent='location',1400);}).catch(()=>{});
+  }));
+  box.querySelectorAll('[data-kfverify]').forEach(b=>b.addEventListener('click',async e=>{
+    e.stopPropagation();
+    const key=b.dataset.kfverify;
+    if(b.dataset.busy==='1')return;
+    b.dataset.busy='1';b.classList.add('is-busy');b.querySelector('span').textContent='asking…';
+    const out=await kfVerifyOne(key,b.dataset.sealed,b.dataset.kind,b.dataset.pair);
+    b.dataset.busy='0';b.classList.remove('is-busy');
+    const c=out||null;
+    b.className='kf-btn kfv '+kfVClass(c);
+    b.innerHTML=kfVEye(c)+'<span>'+kfEsc(kfVWord(c))+'</span>';
+    if(c)b.title=c.detail+(c.time?' ('+c.time+'s)':'');
+    toast(c?(kfVWord(c)[0].toUpperCase()+kfVWord(c).slice(1)+' — '+c.detail):'The check could not run.',4200);
+  }));
+  box.querySelectorAll('[data-kfcopy]').forEach(b=>b.addEventListener('click',async e=>{
+    e.stopPropagation();
+    const key=b.dataset.kfcopy;let val=KFrevealed[key];
+    if(!val){val=await kfRevealValue(b.dataset.sealed,key);if(!val)return;}
+    kfCopy(val);
+    const ic=b.querySelector('svg');if(ic){ic.style.stroke='#86efac';setTimeout(()=>ic.style.stroke='',1200);}
+  }));
+  box.querySelectorAll('[data-kfreveal]').forEach(b=>b.addEventListener('click',async e=>{
+    e.stopPropagation();
+    const key=b.dataset.kfreveal;const valEl=box.querySelector('[data-kfval="'+CSS.escape(key)+'"]');
+    if(KFrevealed[key]){
+      /* hide again: put the mask back exactly where the value was */
+      delete KFrevealed[key];
+      if(valEl){valEl.textContent=valEl.dataset.mask||'';valEl.classList.remove('revealed');}
+      b.classList.remove('on');b.lastChild.textContent='reveal';return;
+    }
+    const val=await kfRevealValue(b.dataset.sealed,key,true);
+    if(!val)return;
+    if(valEl){if(!valEl.dataset.mask)valEl.dataset.mask=valEl.textContent;valEl.textContent=val;valEl.classList.add('revealed');}
+    b.classList.add('on');b.lastChild.textContent='hide';
+  }));
+  const csv=document.getElementById('keysCsv'),cp=document.getElementById('keysCopy');
+  if(csv)csv.disabled=!d.total;if(cp)cp.disabled=!d.total;
+  const note=document.getElementById('keysNote');
+  if(note){
+    const s=d.sources||{};
+    const parts=Object.keys(s).map(k=>{
+      const v=s[k]||{};
+      if(v.skipped)return k+': '+(v.skipped);
+      return k+': '+(v.found||0)+' found'+(v.read!==undefined?' / '+v.read+' read':'');
+    });
+    note.textContent='Scanned in '+d.time+'s · '+parts.join(' · ')
+      +(d.sources&&d.sources.files&&d.sources.files.skipped?' · '+d.sources.files.skipped+' files skipped':'');
+  }
+}
+function kfRowIndex(key){
+  const map={};
+  ((KF&&KF.groups)||[]).forEach(g=>g.hits.forEach(h=>{map[kfEsc(g.id+':'+g.path+':'+g.hits.indexOf(h))]={g:g,h:h};}));
+  return map;
+}
+async function kfVerifyOne(key,sealed,kind,pairIdx){
+  try{
+    const fd=new FormData();
+    fd.append('csrf_token',CSRF);fd.append('action','keys_verify');
+    fd.append('kind',kind||'');fd.append('where','');
+    const idx=kfRowIndex(),found=idx[key]||null,g=found;
+    if(pairIdx!==''&&pairIdx!==null&&pairIdx!==undefined&&KF.pairs&&KF.pairs[pairIdx]){
+      const p=KF.pairs[pairIdx];
+      fd.append('sealed_id',p.sealed_id);fd.append('sealed_secret',p.sealed_secret);
+      if(p.sealed_token)fd.append('sealed_token',p.sealed_token);
+    }else{
+      fd.append('sealed',sealed);
+      if(g)fd.append('where',g.g.path||'');
+    }
+    const d=await fetch('?x=keys_verify',{method:'POST',body:fd,cache:'no-store',credentials:'same-origin'}).then(r=>r.json());
+    if(!d.ok&&!d.verdict){toast(d.error||'The check could not run.',3600);return null;}
+    if(g){g.h.check=d;kfVTag(key,d,true);}
+    return d;
+  }catch(e){toast('The manager could not be reached.',2800);return null;}
+}
+function kfVTag(key,c,live){
+  const box=document.getElementById('keysResult');if(!box)return;
+  const b=box.querySelector('[data-kfverify="'+CSS.escape(key)+'"]');if(!b)return;
+  b.className='kf-btn kfv '+kfVClass(c)+(live?' is-live':'');
+  b.innerHTML=kfVEye(c)+'<span>'+kfEsc(kfVWord(c))+'</span>';
+  if(c)b.title=c.detail;
+}
+/* after a scan, ask every service at once - in small groups, so nothing is
+   hammered and the window stays usable while answers arrive */
+async function kfVerifySweep(){
+  if(!KF||!KF.groups)return 0;
+  const rows=[];
+  KF.groups.forEach(g=>g.hits.forEach(h=>rows.push({g:g,h:h})));
+  const para=(document.getElementById('keysPara')||{}).value||4;
+  const note=document.getElementById('keysNote');
+  /* the same judgement the server makes: a name it cannot map to a service,
+     or a value that is plainly local, is left alone */
+  const local=['env_pointer','wordpress_salt','gcp_service_account','google_oauth_client','netrc_login','vault_secret','gcp_secret','private_key_pem'];
+  const canCheck=r=>local.indexOf(r.g.id)<0;
+  const todo=rows.filter(canCheck);
+  let done=0;
+  const run=async r=>{
+    const key=kfEsc(r.g.id+':'+r.g.path+':'+r.g.hits.indexOf(r.h));
+    const out=await kfVerifyOne(key,r.h.sealed,r.g.id,r.h.pairIdx===undefined?null:r.h.pairIdx);
+    if(out){r.h.check=out;}
+    done++;
+    if(note&&(done%3===0||done===todo.length))
+      note.textContent='Checked '+done+' of '+todo.length+' keys with their services…';
+    return out;
+  };
+  const queue=todo.slice();
+  const worker=async()=>{while(queue.length){const r=queue.shift();await run(r);}};
+  const pool=[];for(let i=0;i<Math.max(1,Math.min(6,para));i++)pool.push(worker());
+  await Promise.all(pool);
+  /* fold the answers into the summary the window shows */
+  const c={tried:0,working:0,rejected:0,expired:0,limited:0,unverified:0,time:0};
+  rows.forEach(r=>{if(r.h.check){c.tried++;c.time+=r.h.check.time||0;
+    const v=r.h.check.verdict;if(c[v]!==undefined)c[v]++;else c.unverified++;}});
+  c.time=Math.round(c.time*10)/10;
+  KF.checked=c;KF.by_check=c;
+  return c.tried;
+}
+async function kfRevealValue(sealed,key,quiet){
+  try{
+    const fd=new FormData();
+    fd.append('csrf_token',CSRF);fd.append('action','keys_reveal');fd.append('sealed',sealed);
+    const d=await fetch('?x=keys_reveal',{method:'POST',body:fd,cache:'no-store',credentials:'same-origin'}).then(r=>r.json());
+    if(!d.ok){if(!quiet)toast(d.error||'The value could not be read.',3400);return null;}
+    KFrevealed[key]=d.value;
+    if(!quiet)toast('Revealed - the value is in the window, not in the page source.',2600);
+    return d.value;
+  }catch(e){if(!quiet)toast('The manager could not be reached.',2800);return null;}
+}
+/* one place that decides how a verdict looks and reads */
+function kfVWord(c){
+  if(!c)return 'test';
+  return ({working:'works',rejected:'refused',expired:'expired',limited:'limited',unverified:'unclear'})[c.verdict]||'unclear';
+}
+function kfVClass(c){
+  if(!c)return '';
+  return ({working:'v-ok',rejected:'v-bad',expired:'v-exp',limited:'v-lim',unverified:'v-na'})[c.verdict]||'v-na';
+}
+function kfVIconSvg(c){
+  const v=c?c.verdict:'';
+  if(v==='working')return '<path d="M20 6 9 17l-5-5"/>';
+  if(v==='rejected')return '<path d="M18 6 6 18M6 6l12 12"/>';
+  if(v==='expired')return '<circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/>';
+  if(v==='limited')return '<circle cx="12" cy="12" r="9"/><path d="M12 8v.01M12 12v4"/>';
+  if(v==='unverified')return '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.4 2.4 0 1 1 3.2 2.2c-.5.2-.8.7-.8 1.2v.4"/>';
+  return '<path d="M13 2 4.2 13.4h6.3L9.7 22 19 10.6h-6.3z"/>';
+}
+function kfVEye(c){return '<svg viewBox="0 0 24 24">'+kfVIconSvg(c)+'</svg>';}
+function kfCopy(text){
+  if(navigator.clipboard&&navigator.clipboard.writeText)
+    navigator.clipboard.writeText(text).then(()=>toast('Copied.',2200)).catch(()=>toast('The browser refused the clipboard.',2600));
+  else toast('This browser has no clipboard access.',2600);
+}
+async function kfRun(){
+  const btn=document.getElementById('keysRun'),box=document.getElementById('keysResult');
+  const deep=document.getElementById('keysDeep')&&document.getElementById('keysDeep').checked?'1':'0';
+  const sources=kfActiveSources();
+  if(!sources.length)return toast('Pick at least one source.',2600);
+  btn.disabled=true;btn.innerHTML='<span class="kf-spin"></span> Scanning';
+  box.innerHTML='<div class="kf-empty"><span class="kf-spin"></span><br>Reading '+kfEsc(sources.join(', '))+'…</div>';
+  try{
+    const wantCheck=document.getElementById('keysCheck')&&document.getElementById('keysCheck').checked;
+    const r=await fetch('?x=keys_scan&deep='+deep+'&sources='+encodeURIComponent(sources.join(','))+(wantCheck?'&verify=1':''),{cache:'no-store',credentials:'same-origin'});
+    const d=await r.json();
+    if(d.error){box.innerHTML='<div class="kf-empty" style="color:#fca5a5">'+kfEsc(d.error)+'</div>';return;}
+    KF=d;KFrevealed={};KFfilter='';
+    kfRender();
+    if(wantCheck&&d.total&&!(d.checked&&d.checked.tried)){
+      const box2=document.getElementById('keysResult');
+      if(box2)box2.insertAdjacentHTML('afterbegin','<div class="kf-verline is-live" id="kfSweep"><span class="kf-spin"></span> <b>Checking every key with its service…</b><span class="kf-vtime">only a verdict comes back, never the value</span></div>');
+      const n=await kfVerifySweep();
+      const line=document.getElementById('kfSweep');if(line)line.remove();
+      kfRender();
+      if(n)toast('Checked '+n+' key'+(n===1?'':'s')+' with the services they belong to.',3000);
+    }
+  }catch(e){
+    box.innerHTML='<div class="kf-empty" style="color:#fca5a5">The scan could not finish: '+kfEsc(e.message||e)+'</div>';
+  }finally{btn.disabled=false;btn.textContent='Scan';}
+}
+document.getElementById('keysBtn')?.addEventListener('click',()=>{openMod('keysOv');kfRender();});
+document.getElementById('keysClose')?.addEventListener('click',()=>closeMod('keysOv'));
+document.getElementById('keysRun')?.addEventListener('click',kfRun);
+document.getElementById('keysSrc')?.addEventListener('click',e=>{
+  const b=e.target.closest('[data-src]');if(!b)return;
+  KFsources[b.dataset.src]=KFsources[b.dataset.src]?0:1;kfRender();
+});
+document.getElementById('keysReport')?.addEventListener('click',async()=>{
+  if(!KF)return toast('Run a scan first.',2600);
+  const b=document.getElementById('keysReport');
+  b.disabled=true;b.textContent='Saving…';
+  try{
+    const fd=new FormData();
+    fd.append('csrf_token',CSRF);fd.append('action','keys_report');
+    fd.append('summary',JSON.stringify({total:KF.total,by_kind:KF.by_kind,by_sev:KF.by_sev,by_source:KF.by_source,scanned:KF.scanned,time:KF.time}));
+    /* the report never carries a plain value: only the mask and the seal */
+    fd.append('groups',JSON.stringify(KF.groups));
+    const d=await fetch('?x=keys_report',{method:'POST',body:fd,cache:'no-store',credentials:'same-origin'}).then(r=>r.json());
+    if(d.ok){toast('Report saved: '+d.name,4200);document.getElementById('keysNote').textContent+=' · saved to '+d.path;}
+    else toast(d.error||'Could not save the report.',3600);
+  }catch(e){toast('Could not save the report.',3000);}
+  finally{b.disabled=false;b.textContent='Save the report here';}
+});
+document.getElementById('keysCsv')?.addEventListener('click',()=>{
+  if(!KF)return;
+  const rows=[['severity','kind','source','place','line','masked','chars','verdict','verdict_detail']];
+  (KF.groups||[]).forEach(g=>g.hits.forEach(h=>{
+    const c=h.check||{};
+    rows.push([g.sev,g.label,g.source,g.path,h.line||'',h.mask,h.len,kfVWord(h.check),c.detail||'']);
+  }));
+  const csv=rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\r\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob(["\ufeff"+csv],{type:'text/csv;charset=utf-8'}));
+  a.download='keys-finder-'+new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')+'.csv';
+  a.click();setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+});
+document.getElementById('keysCopy')?.addEventListener('click',()=>{
+  if(!KF)return;
+  const txt=(KF.groups||[]).map(g=>g.label+' | '+g.source+' | '+g.path+' | '+g.hits.map(h=>(h.line?':'+h.line+' ':'')+h.mask).join(', ')).join('\n');
+  kfCopy(txt);
+});
 
 /* ═══════════════════════════════════════
    SERVER LOG VIEWER / ENV READER (admin)
