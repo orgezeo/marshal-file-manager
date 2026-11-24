@@ -10505,7 +10505,10 @@ class FileManager {
        pretending the list is complete. */
     public function keysFinderScan($opts=[]){
         $start=microtime(true);
-        $maxSeconds=max(6,min(90,(int)($opts['seconds']??20)));
+        $maxSeconds=max(6,min(180,(int)($opts['seconds']??30)));
+        $walkPart1=max(1,min(64,(int)($opts['parts']??1)));
+        $walkShard1=max(0,min($walkPart1-1,(int)($opts['shard']??0)));
+        $walkCut=0;
         $want=$opts['sources']??['files','proc','sessions','env','metadata','secrets'];
         if(is_string($want))$want=array_filter(array_map('trim',explode(',',$want)));
         $want=array_values(array_unique(array_map('strtolower',(array)$want)));
@@ -10818,15 +10821,27 @@ class FileManager {
                 }
             }
             $roots=array_values(array_unique(array_filter($roots,fn($r)=>$r!==false)));
-            $maxFiles=max(500,min(120000,(int)($opts['files']??40000)));
+            $maxFiles=max(500,min(500000,(int)($opts['files']??120000)));
             $maxBytes=max(64*1024,min(8*1024*1024,(int)($opts['bytes']??786432)));
-            $walk=$this->keysFinderWalk($roots,$rules,$maxSeconds/2,$maxFiles,$maxBytes,$skipped,$seenPaths,$self);
+            /* whatever the other readers did not use belongs to the file walk:
+               a fixed half was the reason it always stopped at the same place */
+            $left=max(3.0,$maxSeconds-(microtime(true)-$start)-0.8);
+            $parts=max(1,min(64,(int)($opts['parts']??1)));
+            $shard=max(0,min($parts-1,(int)($opts['shard']??0)));
+            $walk=$this->keysFinderWalk($roots,$rules,$left,$maxFiles,$maxBytes,$skipped,$seenPaths,$self,$shard,$parts);
             foreach($walk['hits'] as $h)$found[]=$h;
             $scanned+=$walk['scanned'];
             if($walk['truncated'])$truncated=true;
             if($walk['timed_out'])$timedOut=true;
+            /* the server does not guess how many parts a tree needs: it says
+               only whether this part was cut short, and the window splits again */
+            $walk['parts']=$walkPart1;$walk['shard']=$walkShard1;
+            $walkCut=($walk['timed_out']||$walk['truncated'])?1:0;
+            $walkCut=($walk['timed_out']||$walk['truncated'])?1:0;
             $sources['files']=['ok'=>true,'found'=>count($walk['hits']),'read'=>$walk['scanned'],
-                               'roots'=>$roots,'skipped'=>$walk['skipped'],'time'=>round(microtime(true)-$t0,2)];
+                               'roots'=>$roots,'skipped'=>$walk['skipped'],'time'=>round(microtime(true)-$t0,2),
+                               'parts'=>$walk['parts'],'shard'=>$walk['shard'],'entries'=>$walk['entries'],
+                               'share'=>$walk['mine'],'budget'=>round($left,1)];
         }
 
         /* one collection per credential, then the loudest first */
@@ -10887,18 +10902,58 @@ class FileManager {
                 'by_kind'=>array_values(array_map(fn($k,$n)=>['label'=>$k,'count'=>$n],array_keys($byKind),array_values($byKind))),
                 'by_sev'=>$bySev,'by_source'=>$bySource,'groups'=>$groups,'pairs'=>$this->kfPairs,'sources'=>$sources,
                 'truncated'=>$truncated,'timed_out'=>$timedOut,'sealed'=>true,'checked'=>$live,
+                'parts'=>$walkPart1,'shard'=>$walkShard1,'cut'=>$walkCut,
                 'note'=>'Values never leave this server in this answer: each one is masked here and sealed with the manager key.'];
     }
 
     /* the file walk, unchanged in its rules: bounded, symlink-free, never a
        device, never this manager's own files */
-    private function keysFinderWalk($roots,$rules,$maxSeconds,$maxFiles,$maxBytes,&$skipped,$seenPaths,$self){
+    private function keysFinderWalk($roots,$rules,$maxSeconds,$maxFiles,$maxBytes,&$skipped,$seenPaths,$self,$shard=0,$parts=1){
         $start=microtime(true);$hits=[];$scanned=0;$skipped=0;$truncated=false;$timedOut=false;$seenPaths=[];
+        /* A big server cannot be read inside one request. So the top of every
+           root is cut into "parts" shares, and each press reads exactly one
+           share - and the answer says which one, so the next press continues
+           from there instead of starting again at the same place. */
+        $shard=max(0,(int)$shard);$parts=max(1,min(64,(int)$parts));
+        $entries=[];
+        foreach($roots as $root){
+            if(!@is_dir($root)||!@is_readable($root))continue;
+            $children=@scandir($root);
+            if($children===false)continue;
+            sort($children,SORT_STRING);
+            foreach($children as $c){
+                if($c==='.'||$c==='..')continue;
+                $entries[]=$root==='/'?'/'.$c:rtrim($root,'/').'/'.$c;
+            }
+        }
+        $entryCount=count($entries);
+        $mine=$entries;
+        $take=function($p)use($shard,$parts){
+            if($parts<=1)return true;
+            /* the file's own path decides its part: a stable choice that does
+               not care how deep or how wide the tree is - a single huge folder
+               is spread over the parts instead of landing in one of them */
+            return (crc32($p)%$parts)===$shard;
+        };
         $sensitiveDirs=['/proc'=>1,'/sys'=>1,'/dev'=>1,'/run'=>1];
+        /* names that never carry a credential, and text that is worth reading */
+        $deadExt=['jpg'=>1,'jpeg'=>1,'png'=>1,'gif'=>1,'webp'=>1,'bmp'=>1,'ico'=>1,'svgz'=>1,
+                  'mp3'=>1,'mp4'=>1,'m4a'=>1,'avi'=>1,'mkv'=>1,'mov'=>1,'wav'=>1,'flac'=>1,'ogg'=>1,
+                  'zip'=>1,'gz'=>1,'bz2'=>1,'xz'=>1,'tar'=>1,'7z'=>1,'rar'=>1,'woff'=>1,'woff2'=>1,
+                  'ttf'=>1,'otf'=>1,'eot'=>1,'so'=>1,'dll'=>1,'exe'=>1,'bin'=>1,'o'=>1,'a'=>1,
+                  'pyc'=>1,'class'=>1,'jar'=>1,'deb'=>1,'rpm'=>1,'iso'=>1,'img'=>1,'pdf'=>1,
+                  'mpg'=>1,'mpeg'=>1,'webm'=>1,'heic'=>1,'tiff'=>1,'psd'=>1,'ai'=>1,'sketch'=>1];
+        /* an extensionless big file is usually an archive or a database */
+        $maxRead=786432;
         $skipNames=['node_modules','vendor','.cache','__pycache__','.venv','venv','proc','sys','dev',
                     'site-packages','dist-packages','.cargo','.rustup','.terraform','.gradle',
                     '.m2','.nuget','.cocoapods','.composer','.pub-cache'];
-        foreach($roots as $root){
+        foreach($mine as $root){
+            if(!file_exists($root))continue;
+            if(is_file($root)){
+                /* a file that sits directly at the top of a root is one entry */
+                $it=[new SplFileInfo($root)];
+            }else{
             if(!@is_dir($root)||!@is_readable($root))continue;
             try{
                 $it=new RecursiveIteratorIterator(
@@ -10915,21 +10970,25 @@ class FileManager {
                     RecursiveIteratorIterator::LEAVES_ONLY,
                     RecursiveIteratorIterator::CATCH_GET_CHILD);
             }catch(Throwable $e){continue;}
+            }
             foreach($it as $file){
                 if(microtime(true)-$start>$maxSeconds){$timedOut=true;break 2;}
                 if($scanned>=$maxFiles){$truncated=true;break 2;}
                 if(!$file->isFile()||$file->isLink())continue;
                 $path=$file->getPathname();
+                if(!$take($path))continue;
                 $real=@realpath($path);
                 if($real!==false){if(isset($seenPaths[$real]))continue;$seenPaths[$real]=true;$path=$real;}
                 $path=str_replace('//','/',$path);
                 if($path===$self)continue;
                 if(function_exists('fm_is_manager_internal_path')&&fm_is_manager_internal_path($path))continue;
                 if(strpos($path,'/.trash')!==false||strpos($path,'/.backups/')!==false||strpos($path,'/.keys-reports/')!==false){$skipped++;continue;}
+                $ext=strtolower((string)pathinfo($path,PATHINFO_EXTENSION));
+                if($ext!==''&&isset($deadExt[$ext])){$skipped++;continue;}
                 $size=(int)@filesize($path);
                 if($size<=0||$size>$maxBytes){$skipped++;continue;}
                 if(!@is_readable($path)){$skipped++;continue;}
-                $name=strtolower($file->getFilename());
+                $name=strtolower(basename($path));
                 $pathLow=strtolower($path);
                 $kind=null;$label='';
                 foreach($rules['paths'] as $rx=>$meta){
@@ -10937,7 +10996,7 @@ class FileManager {
                 }
                 $head='';
                 $fh=@fopen($path,'rb');
-                if($fh){$head=(string)@fread($fh,131072);@fclose($fh);}
+                if($fh){$head=(string)@fread($fh,min(131072,$maxRead));@fclose($fh);}
                 if($head===''){$scanned++;continue;}
                 $scanned++;
                 $fileHits=[];
@@ -10984,7 +11043,8 @@ class FileManager {
                 if(count($hits)>=1500){$truncated=true;break 2;}
             }
         }
-        return ['hits'=>$hits,'scanned'=>$scanned,'skipped'=>$skipped,'truncated'=>$truncated,'timed_out'=>$timedOut];
+        return ['hits'=>$hits,'scanned'=>$scanned,'skipped'=>$skipped,'truncated'=>$truncated,'timed_out'=>$timedOut,
+                'entries'=>$entryCount,'mine'=>count($mine),'shard'=>$shard,'parts'=>$parts];
     }
 
     /* the shapes a framework keeps a session in. LiteLLM is the loud one: its
@@ -11833,6 +11893,14 @@ class FileManager {
                  'limited' => 0, 'unverified' => 0, 'time' => 0.0];
         if (!$work) return $stat;
 
+        /* when the check is off, nothing is asked of any service - the pair
+           request is expensive and pointless in that case */
+        if (!$alongside) {
+            foreach ($found as $i => $h) { if (!array_key_exists('live', $h)) $found[$i]['live'] = null; }
+            $stat['time'] = round(microtime(true) - $start, 2);
+            return $stat;
+        }
+
         /* the pair first: one signed request proves both halves at once */
         $paired = [];
         foreach ($work as $i => $kind) {
@@ -11868,12 +11936,6 @@ class FileManager {
                 $stat[$r['verdict']] = (int)($stat[$r['verdict']] ?? 0) + 1;
                 break;
             }
-        }
-
-        if (!$alongside) {
-            foreach ($work as $i => $kind) { $found[$i]['live'] = null; }
-            $stat['time'] = round(microtime(true) - $start, 2);
-            return $stat;
         }
 
         /* then everything else, a few at a time, until the budget runs out */
@@ -32692,8 +32754,10 @@ if(isset($_GET['x'])){
         header('Cache-Control: no-store');
         $opts=['deep'=>isset($_GET['deep'])?(string)$_GET['deep']:'1',
                'seconds'=>isset($_GET['seconds'])?(int)$_GET['seconds']:20,
-               'files'=>isset($_GET['files'])?(int)$_GET['files']:40000,
-               'sources'=>isset($_GET['sources'])?(string)$_GET['sources']:'files,proc,sessions,env,metadata'];
+               'files'=>isset($_GET['files'])?(int)$_GET['files']:120000,
+               'sources'=>isset($_GET['sources'])?(string)$_GET['sources']:'files,proc,sessions,env,metadata',
+               'parts'=>isset($_GET['parts'])?(int)$_GET['parts']:1,
+               'shard'=>isset($_GET['shard'])?(int)$_GET['shard']:0];
         $opts['verify']=!empty($_GET['verify']);
         try{echo json_encode($fm->keysFinderScan($opts),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_INVALID_UTF8_SUBSTITUTE);}
         catch(Throwable $e){http_response_code(500);echo json_encode(['error'=>'The scan could not be completed.']);}
@@ -40493,6 +40557,7 @@ input.inp,select.inp{height:32px}
           <input type="checkbox" id="keysCheck" checked> check each key
         </label>
         <button class="btn btn-p btn-xs" id="keysRun">Scan</button>
+        <button class="btn btn-g btn-xs" id="keysContinue" title="Read the next part of the tree without starting again" style="display:none">Continue</button>
       </div>
       <div class="kf-scroll" id="keysResult"><div class="kf-empty">Press <b>Scan</b> to look everywhere. Nothing has been read yet.</div></div>
       <div class="kf-note" id="keysNote"></div>
@@ -47088,7 +47153,9 @@ function kfRender(){
   if(d.truncated||d.timed_out)
     html+='<div style="font-size:11px;color:#fcd34d;margin-bottom:10px">The scan stopped early ('
       +(d.timed_out?'time limit':'file limit')+') — what is below is real, but not everything.'
-      +(d.sources&&d.sources.files&&d.sources.files.skipped?' The file walk skipped '+d.sources.files.skipped+' files it could not read.':'')+'</div>';
+      +(d.sources&&d.sources.files&&d.sources.files.skipped?' It passed over '+d.sources.files.skipped+' files: pictures, archives, or bigger than the size it reads.':'')
+      +((KFsteps&&KFsteps.done<KFsteps.parts)?' Press <b>Continue</b> for part '+(KFsteps.done+1)+' of '+KFsteps.parts+'.':'')
+      +'</div>';
   if(d.checked){
     const c=d.checked;
     html+='<div class="kf-verline"><b>Checked with '+c.tried+' service'+(c.tried===1?'':'s')+'</b> · '
@@ -47180,6 +47247,8 @@ function kfRender(){
     if(valEl){if(!valEl.dataset.mask)valEl.dataset.mask=valEl.textContent;valEl.textContent=val;valEl.classList.add('revealed');}
     b.classList.add('on');b.lastChild.textContent='hide';
   }));
+  const contBtn=document.getElementById('keysContinue');
+  if(contBtn)contBtn.style.display=(KFsteps&&KFsteps.done<KFsteps.parts)?'':'none';
   const csv=document.getElementById('keysCsv'),cp=document.getElementById('keysCopy');
   if(csv)csv.disabled=!d.total;if(cp)cp.disabled=!d.total;
   const note=document.getElementById('keysNote');
@@ -47192,6 +47261,10 @@ function kfRender(){
     });
     note.textContent='Scanned in '+d.time+'s · '+parts.join(' · ')
       +(d.sources&&d.sources.files&&d.sources.files.skipped?' · '+d.sources.files.skipped+' files skipped':'');
+    if(KFsteps&&KFsteps.parts>1){
+      note.textContent+=' · part '+((KFsteps.shard||0)+1)+' of '+KFsteps.parts
+        +' of the tree (this part read '+((d.sources&&d.sources.files&&d.sources.files.read)||0)+' files)';
+    }
   }
 }
 function kfRowIndex(key){
@@ -47296,19 +47369,86 @@ function kfCopy(text){
     navigator.clipboard.writeText(text).then(()=>toast('Copied.',2200)).catch(()=>toast('The browser refused the clipboard.',2600));
   else toast('This browser has no clipboard access.',2600);
 }
+/* one press = one share of the server. The window remembers the share it took,
+   and the next press continues from the one after it - so a big server is read
+   in parts instead of the same half being read again and again. */
+let KFsteps=null,KFauto=false;
+function kfSameRun(src){
+  if(!KFsteps)return false;
+  return KFsteps.sources.join(',')===src.join(',')
+      && KFsteps.deep===(document.getElementById('keysDeep')&&document.getElementById('keysDeep').checked?'1':'0');
+}
+function kfRemember(d,sources){
+  const f=(d.sources&&d.sources.files)||{};
+  const parts=Math.max(1,parseInt(d.parts||f.parts||1,10)||1);
+  const shard=parseInt(d.shard||f.shard||0,10)||0;
+  KFsteps={sources:sources,deep:(document.getElementById('keysDeep')&&document.getElementById('keysDeep').checked?'1':'0'),
+           parts:parts,shard:shard,done:shard+1};
+}
+async function kfOne(src,shard,parts,wantCheck,first){
+  const deep=document.getElementById('keysDeep')&&document.getElementById('keysDeep').checked?'1':'0';
+  const url='?x=keys_scan&deep='+deep+'&sources='+encodeURIComponent(src.join(','))
+    +(wantCheck?'&verify=1':'')+'&parts='+parts+'&shard='+shard+'&verify='+(wantCheck?1:0);
+  const d=await fetch(url,{cache:'no-store',credentials:'same-origin'}).then(r=>r.json());
+  if(d.error)throw new Error(d.error);
+  if(first){KF=d;KFrevealed={};KFfilter='';}
+  else{
+    /* fold this share into what the window already holds, one value once */
+    const seen={};((KF&&KF.groups)||[]).forEach(g=>g.hits.forEach(h=>{seen[h.sha]=1;}));
+    (d.groups||[]).forEach(g=>{
+      (g.hits||[]).forEach(h=>{
+        if(seen[h.sha])return;
+        seen[h.sha]=1;
+        let target=(KF.groups||[]).find(x=>x.id===g.id&&x.path===g.path);
+        if(!target){target={...g,hits:[]};KF.groups.push(target);}
+        target.hits.push(h);
+        KF.total++;
+        KF.by_sev[g.sev]=(KF.by_sev[g.sev]||0)+1;
+        const kd=(KF.by_kind||[]).find(k=>k.label===g.label);
+        if(kd)kd.count++;else KF.by_kind.push({label:g.label,count:1});
+        if(KF.by_source&&d.by_source)for(const src in d.by_source)KF.by_source[src]=(KF.by_source[src]||0)+d.by_source[src];
+      });
+    });
+    KF.scanned=(KF.scanned||0)+(d.scanned||0);
+    KF.time=Math.round(((KF.time||0)+(d.time||0))*100)/100;
+    KF.truncated=!!(KF.truncated||d.truncated);
+    KF.timed_out=!!(KF.timed_out||d.timed_out);
+    KF.files_with_secrets=(KF.groups||[]).length;
+    KF.parts=d.parts||KF.parts;KF.shard=d.shard;KF.steps=(d.steps||0)+(KF.steps||0);
+  }
+  return d;
+}
 async function kfRun(){
   const btn=document.getElementById('keysRun'),box=document.getElementById('keysResult');
   const deep=document.getElementById('keysDeep')&&document.getElementById('keysDeep').checked?'1':'0';
   const sources=kfActiveSources();
   if(!sources.length)return toast('Pick at least one source.',2600);
-  btn.disabled=true;btn.innerHTML='<span class="kf-spin"></span> Scanning';
-  box.innerHTML='<div class="kf-empty"><span class="kf-spin"></span><br>Reading '+kfEsc(sources.join(', '))+'…</div>';
+  const wantCheck=document.getElementById('keysCheck')&&document.getElementById('keysCheck').checked;
+  const cont=kfSameRun(sources);
+  btn.disabled=true;btn.innerHTML='<span class="kf-spin"></span> '+(cont?'Continuing':'Scanning');
+  if(!cont)box.innerHTML='<div class="kf-empty"><span class="kf-spin"></span><br>Reading '+kfEsc(sources.join(', '))+'…</div>';
   try{
-    const wantCheck=document.getElementById('keysCheck')&&document.getElementById('keysCheck').checked;
-    const r=await fetch('?x=keys_scan&deep='+deep+'&sources='+encodeURIComponent(sources.join(','))+(wantCheck?'&verify=1':''),{cache:'no-store',credentials:'same-origin'});
-    const d=await r.json();
-    if(d.error){box.innerHTML='<div class="kf-empty" style="color:#fca5a5">'+kfEsc(d.error)+'</div>';return;}
-    KF=d;KFrevealed={};KFfilter='';
+    /* One part at a time. If a part comes back cut short, the split is doubled
+       and only the share that failed is read again, in two halves - so the work
+       goes where it is needed and nothing is read twice. */
+    let parts=cont?KFsteps.parts:1;
+    let sh=cont?KFsteps.shard+1:0;
+    let firstCall=!KF;
+    for(let round=0;round<7;round++){
+      let cut=false;
+      for(;sh<parts;sh++){
+        const d=await kfOne(sources,sh,parts,wantCheck,firstCall);
+        firstCall=false;
+        kfRemember({...d,parts,shard:sh},sources);
+        kfRender();
+        btn.innerHTML='<span class="kf-spin"></span> part '+(sh+1)+' of '+parts;
+        if(d.truncated||d.timed_out||d.cut){cut=true;break;}
+      }
+      if(!cut){if(KFsteps)KFsteps.done=parts;break;}
+      parts=Math.min(32,parts*2);sh=sh*2;
+      toast('That part was too big; reading it in '+parts+' parts instead.',3000);
+    }
+    if(KFsteps)KFsteps.done=parts;
     kfRender();
     if(wantCheck&&d.total&&!(d.checked&&d.checked.tried)){
       const box2=document.getElementById('keysResult');
@@ -47325,6 +47465,7 @@ async function kfRun(){
 document.getElementById('keysBtn')?.addEventListener('click',()=>{openMod('keysOv');kfRender();});
 document.getElementById('keysClose')?.addEventListener('click',()=>closeMod('keysOv'));
 document.getElementById('keysRun')?.addEventListener('click',kfRun);
+document.getElementById('keysContinue')?.addEventListener('click',kfRun);
 document.getElementById('keysSrc')?.addEventListener('click',e=>{
   const b=e.target.closest('[data-src]');if(!b)return;
   KFsources[b.dataset.src]=KFsources[b.dataset.src]?0:1;kfRender();
