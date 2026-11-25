@@ -1159,7 +1159,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R57');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R58');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -34518,8 +34518,10 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .sidebar{grid-area:sb;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
 .sb-sec{padding:14px 10px 0}
 .sb-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.9px;color:var(--t3);padding:4px 10px 7px;display:flex;align-items:center;justify-content:space-between}
-.sb-nav{display:flex;flex-direction:column;gap:3px}
-.sb-item{display:flex;align-items:center;gap:10px;padding:8px 11px;border-radius:var(--r);color:var(--t2);text-decoration:none;font-size:12.5px;font-weight:var(--fw-medium);transition:background .15s,color .15s,transform .18s var(--spring);cursor:pointer;border:none;background:transparent;width:100%;text-align:left;white-space:nowrap;overflow:hidden;min-height:34px}
+/* R58 · one pitch for the whole column: the rows carried a 3px flex gap AND a
+   2px top/bottom margin AND their own min-height, so the tools read as islands. */
+.sb-nav{display:flex;flex-direction:column;gap:0}
+.sb-item{display:flex;align-items:center;gap:10px;padding:8px 11px;border-radius:var(--r);color:var(--t2);text-decoration:none;font-size:12.5px;font-weight:var(--fw-medium);transition:background .15s,color .15s,transform .18s var(--spring);cursor:pointer;border:none;background:transparent;width:100%;text-align:left;white-space:nowrap;overflow:hidden;min-height:32px}
 .sb-item svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0;transition:transform .18s var(--spring)}
 .sb-item:hover{background:var(--hov);color:var(--t1);transform:translateX(2px)}.sb-item:hover svg{transform:scale(1.1)}.sb-item:active{transform:scale(.97)}
 .sb-item.danger:hover{background:rgba(239,68,68,.08);color:#fca5a5}
@@ -34752,7 +34754,9 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .ft tbody tr:focus{outline:2px solid rgba(133,137,140,.5);outline-offset:-2px}
 <?php for($i=1;$i<=60;$i++) echo ".ft tbody tr:nth-child($i){animation-delay:".($i*.018)."s}\n";?>
 @keyframes rIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-.ft td{padding:6px 10px;vertical-align:middle}
+/* R58 · one line per file row: the type chip now rides at the end of the name
+   instead of under it, so the padding gives back the line it no longer needs */
+.ft td{padding:4px 10px;vertical-align:middle}
 /* ══ GLOBAL INPUTS DARK THEME ══ */
 input[type=checkbox],input[type=radio]{
   appearance:none;-webkit-appearance:none;cursor:pointer;
@@ -34789,11 +34793,13 @@ input[type=checkbox]:focus,input[type=radio]:focus{outline:none;box-shadow:0 0 0
 .nc{display:flex;align-items:center;gap:9px;cursor:pointer;min-width:0}
 .ib{width:29px;height:29px;flex-shrink:0;border-radius:8px;display:flex;align-items:center;justify-content:center;transition:transform .18s var(--spring)}
 .ft tbody tr:hover .ib{transform:scale(1.08)}.ib .ti{width:17px;height:17px}
-.nm{min-width:0}
+/* R58 · the name and its type chip share ONE line: the chip used to sit under the
+   name, so every row was two lines tall and the table was 53px a row. */
+.nm{min-width:0;display:flex;align-items:center;gap:7px}
 .tag-dot{margin-right:6px;vertical-align:middle}
-.nt{color:var(--t1);font-weight:var(--fw-medium);font-size:13px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px;text-decoration:none;transition:color .15s}
+.nt{color:var(--t1);font-weight:var(--fw-medium);font-size:13px;display:block;min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px;text-decoration:none;transition:color .15s}
 a.nt:hover{color:var(--link)}
-.eb{display:inline-block;margin-top:1px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;padding:1px 5px;border-radius:4px;background:var(--raised);color:var(--t3)}
+.eb{display:inline-block;flex:0 0 auto;line-height:1.5;margin-top:0;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;padding:0 5px;border-radius:3px;background:transparent;border:1px solid var(--border2);color:var(--t3)}
 .mono{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--t2);padding:2px 7px;border-radius:5px;background:var(--raised);white-space:nowrap}
 .sz{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--t2);white-space:nowrap}
 .mt{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--t3);white-space:nowrap}
@@ -36209,6 +36215,8 @@ button.rc-row{cursor:pointer}
 .term-line.res-dim{color:#7d7d7d}
 .term-line.res-ls{color:#b8b8b8}
 .term-line .res-perm{color:#8a8a8a}
+/* the columns of a listing are spaces; they are printed, never trimmed */
+.term-line .res-gap{white-space:pre}
 .term-line .res-user{color:#c8b070}
 .term-line .res-size{color:#9a9a9a}
 .term-line .res-date{color:#8f9a8f}
@@ -36236,7 +36244,7 @@ button.rc-row{cursor:pointer}
 .term-logo{display:block;width:max-content;max-width:100%;overflow-x:auto;overflow-y:hidden;margin:0 auto;color:#c98b8b;white-space:pre;line-height:1;letter-spacing:0;font-size:var(--term-logo-fs,6px);font-family:'TerminalTMT',monospace;tab-size:4}
 /* exactly two terminal lines of air between the mark and its caption: the gap
    follows the console's own line pitch, so it stays right at any text size */
-.term-logo-meta{display:block;margin:calc(var(--term-fs,13.5px) * 1.245 * 2) auto 0;text-align:center;font-size:var(--term-fs,13.5px);line-height:calc(var(--term-fs,13.5px) * 1.245);white-space:normal;word-break:break-word}
+.term-logo-meta{display:block;margin:calc(var(--term-fs,13.5px) * var(--term-lh,1.19) * 2) auto 0;text-align:center;font-size:var(--term-fs,13.5px);line-height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));white-space:normal;word-break:break-word}
 /* R57d · the frame is back: one quiet box around the mark and its caption, and it
    is part of the printed output - clear removes it with the rest of the screen. */
 /* R57e · the frame takes the console's width by itself: it is a block, so its left
@@ -36265,13 +36273,32 @@ button.rc-row{cursor:pointer}
 /* R52 · the faint tail of a completion, drawn the way PowerShell and fish do it */
 .term-prompt-wrap{--ghost:''}
 .term-row{position:relative}
-.term-ghost{display:none;pointer-events:none;white-space:pre;font-family:'TerminalTMT',monospace;font-size:13.5px;line-height:1;color:#6a6a6a;padding:0;margin:0}
-.term-ghost.on{display:inline}
+/* R58 · the line the reader is typing on is one positioned box (.term-live): the
+   field, the faint completion and the caret are all drawn in it by coordinate, so
+   a suggestion can never push the field - or the caret - sideways. The suggestion
+   starts where the typing ends, and the caret stays on the character being typed:
+   that character is printed dark inside the light caret, the way a shell shows a
+   completion. Nothing in this box is in the flow, so nothing here can reflow. */
+.term-live{position:relative;display:inline-block;vertical-align:baseline;flex:0 0 auto;min-width:0;
+  font-size:var(--term-fs,13.5px);
+  height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));white-space:pre;max-width:calc(100vw - 200px)}
+.term-live .term-inp{position:absolute;left:0;top:0;height:100%;padding:0;margin:0;border:0;max-width:none;box-sizing:content-box;
+  line-height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));background:transparent;color:#e0e0e0;caret-color:transparent}
+.term-ghost-tail{position:absolute;top:0;white-space:pre;pointer-events:none;font-family:'TerminalTMT',monospace;
+  font-size:var(--term-fs,13.5px);line-height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));color:#6a6a6a}
+.term-ghost-tail .gt-cur{color:#6a6a6a}
+.term-ghost-tail.on .gt-cur{animation:caretInk 1s step-end infinite}
+@keyframes caretInk{0%,49%{color:#1f1f1f}50%,100%{color:#6a6a6a}}
+.term-int-caret{position:absolute;top:50%;transform:translateY(-50%);width:.62em;height:1.25em;background:#e4e4e4;
+  font-size:var(--term-fs,13.5px);border-radius:1px;pointer-events:none;display:none}
+.term-int-caret.on{display:block}
+.term-int-caret.on.blink{animation:blink 1s step-end infinite}
 
-.term-cursor{display:inline-block;width:8px;height:13px;background:#d0d0d0;vertical-align:-2px;margin-left:1px;flex-shrink:0}
+/* R58 · the caret is as tall as a glyph and as wide as a stem, both in em, so
+   Ctrl+Shift+= (the console font zoom) takes the caret with it. It used to be a
+   13px block whatever the text size was, which is why it ignored the zoom. */
 /* R56 · a command editor caret: solid while a key is being typed, and it only
    starts blinking once the line goes quiet. */
-.term-cursor.blink{animation:blink 1s step-end infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
 .term-suggest{position:absolute;background:#252525;border:1px solid #6a6a6a;border-radius:1px;padding:3px 0;z-index:9;min-width:180px;box-shadow:0 8px 24px rgba(0,0,0,.65)}
 .term-sug-item{padding:4px 12px;font-family:monospace;font-size:12px;color:#26c6da;cursor:pointer}
@@ -36406,7 +36433,12 @@ body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
 /* text size inside the console only: the prompt, the printed lines and the
    answers grow and shrink together, nothing else on the page moves */
 .term-scroll,.term-out,.term-line,.term-ps,.term-inp,.term-sug-item{font-size:var(--term-fs,13.5px)}
-.term-line,.term-ps,.term-inp{line-height:calc(var(--term-fs,13.5px) * 1.245)}
+/* R58 · the console leading is ONE number now (--term-lh): the printed line, the
+   prompt row, the caret, the logo spacing and the scroll walk all read it, so a
+   font zoom moves the whole grid together. 16.81px -> 16.07px: a slight tighten,
+   still far from cramped (the glyph itself is ~13.5px). */
+:root{--term-lh:1.19}
+.term-line,.term-ps,.term-inp{line-height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19))}
 .term-inp{line-height:1}
 .term-sug-item{font-size:calc(var(--term-fs,13.5px) * .92)}
 /* ══ R53c · context menu, toast, resize grip, and the windowed console ═════ */
@@ -36467,7 +36499,12 @@ body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
 .term-toast.on{opacity:1;transform:none}
 /* while it sits inside the manager the console is a window: moved by its title
    bar, resized from its corner, and maximised to the page by the middle button */
-.term-win.term-windowed{inset:auto;left:max(16px,calc(50vw - 560px));top:max(24px,4vh);width:min(1120px,calc(100vw - 32px));height:min(760px,calc(100vh - 64px));
+/* R58 · every tool window is placed by the same geometry: the screen's centre.
+   This one used to hang from "top:4vh", a number of its own, so the terminal sat
+   higher than the manager's own dialogs (which centre with flex). It is now the
+   same rule: a fixed layer that centres its child, and a frame that is dragged
+   as a margin - so a maximised or restored window always comes back to centre. */
+.term-win.term-windowed{inset:auto;left:0;right:0;top:0;bottom:0;margin:auto;width:min(1120px,calc(100vw - 32px));height:min(760px,calc(100vh - 64px));
   border-radius:var(--rlg,14px);box-shadow:0 28px 74px rgba(0,0,0,.45),0 2px 10px rgba(0,0,0,.3);overflow:hidden}
 .term-win.term-windowed.term-dragging{cursor:move;user-select:none}
 .term-win.term-windowed .term-titlebar{cursor:default}
@@ -37875,7 +37912,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11"] .sb-sec{padding:0}
 :root[data-theme="win11"] .sb-label{font-size:12px;font-weight:600;text-transform:none;letter-spacing:0;color:rgba(0,0,0,.6063);padding:14px 16px 6px}
 :root[data-theme="win11"] .sb-item{
-  position:relative;min-height:36px;padding:0 12px;margin:2px 6px;border-radius:4px;border:0;
+  position:relative;min-height:32px;padding:0 12px;margin:0 4px;border-radius:4px;border:0;
   color:#1b1b1b;font-size:14px;font-weight:400;gap:14px;background:transparent;transition:background .1s linear;
 }
 :root[data-theme="win11"] .sb-item svg{width:16px;height:16px;stroke:#1b1b1b;stroke-width:1.5;transition:none}
@@ -37920,13 +37957,13 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11"] .ft tbody tr:hover{background:rgba(0,0,0,.0373)}
 :root[data-theme="win11"] .ft tbody tr.selected{background:rgba(0,103,192,.09);box-shadow:inset 0 0 0 1px rgba(0,103,192,.4)}
 :root[data-theme="win11"] .ft tbody tr:focus{outline:1px solid var(--wm-accent);outline-offset:-1px}
-:root[data-theme="win11"] .ft td{padding:5px 10px;border-right:1px solid rgba(0,0,0,.035)}
+:root[data-theme="win11"] .ft td{padding:3px 10px;border-right:1px solid rgba(0,0,0,.035)}
 :root[data-theme="win11"] .ft td:last-child{border-right:0}
-:root[data-theme="win11"] .nt{font-size:14px;font-weight:400;color:#1b1b1b;max-width:260px}
+:root[data-theme="win11"] .nt{font-size:14px;font-weight:400;color:#1b1b1b;max-width:210px}
 :root[data-theme="win11"] a.nt:hover{color:#1b1b1b;text-decoration:underline}
 :root[data-theme="win11"] .mt,:root[data-theme="win11"] .sz{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:12px;color:rgba(0,0,0,.6063)}
 :root[data-theme="win11"] .mono{font-family:'Cascadia Mono',ui-monospace,'Consolas',monospace;font-size:11.5px;background:transparent;color:rgba(0,0,0,.6063);padding:0}
-:root[data-theme="win11"] .eb{background:rgba(0,0,0,.0605);color:rgba(0,0,0,.6063);border-radius:3px;font-family:'Segoe UI Variable Text','Segoe UI',sans-serif;font-size:10px;font-weight:600}
+:root[data-theme="win11"] .eb{background:rgba(0,0,0,.0605);border:0;color:rgba(0,0,0,.6063);border-radius:3px;font-family:'Segoe UI Variable Text','Segoe UI',sans-serif;font-size:10px;font-weight:600}
 :root[data-theme="win11"] .own-name{color:rgba(0,0,0,.6063);font-size:12px}
 :root[data-theme="win11"] .own-cell{background:transparent;border:0;padding:0}
 :root[data-theme="win11"] .own-me{background:rgba(0,103,192,.1);color:#0067c0}
@@ -39135,11 +39172,11 @@ input.inp,select.inp{height:32px}
 }
 :root[data-theme="kalil"] .sb-label{font-size:11px;font-weight:600;text-transform:none;letter-spacing:.2px;color:#7d8189;padding:12px 14px 5px}
 :root[data-theme="kali"] .sb-item{
-  position:relative;min-height:30px;padding:0 10px;margin:1px 6px;border-radius:4px;border:0;
+  position:relative;min-height:30px;padding:0 10px;margin:0 4px;border-radius:4px;border:0;
   color:#eeeeec;font-size:12.5px;font-weight:400;gap:10px;background:transparent;transition:background .12s linear;
 }
 :root[data-theme="kalil"] .sb-item{
-  position:relative;min-height:30px;padding:0 10px;margin:1px 6px;border-radius:4px;border:0;
+  position:relative;min-height:30px;padding:0 10px;margin:0 4px;border-radius:4px;border:0;
   color:#2b2b2b;font-size:12.5px;gap:10px;background:transparent;
 }
 :root[data-theme="kali"] .sb-item svg{width:16px;height:16px;stroke:#eeeeec;stroke-width:1.5}
@@ -39481,7 +39518,7 @@ input.inp,select.inp{height:32px}
 :root[data-theme="win11d"] .sb-sec{padding:0}
 :root[data-theme="win11d"] .sb-label{font-size:12px;font-weight:600;text-transform:none;letter-spacing:0;color:rgba(255,255,255,.6063);padding:14px 16px 6px}
 :root[data-theme="win11d"] .sb-item{
-  position:relative;min-height:36px;padding:0 12px;margin:2px 6px;border-radius:4px;border:0;
+  position:relative;min-height:32px;padding:0 12px;margin:0 4px;border-radius:4px;border:0;
   color:#ffffff;font-size:14px;font-weight:400;gap:14px;background:transparent;transition:background .1s linear;
 }
 :root[data-theme="win11d"] .sb-item svg{width:16px;height:16px;stroke:#ffffff;stroke-width:1.5;transition:none}
@@ -39529,13 +39566,13 @@ input.inp,select.inp{height:32px}
 :root[data-theme="win11d"] .ctx{z-index:520}
 :root[data-theme="win11d"] .ft tbody tr.selected td{color:#ffffff}
 :root[data-theme="win11d"] .ft tbody tr:focus{outline:1px solid var(--wm-accent);outline-offset:-1px}
-:root[data-theme="win11d"] .ft td{padding:5px 10px;border-right:1px solid #262626}
+:root[data-theme="win11d"] .ft td{padding:3px 10px;border-right:1px solid #262626}
 :root[data-theme="win11d"] .ft td:last-child{border-right:0}
-:root[data-theme="win11d"] .nt{font-size:14px;font-weight:400;color:#ffffff;max-width:260px}
+:root[data-theme="win11d"] .nt{font-size:14px;font-weight:400;color:#ffffff;max-width:210px}
 :root[data-theme="win11d"] a.nt:hover{color:#ffffff;text-decoration:underline}
 :root[data-theme="win11d"] .mt,:root[data-theme="win11d"] .sz{font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;font-size:12px;color:rgba(255,255,255,.6063)}
 :root[data-theme="win11d"] .mono{font-family:'Cascadia Mono',ui-monospace,'Consolas',monospace;font-size:11.5px;background:transparent;color:rgba(255,255,255,.6063);padding:0}
-:root[data-theme="win11d"] .eb{background:rgba(255,255,255,.0605);color:rgba(255,255,255,.6063);border-radius:3px;font-family:'Segoe UI Variable Text','Segoe UI',sans-serif;font-size:10px;font-weight:600}
+:root[data-theme="win11d"] .eb{background:rgba(255,255,255,.0605);border:0;color:rgba(255,255,255,.6063);border-radius:3px;font-family:'Segoe UI Variable Text','Segoe UI',sans-serif;font-size:10px;font-weight:600}
 :root[data-theme="win11d"] .own-name{color:rgba(255,255,255,.6063);font-size:12px}
 :root[data-theme="win11d"] .own-cell{background:transparent;border:0;padding:0}
 :root[data-theme="win11d"] .own-me{background:rgba(76,194,255,.14);color:#4cc2ff}
@@ -40950,6 +40987,9 @@ input.inp,select.inp{height:32px}
     return $map[$kind];
   };
 ?>
+<span id="termMonoProbe" aria-hidden="true" style="position:absolute;left:-9999px;top:0;white-space:pre;font-family:'TerminalTMT',monospace;font-size:var(--term-fs,13.5px);line-height:1;visibility:hidden">MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM</span>
+<!-- R58 · a tool window centres on the screen, not on the console: this overlay held 58 of them
+     nested inside #termOv, so every window was measured against the terminal frame. -->
 <div class="mod-ov term-ov" id="termOv">
   <div class="term-win" id="termWin">
     <button type="button" class="btn btn-icon btn-g term-close" id="termClose" title="Close" aria-label="Close the terminal" data-wmclose><svg viewBox="0 0 10 10"><line x1="0.7" y1="0.7" x2="9.3" y2="9.3"/><line x1="9.3" y1="0.7" x2="0.7" y2="9.3"/></svg></button>
@@ -41125,7 +41165,7 @@ input.inp,select.inp{height:32px}
                   <span class="lg-name"><?=htmlspecialchars(FM_PRODUCT_NAME)?></span><span class="lg-sep"> · </span><span class="lg-key">version</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_VERSION)?></span><span class="lg-sep"> · </span><span class="lg-key">build</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_RELEASE)?></span><span class="lg-sep"> · </span><span class="lg-key">since</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_DATE)?></span><span class="lg-sep"> · </span><span class="lg-key"><?=htmlspecialchars(FM_PRODUCT_SYSTEM)?></span>
                   <span class="lg-sub"><span class="lg-key">cwd</span> <span class="lg-val" id="termWorkingDir"><?=htmlspecialchars($termTreeDir)?></span><span class="lg-sep"> · </span><span class="lg-key">host</span> <span class="lg-val"><?=htmlspecialchars($termHostLabel)?></span><span class="lg-sep"> · </span><span class="lg-key">user</span> <span class="lg-val"><?=htmlspecialchars($termUserLabel)?></span><span class="lg-sep"> · </span><span class="lg-key">link</span> <span class="lg-val" id="termConnBadge">ready</span></span>
                 </div>
-              <template id="termPromptTemplate"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><input class="term-inp" id="termInp__UID__" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-ghost" id="termGhost__UID__" aria-hidden="true"></span><span class="term-cursor blink" aria-hidden="true"></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
+              <template id="termPromptTemplate"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><span class="term-live" id="termLive__UID__"><input class="term-inp" id="termInp__UID__" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-ghost term-ghost-tail" id="termGhost__UID__" aria-hidden="true"></span><span class="term-int-caret" id="termCaret__UID__" aria-hidden="true"></span></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
             </div>
           </div>
         </div>
@@ -41161,6 +41201,9 @@ input.inp,select.inp{height:32px}
     </div>
   </div>
 </div>
+</div><!-- R58 · the console overlay closes here: every tool window below is a
+     child of <body>, so the pack centres it on the screen instead of inside
+     the terminal box (58 windows used to be nested in #termOv by mistake) -->
 <?php endif;?>
 
 <!-- CHECKSUM MODAL -->
@@ -51609,7 +51652,61 @@ function termFocusInput(){
   return i;
 }
 function termSugBox(){const t=termTabCurrent();return t?t.wrap.querySelector('.term-suggest'):null;}
-function adjustTermInputWidth(){const i=termInput();if(i)i.style.width=(i.value.length||0.1)+'ch';}
+/* R58 · the box behind the typing is measured in a real monospace span, not in
+   "ch": the field and the faint tail have to sit on exactly the same glyph grid,
+   and "ch" is a whole-number unit that drifted by a pixel per character. */
+function termMonoPx(){
+  const out=document.getElementById('termMonoProbe');
+  if(!out)return 0;
+  out.style.fontSize=getComputedStyle(document.documentElement).getPropertyValue('--term-fs')||'13.5px';
+  const w=out.getBoundingClientRect().width/100;
+  return w>0?w:0;
+}
+function termGlyphRun(text){
+  let n=String(text||'').length;
+  /* a typed tab is one glyph in a terminal, and the tail carries those too */
+  return n;
+}
+function termGhostPlace(inp,gp){
+  const g=inp?inp.closest('.term-live')?.querySelector('.term-ghost-tail'):null;
+  if(!g||!g.classList.contains('on'))return;
+  const step=gp||termMonoPx()||8.13;
+  const at=Math.max(inp.value.length,0)*step;
+  const cap=termRowRoom(inp);
+  /* past the window the field scrolls under its own text, so a tail drawn at the
+     typing position would sit on the wrong glyph: it is simply not drawn there */
+  g.style.display=at>cap?'none':'';
+  g.style.left=at+'px';
+}
+/* the room one prompt row has, minus the prompt itself: the field never grows
+   past the right edge of the console */
+function termRowRoom(i){
+  const row=i&&i.closest('.term-row');
+  if(!row)return Math.max(160,innerWidth-240);
+  const ps=row.querySelector('.term-ps');
+  const room=row.clientWidth-(ps?ps.getBoundingClientRect().width:0)-18;
+  return Math.max(160,Math.round(room));
+}
+function adjustTermInputWidth(el){
+  const i=el||termInput();
+  if(!i)return;
+  const gp=termMonoPx()||8.13;
+  const live=i.closest('.term-live');
+  const g=live?live.querySelector('.term-ghost-tail'):null;
+  const tail=(g&&g.classList.contains('on'))?g.textContent:'';
+  /* field and tail share one pixel grid, measured from the console's own face;
+     the caret is one more glyph wide than the typed text, so the two never clip */
+  /* a command longer than the window: the field is capped to the room the row
+     actually has and scrolls its own text the way an input does, so the caret
+     rides the right edge instead of walking off the screen */
+  const want=(Math.max(i.value.length,1))*gp;
+  const cap=termRowRoom(i);
+  const fw=Math.min(want,cap);
+  if(live)live.style.width=Math.min((Math.max(i.value.length,0)+tail.length+1)*gp,cap+gp)+'px';
+  i.style.width=fw+'px';
+  i.dataset.full=String(want);
+  termGhostPlace(i,gp);
+}
 /* ══ R53 · scrolling that behaves like a terminal ════════════════════════════
    A terminal does not slide a page: output arrives line by line, and the view
    follows it in small instant steps - and only when the reader is already at the
@@ -52501,6 +52598,10 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
     const live=document.getElementById('termFontLive');
     if(live)live.textContent=Math.round(v*100)/100+'px';
     if(save)try{localStorage.setItem(FS_KEY,String(v));}catch(e){}
+    /* R58 · the caret and the typed field are measured in pixels off the console
+       face, so a zoom has to re-measure them: without this the caret kept its old
+       distance and drifted away from the cursor as soon as the text grew. */
+    try{const inp=termInput();if(inp){adjustTermInputWidth(inp);termCaretSync(inp);}}catch(err){}
     return v;
   }
   function termStepFont(delta){
@@ -52559,15 +52660,22 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
      the inline frame is put back the moment it is restored down. */
   let savedFrame=null;
   let animTimer=null;
+  /* R58 · a moved window is described as a MARGIN, not as a left/top pair: the
+     stylesheet centres the frame with inset:0 + margin:auto, and a margin offset
+     is the one geometry that survives being restored, maximised and restored
+     again - left/top used to stick to whatever the last drag left behind. */
   function placeFrame(x,y,w,h){
-    win.style.left=x+'px';win.style.top=y+'px';win.style.width=w+'px';win.style.height=h+'px';
-    win.style.right='auto';win.style.bottom='auto';
+    win.style.width=w+'px';win.style.height=h+'px';
+    win.style.left='0';win.style.right='0';win.style.top='0';win.style.bottom='0';
+    win.style.marginLeft=Math.round(x)+'px';win.style.marginRight='auto';
+    win.style.marginTop=Math.round(y)+'px';win.style.marginBottom='auto';
   }
   function clearFrame(){
     /* remember the window exactly where it is before the stylesheet takes over */
     const r=win.getBoundingClientRect();
     savedFrame={x:r.left,y:r.top,w:r.width,h:r.height};
     ['left','top','right','bottom','width','height'].forEach(k=>win.style.removeProperty(k));
+    ['marginLeft','marginRight','marginTop','marginBottom'].forEach(k=>win.style.removeProperty(k));
     win.dataset.framed='1';
   }
   function restoreFrame(){
@@ -52576,8 +52684,10 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
   }
   function firstFrame(){
     if(win.dataset.framed)return;
-    const w=Math.min(1120,innerWidth-32),h=Math.min(760,innerHeight-64);
-    placeFrame(Math.round((innerWidth-w)/2),Math.max(24,Math.round(innerHeight*.04)),w,h);
+    /* the centred rect is the stylesheet's own answer, read before the inline
+       frame is written - so the window opens exactly where CSS put it */
+    const r=win.getBoundingClientRect();
+    placeFrame(Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height));
     win.dataset.framed='1';
   }
   window.termClearFrame=clearFrame;
@@ -52598,8 +52708,8 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
     const ms=Number(window.FM_TERM_ANIM_MS)||172;
     try{
       const anim=win.animate([
-        {left:x0+'px',top:y0+'px',width:w0+'px',height:h0+'px',borderRadius:collapse?'14px':'0px'},
-        {left:toRect.left+'px',top:toRect.top+'px',width:w1+'px',height:h1+'px',borderRadius:collapse?'0px':'14px'}
+        {marginLeft:x0+'px',marginTop:y0+'px',width:w0+'px',height:h0+'px',borderRadius:collapse?'14px':'0px'},
+        {marginLeft:toRect.left+'px',marginTop:toRect.top+'px',width:w1+'px',height:h1+'px',borderRadius:collapse?'0px':'14px'}
       ],{duration:ms,easing:'cubic-bezier(.16,1,.3,1)'});
       /* the frame is already where it belongs in the stylesheet; the animation is
          only the travel between the two rectangles, so it is always handed back -
@@ -52669,17 +52779,17 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
    again, the way every command editor does. */
   const TERM_CARET={t:0};
   function termCaretWake(){
-    const cur=document.querySelectorAll('.term-row .term-cursor');
+    const cur=document.querySelectorAll('.term-row .term-cursor, .term-row .term-int-caret.on');
     if(!cur.length)return;
     cur.forEach(c=>c.classList.remove('blink'));
     clearTimeout(TERM_CARET.t);
     TERM_CARET.t=setTimeout(()=>{
-      document.querySelectorAll('.term-row .term-cursor').forEach(c=>c.classList.add('blink'));
+      document.querySelectorAll('.term-row .term-cursor, .term-row .term-int-caret.on').forEach(c=>c.classList.add('blink'));
     },650);
   }
   function termCaretIdle(){
     /* a fresh prompt is idle from the first frame, so it blinks at once */
-    document.querySelectorAll('.term-row .term-cursor').forEach(c=>c.classList.add('blink'));
+    document.querySelectorAll('.term-row .term-cursor, .term-row .term-int-caret.on').forEach(c=>c.classList.add('blink'));
     clearTimeout(TERM_CARET.t);
   }
   window.termCaretIdle=termCaretIdle;
@@ -53093,7 +53203,7 @@ function termRowPx(){
   const h=line?parseFloat(getComputedStyle(line).lineHeight):0;
   if(isFinite(h)&&h>0)return h;
   const fs=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--term-fs'))||13.5;
-  return fs*1.245;
+  return fs*(parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--term-lh"))||1.19);
 }
 function termScrollWalk(tab,count){
   clearInterval(TERM_DRAIN.timer);
@@ -53143,7 +53253,12 @@ function termBindTab(tab){
     if(e.key.length===1)setTimeout(()=>{fetchSug();termGhostHint();},60);
     if(['Backspace','Delete'].includes(e.key))setTimeout(()=>{fetchSug();termGhostHint();},30);
   });
-  inp.addEventListener('input',()=>{adjustTermInputWidth();fetchSug();termGhostHint();});
+  inp.addEventListener('input',()=>{adjustTermInputWidth(inp);termCaretSync(inp);fetchSug();termGhostHint();});
+  ['keyup','click','select','focus'].forEach(ev=>inp.addEventListener(ev,()=>termCaretSync(inp)));
+  /* a fresh row has no inline width yet: the field and its caret are laid out
+     the moment the prompt exists, so the caret is on screen from the first frame */
+  adjustTermInputWidth(inp);
+  termCaretSync(inp);
   inp.addEventListener('blur',()=>setTimeout(termHideGhost,120));
   inp.addEventListener('focus',()=>{if(!tab.active)termTabSelect(tab.id);});
 }
@@ -53155,8 +53270,33 @@ function termBindTab(tab){
    options, strings and numbers. */
 const TERM_CMDS=['cd','ls','pwd','cat','grep','find','du','df','free','whoami','id','uname','date','echo','mkdir','rmdir','rm','mv','cp','touch','chmod','chown','tar','zip','unzip','gzip','curl','wget','head','tail','less','more','awk','sed','sort','uniq','wc','ps','kill','top','uptime','php','node','python3','git','composer','mysql','mysqldump','bash','sh','clear','env','export','history','which','ln','stat','file','md5sum','sha256sum','nano','vi','vim'];
 const TERM_OPTS=['-la','-al','-l','-a','-h','-r','-R','-rf','-f','-v','-n','-c','-p','-i','-m','-d','-s','-t','-x','--help','--version'];
-function termGhostEl(){const t=termTabCurrent();return t?t.wrap.querySelector('.term-ghost'):null;}
-function termHideGhost(){const g=termGhostEl();if(g){g.textContent='';g.classList.remove('on');}}
+function termGhostEl(el){const t=termTabCurrent();if(el)return el.closest('.term-live')?.querySelector('.term-ghost-tail')||null;return t?t.wrap.querySelector('.term-ghost-tail'):null;}
+function termCaretEl(el){const t=termTabCurrent();if(el)return el.closest('.term-live')?.querySelector('.term-int-caret')||null;return t?t.wrap.querySelector('.term-int-caret'):null;}
+function termHideGhost(){
+  const g=termGhostEl();
+  if(g){g.textContent='';g.classList.remove('on');g.style.left='0';}
+  const inp=termInput();
+  if(inp)adjustTermInputWidth(inp);
+  termCaretSync();
+}
+/* the caret sits on the character being typed, never on the end of a suggested
+   one: its x is the number of glyphs already in the field, measured in the same
+   monospace grid the field is sized with. A ghosted tail is drawn from that same
+   x, so the completion appears around the caret instead of pushing it. */
+function termCaretSync(el){
+  const inp=el||termInput(),c=termCaretEl(inp);
+  if(!inp||!c)return;
+  const gp=termMonoPx()||8.13;
+  let pos=0;
+  try{pos=(inp.selectionStart==null?inp.value.length:inp.selectionStart)||0;}catch(err){pos=inp.value.length;}
+  const fw=parseFloat(inp.style.width)||0;
+  const x=Math.max(pos,0)*gp;
+  /* scrollLeft keeps the tail of a long command in step with the field */
+  const edge=Math.max(fw-gp,0);
+  c.style.left=(fw>0?Math.min(x,edge)+ (inp.scrollLeft||0):x)+'px';
+  c.classList.add('on');
+  if(!termRunning&&document.activeElement!==inp)c.classList.add('blink');
+}
 function termSugItemAt(sel){return [...(termSugBox()?.querySelectorAll('.term-sug-item')||[])].find(el=>el.textContent===sel)||null;}
 /* the faint tail: the rest of a file name, a folder, a command or a past line */
 function termGhostHint(){
@@ -53179,12 +53319,18 @@ function termGhostHint(){
   termHideGhost();
 }
 function termShowGhost(typed,full){
-  const g=termGhostEl();
-  if(!g){return;}
+  const g=termGhostEl(),inp=termInput();
+  if(!g||!inp){return;}
   const tail=String(full).slice(String(typed).length); /* the input already holds the typed part */
   if(!tail){termHideGhost();return;}
-  g.textContent=tail;
+  const gp=termMonoPx()||8.13;
+  /* the first character of the tail is the one under the caret: it is printed
+     dark, so the reader reads the completion through the cursor block */
+  g.innerHTML='<span class="gt-cur">'+esc(tail.slice(0,1))+'</span>'+esc(tail.slice(1));
+  g.style.left=(Math.max(inp.value.length,0)*gp)+'px';
   g.classList.add('on');
+  adjustTermInputWidth(inp);
+  termCaretSync(inp);
 }
 function termAcceptGhost(){
   const g=termGhostEl(),inp=termInput();
@@ -53273,14 +53419,21 @@ function termResultClass(line,exit){
 function termPaintResult(line,cls){
   if(cls==='res-dim')return esc(line);
   if(cls==='res-ls'){
-    const m=line.match(/^([dlcbps-][rwxsStT-]{9}[+.]?)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\w{3}\s+\d+\s+[\d:]+)\s+(.*)$/);
+    /* R58 · ls -la came back with its columns squeezed together. The pattern used
+       to swallow the runs of spaces that make an ls column, and then put a single
+       space back, so "     400 Nov 25 13:21" was printed as " 400 Nov 25 13:21"
+       and the listing stopped lining up. The separators are captured and given
+       back exactly as the shell printed them - a listing is a table, and its
+       columns are the spaces. */
+    const m=line.match(/^([dlcbps-][rwxsStT-]{9}[+.]?)(\s+)(\d+)(\s+)(\S+)(\s+)(\S+)(\s+)(\d+)(\s+)(\w{3}\s+\d+\s+[\d:]+)(\s+)(.*)$/);
     if(m){
       const isDir=m[1][0]==='d',isLink=m[1][0]==='l';
-      const nameCls=isDir?'res-dir':(TERM_ARCHIVE.test(m[7])?'res-zip':(TERM_SCRIPTS.test(m[7])?'res-exec':(isLink?'res-link':'')));
-      return '<span class="res-perm">'+esc(m[1])+'</span> '+esc(m[2])+' '
-        +'<span class="res-user">'+esc(m[3])+'</span> <span class="res-user">'+esc(m[4])+'</span> '
-        +'<span class="res-size">'+esc(m[5])+'</span> <span class="res-date">'+esc(m[6])+'</span> '
-        +'<span class="'+nameCls+'">'+esc(m[7])+'</span>';
+      const nameCls=isDir?'res-dir':(TERM_ARCHIVE.test(m[13])?'res-zip':(TERM_SCRIPTS.test(m[13])?'res-exec':(isLink?'res-link':'')));
+      const sp=i=>'<span class="res-gap">'+esc(m[i])+'</span>';
+      return '<span class="res-perm">'+esc(m[1])+'</span>'+sp(2)+esc(m[3])+sp(4)
+        +'<span class="res-user">'+esc(m[5])+'</span>'+sp(6)+'<span class="res-user">'+esc(m[7])+'</span>'+sp(8)
+        +'<span class="res-size">'+esc(m[9])+'</span>'+sp(10)+'<span class="res-date">'+esc(m[11])+'</span>'+sp(12)
+        +'<span class="'+(nameCls||'res-name')+'">'+esc(m[13])+'</span>';
     }
   }
   if(/^[^\s<>]+$/.test(line)){
