@@ -1165,7 +1165,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R59');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R60');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -34440,6 +34440,61 @@ html{height:100%;-webkit-tap-highlight-color:transparent}
 body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-weight:var(--fw-regular);background:var(--bg);color:var(--t1);font-size:13.5px;line-height:1.5;height:100vh;overflow:hidden;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;transition:background-color .2s var(--out),color .2s var(--out)}
 <?php if($fmLoginTransition):?>html.fm-login-arrive body{opacity:0;transition:opacity .36s ease}html.fm-login-arrive.fm-login-arrive-visible body{opacity:1}@media(prefers-reduced-motion:reduce){html.fm-login-arrive body{transition:none}}<?php endif;?>
 
+
+/* ══ R60 · the two top bars are told apart by their height, and every control in
+   them is the same size ══════════════════════════════════════════════════════
+   The bar that carries the mark, the path and the search was as tall as the tool
+   bar under it, and its fields and buttons were three different heights. Both
+   bars are now one step shorter (40px and 78px), every button and every field in
+   both rows is a single 28px, and the path crumbs sit closer to their slashes. */
+.term-standalone{
+  --th:40px;
+}
+.topbar{padding:0 10px;gap:5px}
+.brand{padding-right:2px}
+.brand-icon{width:31px;height:31px}
+/* the two input rows: one height for inputs, buttons and labels */
+.topbar .btn,.topbar .btn-sm,.topbar .btn-icon{height:28px;min-height:28px;padding-top:0;padding-bottom:0;font-size:12px}
+.topbar .tb-right .btn-icon{width:28px;min-width:28px;height:28px;padding:0}
+.topbar .tb-right .btn-sm{min-width:28px;padding:0 9px}
+.topbar .tsearch{height:28px;padding:0 3px 0 9px;gap:5px}
+.topbar .tsearch input{font-size:12px;padding:4px 4px;width:146px}
+.topbar .tsearch svg{width:12px;height:12px}
+.toolbar{padding:7px 12px;gap:6px}
+.toolbar .tb-row{gap:6px}
+.toolbar .tb-row .inp{height:28px;padding:0 10px;font-size:12px}
+.toolbar .tb-row .btn-sm,.toolbar .tb-row .upl-lbl{height:28px;min-height:28px;padding:0 10px;font-size:12px}
+.toolbar .tb-row .btn-sm svg,.toolbar .tb-row .upl-lbl svg{width:12px;height:12px}
+/* one width for the four wide fields of the two rows, so the two rows line up */
+.topbar .tsearch{width:210px}
+.toolbar .tb-row #jumpPath,.toolbar .tb-row .tb-jump{flex:1 1 0;min-width:0}
+/* the path: the crumb hugs its slash, the slash is a thin stroke between two */
+.bc a{padding:2px 3px;font-size:12px;border-radius:4px}
+.bc-sep{padding:0;font-size:11.5px;opacity:.85}
+.bc a.last{font-weight:600}
+
+/* ══ R60 · one size in the two top rows, in every pack ══════════════════════
+   28px for a field, a button and a labelled button alike - the packs set 30/32
+   for their own dialogs, and this is the last word for the rows at the top of the
+   page, so the two bars read as one grid instead of three different heights. */
+.topbar .btn,.topbar .btn-sm,.topbar .btn-icon,
+.toolbar .tb-row .btn,.toolbar .tb-row .btn-sm,.toolbar .tb-row .btn.btn-sm,
+.toolbar .tb-row .upl-lbl,
+.topbar .inp,.toolbar .tb-row .inp{height:28px;min-height:28px;max-height:28px;padding-top:0;padding-bottom:0}
+/* the packs give a button inside a field form `min-height:32px` at a heavier
+   weight than any plain rule can outrank, so the height is forced only here, and
+   only for the height - colour, radius and type still come from the pack. */
+.topbar .btn,.topbar .btn-sm,.topbar .btn-icon,
+.toolbar .tb-row .btn,.toolbar .tb-row .btn-sm,
+.toolbar .tb-row .upl-lbl,
+.topbar .inp,.toolbar .tb-row .inp,
+form:has(> .inp) > .btn{height:28px!important;min-height:28px!important;max-height:28px!important}
+.topbar .btn svg,.toolbar .tb-row .btn-sm svg,.toolbar .tb-row .upl-lbl svg{width:12px;height:12px}
+.topbar .tsearch{height:28px}
+/* the path: the crumb hugs its slash */
+.bc a{padding:2px 3px}
+.bc-sep{padding:0 1px}
+
 /* ══ LAYOUT ══ */
 .shell{display:grid;grid-template:"tb tb" var(--th) "sb main" 1fr "bar bar" var(--bh) / var(--sw) 1fr;height:100vh;overflow:hidden}
 
@@ -34560,11 +34615,13 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 
 /* ══ MAIN ══ */
 .main{grid-area:main;display:flex;flex-direction:column;overflow:hidden;min-width:0;position:relative}
-.toolbar{padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);display:flex;flex-direction:column;flex-wrap:nowrap;gap:8px;align-items:stretch;flex-shrink:0}
-.toolbar .tb-row{display:flex;align-items:center;flex-wrap:nowrap!important;gap:8px;width:100%;min-width:0}
-.toolbar .tb-row .inp{height:32px;padding-top:0;padding-bottom:0}
-.toolbar .tb-row .btn-sm,.toolbar .tb-row .upl-lbl{height:32px;justify-content:center;padding-top:0;padding-bottom:0}
+.toolbar{padding:7px 12px;border-bottom:1px solid var(--border);background:var(--panel);display:flex;flex-direction:column;flex-wrap:nowrap;gap:6px;align-items:stretch;flex-shrink:0}
+.toolbar .tb-row{display:flex;align-items:center;flex-wrap:nowrap!important;gap:6px;width:100%;min-width:0}
+/* R60 · one 28px height for every field and button of both top rows */
+.toolbar .tb-row .inp{height:28px;padding:0 10px;font-size:12px}
+.toolbar .tb-row .btn-sm,.toolbar .tb-row .upl-lbl{height:28px;min-height:28px;justify-content:center;padding:0 10px;font-size:12px}
 .toolbar .tb-row .btn-sm{flex-shrink:0}
+.toolbar .tb-row .btn-sm svg,.toolbar .tb-row .upl-lbl svg{width:12px;height:12px}
 .content{flex:1;overflow-y:auto;padding:12px;position:relative}
 .content::-webkit-scrollbar{width:4px}.content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.07);border-radius:6px}
 .content.drag-over::after{content:'Drop files to upload';position:absolute;inset:8px;border:2px dashed var(--indigo);border-radius:var(--rlg);background:rgba(133,137,140,.07);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:var(--link);pointer-events:none;z-index:50}
@@ -34801,7 +34858,14 @@ input[type=checkbox]:focus,input[type=radio]:focus{outline:none;box-shadow:0 0 0
 .ft tbody tr:hover .ib{transform:scale(1.08)}.ib .ti{width:17px;height:17px}
 /* R58 · the name and its type chip share ONE line: the chip used to sit under the
    name, so every row was two lines tall and the table was 53px a row. */
-.nm{min-width:0;display:flex;align-items:center;gap:7px}
+/* R60 · the chip is not "after the name" any more: it stands on one straight
+   line for every row, in the middle of the space between the Name column and the
+   Perms column. The name keeps its half and is cut with an ellipsis before that
+   line, so a long folder name can never run underneath the chip. */
+.ft .nc{position:relative}
+.nm{min-width:0;display:flex;align-items:center;gap:7px;padding-right:50%}
+.ft .nm .eb{position:absolute;left:50%;top:50%;transform:translateY(-50%)}
+.ft .nm .nt{max-width:100%}
 .tag-dot{margin-right:6px;vertical-align:middle}
 .nt{color:var(--t1);font-weight:var(--fw-medium);font-size:13px;display:block;min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px;text-decoration:none;transition:color .15s}
 a.nt:hover{color:var(--link)}
@@ -35270,17 +35334,17 @@ a.nt:hover{color:var(--link)}
    narrows: the radius is a fraction of the viewport, so a phone gets an almost
    square corner while a desktop keeps the soft one. The close button follows
    the same curve, staying a comfortable target without eating the picture. */
-.fm-top-strip{--fms-r:clamp(3px,1.15vw,12px);--fms-x:clamp(20px,3.4vw,34px);--fms-gap:clamp(6px,1vw,12px);position:relative;display:block;width:100%;margin:0 0 var(--fms-gap);border-radius:var(--fms-r);overflow:hidden;line-height:0;background:#5b21b6}
+.fm-top-strip{--fms-r:clamp(2px,.5vw,6px);--fms-xr:clamp(1px,.28vw,3px);--fms-x:clamp(20px,3.4vw,34px);--fms-gap:clamp(6px,1vw,12px);position:relative;display:block;width:100%;margin:0 0 var(--fms-gap);border-radius:var(--fms-r);overflow:hidden;line-height:0;background:#5b21b6}
 .fm-top-strip-link{display:block;border-radius:var(--fms-r);line-height:0;text-decoration:none}
 .fm-top-strip-link img{display:block;width:100%;height:auto;border-radius:var(--fms-r)}
-.fm-top-strip-close{position:absolute;top:0;right:0;z-index:2;width:var(--fms-x);height:var(--fms-x);margin:0;padding:0;border:0;cursor:pointer;background:rgba(255,255,255,.22);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);color:#fff;border-radius:0 var(--fms-r) 0 var(--fms-r);display:flex;align-items:center;justify-content:center;transition:background .18s ease,width .2s ease,height .2s ease}
+.fm-top-strip-close{position:absolute;top:0;right:0;z-index:2;width:var(--fms-x);height:var(--fms-x);margin:0;padding:0;border:0;cursor:pointer;background:rgba(255,255,255,.22);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);color:#fff;border-radius:0 var(--fms-xr) 0 var(--fms-xr);display:flex;align-items:center;justify-content:center;transition:background .18s ease,width .2s ease,height .2s ease}
 .fm-top-strip-close:hover{background:rgba(255,255,255,.38)}
 .fm-top-strip-close:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:-2px}
 .fm-top-strip-close svg{width:clamp(9px,1.45vw,15px);height:clamp(9px,1.45vw,15px);stroke:#fff;fill:none;stroke-width:2.4;stroke-linecap:round;pointer-events:none}
 /* two explicit steps, for browsers that ignore clamp() on a variable */
-@media(max-width:900px){.fm-top-strip{--fms-r:7px;--fms-x:28px}}
-@media(max-width:640px){.fm-top-strip{--fms-r:4px;--fms-x:24px;--fms-gap:8px}}
-@media(max-width:420px){.fm-top-strip{--fms-r:2px;--fms-x:21px;--fms-gap:6px}}
+@media(max-width:900px){.fm-top-strip{--fms-r:4px;--fms-xr:2px;--fms-x:28px}}
+@media(max-width:640px){.fm-top-strip{--fms-r:3px;--fms-xr:2px;--fms-x:24px;--fms-gap:8px}}
+@media(max-width:420px){.fm-top-strip{--fms-r:2px;--fms-xr:1px;--fms-x:21px;--fms-gap:6px}}
 .filter-bar{display:flex;align-items:center;gap:5px;padding:0 0 8px;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .filter-bar::-webkit-scrollbar{display:none}
 .fb-btn{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:20px;font-size:11.5px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--t2);cursor:pointer;white-space:nowrap;transition:all .15s;-webkit-user-select:none;user-select:none}
@@ -37134,6 +37198,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   .toolbar .tb-row{display:flex;align-items:center;flex-wrap:wrap!important;gap:6px;width:100%}
   .toolbar .tb-row .upl-lbl,.toolbar .tb-row .btn-sm{height:40px;min-height:40px}
   .toolbar .tb-row .upl-lbl{flex:0 0 auto}.toolbar .tb-row .inp{flex:1;min-height:40px;height:40px;padding:9px 11px}.toolbar .tb-row .btn-sm{flex-shrink:0}
+.toolbar .tb-row .btn-sm svg,.toolbar .tb-row .upl-lbl svg{width:12px;height:12px}
 }
 @media(max-width:430px){
   :root{--th:50px}
@@ -37854,7 +37919,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   --wm-close:#c42b1c;--wm-close-h:#c42b1c;--danger-fg:#c42b1c;
   --wm-shadow:0 2px 4px rgba(0,0,0,.04),0 1px 2px rgba(0,0,0,.06);
   --wm-shadow-win:0 32px 64px rgba(0,0,0,.1876),0 2px 21px rgba(0,0,0,.1473);
-  --sw:248px;--th:48px;--bh:24px;
+  --sw:248px;--th:40px;--bh:24px;
 }
 /* ── base surface: Mica (a soft, desaturated desktop tint) ───────────── */
 :root[data-theme="win11"] body{
@@ -37921,18 +37986,18 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 :root[data-theme="win11"] .brand-icon{width:26px;height:26px;border-radius:6px;background:linear-gradient(135deg,#4cc2ff,#0067c0);display:grid;place-items:center;box-shadow:none}
 :root[data-theme="win11"] .brand-icon img{width:100%;height:100%;object-fit:contain;border-radius:6px}
 :root[data-theme="win11"] .dv{background:rgba(0,0,0,.0803);height:20px}
-:root[data-theme="win11"] .bc a{color:rgba(0,0,0,.6063);font-size:13px;border-radius:4px;padding:3px 6px;transition:background .1s,color .1s}
+:root[data-theme="win11"] .bc a{color:rgba(0,0,0,.6063);font-size:12px;border-radius:4px;padding:2px 3px;transition:background .1s,color .1s}
 :root[data-theme="win11"] .bc a:hover{background:rgba(0,0,0,.0373);color:#1b1b1b}
 :root[data-theme="win11"] .bc a.last{color:#1b1b1b;font-weight:600}
 :root[data-theme="win11"] .bc-sep{color:rgba(0,0,0,.4458);font-size:12px}
-:root[data-theme="win11"] .tsearch{height:32px;background:rgba(255,255,255,.7);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;box-shadow:none;padding:0 4px 0 9px}
+:root[data-theme="win11"] .tsearch{height:28px;background:rgba(255,255,255,.7);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;box-shadow:none;padding:0 4px 0 9px}
 :root[data-theme="win11"] .tsearch:focus-within{background:#fff;border-bottom:2px solid var(--wm-accent);border-color:var(--wm-accent);box-shadow:none;padding-bottom:0}
 :root[data-theme="win11"] .tsearch svg{stroke:rgba(0,0,0,.6063)}
-:root[data-theme="win11"] .tsearch input{color:#1b1b1b;font-size:13px}
+:root[data-theme="win11"] .tsearch input{color:#1b1b1b;font-size:12px}
 :root[data-theme="win11"] .tsearch input::placeholder{color:rgba(0,0,0,.4458)}
 :root[data-theme="win11"] .tsearch-panel{background:#f9f9f9;border:1px solid rgba(0,0,0,.0578);border-bottom-color:rgba(0,0,0,.16);border-radius:8px;box-shadow:var(--wm-shadow-win);padding:4px}
 :root[data-theme="win11"] .tb-right {gap:4px}
-:root[data-theme="win11"] .topbar .tb-right .btn-icon,.topbar .btn-icon{width:32px;min-width:32px;height:32px;border-radius:4px}
+:root[data-theme="win11"] .topbar .tb-right .btn-icon,.topbar .btn-icon{width:28px;min-width:28px;height:28px;border-radius:4px}
 
 /* ── SIDEBAR (NavigationView pane) ───────────────────────────────────── */
 :root[data-theme="win11"] .sidebar{background:transparent;border-right:1px solid rgba(0,0,0,.0578)}
@@ -37964,7 +38029,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 /* ── MAIN AREA + COMMAND BAR ─────────────────────────────────────────── */
 :root[data-theme="win11"] .main{background:rgba(255,255,255,.5)}
-:root[data-theme="win11"] .toolbar{background:transparent;border-bottom:1px solid rgba(0,0,0,.0578);padding:8px 12px}
+:root[data-theme="win11"] .toolbar{background:transparent;border-bottom:1px solid rgba(0,0,0,.0578);padding:7px 12px}
 :root[data-theme="win11"] .content{padding:8px 12px 12px}
 :root[data-theme="win11"] .content::-webkit-scrollbar{width:12px}
 :root[data-theme="win11"] .content::-webkit-scrollbar-track{background:transparent}
@@ -39483,7 +39548,7 @@ input.inp,select.inp{height:32px}
   --wm-close:#c42b1c;--wm-close-h:#c42b1c;--danger-fg:#ff99a4;
   --wm-shadow:0 2px 4px rgba(0,0,0,.24),0 1px 2px rgba(0,0,0,.32);
   --wm-shadow-win:0 32px 64px rgba(0,0,0,.56),0 2px 21px rgba(0,0,0,.4);
-  --sw:248px;--th:48px;--bh:24px;
+  --sw:248px;--th:40px;--bh:24px;
 }
 /* ── base surface: Mica (a soft, desaturated desktop tint) ───────────── */
 :root[data-theme="win11d"] body{
@@ -39527,18 +39592,18 @@ input.inp,select.inp{height:32px}
 :root[data-theme="win11d"] .brand-icon{width:calc(var(--th) - 2px);height:calc(var(--th) - 2px);background:transparent;box-shadow:none;display:grid;place-items:center}
 :root[data-theme="win11d"] .brand-icon img{width:100%;height:100%;object-fit:contain}
 :root[data-theme="win11d"] .dv{background:rgba(255,255,255,.0803);height:20px}
-:root[data-theme="win11d"] .bc a{color:rgba(255,255,255,.6063);font-size:13px;border-radius:4px;padding:3px 6px;transition:background .1s,color .1s}
+:root[data-theme="win11d"] .bc a{color:rgba(255,255,255,.6063);font-size:12px;border-radius:4px;padding:2px 3px;transition:background .1s,color .1s}
 :root[data-theme="win11d"] .bc a:hover{background:rgba(255,255,255,.0373);color:#ffffff}
 :root[data-theme="win11d"] .bc a.last{color:#ffffff;font-weight:600}
 :root[data-theme="win11d"] .bc-sep{color:rgba(255,255,255,.4458);font-size:12px}
-:root[data-theme="win11d"] .tsearch{height:32px;background:rgba(255,255,255,.0605);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;box-shadow:none;padding:0 4px 0 9px}
+:root[data-theme="win11d"] .tsearch{height:28px;background:rgba(255,255,255,.0605);border:1px solid var(--wm-stroke-t);border-bottom-color:var(--wm-stroke-b);border-radius:4px;box-shadow:none;padding:0 4px 0 9px}
 :root[data-theme="win11d"] .tsearch:focus-within{background:rgba(255,255,255,.0837);border-bottom:2px solid var(--wm-accent);border-color:var(--wm-accent);box-shadow:none;padding-bottom:0}
 :root[data-theme="win11d"] .tsearch svg{stroke:rgba(255,255,255,.6063)}
-:root[data-theme="win11d"] .tsearch input{color:#ffffff;font-size:13px}
+:root[data-theme="win11d"] .tsearch input{color:#ffffff;font-size:12px}
 :root[data-theme="win11d"] .tsearch input::placeholder{color:rgba(255,255,255,.4458)}
 :root[data-theme="win11d"] .tsearch-panel{background:#2b2b2b;border:1px solid rgba(0,0,0,.0578);border-bottom-color:rgba(0,0,0,.16);border-radius:8px;box-shadow:var(--wm-shadow-win);padding:4px}
 :root[data-theme="win11d"] .tb-right {gap:4px}
-:root[data-theme="win11d"] .topbar .tb-right .btn-icon,.topbar .btn-icon{width:32px;min-width:32px;height:32px;border-radius:4px}
+:root[data-theme="win11d"] .topbar .tb-right .btn-icon,.topbar .btn-icon{width:28px;min-width:28px;height:28px;border-radius:4px}
 
 /* ── SIDEBAR (NavigationView pane) ───────────────────────────────────── */
 :root[data-theme="win11d"] .sidebar{background:transparent;border-right:1px solid rgba(255,255,255,.0578)}
@@ -39570,7 +39635,7 @@ input.inp,select.inp{height:32px}
 
 /* ── MAIN AREA + COMMAND BAR ─────────────────────────────────────────── */
 :root[data-theme="win11d"] .main{background:#202020}
-:root[data-theme="win11d"] .toolbar{background:#202020;border-bottom:1px solid #0f0f0f;padding:8px 12px}
+:root[data-theme="win11d"] .toolbar{background:#202020;border-bottom:1px solid #0f0f0f;padding:7px 12px}
 :root[data-theme="win11d"] .content{background:#202020;padding:8px 12px 12px}
 :root[data-theme="win11d"] .content::-webkit-scrollbar{width:12px}
 :root[data-theme="win11d"] .content::-webkit-scrollbar-track{background:transparent}
@@ -52930,18 +52995,31 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
      stylesheet centres the frame with inset:0 + margin:auto, and a margin offset
      is the one geometry that survives being restored, maximised and restored
      again - left/top used to stick to whatever the last drag left behind. */
+  /* R60 · the frame is written as (margin-left, margin-top, width, height) and
+     the OPPOSITE side is left free - only one side of each axis may carry a
+     length, or the element is over-constrained and the browser starts ignoring
+     the margins. So a maximised window is only ever released by removing these
+     four properties. (R58/R59 wrote all four sides plus a marginLeft, so after a
+     drag a "maximised" console was still pushed 130px down and 40px right: it
+     grew only downwards and to the right - the same bug the reader saw.) */
   function placeFrame(x,y,w,h){
+    /* the opposite side of each axis must be FREE, not `0` and not `auto`: with
+       left+right+width all set the box is over-constrained and the margin is
+       simply dropped, which is exactly how a maximised console ended up growing
+       only to the left and downwards. Clear them, then write one side. */
+    win.style.removeProperty('right');win.style.removeProperty('bottom');
+    win.style.left='0';win.style.top='0';
+    win.style.marginLeft=Math.round(x)+'px';win.style.marginTop=Math.round(y)+'px';
     win.style.width=w+'px';win.style.height=h+'px';
-    win.style.left='0';win.style.right='0';win.style.top='0';win.style.bottom='0';
-    win.style.marginLeft=Math.round(x)+'px';win.style.marginRight='auto';
-    win.style.marginTop=Math.round(y)+'px';win.style.marginBottom='auto';
   }
   function clearFrame(){
     /* remember the window exactly where it is before the stylesheet takes over */
     const r=win.getBoundingClientRect();
     savedFrame={x:r.left,y:r.top,w:r.width,h:r.height};
     ['left','top','right','bottom','width','height'].forEach(k=>win.style.removeProperty(k));
-    ['marginLeft','marginRight','marginTop','marginBottom'].forEach(k=>win.style.removeProperty(k));
+    /* removeProperty takes the dashed names only - camelCase is ignored, which is
+       why a moved window kept its margin and a maximised console stayed offset */
+    ['margin-left','margin-right','margin-top','margin-bottom'].forEach(k=>win.style.removeProperty(k));
     win.dataset.framed='1';
   }
   function restoreFrame(){
