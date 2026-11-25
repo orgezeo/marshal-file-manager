@@ -1165,7 +1165,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R60');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R61');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -36074,7 +36074,13 @@ button.rc-row{cursor:pointer}
    lets the page through, the frame itself keeps the mouse, and the layer sits
    UNDER the manager's dialogs - so a tool opens above the console, the way a
    dialog opens above the window it was asked from. */
-.term-ov{padding:0;background:transparent;backdrop-filter:none;align-items:stretch;justify-content:stretch;z-index:190;pointer-events:none}
+/* R61 · the console is the window on top: 190 put its title bar UNDER .topbar
+   (200), so the three buttons and the tool name slid behind the manager's bars */
+.term-ov{padding:0;background:transparent;backdrop-filter:none;align-items:stretch;justify-content:stretch;z-index:260;pointer-events:none}
+/* R61 · everything behind the console is softly blurred, so the eye has one
+   window to read. The blur sits on the console's own layer, not on the page, so
+   the tool keeps its colours; the windowed frame keeps a thin border on top. */
+.term-ov{background:rgba(0,0,0,.14);-webkit-backdrop-filter:blur(7px) saturate(115%);backdrop-filter:blur(7px) saturate(115%)}
 .term-ov>.term-win{pointer-events:auto}
 .term-ov.open{display:block}
 .term-win{position:fixed;inset:0;width:100vw;height:100dvh;background:#1e1e1e;color:#c8c8c8;border:0;border-radius:0;box-shadow:none;overflow:hidden;display:flex;flex-direction:column;padding:0;box-sizing:border-box;font-family:monospace;font-size:0;line-height:0}
@@ -36274,19 +36280,20 @@ button.rc-row{cursor:pointer}
 .term-scroll::-webkit-scrollbar-track{background:#191919;border-left:1px solid #2a2a2a}
 .term-scroll::-webkit-scrollbar-thumb{background:#6a6a6a;border:2px solid #191919;border-radius:0}
 .term-out{display:block;overflow:visible;padding:0;font-family:monospace;font-size:0;line-height:0;color:#c8c8c8;background:transparent;white-space:pre-wrap;word-break:break-word}
-.term-line{display:block;font-size:13.5px;line-height:1.28;min-height:0;margin:0 0 0 1px;white-space:pre-wrap;word-break:break-word}
+.term-line{display:block;font-size:13.5px;line-height:1.28;min-height:0;margin:0 0 0 1px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;max-width:100%}
 .term-line.cmd-line{color:#26c6da}
 .term-line.ok-line{color:#c8c8c8}
 .term-line.err-line{color:#e88080}
 .term-line.info-line{color:#8fd3e0;font-style:normal}
 .term-line.success-line{color:#35d07f}
-.term-prompt-str{color:#35d07f}
+.term-prompt-str{color:#7ee0a8}
 .term-at{color:#8a8a8a}
 .term-prompt-wrap .term-at{color:#8a8a8a}
-.term-host{color:#e0b060}
+.term-line .tk-at,.term-line .term-at{color:#8a8a8a}
+.term-host{color:#e8c078}
 .term-path{color:#35a0f0}
-.term-cwd{color:#35a0f0}
-.term-dollar{color:#c8c8c8}
+.term-cwd{color:#6fc0f8}
+.term-dollar{color:#d0d0d0}
 /* the command you typed keeps its own colours after it has run: the prompt is
    green/blue, the command is plain, the answer takes the colours of what it is */
 .term-line.cmd-line{color:#d8d8d8}
@@ -36317,9 +36324,12 @@ button.rc-row{cursor:pointer}
 .term-line .res-media{color:#c07ae0;font-weight:700}
 .term-line .res-link{color:#5fd0c0;font-weight:700}
 .term-line .res-err{color:#e88080}
-.term-at{color:#d4d454}
+/* R61 · one colour for the @, live and printed: the live prompt used #8a8a8a
+   and a stray `.term-at{color:#d4d454}` painted the echoed line yellow, so the
+   same prompt changed colour on Enter. The token belongs to this theme. */
+.term-at{color:#8a8a8a}
 .term-path{color:#26c6da}
-.term-dollar{color:#c8c8c8}
+.term-dollar{color:#d0d0d0}
 
 /* welcome banner, outlined like the MobaXterm greeting box */
 /* R57 · the greeting box is gone. The console opens with a watermark printed
@@ -36357,24 +36367,32 @@ button.rc-row{cursor:pointer}
 .term-prompt-wrap.term-busy .term-row{visibility:hidden}
 .term-prompt-wrap.term-busy::after{content:'running…';display:block;font-size:12px;line-height:1.6;color:#7a7a7a;padding:2px 0 6px}
 .term-prompt-wrap{position:relative;display:block;background:transparent;font-size:13.5px;line-height:normal;padding:2px 0 8px}
-.term-row{display:flex;align-items:center;padding:0;margin:0 0 -2px 1px;background:transparent;gap:0;font-size:13.5px;line-height:normal}
-.term-ps{font-family:monospace;font-size:13.5px;line-height:normal;white-space:nowrap;flex-shrink:0}
-.term-inp{flex:0 1 auto;width:.1ch;max-width:calc(100vw - 360px);background:transparent;border:none;outline:none;font-family:monospace;font-size:13.5px;line-height:1;color:#e0e0e0;caret-color:transparent;padding:0;margin:0;resize:none;letter-spacing:0}
+.term-row{display:flex;align-items:center;padding:0;margin:0 0 -2px 1px;background:transparent;gap:0;font-size:13.5px;line-height:normal;flex-wrap:wrap;min-width:0}
+.term-ps{font-family:monospace;font-size:13.5px;line-height:normal;white-space:pre-wrap;overflow-wrap:anywhere;flex:0 1 auto;min-width:0}
+.term-inp{flex:0 1 auto;width:.1ch;max-width:calc(100vw - 360px);background:transparent;border:none;outline:none;font-family:monospace;font-size:13.5px;line-height:1;color:#e0e0e0;caret-color:transparent;padding:0;margin:0;resize:none;letter-spacing:0;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;display:block;box-sizing:content-box}
 .term-inp::placeholder{color:#636363}
 /* R52 · the faint tail of a completion, drawn the way PowerShell and fish do it */
 .term-prompt-wrap{--ghost:''}
 .term-row{position:relative}
+/* R61 · a prompt deeper than half the row takes the whole line, so the field
+   starts on a new line instead of being pushed out of the window */
+.term-row.live-wrapped .term-live{flex:0 0 100%;margin-top:1px}
 /* R58 · the line the reader is typing on is one positioned box (.term-live): the
    field, the faint completion and the caret are all drawn in it by coordinate, so
    a suggestion can never push the field - or the caret - sideways. The suggestion
    starts where the typing ends, and the caret stays on the character being typed:
    that character is printed dark inside the light caret, the way a shell shows a
    completion. Nothing in this box is in the flow, so nothing here can reflow. */
-.term-live{position:relative;display:inline-block;vertical-align:baseline;flex:0 0 auto;min-width:0;
+.term-live{position:relative;display:inline-block;vertical-align:baseline;flex:0 0 auto;min-width:0;max-width:100%;
   font-size:var(--term-fs,13.5px);
   height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));white-space:pre;max-width:calc(100vw - 200px)}
+/* R61 · a command longer than the room it has wraps onto a new line instead of
+   scrolling its own tail out of the window, and the box grows with it */
+.term-live .term-inp.term-inp{background:transparent!important;border:0!important;box-shadow:none!important;border-radius:0!important;
+  padding:0!important;margin:0!important;outline:none!important;appearance:none;-webkit-appearance:none;min-height:0!important;max-height:none!important}
 .term-live .term-inp{position:absolute;left:0;top:0;height:100%;padding:0;margin:0;border:0;max-width:none;box-sizing:content-box;
-  line-height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));background:transparent;color:#e0e0e0;caret-color:transparent}
+  line-height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));background:transparent;color:#e0e0e0;caret-color:transparent;
+  white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;overflow:hidden;resize:none;-webkit-user-select:text;user-select:text}
 .term-ghost-tail{position:absolute;top:0;white-space:pre;pointer-events:none;font-family:'TerminalTMT',monospace;
   font-size:var(--term-fs,13.5px);line-height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));color:#6a6a6a}
 .term-ghost-tail .gt-cur{color:#6a6a6a}
@@ -36524,6 +36542,9 @@ body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
 /* text size inside the console only: the prompt, the printed lines and the
    answers grow and shrink together, nothing else on the page moves */
 .term-scroll,.term-out,.term-line,.term-ps,.term-inp,.term-sug-item{font-size:var(--term-fs,13.5px)}
+/* R61 · a prompt deeper than half the row gives the field its own line */
+.term-row.live-wrapped .term-live{flex:0 0 100%;margin-top:1px}
+.term-row.live-wrapped .term-ps{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0;flex:0 1 auto}
 /* R58 · the console leading is ONE number now (--term-lh): the printed line, the
    prompt row, the caret, the logo spacing and the scroll walk all read it, so a
    font zoom moves the whole grid together. 16.81px -> 16.07px: a slight tighten,
@@ -36596,7 +36617,9 @@ body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
    same rule: a fixed layer that centres its child, and a frame that is dragged
    as a margin - so a maximised or restored window always comes back to centre. */
 .term-win.term-windowed{inset:auto;left:0;right:0;top:0;bottom:0;margin:auto;width:min(1120px,calc(100vw - 32px));height:min(760px,calc(100vh - 64px));
-  border-radius:var(--rlg,14px);box-shadow:0 28px 74px rgba(0,0,0,.45),0 2px 10px rgba(0,0,0,.3);overflow:hidden}
+  border-radius:var(--rlg,14px);box-shadow:0 28px 74px rgba(0,0,0,.45),0 2px 10px rgba(0,0,0,.3);overflow:hidden;
+  /* R61 · a blurred page needs an edge: the frame gets one hairline of its own */
+  border:1px solid rgba(255,255,255,.14)}
 .term-win.term-windowed.term-dragging{cursor:move;user-select:none}
 .term-win.term-windowed .term-titlebar{cursor:default}
 .term-resize{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;z-index:70;
@@ -39761,7 +39784,9 @@ input.inp,select.inp{height:32px}
    underneath it is still the page - a window, not a full-screen dimmer. */
 :root[data-theme="win11"] .term-ov,:root[data-theme="win11d"] .term-ov,
 :root[data-theme="win10"] .term-ov,:root[data-theme="win10d"] .term-ov{
-  background:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;
+  /* R61 · the console layer now carries the soft blur the reader asked for, so
+     these packs keep a light tint instead of wiping it back to transparent */
+  background:rgba(0,0,0,.14);-webkit-backdrop-filter:blur(7px) saturate(115%);backdrop-filter:blur(7px) saturate(115%);
 }
 :root[data-theme="win11d"] .mod{
   background:#2b2b2b;border:1px solid rgba(255,255,255,.0578);border-bottom-color:rgba(255,255,255,.16);
@@ -41271,7 +41296,7 @@ input.inp,select.inp{height:32px}
                   <span class="lg-name"><?=htmlspecialchars(FM_PRODUCT_NAME)?></span><span class="lg-sep"> · </span><span class="lg-key">version</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_VERSION)?></span><span class="lg-sep"> · </span><span class="lg-key">build</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_RELEASE)?></span><span class="lg-sep"> · </span><span class="lg-key">since</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_DATE)?></span><span class="lg-sep"> · </span><span class="lg-key"><?=htmlspecialchars(FM_PRODUCT_SYSTEM)?></span>
                   <span class="lg-sub"><span class="lg-key">cwd</span> <span class="lg-val" id="termWorkingDir"><?=htmlspecialchars($termTreeDir)?></span><span class="lg-sep"> · </span><span class="lg-key">host</span> <span class="lg-val"><?=htmlspecialchars($termHostLabel)?></span><span class="lg-sep"> · </span><span class="lg-key">user</span> <span class="lg-val"><?=htmlspecialchars($termUserLabel)?></span><span class="lg-sep"> · </span><span class="lg-key">link</span> <span class="lg-val" id="termConnBadge">ready</span></span>
                 </div>
-              <template id="termPromptTemplate"><div class="term-row" data-tab="__UID__"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><span class="term-live" id="termLive__UID__"><input class="term-inp" id="termInp__UID__" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-ghost term-ghost-tail" id="termGhost__UID__" aria-hidden="true"></span><span class="term-int-caret" id="termCaret__UID__" aria-hidden="true"></span></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
+              <template id="termPromptTemplate"><div class="term-row" data-tab="__UID__"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><span class="term-live" id="termLive__UID__"><textarea class="term-inp" id="termInp__UID__" rows="1" wrap="soft" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"></textarea><span class="term-ghost term-ghost-tail" id="termGhost__UID__" aria-hidden="true"></span><span class="term-int-caret" id="termCaret__UID__" aria-hidden="true"></span></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
             </div>
           </div>
         </div>
@@ -51792,6 +51817,9 @@ function termGhostPlace(inp,gp){
   const step=gp||termMonoPx()||8.13;
   const at=Math.max(inp.value.length,0)*step;
   const cap=termRowRoom(inp);
+  /* R61 · a field that wrapped paints its own text; a tail drawn on the old
+     one-line grid would land on the wrong glyph, so it is not drawn at all */
+  if((inp.scrollHeight||0)>(parseFloat(getComputedStyle(inp).lineHeight)||16)*1.5){g.style.display='none';return;}
   /* past the window the field scrolls under its own text, so a tail drawn at the
      typing position would sit on the wrong glyph: it is simply not drawn there */
   g.style.display=at>cap?'none':'';
@@ -51811,6 +51839,16 @@ function termRowRoom(i){
   const room=row.clientWidth-(ps?ps.getBoundingClientRect().width:0)-18;
   return Math.max(160,Math.round(room));
 }
+function termFieldLines(i){
+  /* how many lines the command needs, measured from its content - never from the
+     height the box happens to have, or the two numbers would feed each other */
+  const lh=parseFloat(getComputedStyle(i).lineHeight)||(termFontPx()*1.19)||16;
+  const prev=i.style.height;
+  i.style.height='auto';
+  const h=i.scrollHeight||lh;
+  i.style.height=prev;
+  return Math.max(1,Math.round(h/lh));
+}
 function adjustTermInputWidth(el){
   const i=el||termInput();
   if(!i)return;
@@ -51818,17 +51856,35 @@ function adjustTermInputWidth(el){
   const live=i.closest('.term-live');
   const g=live?live.querySelector('.term-ghost-tail'):null;
   const tail=(g&&g.classList.contains('on'))?g.textContent:'';
-  /* field and tail share one pixel grid, measured from the console's own face;
-     the caret is one more glyph wide than the typed text, so the two never clip */
-  /* a command longer than the window: the field is capped to the room the row
-     actually has and scrolls its own text the way an input does, so the caret
-     rides the right edge instead of walking off the screen */
-  const want=(Math.max(i.value.length,1))*gp;
-  const cap=termRowRoom(i);
-  const fw=Math.min(want,cap);
-  if(live)live.style.width=Math.min((Math.max(i.value.length,0)+tail.length+1)*gp,cap+gp)+'px';
+  const row=i.closest('.term-row');
+  /* R61 · the console is one column: the prompt and the command are laid out in
+     a row that owns the width of the console, and the command takes the NEXT
+     line as soon as the prompt leaves it less room than the command needs. The
+     field keeps a minimum of a third of the row so short commands stay on the
+     prompt's line, exactly like a shell. */
+  const room=termRowRoom(i);
+  const ps=row?row.querySelector('.term-ps'):null;
+  const psW=ps?ps.getBoundingClientRect().width:0;
+  const rowW=row?row.clientWidth:room;
+  if(row)row.classList.toggle('live-wrapped',psW>Math.max(80,rowW*0.5));
+  const avail=row&&row.classList.contains('live-wrapped')?Math.max(160,rowW-2):room;
+  const want=Math.max(i.value.length,1)*gp;
+  const fw=Math.max(Math.min(want,avail),Math.min(avail,Math.round(avail/3)));
+  if(live){live.style.width=(fw+2)+'px';live.style.maxWidth='100%';}
   i.style.width=fw+'px';
   i.dataset.full=String(want);
+  /* the box the typing happens in is as tall as the text inside it */
+  if(live){
+    const lh=parseFloat(getComputedStyle(i).lineHeight)||(termFontPx()*1.19)||16;
+    /* the box grows with the command up to eight lines; past that it scrolls
+       inside itself, so one enormous paste cannot push the prompt off screen */
+    const lines=Math.min(termFieldLines(i),8);
+    const h=lines*lh;
+    live.style.height=h+'px';
+    i.style.height=h+'px';
+    i.style.overflowY=i.scrollHeight>h+1?'auto':'hidden';
+    if(row)row.style.alignItems=lines>1?'flex-start':'center';
+  }
   termGhostPlace(i,gp);
 }
 /* ══ R53 · scrolling that behaves like a terminal ════════════════════════════
@@ -53600,6 +53656,9 @@ function termBindTab(tab){
   inp.addEventListener('keydown',async e=>{
     if(!tab.active){termTabSelect(tab.id);}
     e.stopPropagation();
+    /* R61 · the field wraps, so Enter is a command and Shift+Enter is a new
+       line inside the command - never a new line that runs by itself */
+    if(e.key==='Enter'&&e.shiftKey){e.preventDefault();inp.value+='\n';adjustTermInputWidth(inp);termCaretSync(inp);return;}
     if(e.key==='Enter'){e.preventDefault();hideSug();await runTerm();return;}
     if(termRunning){if(!e.ctrlKey)e.preventDefault();return;}
     if(e.key==='ArrowUp'){e.preventDefault();if(tab.hIdx<tab.hist.length-1){tab.hIdx++;inp.value=tab.hist[tab.hist.length-1-tab.hIdx]||'';}adjustTermInputWidth();return;}
@@ -53693,7 +53752,10 @@ function termShowGhost(typed,full){
 function termAcceptGhost(){
   const g=termGhostEl(),inp=termInput();
   if(!g||!g.classList.contains('on')||!inp){return false;}
-  const tail=g.textContent.slice((inp.value||'').length);
+  /* the box holds ONLY the suggested tail - the typed part lives in the field -
+     so the whole of its text is what Tab has to add. Slicing it by the length of
+     the field removed all of it, and Tab did nothing at all. */
+  const tail=g.textContent||'';
   if(!tail){return false;}
   inp.value=inp.value+tail;
   termHideGhost();
