@@ -34580,8 +34580,6 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .sb-item .sb-star svg polygon{fill:#facc15;stroke:#facc15;stroke-width:1;stroke-linejoin:round}
 /* the pinned tool leads the pane: its star is the same size as the icons beside it,
    so the row reads as "this one is pinned", not as a different kind of row */
-.sb-item .sb-star-hero svg{width:16px;height:16px}
-.sb-item .sb-star-hero{filter:drop-shadow(0 0 3px rgba(250,204,21,.45))}
 /* the star that marks a featured tool must not sit glued to the pane's
    edge: the compact rows of the packs left it as little as 5px of air */
 :root[data-theme="kali"] .sb-item .sb-star,
@@ -35975,7 +35973,7 @@ button.rc-row{cursor:pointer}
 .sh-btn.sh-purp:hover{background:rgba(139,92,246,.08);color:#c4b5fd;border-color:rgba(139,92,246,.2)}
 
 /* ══ TERMINAL (MobaXterm-style dark shell: title bar, black menu, icon toolbar, rail, session tree, chevron status bar) ══ */
-.term-ov{padding:0;background:#1c1c1c;backdrop-filter:none;align-items:stretch;justify-content:stretch}
+.term-ov{padding:0;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);align-items:stretch;justify-content:stretch}
 .term-ov.open{display:block}
 .term-win{position:fixed;inset:0;width:100vw;height:100dvh;background:#1e1e1e;color:#c8c8c8;border:0;border-radius:0;box-shadow:none;overflow:hidden;display:flex;flex-direction:column;padding:0;box-sizing:border-box;font-family:monospace;font-size:0;line-height:0}
 
@@ -36287,6 +36285,146 @@ body.term-standalone .shell{display:none!important}
    that belongs to the console asks for it with .term-allow */
 body.term-standalone .mod-ov:not(.term-ov):not(.term-allow){display:none!important}
 body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
+/* ══ R53c · the console window wears the manager's own theme ═══════════════
+   The console frame is built from the manager's tokens and its two font
+   families, so a light theme gives a light console and the dark ones stay dark.
+   Only the scrollback stays a terminal: black in every theme, the way a real
+   terminal is. Attributes on <body> carry the pack, its brightness and the
+   window button set, because the console lives outside the manager's DOM. */
+.term-win{background:var(--panel);color:var(--t1);border:1px solid var(--border2);font-size:0;line-height:0}
+.term-titlebar{height:32px;min-height:32px;padding:0 0 0 10px;gap:8px;background:var(--raised);border-bottom:1px solid var(--border)}
+.term-applogo svg{stroke:var(--t2)}
+.term-apptitle{font-size:12px;color:var(--t2)}
+.term-apptitle b{color:var(--t1)}
+.term-wbtn{width:44px;height:32px;color:var(--t2)}
+.term-wbtn:hover{background:var(--hov);color:var(--t1)}
+.term-wbtn-close:hover{background:#c0392b;color:#fff}
+.term-menubar{height:26px;min-height:26px;background:var(--surf);border-bottom:1px solid var(--border)}
+.term-menu-item{height:26px;line-height:26px;color:var(--t1);font-size:12px}
+.term-menu-item:hover,.term-menu-item.on{background:var(--hov);color:var(--t1)}
+.term-menu-pop{top:26px;background:var(--surf);border:1px solid var(--border2);box-shadow:0 12px 30px rgba(0,0,0,calc(.35 * var(--term-shade,1)))}
+.term-menu-pop .mi{color:var(--t1);height:24px}
+.term-menu-pop .mi:hover{background:var(--hov);color:var(--t1)}
+.term-menu-pop .mi .mk{color:var(--t3)}
+.term-menu-pop .msep{background:var(--border2)}
+.term-menu-brand{color:var(--t3)}
+.term-menu-brand b{color:#e8c33a}
+.term-toolbar{height:54px;min-height:54px;background:var(--panel);border-bottom:1px solid var(--border)}
+.term-tile{color:var(--t2)}
+.term-tile svg{stroke:var(--t2)}
+.term-tile-cap{color:var(--t2);font-family:'TerminalTMT',monospace}
+.term-tile:hover{background:var(--hov);border-color:var(--border2)}
+.term-tile:hover svg,.term-tile:hover .term-tile-cap{color:var(--t1)}
+.term-tile-sep{background:var(--border)}
+.term-rail{background:var(--panel);border-right:1px solid var(--border)}
+.term-rail-btn{color:var(--t3)}
+.term-rail-btn:hover{background:var(--hov);color:var(--t1)}
+.term-rail-btn.on{background:var(--raised);color:var(--t1)}
+.term-rail-btn.on::before{background:var(--link)}
+.term-rail-fold{color:var(--t2);border-bottom:1px solid var(--border)}
+.term-rail-fold:hover{background:var(--hov);color:var(--t1)}
+.term-side{background:var(--panel);border-right:1px solid var(--border)}
+.term-tree-row{color:var(--t1)}
+.term-tree-row:hover{background:var(--hov)}
+.term-tree-row.on{background:var(--act);color:var(--t1)}
+.term-tree-row.on .term-tree-name{color:var(--t1)}
+.term-qc-inp,.term-qc-add{background:var(--surf);border-color:var(--border2);color:var(--t1)}
+.term-tabs{background:var(--raised);border-bottom:1px solid var(--border)}
+.term-tab{background:var(--surf);color:var(--t2);border-color:var(--border)}
+.term-tab.on{background:var(--panel);color:var(--t1)}
+.term-tab-new{color:var(--t2)}
+.term-tab-new:hover{background:var(--hov);color:var(--t1)}
+.term-footer,.term-statusbar{background:var(--raised);color:var(--t2);border-top:1px solid var(--border)}
+.term-panel-note{color:var(--t2)}
+.term-panel-foot{background:var(--raised);border-top:1px solid var(--border);color:var(--t2)}
+
+/* the black window buttons of this pack (Kali) and the square ones of Windows */
+.term-win[data-wbtns="kali"] .term-wbtn{border-radius:0}
+.term-win[data-wbtns="kali"] .term-wbtn:hover{background:var(--hov)}
+.term-win[data-wbtns="mac"] .term-wbtn{border-radius:50%;width:13px;height:13px;margin:0 3px;color:transparent}
+.term-win[data-wbtns="mac"] .term-wbtn svg{opacity:0}
+.term-win[data-wbtns="mac"] .term-wbtn:hover svg{opacity:1;stroke:#4a2b18}
+.term-win[data-wbtns="mac"] #termWinClose{background:#ff5f57}
+.term-win[data-wbtns="mac"] #termWinMin{background:#febc2e}
+.term-win[data-wbtns="mac"] #termWinMax{background:#28c840}
+.term-win[data-wbtns="mac"] .term-title-spacer{flex:1}
+
+/* the three buttons actually do what the manager's three buttons do */
+.term-win.term-maxed .term-titlebar{border-bottom-color:var(--border2)}
+
+/* text size inside the console only: the prompt, the printed lines and the
+   answers grow and shrink together, nothing else on the page moves */
+.term-scroll,.term-out,.term-line,.term-ps,.term-inp,.term-sug-item,.term-banner{font-size:var(--term-fs,13.5px)}
+.term-line,.term-ps,.term-inp,.term-out{line-height:calc(var(--term-fs,13.5px) * 1.28)}
+.term-inp{line-height:1}
+.term-banner{font-size:calc(var(--term-fs,13.5px) * .93)}
+.term-sug-item{font-size:calc(var(--term-fs,13.5px) * .92)}
+/* ══ R53c · context menu, toast, resize grip, and the windowed console ═════ */
+/* the strips that were still painted by hand follow the pack now: labels, values,
+   separators, tab faces, icons, the quick-connect pill and the tree */
+.term-status-label{color:var(--t3)}
+.term-status-value{color:var(--t1)}
+.term-status-sep{background:var(--border)}
+.term-status-ico svg{stroke:var(--t3)}
+.term-status-graph{background:var(--surf);border-color:var(--border)}
+.term-tab{background:var(--surf);color:var(--t2);box-shadow:none}
+.term-tab:hover{background:var(--hov);color:var(--t1)}
+.term-tab.on{background:var(--panel);color:var(--t1)}
+.term-tab.on .term-tab-ico svg{stroke:var(--link)}
+.term-tab-ico svg{stroke:var(--t3)}
+.term-tab-num{color:var(--t3)}
+.term-tab-close{color:var(--t2)}
+.term-tab-new{background:var(--surf);border:1px solid var(--border2);color:var(--t2);border-radius:var(--r,6px)}
+.term-tab-new:hover{background:var(--hov);color:var(--t1)}
+.term-qc-inp{background:var(--surf);border:1px solid var(--border2);color:var(--t1)}
+.term-qc-inp::placeholder{color:var(--t3)}
+.term-qc-add{background:var(--surf);border:1px solid var(--border2);color:var(--t2)}
+.term-qc-add:hover{background:var(--hov);color:var(--t1)}
+.term-tree{background:var(--panel)}
+.term-tree-name{color:var(--t1)}
+.term-tree-row.file .term-tree-ico svg{stroke:var(--t2)}
+.term-tree-ico svg{stroke:var(--t2);fill:none}
+.term-tree-row.folder .term-tree-ico svg{stroke:var(--link);fill:rgba(125,160,200,.12)}
+.term-tree-badge{color:var(--t3);border-color:var(--border)}
+.term-panel-note,.term-tree-empty{color:var(--t2)}
+.term-rail-btn.on::before{background:var(--link)}
+.term-win .term-titlebar{box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+:root[data-theme="win11"] .term-win .term-titlebar,:root[data-theme="win10"] .term-win .term-titlebar,:root[data-theme="light"] .term-win .term-titlebar{box-shadow:none}
+/* the last dark-only pieces: badges, the selected marker under the tree, and the
+   strip along the bottom of the sidebar */
+.term-tree-badge,.term-tree .kf-badge{color:var(--t3)}
+.term-selected{color:var(--t3)}
+.term-selected b{color:var(--t1)}
+.term-side>.term-panel-foot{background:var(--raised);border-top:1px solid var(--border);color:var(--t2)}
+.term-win .term-tree-empty{padding:10px 12px}
+.term-ctx{position:fixed;z-index:100000;min-width:236px;max-width:320px;padding:4px;border-radius:var(--r,10px);
+  background:var(--surf);border:1px solid var(--border2);box-shadow:0 18px 44px rgba(0,0,0,.38),0 2px 8px rgba(0,0,0,.22);
+  font-family:'TerminalTMT',monospace;font-size:12px;color:var(--t1);animation:termCtxIn .09s ease-out both}
+@keyframes termCtxIn{from{opacity:0;transform:translateY(-3px) scale(.985)}to{opacity:1;transform:none}}
+.term-ctx .tm-head{padding:6px 9px 5px;font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--t3);
+  border-bottom:1px solid var(--border);margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:ltr;text-align:left}
+.term-ctx .tm-item{display:flex;align-items:center;gap:9px;height:27px;padding:0 9px;border-radius:calc(var(--r,10px) - 6px);cursor:default;white-space:nowrap}
+.term-ctx .tm-item:hover{background:var(--hov);color:var(--t1)}
+.term-ctx .tm-item.dis{color:var(--t3);opacity:.55}
+.term-ctx .tm-item.dis:hover{background:transparent}
+.term-ctx .tm-ico{width:14px;height:14px;flex:0 0 14px;display:grid;place-items:center}
+.term-ctx .tm-ico svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.term-ctx .tm-key{margin-left:auto;padding-left:14px;font-size:10.5px;color:var(--t3)}
+.term-ctx .tm-sep{height:1px;margin:4px 6px;background:var(--border)}
+.term-toast{position:fixed;right:14px;bottom:44px;z-index:99999;max-width:320px;padding:8px 12px;border-radius:8px;
+  background:var(--raised);border:1px solid var(--border2);color:var(--t1);font-family:'TerminalTMT',monospace;font-size:11.5px;
+  box-shadow:0 10px 26px rgba(0,0,0,.3);opacity:0;transform:translateY(6px);transition:opacity .16s,transform .16s;pointer-events:none}
+.term-toast.on{opacity:1;transform:none}
+/* while it sits inside the manager the console is a window: moved by its title
+   bar, resized from its corner, and maximised to the page by the middle button */
+.term-win.term-windowed{inset:auto;left:max(16px,calc(50vw - 560px));top:max(24px,4vh);width:min(1120px,calc(100vw - 32px));height:min(760px,calc(100vh - 64px));
+  border-radius:var(--rlg,14px);box-shadow:0 28px 74px rgba(0,0,0,.45),0 2px 10px rgba(0,0,0,.3);overflow:hidden}
+.term-win.term-windowed.term-dragging{cursor:move;user-select:none}
+.term-win.term-windowed .term-titlebar{cursor:default}
+.term-resize{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;z-index:70;
+  background:linear-gradient(135deg,transparent 45%,var(--border2) 45%,var(--border2) 55%,transparent 55%,transparent 68%,var(--border2) 68%,var(--border2) 78%,transparent 78%)}
+body.term-standalone .term-win.term-windowed{inset:0;left:0;top:0;width:100vw;height:100dvh;border-radius:0;box-shadow:none}
+body.term-standalone .term-resize{display:none}
 body.term-standalone .term-win{position:fixed;inset:0}
 /* the three window buttons replace the floating close box */
 .term-close{display:none!important}
@@ -39788,21 +39926,23 @@ input.inp,select.inp{height:32px}
   <div class="sb-div"></div>
   <div class="sb-sec" style="flex-shrink:1;min-height:0;display:flex;flex-direction:column"><div class="sb-label">Tools</div>
     <div class="sb-nav" style="overflow-y:auto;overflow-x:hidden;min-height:0;flex:1">
-       <?php if(!empty($_SESSION['fm_admin'])&&fm_can('guard')):?><button class="sb-item" id="termBtn" title="A real shell on this server in a new tab"><svg viewBox="0 0 24 24" style="stroke:#22c55e"><rect x="2.5" y="4" width="19" height="16" rx="2"/><polyline points="6.5 9.5 9.5 12 6.5 14.5"/><line x1="11.5" y1="15" x2="16" y2="15"/></svg><span class="sb-tool-name">Terminal</span><span class="sb-star sb-star-hero" title="Pinned tool" aria-label="Pinned tool"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span></button><button class="sb-item" id="updBtn" title="Check for a newer version of this file manager, read exactly what changed, and install it when you decide to - separately from the File Guardian tool, which only keeps the backup"><svg viewBox="0 0 24 24" style="stroke:#34d399" style="stroke:#34d399"><path d="M20.3 12.6a8.3 8.3 0 1 1-2.4-6.5"/><path d="M20.6 4.2v4.6h-4.6"/><circle cx="12" cy="12" r="1.6"/></svg></svg><span class="sb-tool-name">Check Updates</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
+       <?php if(!empty($_SESSION['fm_admin'])&&fm_can('guard')):?><button class="sb-item" id="updBtn" title="Check for a newer version of this file manager, read exactly what changed, and install it when you decide to - separately from the File Guardian tool, which only keeps the backup"><svg viewBox="0 0 24 24" style="stroke:#34d399"><path d="M20.3 12.6a8.3 8.3 0 1 1-2.4-6.5"/><path d="M20.6 4.2v4.6h-4.6"/><circle cx="12" cy="12" r="1.6"/></svg></svg><span class="sb-tool-name">Check Updates</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button><?php endif;?>
-       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="cmsBtn" title="Every WordPress, Joomla and Drupal site on this host: its config, its database, its users, its plugins and its files"><svg viewBox="0 0 24 24" style="stroke:#a78bfa" style="stroke:#a78bfa"><circle cx="12" cy="12" r="9.2"/><path d="M2.8 12h18.4"/><path d="M12 2.8a15 15 0 0 1 4 9.2 15 15 0 0 1-4 9.2 15 15 0 0 1-4-9.2 15 15 0 0 1 4-9.2z"/></svg></svg><span class="sb-tool-name">CMS Manager</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?><?php endif;?>
-       <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?><button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account"><svg viewBox="0 0 24 24" style="stroke:#3b82f6" style="stroke:#2563eb"><path d="M14.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8.5"/><path d="M14.5 3 19 7.5h-4.5z"/><path d="M9.5 13.5h5"/><path d="m12.6 11.4 2.1 2.1-2.1 2.1"/></svg></svg><span class="sb-tool-name">MFM ACC Login</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
+       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="cmsBtn" title="Every WordPress, Joomla and Drupal site on this host: its config, its database, its users, its plugins and its files"><svg viewBox="0 0 24 24" style="stroke:#a78bfa"><circle cx="12" cy="12" r="9.2"/><path d="M2.8 12h18.4"/><path d="M12 2.8a15 15 0 0 1 4 9.2 15 15 0 0 1-4 9.2 15 15 0 0 1-4-9.2 15 15 0 0 1 4-9.2z"/></svg></svg><span class="sb-tool-name">CMS Manager</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?><?php endif;?>
+       <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?><button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account"><svg viewBox="0 0 24 24" style="stroke:#2563eb"><path d="M14.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8.5"/><path d="M14.5 3 19 7.5h-4.5z"/><path d="M9.5 13.5h5"/><path d="m12.6 11.4 2.1 2.1-2.1 2.1"/></svg></svg><span class="sb-tool-name">MFM ACC Login</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button><?php endif;?>
-       <?php if(function_exists('fm_mfm_is_primary')&&fm_mfm_is_primary()):?><button class="sb-item" id="mfaBtn" title="Every account of this file manager: what each one may do, which of their sessions are open, and everything an administrator can change about them"><svg viewBox="0 0 24 24" style="stroke:#38bdf8" style="stroke:#93c5fd"><path d="M12 21.5s7.5-3.6 7.5-9.5V5.6L12 2.5 4.5 5.6V12c0 5.9 7.5 9.5 7.5 9.5z"/><circle cx="12" cy="10" r="2.3"/><path d="M8.4 16c.7-1.7 2-2.6 3.6-2.6s2.9.9 3.6 2.6"/></svg></svg><span class="sb-tool-name">MFM Admin</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
+       <?php if(function_exists('fm_mfm_is_primary')&&fm_mfm_is_primary()):?><button class="sb-item" id="mfaBtn" title="Every account of this file manager: what each one may do, which of their sessions are open, and everything an administrator can change about them"><svg viewBox="0 0 24 24" style="stroke:#93c5fd"><path d="M12 21.5s7.5-3.6 7.5-9.5V5.6L12 2.5 4.5 5.6V12c0 5.9 7.5 9.5 7.5 9.5z"/><circle cx="12" cy="10" r="2.3"/><path d="M8.4 16c.7-1.7 2-2.6 3.6-2.6s2.9.9 3.6 2.6"/></svg></svg><span class="sb-tool-name">MFM Admin</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button><?php endif;?>
-       <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><button class="sb-item" id="pieBtn" title="Install WordPress plugins from the official repository, and Joomla extensions from a package - search, read, install, activate"><svg viewBox="0 0 24 24" style="stroke:#f472b6" style="stroke:#fbbf24"><path d="M9.4 3.6h5.2a1.4 1.4 0 0 1 1.3.9l.8 2 2.1.8a1.4 1.4 0 0 1 .9 1.3v5.2a1.4 1.4 0 0 1-.9 1.3l-2.1.8-.8 2a1.4 1.4 0 0 1-1.3.9H9.4a1.4 1.4 0 0 1-1.3-.9l-.8-2-2.1-.8a1.4 1.4 0 0 1-.9-1.3V8.6a1.4 1.4 0 0 1 .9-1.3l2.1-.8.8-2a1.4 1.4 0 0 1 1.3-.9z"/></svg></svg><span class="sb-tool-name">Plugins Installer</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
-       <?php if(!empty($_SESSION['fm_admin'])&&fm_can('rooting')):?><button class="sb-item" id="rootBtn" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and the tool takes root by itself if any of them is open"><svg viewBox="0 0 24 24" style="stroke:#ef4444" style="stroke:#fca5a5"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m11 12 8-8"/><path d="m17 6 2.5 2.5"/><path d="m14 9 2.5 2.5"/></svg></svg><span class="sb-tool-name">Rooting</span><span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
+       <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><button class="sb-item" id="pieBtn" title="Install WordPress plugins from the official repository, and Joomla extensions from a package - search, read, install, activate"><svg viewBox="0 0 24 24" style="stroke:#fbbf24"><path d="M9.4 3.6h5.2a1.4 1.4 0 0 1 1.3.9l.8 2 2.1.8a1.4 1.4 0 0 1 .9 1.3v5.2a1.4 1.4 0 0 1-.9 1.3l-2.1.8-.8 2a1.4 1.4 0 0 1-1.3.9H9.4a1.4 1.4 0 0 1-1.3-.9l-.8-2-2.1-.8a1.4 1.4 0 0 1-.9-1.3V8.6a1.4 1.4 0 0 1 .9-1.3l2.1-.8.8-2a1.4 1.4 0 0 1 1.3-.9z"/></svg></svg><span class="sb-tool-name">Plugins Installer</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
+       <?php if(!empty($_SESSION['fm_admin'])&&fm_can('rooting')):?><button class="sb-item" id="rootBtn" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and the tool takes root by itself if any of them is open"><svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m11 12 8-8"/><path d="m17 6 2.5 2.5"/><path d="m14 9 2.5 2.5"/></svg></svg><span class="sb-tool-name">Rooting</span><span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
+       <?php if(!$fm->isRO()&&fm_can('terminal')):?><button class="sb-item" id="termBtn" title="A real shell on this server in a new tab"><svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2"/><polyline points="6.5 9.5 9.5 12 6.5 14.5"/><line x1="11.5" y1="15" x2="16" y2="15"/></svg><span class="sb-tool-name">Terminal</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
        <?php $pmNow=$fm->privMode();$pmShort=['server'=>'server','auto'=>'','wordpress'=>'WP','joomla'=>'Joomla'][$pmNow]??'';$pmLabel=['server'=>'Server account only','auto'=>'Automatic','wordpress'=>'WordPress','joomla'=>'Joomla'][$pmNow]??$pmNow;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(fm_can('privmode')):?><button class="sb-item" id="privModeBtn" title="File changes are performed by: <?=htmlspecialchars($pmLabel)?> - click to change"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>Privilege Mode<span id="privModeBadge" style="margin-left:6px;font-size:10px;opacity:.8"><?=trim((string)$pmShort)===''?'':'· '.htmlspecialchars($pmShort)?></span></button><?php endif;?><?php endif;?><?php endif;?>
-       <button class="sb-item" id="actBtn" title="Everything this tool has done on this server, newest first"><svg viewBox="0 0 24 24" style="stroke:#fbbf24"><path d="M2.5 12h4l2.5-6.5 4 13 2.5-6.5h6"/></svg><span class="sb-tool-name">Activity Log</span><span class="sb-tool-name">Activity</span><span class="sb-star" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span></button>
-       <button class="sb-item" id="mfmThemeBtn" title="MFM Theme - pick a look for this file manager"><svg viewBox="0 0 24 24" style="stroke:#c084fc"><rect x="2" y="3" width="20" height="16" rx="2.5"/><path d="M2 8h20"/><circle cx="5.5" cy="5.5" r=".9"/><circle cx="8.3" cy="5.5" r=".9"/><path d="M6 13l2.6 4 2.4-3 2 2.4"/></svg><span class="sb-tool-name">MFM Theme</span><span class="sb-tool-name">Theme</span><span class="sb-star" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span></button>
-       <button class="sb-item" id="agentBtn" title="Open Assistant Agent"><svg viewBox="0 0 24 24" style="stroke:#22d3ee"><path d="M20.5 12.4a7.5 7.5 0 0 1-10.9 6.7L4.2 20.6l1.5-5.1a7.5 7.5 0 1 1 14.8-3.1z"/><path d="M8.6 11.2h.01M12 11.2h.01M15.4 11.2h.01"/></svg><span class="sb-tool-name">Assistant Agent</span><span class="sb-tool-name">Agent</span><span class="sb-star" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span></button>
-       <?php if(!$fm->isRO()):?><button class="sb-item" id="brBtn" title="Rename many selected files at once with a pattern, a number series or a find-and-replace"><svg viewBox="0 0 24 24" style="stroke:#fb923c"><path d="M4 7V4.5h16V7"/><path d="M12 4.5v15"/><path d="M8.5 19.5h7"/><path d="m18.5 12-2-2"/><path d="m16.5 10 2 2"/></svg><span class="sb-tool-name">Batch Rename</span><span class="sb-tool-name">Rename</span><span class="sb-star" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span></button>
+       <button class="sb-item" id="actBtn" title="Everything this tool has done on this server, newest first"><svg viewBox="0 0 24 24"><path d="M2.5 12h4l2.5-6.5 4 13 2.5-6.5h6"/></svg></svg>Activity Log</button>
+       <button class="sb-item" id="mfmThemeBtn" title="MFM Theme - pick a look for this file manager"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="16" rx="2.5"/><path d="M2 8h20"/><circle cx="5.5" cy="5.5" r=".9"/><circle cx="8.3" cy="5.5" r=".9"/><path d="M6 13l2.6 4 2.4-3 2 2.4"/></svg><span class="sb-tool-name">MFM Theme</span></button>
+       <button class="sb-item" id="agentBtn" title="Open Assistant Agent"><svg viewBox="0 0 24 24"><path d="M20.5 12.4a7.5 7.5 0 0 1-10.9 6.7L4.2 20.6l1.5-5.1a7.5 7.5 0 1 1 14.8-3.1z"/><path d="M8.6 11.2h.01M12 11.2h.01M15.4 11.2h.01"/></svg></svg>Assistant Agent
+       </button>
+       <?php if(!$fm->isRO()):?><button class="sb-item" id="brBtn" title="Rename many selected files at once with a pattern, a number series or a find-and-replace"><svg viewBox="0 0 24 24"><path d="M4 7V4.5h16V7"/><path d="M12 4.5v15"/><path d="M8.5 19.5h7"/><path d="m18.5 12-2-2"/><path d="m16.5 10 2 2"/></svg></svg>Batch Rename</button>
        <?php if(!$fm->isRO()):?><form method="post" style="width:100%">
         <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>">
         <input type="hidden" name="action" value="backup_dir">
@@ -39835,7 +39975,6 @@ input.inp,select.inp{height:32px}
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="sqlBtn" title="Run SQL against a database on this host and read the answer"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.6" rx="7.4" ry="2.9"/><path d="M4.6 5.6v12.8c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9V5.6"/><path d="M4.6 12c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9"/></svg></svg>SQL Manager</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="sshBtn" title="Manage SSH accounts and keys on this server"><svg viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="12" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/><polyline points="6.5 9 8.5 11 6.5 13"/><path d="M11 13h3.5"/></svg></svg>SSH Access</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><button class="sb-item" id="symlinkBtn" title="Create a symbolic link where the filesystem does not offer one"><svg viewBox="0 0 24 24"><path d="M10 13.5a4.5 4.5 0 0 0 6.8.5l2.7-2.7a4.5 4.5 0 0 0-6.4-6.4l-1.5 1.5"/><path d="M14 10.5a4.5 4.5 0 0 0-6.8-.5l-2.7 2.7a4.5 4.5 0 0 0 6.4 6.4l1.5-1.5"/></svg></svg>Symlink</button><?php endif;?>
-       <?php if(!$fm->isRO()&&fm_can('terminal')):?><button <?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="threatsBtn" title="Review suspicious small files and CMS accounts"><svg viewBox="0 0 24 24"><path d="M12 3 2.9 19.2a1.4 1.4 0 0 0 1.2 2.1h15.8a1.4 1.4 0 0 0 1.2-2.1z"/><path d="M12 9v4.6"/><path d="M12 17h.01"/></svg></svg>Threats Alerts</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?><button class="sb-item" id="webmailBtn" title="Every mailbox on this host - WordPress, Joomla, mail folders, mail servers and cPanel accounts - opened without a sign-in"><svg viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="m3.4 6.6 8.6 6.4 8.6-6.4"/></svg></svg>Webmail Manager</button><?php endif;?><?php endif;?><?php endif;?>
        <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><button class="sb-item" id="wfcBtn" title="Drive the Wordfence plugin installed on this server - firewall, blocks, scans, logs and every setting"><svg viewBox="0 0 24 24"><rect x="2.6" y="4" width="18.8" height="16" rx="1.6"/><path d="M2.6 9.3h18.8M2.6 14.7h18.8"/><path d="M8.5 4v5.3M15.5 9.3v5.4M8.5 14.7V20M15.5 4v5.3"/></svg></svg>Wordfence Controller
@@ -51441,11 +51580,13 @@ function termScrollToBottom(){
 function termScrollBottom(){termScrollToBottom();}
 
 document.getElementById('termBtn')?.addEventListener('click',()=>{
-  const terminalUrl=new URL(window.location.href);
-  terminalUrl.searchParams.set('terminal','1');
-  terminalUrl.searchParams.delete('x');
-  terminalUrl.searchParams.delete('raw');
-  window.open(terminalUrl.toString(),'_blank','noopener,noreferrer');
+  /* a window inside the manager, so its buttons, its theme and its frame are the
+     manager's - and its tabs keep running when it is hidden */
+  const ov=document.getElementById('termOv');
+  if(!ov)return;
+  ov.classList.add('open');
+  if(typeof window.termMaxSync==='function')window.termMaxSync();
+  termFocusInput();
 });
 document.getElementById('termClose')?.addEventListener('click',()=>closeMod('termOv'));
 termWin?.addEventListener('click',e=>{
@@ -52146,9 +52287,10 @@ function termSetFocused(on){
   /* the console stays on screen either way - focused view only decides whether
      the manager is behind it */
   if(ov)ov.classList.add('open');
-  termScrollBottom();
-  appendLine(on?'Focused view: the console now fills the page. The restore button brings the manager back.'
-               :'Manager view restored; the console is in front, its tabs are untouched.','info-line');
+  if(typeof window.termToast==='function'){
+    window.termToast(on?'Maximised - the console fills the window':'Restored down');
+  }
+  if(typeof window.termMaxSync==='function')window.termMaxSync();
 }
 function termHideConsole(){
   const ov=document.getElementById('termOv');
@@ -52160,6 +52302,347 @@ function termHideConsole(){
   closeMod('termOv');
 }
 document.getElementById('termWinMin')?.addEventListener('click',termHideConsole);
+
+/* ══ R53c · window chrome, text size, and a real context menu ═══════════════
+   Everything below is wired to state that already exists in the manager: the
+   theme pack that is live, the folder this tab is in, and the commands the
+   console can already run. Nothing here is decoration. */
+(function(){
+  const win=document.getElementById('termWin');
+  if(!win)return;
+
+  /* ── the pack decides the frame ─────────────────────────────────────── */
+  function termThemeSync(){
+    const root=document.documentElement;
+    const pack=(root.getAttribute('data-theme')||'dark');
+    win.setAttribute('data-theme',pack);
+    const light=pack==='light'||pack==='win11'||pack==='win10'||pack==='kalil';
+    const wbtns=pack.startsWith('kali')?'kali':(pack.startsWith('win')?'win':'plain');
+    win.setAttribute('data-wbtns',wbtns);
+    document.body.classList.toggle('term-light-pack',light);
+  }
+  termThemeSync();
+
+  /* ── Ctrl+Shift +/- and Ctrl+wheel: the text of the console only ─────── */
+  const FS_KEY='mfm-term-fontsize';
+  function termSetFont(px,save){
+    const v=Math.min(26,Math.max(9,Math.round(px*10)/10));
+    document.documentElement.style.setProperty('--term-fs',v+'px');
+    const box=document.getElementById('termScroll');
+    if(box&&TERM_SCROLL.follow)box.scrollTop=box.scrollHeight;
+    const live=document.getElementById('termFontLive');
+    if(live)live.textContent=Math.round(v*100)/100+'px';
+    if(save)try{localStorage.setItem(FS_KEY,String(v));}catch(e){}
+    return v;
+  }
+  function termStepFont(delta){
+    const now=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--term-fs'))||13.5;
+    const v=termSetFont(now+delta,true);
+    termToast('Terminal text '+Math.round(v)+'px · Ctrl+Shift+0 resets');
+    return v;
+  }
+  try{
+    const saved=parseFloat(localStorage.getItem(FS_KEY));
+    if(isFinite(saved)&&saved>0)termSetFont(saved,false);
+  }catch(e){}
+  window.termStepFont=termStepFont;
+
+  /* a small toast in the corner of the console, never over the output */
+  let toastEl=null;
+  function termToast(text){
+    if(!toastEl){
+      toastEl=document.createElement('div');
+      toastEl.className='term-toast';
+      document.body.appendChild(toastEl);
+    }
+    toastEl.textContent=text;
+    toastEl.classList.add('on');
+    clearTimeout(termToast.t);
+    termToast.t=setTimeout(()=>toastEl.classList.remove('on'),1400);
+  }
+  window.termToast=termToast;
+
+  /* ── the three window buttons ────────────────────────────────────────── */
+  /* the manager's own arrows: the console is a window inside the page, so
+     maximised means it takes the whole page, and rest down means the window it
+     had before - no line in the scrollback, no second page to load */
+  function termMaxSync(){
+    const on=document.body.classList.contains('term-standalone');
+    win.classList.toggle('term-maxed',on);
+    win.classList.toggle('term-windowed',!on);
+    const btn=document.getElementById('termWinMax');
+    if(btn){
+      btn.title=on?'Restore down - the console goes back to its window':'Maximise - the console fills the page';
+      btn.setAttribute('aria-label',on?'Restore down':'Maximise');
+      btn.innerHTML=on
+        ?'<svg viewBox="0 0 10 10"><rect x="1" y="3" width="6" height="6"/><path d="M3 3V1h6v6H7"/></svg>'
+        :'<svg viewBox="0 0 10 10"><rect x="1.2" y="1.2" width="7.6" height="7.6"/></svg>';
+    }
+  }
+  window.termMaxSync=termMaxSync;
+
+  /* move it by the title bar, size it from the corner; the frame lives on the
+     element so a theme redraw or a tab switch never loses it */
+  let drag=null;
+  const titlebar=win.querySelector('.term-titlebar');
+  function placeFrame(x,y,w,h){
+    win.style.left=x+'px';win.style.top=y+'px';win.style.width=w+'px';win.style.height=h+'px';
+    win.style.right='auto';win.style.bottom='auto';
+  }
+  function firstFrame(){
+    if(win.dataset.framed)return;
+    const w=Math.min(1120,innerWidth-32),h=Math.min(760,innerHeight-64);
+    placeFrame(Math.round((innerWidth-w)/2),Math.max(24,Math.round(innerHeight*.04)),w,h);
+    win.dataset.framed='1';
+  }
+  titlebar?.addEventListener('pointerdown',e=>{
+    if(e.target.closest('.term-wbtn'))return;
+    if(document.body.classList.contains('term-standalone'))return;
+    firstFrame();
+    const r=win.getBoundingClientRect();
+    drag={dx:e.clientX-r.left,dy:e.clientY-r.top,w:r.width,h:r.height};
+    win.classList.add('term-dragging');
+    try{titlebar.setPointerCapture(e.pointerId);}catch(err){}
+    e.preventDefault();
+  });
+  titlebar?.addEventListener('pointermove',e=>{
+    if(!drag)return;
+    const x=Math.max(-40,Math.min(innerWidth-140,e.clientX-drag.dx));
+    const y=Math.max(0,Math.min(innerHeight-44,e.clientY-drag.dy));
+    placeFrame(x,y,drag.w,drag.h);
+  });
+  const endDrag=()=>{if(drag){drag=null;win.classList.remove('term-dragging');}};
+  titlebar?.addEventListener('pointerup',endDrag);
+  titlebar?.addEventListener('pointercancel',endDrag);
+  titlebar?.addEventListener('dblclick',e=>{
+    if(e.target.closest('.term-wbtn'))return;
+    document.getElementById('termWinMax')?.click();
+  });
+  const grip=document.createElement('div');
+  grip.className='term-resize';
+  grip.title='Resize';
+  win.appendChild(grip);
+  grip.addEventListener('pointerdown',e=>{
+    if(document.body.classList.contains('term-standalone'))return;
+    firstFrame();
+    const r=win.getBoundingClientRect();
+    const start={x:e.clientX,y:e.clientY,w:r.width,h:r.height,left:r.left,top:r.top};
+    try{grip.setPointerCapture(e.pointerId);}catch(err){}
+    const move=ev=>{
+      const w=Math.max(520,start.w+(ev.clientX-start.x));
+      const h=Math.max(280,start.h+(ev.clientY-start.y));
+      placeFrame(start.left,start.top,w,h);
+    };
+    const up=()=>{grip.removeEventListener('pointermove',move);grip.removeEventListener('pointerup',up);};
+    grip.addEventListener('pointermove',move);
+    grip.addEventListener('pointerup',up);
+    e.preventDefault();
+  });
+  if(document.getElementById('termOv')?.classList.contains('open')&&!document.body.classList.contains('term-standalone'))firstFrame();
+  termMaxSync();
+
+  /* ── keys: text size, and the rest of the shell habits ───────────────── */
+  window.addEventListener('keydown',e=>{
+    const k=e.key;
+    if((e.ctrlKey||e.metaKey)&&e.shiftKey&&(k==='+'||k==='='||k==='Add'||e.code==='NumpadAdd')){e.preventDefault();e.stopPropagation();termStepFont(1);return;}
+    if((e.ctrlKey||e.metaKey)&&e.shiftKey&&(k==='-'||k==='_'||k==='Subtract'||e.code==='NumpadSubtract')){e.preventDefault();e.stopPropagation();termStepFont(-1);return;}
+    if((e.ctrlKey||e.metaKey)&&e.shiftKey&&(k==='0'||e.code==='Digit0')){e.preventDefault();e.stopPropagation();termSetFont(13.5,true);termToast('Terminal text reset to 13.5px');return;}
+    if((e.ctrlKey||e.metaKey)&&e.shiftKey&&(k==='c'||k==='C')){
+      /* copy the selection, or the command line when nothing is selected */
+      if(String(window.getSelection()||'').length){return;}
+      const inp=termInput();
+      if(inp&&inp.value){e.preventDefault();e.stopPropagation();
+        try{navigator.clipboard.writeText(inp.value);termToast('Copied the command line');}catch(err){}}
+      return;
+    }
+  },true);
+  win.addEventListener('wheel',e=>{
+    if(!(e.ctrlKey||e.metaKey))return;
+    e.preventDefault();
+    termStepFont(e.deltaY<0?1:-1);
+  },{passive:false});
+
+  /* ── the context menu ────────────────────────────────────────────────── */
+  let menu=null;
+  function closeTermMenu(){if(menu){menu.remove();menu=null;}}
+  function menuHTML(title,rows){
+    return '<div class="tm-head">'+title+'</div>'+rows.map(r=>{
+      if(r.sep)return '<div class="tm-sep"></div>';
+      return '<div class="tm-item'+(r.dis?' dis':'')+'" data-tm="'+r.act+'">'
+        +'<span class="tm-ico">'+(r.ico||'')+'</span><span>'+r.label+'</span>'
+        +(r.key?'<span class="tm-key">'+r.key+'</span>':'')+'</div>';
+    }).join('');
+  }
+  const ICO={
+    folder:'<svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg>',
+    term:'<svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2"/><polyline points="6.5 9.5 9.5 12 6.5 14.5"/><line x1="11.5" y1="15" x2="16" y2="15"/></svg>',
+    file:'<svg viewBox="0 0 24 24"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>',
+    copy:'<svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    paste:'<svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z"/></svg>',
+    rename:'<svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M14 6l4 4"/></svg>',
+    trash:'<svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>',
+    open:'<svg viewBox="0 0 24 24"><path d="M14 3h7v7"/><path d="M21 3l-9 9"/><path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></svg>',
+    eye:'<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+    cwd:'<svg viewBox="0 0 24 24"><path d="M12 20V5M6 11l6-6 6 6"/></svg>',
+    plus:'<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+    down:'<svg viewBox="0 0 24 24"><path d="M12 4v12M7 12l5 5 5-5M4 20h16"/></svg>',
+    font:'<svg viewBox="0 0 24 24"><path d="M4 20l6-16 6 16"/><path d="M6.5 14h7"/><path d="M17 20v-8"/><path d="M15 14l2-2 2 2"/></svg>'
+  };
+  function showTermMenu(x,y,title,rows,onPick){
+    closeTermMenu();
+    menu=document.createElement('div');
+    menu.className='term-ctx';
+    menu.innerHTML=menuHTML(title,rows);
+    document.body.appendChild(menu);
+    const r=menu.getBoundingClientRect();
+    menu.style.left=Math.min(x,innerWidth-r.width-8)+'px';
+    menu.style.top=Math.min(y,innerHeight-r.height-8)+'px';
+    menu.querySelectorAll('.tm-item').forEach(el=>{
+      el.addEventListener('click',()=>{
+        const act=el.dataset.tm;
+        closeTermMenu();
+        if(!el.classList.contains('dis'))onPick(act);
+      });
+    });
+  }
+  window.showTermMenu=showTermMenu;
+  window.closeTermMenu=closeTermMenu;
+  document.addEventListener('mousedown',e=>{if(menu&&!menu.contains(e.target))closeTermMenu();},true);
+  document.addEventListener('keydown',e=>{
+    if(e.key==='Escape'&&menu){e.preventDefault();e.stopPropagation();closeTermMenu();}
+  },true);
+  document.addEventListener('scroll',closeTermMenu,true);
+  window.addEventListener('blur',closeTermMenu);
+
+  function termCopy(text,label){
+    try{navigator.clipboard.writeText(text);termToast(label||'Copied');}
+    catch(err){termToast('The browser blocked the clipboard here');}
+  }
+  window.termCopyFromMenu=termCopy;
+
+  /* a file or a folder in the session tree */
+  function rowMenu(row,x,y){
+    const name=row.dataset.termPath||'';
+    const isDir=row.dataset.termDir==='1';
+    const cwd=termCurrentDir();
+    const full=(cwd.replace(/[\\/]+$/,''))+'/'+name;
+    const q=s=>"'"+String(s).replace(/'/g,"'\\''")+"'";
+    const rows=[
+      {act:'cd',label:'Open in the terminal here',key:'cd',dis:!isDir,ico:ICO.term},
+      {act:'pwd',label:'Print this folder in the console',ico:ICO.cwd},
+      {act:'open',label:'Open in the file manager',key:'Enter',ico:ICO.folder},
+      {sep:true},
+      {act:'view',label:'Show it in the console (ls -la)',dis:isDir,ico:ICO.eye},
+      {act:'cat',label:'Read the file (cat)',dis:isDir,ico:ICO.file},
+      {sep:true},
+      {act:'newname',label:'Put the name in the prompt',ico:ICO.rename},
+      {act:'copy',label:'Copy the path',ico:ICO.copy},
+      {act:'newtab',label:'New tab in this folder',dis:!isDir,ico:ICO.plus},
+      {act:'trash',label:'Delete it (rm -rf)',ico:ICO.trash}
+    ];
+    showTermMenu(x,y,(isDir?'Folder · ':'File · ')+name,rows,act=>{
+      if(act==='cd')termRunCommand('cd '+q(full));
+      else if(act==='pwd')termRunCommand('pwd');
+      else if(act==='open')isDir?termOpenFolder(name):termOpenHere();
+      else if(act==='view')termRunCommand('ls -la '+q(name));
+      else if(act==='cat')termRunCommand('cat '+q(name));
+      else if(act==='newname'){const inp=termInput();if(inp){inp.value=name;inp.focus();}}
+      else if(act==='copy')termCopy(full,'Path copied');
+      else if(act==='newtab')termTabNew(full);
+      else if(act==='trash')termRunCommand('rm -rf '+q(full));
+    });
+  }
+  window.termRowMenu=rowMenu;
+
+  /* the folder itself and the empty space under it */
+  function folderMenu(x,y,folder){
+    const cwd=folder||termCurrentDir();
+    showTermMenu(x,y,'Folder · '+(cwd||'/'),[
+      {act:'newtab',label:'Open a terminal here',key:'Ctrl+Shift+T',ico:ICO.term},
+      {act:'cd',label:'cd into this folder',ico:ICO.folder},
+      {act:'pwd',label:'Print the working directory',key:'pwd',ico:ICO.cwd},
+      {sep:true},
+      {act:'ls',label:'List the contents (ls -la)',key:'ls',ico:ICO.eye},
+      {act:'tree',label:'Refresh the folder tree',ico:ICO.down},
+      {sep:true},
+      {act:'copy',label:'Copy the folder path',ico:ICO.copy},
+      {act:'open',label:'Open this folder in the file manager',ico:ICO.open},
+      {sep:true},
+      {act:'fontup',label:'Bigger terminal text',key:'Ctrl+Shift++',ico:ICO.font},
+      {act:'fontdown',label:'Smaller terminal text',key:'Ctrl+Shift+-',ico:ICO.font}
+    ],act=>{
+      /* where the menu was opened from decides what "here" means */
+      if(act==='newtab')termTabNew(cwd);
+      else if(act==='cd')termRunCommand('cd '+JSON.stringify(cwd).replace(/^"|"$/g,"'"));
+      else if(act==='pwd')termRunCommand('pwd');
+      else if(act==='ls')termRunCommand('ls -la');
+      else if(act==='tree')termRefreshTree();
+      else if(act==='copy')termCopy(cwd,'Folder path copied');
+      else if(act==='open')window.location.href=location.pathname+'?dir='+encodeURIComponent(cwd);
+      else if(act==='fontup')termStepFont(1);
+      else if(act==='fontdown')termStepFont(-1);
+    });
+  }
+  window.termFolderMenu=folderMenu;
+
+  /* the scrollback itself: copy, paste, clear, a new tab, the text size.
+     The listener sits on the console and not on the scrollback, because a
+     right click on the empty part of the page is not inside the scroll box. */
+  function consoleMenu(e){
+    if(e.target.closest('.term-tree-row[data-term-path]'))return;
+    if(e.target.closest('.term-toast,.term-ctx'))return;
+    e.preventDefault();
+    const sel=String(window.getSelection()||'').trim();
+    showTermMenu(e.clientX,e.clientY,'Console',[
+      {act:'copy',label:sel?'Copy the selection':'Copy the selected text',key:'Ctrl+Shift+C',dis:!sel,ico:ICO.copy},
+      {act:'paste',label:'Paste into the prompt',ico:ICO.paste},
+      {act:'selectall',label:'Select the whole scrollback',ico:ICO.copy},
+      {sep:true},
+      {act:'clear',label:'Clear the console',ico:ICO.trash},
+      {act:'newtab',label:'Open a terminal here',key:'Ctrl+Shift+T',ico:ICO.term},
+      {act:'bottom',label:'Go to the newest line',key:'Ctrl+End',ico:ICO.down},
+      {sep:true},
+      {act:'fontup',label:'Bigger terminal text',key:'Ctrl+Shift++',ico:ICO.font},
+      {act:'fontdown',label:'Smaller terminal text',key:'Ctrl+Shift+-',ico:ICO.font},
+      {act:'fontreset',label:'Reset the text size',key:'Ctrl+Shift+0',ico:ICO.font}
+    ],act=>{
+      if(act==='copy')termCopy(sel||'','Copied');
+      else if(act==='selectall'){const box=document.getElementById('termScroll');const r=document.createRange();r.selectNodeContents(box);const s2=window.getSelection();s2.removeAllRanges();s2.addRange(r);termToast('Whole scrollback selected');}
+      else if(act==='paste')doTermAct('paste');
+      else if(act==='clear')doTermAct('clear');
+      else if(act==='newtab')termTabNew(termCurrentDir());
+      else if(act==='bottom')doTermAct('bottom');
+      else if(act==='fontup')termStepFont(1);
+      else if(act==='fontdown')termStepFont(-1);
+      else if(act==='fontreset')termSetFont(13.5,true);
+    });
+  }
+
+  /* the tree: a row, or the empty space and the server line under it */
+  win.addEventListener('contextmenu',e=>{
+    if(!e.target.isConnected)return;
+    if(e.target.closest('.term-ctx'))return;
+    const row=e.target.closest('.term-tree-row[data-term-path]');
+    if(row){e.preventDefault();rowMenu(row,e.clientX,e.clientY);return;}
+    /* the folder line and the empty space under the tree: the folder's menu */
+    if(e.target.closest('.term-side,.term-tree')){
+      e.preventDefault();
+      folderMenu(e.clientX,e.clientY,termCurrentDir());
+      return;
+    }
+    /* the scrollback, the prompt, the toolbars, the tabs: the console's menu */
+    consoleMenu(e);
+  });
+
+  /* the mouse buttons of the window: maximise/full page, minimise, close */
+  document.getElementById('termWinMax')?.addEventListener('click',()=>{
+    setTimeout(()=>{termMaxSync();termFocusInput();},0);
+  });
+
+  termMaxSync();
+  window.termThemeSync=termThemeSync;
+})();
+
 document.getElementById('termWinMax')?.addEventListener('click',()=>{
   termSetFocused(!document.body.classList.contains('term-standalone'));
 });
@@ -52199,7 +52682,18 @@ function drawTermCpu(){
   const w=termCpuGraph.width,h=termCpuGraph.height;
   termCpuCtx.clearRect(0,0,w,h);termCpuCtx.beginPath();termCpuCtx.moveTo(0,h);
   termCpuData.forEach((v,i)=>termCpuCtx.lineTo(i*(w/(termCpuData.length-1)),h-(v/100*h)));
-  termCpuCtx.lineTo(w,h);termCpuCtx.closePath();termCpuCtx.fillStyle='#5a9c5f';termCpuCtx.fill();
+  termCpuCtx.lineTo(w,h);termCpuCtx.closePath();
+  /* a canvas keeps whatever colour it was painted with: in a light pack the
+     strip has to be repainted too, or it stays a black slab in a white bar */
+  const pack=document.documentElement.getAttribute('data-theme')||'dark';
+  const light=pack==='win11'||pack==='win10'||pack==='light'||pack==='kalil';
+  termCpuCtx.fillStyle=light?'rgba(0,103,192,.35)':'#5a9c5f';
+  termCpuCtx.fill();
+  termCpuCtx.strokeStyle=light?'rgba(0,103,192,.8)':'#7fc386';
+  termCpuCtx.lineWidth=1;
+  termCpuCtx.beginPath();termCpuCtx.moveTo(0,h);
+  termCpuData.forEach((v,i)=>termCpuCtx.lineTo(i*(w/(termCpuData.length-1)),h-(v/100*h)));
+  termCpuCtx.stroke();
 }
 async function refreshTermSystemInfo(){
   if(termSystemInfoBusy)return;
@@ -52270,8 +52764,6 @@ async function runTerm(){
   if(!cmd||!inp||!tab||termRunning)return;
   termRunning=true;
   tab.hist.push(cmd);tab.hIdx=-1;inp.value='';adjustTermInputWidth();
-  const promptText=(tab.wrap.querySelector('.term-ps')?.textContent||'$').trim();
-  appendLineTo(tab,promptText+' ', 'cmd-line');
   appendCommandLine(tab,cmd);
   if(cmd==='clear'||cmd==='cls'){tab.out.innerHTML='';termRunning=false;termTabScroll();return;}
   tab.wrap.classList.add('term-busy');
@@ -52302,33 +52794,49 @@ function termFinishRun(tab,inp){
   const i=inp||termInput();
   if(i){try{i.focus({preventScroll:true});}catch(e){i.focus();}}
 }
-/* output is written a line at a time, so the scrollback steps like a terminal
-   instead of the whole block appearing and the page jumping in one go */
-const TERM_DRAIN={timer:null};
+/* The answer is written to the page in one go - a command is finished when it
+   returns, and nobody wants to watch a file crawl in line by line. What steps is
+   the view: the scrollback catches up in small instant jumps of a few lines, the
+   way a terminal does, and only when the reader is on the newest line. */
+const TERM_DRAIN={timer:null,queue:[],tab:null,exit:0,linesPerStep:4};
 function termDrainResult(tab,lines,exit){
-  clearInterval(TERM_DRAIN.timer);
-  /* whether the reader was at the bottom when the answer started: if they had
-     scrolled up to read, their place is kept until they come back down */
+  if(!tab||!tab.out){termFinishRun(tab);return;}
   const box=termScrollBox();
-  const follow=!box||termAtBottom(box);
-  let i=0;
-  /* even a 300-line answer lands a few lines at a time, so the scrollback steps
-     like a terminal instead of jumping a screen at a time */
-  const burst=lines.length>240?4:(lines.length>100?2:1);
-  const step=()=>{
-    if(!tab||!tab.out){
-      clearInterval(TERM_DRAIN.timer);termFinishRun(tab);return;
-    }
-    for(let k=0;k<burst&&i<lines.length;k++,i++)appendResultLine(tab,lines[i],exit);
-    if(i>=lines.length){
-      clearInterval(TERM_DRAIN.timer);
-      if(TERM_SCROLL.follow)termScrollToBottom();
-      termFinishRun(tab);
-      return;
-    }
-  };
-  step();
-  TERM_DRAIN.timer=setInterval(step,14);
+  const follow=!box||tab!==termTabCurrent()||TERM_SCROLL.follow;
+  /* the whole result, once */
+  const frag=document.createDocumentFragment();
+  lines.forEach(line=>{
+    const cls=termResultClass(line,exit);
+    const el=document.createElement('span');
+    el.className='term-line '+cls;
+    el.innerHTML=termPaintResult(line,cls);
+    frag.appendChild(el);
+  });
+  tab.out.appendChild(frag);
+  tab.lines+=lines.length;
+  TERM_SCROLL.follow=follow;
+  if(!follow){termFinishRun(tab);return;}
+  /* then the view walks down to it in steps - a few lines per frame, never a
+     page, and it stops the moment the reader scrolls away */
+  termScrollWalk(tab,lines.length);
+  termFinishRun(tab);
+}
+function termScrollWalk(tab,count){
+  clearInterval(TERM_DRAIN.timer);
+  const box=termScrollBox();
+  if(!box)return;
+  /* the step is a handful of lines per frame, so the view walks down the answer
+     instead of cutting to the bottom, and it keeps walking while the answer is
+     still being written */
+  const fs=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--term-fs'))||13.5;
+  const row=fs*1.28;
+  const step=Math.max(1,Math.min(6,Math.ceil((count||1)/60)))*row;
+  TERM_DRAIN.timer=setInterval(()=>{
+    if(!TERM_SCROLL.follow||tab!==termTabCurrent()){clearInterval(TERM_DRAIN.timer);TERM_DRAIN.timer=null;return;}
+    const gap=box.scrollHeight-box.scrollTop-box.clientHeight;
+    if(gap<=1){box.scrollTop=box.scrollHeight;clearInterval(TERM_DRAIN.timer);TERM_DRAIN.timer=null;return;}
+    termScrollBy(box,box.scrollTop+Math.min(step,gap));
+  },16);
 }
 /* kept for the helpers that still call the plain form */
 function appendLine(text,cls){appendLineTo(termTabCurrent(),text,cls);}
@@ -52423,16 +52931,22 @@ function termPaint(text,cls){
    prompt markup, then the command painted word by word. Nothing turns white. */
 function termPromptMarkup(tab){
   const ps=tab&&tab.wrap?tab.wrap.querySelector('.term-ps'):null;
-  if(!ps)return '<span class="tk-user">admin</span><span class="tk-at">@</span><span class="tk-host">host</span><span class="tk-dollar">:</span><span class="tk-cwd">~</span><span class="tk-dollar">$</span>&#160;';
+  if(!ps)return '<span class="tk-user">admin</span><span class="tk-at">@</span><span class="tk-host">host</span><span class="tk-dollar">:</span><span class="tk-cwd">~</span><span class="tk-dollar">$</span>';
   /* the prompt is copied as markup, so the line you typed is coloured exactly
-     like the line you are typing on - a literal space, never a wrapped one */
-  return ps.innerHTML.replace(/\s+$/,'')+' ';
+     like the line you are typing on. The single space after the dollar belongs to
+     the command, not to the prompt: the live prompt keeps its no-break space in
+     the dollar span, and both lines then put exactly one space before the words */
+  /* the live prompt keeps its no-break space inside the dollar span; the printed
+     line drops it and puts exactly one ordinary space before the command, so the
+     two lines measure the same width up to the first character */
+  return ps.innerHTML.replace(/[\s\u00a0]+$/,'')
+    .replace(/(<span class="term-dollar">\$)(?:&#160;|&nbsp;|\u00a0)+<\/span>$/,'$1</span>');
 }
 function appendCommandLine(tab,cmd){
   if(!tab){return;}
   const s=document.createElement('span');
   s.className='term-line cmd-line';
-  s.innerHTML='<span class="tk-prompt">'+termPromptMarkup(tab)+'</span>'+termPaint(cmd);
+  s.innerHTML='<span class="tk-prompt">'+termPromptMarkup(tab)+' </span>'+termPaint(cmd);
   const box=termScrollBox();
   const follow=!box||tab!==termTabCurrent()||TERM_SCROLL.follow;
   tab.out.appendChild(s);
