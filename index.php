@@ -1165,7 +1165,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R67');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R70');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -36433,8 +36433,13 @@ button.rc-row{cursor:pointer}
 .term-ghost-tail .gt-cur{color:#6a6a6a}
 .term-ghost-tail.on .gt-cur{animation:caretInk 1s step-end infinite}
 @keyframes caretInk{0%,49%{color:#1f1f1f}50%,100%{color:#6a6a6a}}
-.term-int-caret{position:absolute;top:50%;transform:translateY(-50%);width:.62em;height:1.25em;background:#e4e4e4;
-  font-size:var(--term-fs,13.5px);border-radius:1px;pointer-events:none;display:none}
+.term-int-caret{position:absolute;top:50%;transform:translateY(-50%);
+  /* R68/R69 · sized from the field's own font, never from a stale fallback:
+     one glyph wide, and exactly as tall as the letters - the foot sits on the
+     baseline and the whole length of the block is spent upwards */
+  width:calc(var(--caret-glyph, 8.13px) * .92);
+  height:var(--caret-ink, 11px);
+  background:#e4e4e4;border-radius:1px;pointer-events:none;display:none}
 .term-int-caret.on{display:block}
 .term-int-caret.on.blink{animation:blink 1s step-end infinite}
 
@@ -54026,9 +54031,41 @@ function termHideGhost(){
    one: its x is the number of glyphs already in the field, measured in the same
    monospace grid the field is sized with. A ghosted tail is drawn from that same
    x, so the completion appears around the caret instead of pushing it. */
+function termCaretMetrics(){
+  /* R68 · the block's size comes from the glyphs it sits between: the field's
+     own font for the advance, and the measured ink height of a capital for the
+     height. Falls back to the font's own numbers if a canvas is unavailable. */
+  const inp=document.querySelector('textarea.term-inp')||document.querySelector('.term-inp');
+  const root=document.querySelector('.term-row')||document.documentElement;
+  if(!inp||!root)return;
+  const cs=getComputedStyle(inp);
+  const fs=parseFloat(cs.fontSize)||13.5;
+  let ink=fs*0.94, inkAsc=fs*0.86, inkDesc=fs*0.13, adv=fs*0.6018, fbA=fs*0.94, fbD=fs*0.25;
+  try{
+    const cv=document.createElement('canvas').getContext('2d');
+    cv.font=cs.fontSize+' '+cs.fontFamily;
+    const mM=cv.measureText('M'), mX=cv.measureText('x');
+    const mD=cv.measureText('$');
+    adv=mX.width||mM.width||adv;
+    /* R70 · the length of "$": it reaches higher than a capital and hangs
+       below the baseline, so the block does too - from the top of the "$" to
+       its foot, which is what the reader compared it with */
+    inkAsc=(mD.actualBoundingBoxAscent||mM.actualBoundingBoxAscent||fs*0.86);
+    inkDesc=(mD.actualBoundingBoxDescent||0);
+    ink=inkAsc+inkDesc;
+    fbA=mM.fontBoundingBoxAscent||ink;
+    fbD=mM.fontBoundingBoxDescent||0;
+  }catch(err){}
+  root.style.setProperty('--caret-glyph',adv.toFixed(2)+'px');
+  root.style.setProperty('--caret-ink',ink.toFixed(2)+'px');
+  root.style.setProperty('--caret-inkasc',inkAsc.toFixed(2)+'px');
+  root.style.setProperty('--caret-fbasc',fbA.toFixed(2)+'px');
+  root.style.setProperty('--caret-fbdesc',fbD.toFixed(2)+'px');
+}
 function termCaretSync(el){
   const inp=el||termInput(),c=termCaretEl(inp);
   if(!inp||!c)return;
+  termCaretMetrics();
   const gp=termMonoPx()||8.13;
   let pos=0;
   try{pos=(inp.selectionStart==null?inp.value.length:inp.selectionStart)||0;}catch(err){pos=inp.value.length;}
@@ -54042,6 +54079,30 @@ function termCaretSync(el){
   /* scrollLeft keeps the tail of a long command in step with the field */
   const edge=Math.max(fw-gp,0);
   c.style.left=(fw>0?Math.min(x,edge)+ (inp.scrollLeft||0):x)+'px';
+  /* R69 · the block sits on the letters, not near them: its top is the ink top
+     of a capital, computed from the field's own font metrics (half-leading,
+     font ascent, cap height) and its height is exactly that cap height. The
+     foot lands on the baseline - which is where it already looked right - and
+     nothing is lost at either end. */
+  (function(){
+    const cs=getComputedStyle(inp);
+    const fs=parseFloat(cs.fontSize)||13.5;
+    const lh=parseFloat(cs.lineHeight)||fs*1.2;
+    const num=n=>{const v=parseFloat(n);return isFinite(v)?v:0;};
+    const host=getComputedStyle(c).getPropertyValue('--caret-ink');
+    const ink=num(host)||fs*0.69;
+    const inkAsc=num(getComputedStyle(c).getPropertyValue('--caret-inkasc'))||ink;
+    const fbA=num(getComputedStyle(c).getPropertyValue('--caret-fbasc'))||fs*0.94;
+    const fbD=num(getComputedStyle(c).getPropertyValue('--caret-fbdesc'))||fs*0.25;
+    const box=c.parentElement;
+    if(!box)return;
+    const base=box.getBoundingClientRect();
+    const ir=inp.getBoundingClientRect();
+    const half=(lh-(fbA+fbD))/2;
+    c.style.height=ink.toFixed(2)+'px';
+    c.style.top=(ir.top-base.top+half+(fbA-inkAsc)-1).toFixed(2)+'px';
+    c.style.transform='none';
+  })();
   c.classList.add('on');
   if(!termRunning&&document.activeElement!==inp)c.classList.add('blink');
 }
