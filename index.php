@@ -35943,8 +35943,19 @@ button.rc-row{cursor:pointer}
 .prev-body .md-render img{max-width:100%;border-radius:6px}
 
 /* ══ CONTEXT MENU (desktop right-click) ══ */
-.ctx{display:none;position:fixed;z-index:500;background:var(--raised);border:1px solid var(--border2);border-radius:var(--rlg);padding:5px;min-width:180px;box-shadow:0 20px 60px rgba(0,0,0,.7),0 4px 16px rgba(0,0,0,.4);animation:ctxIn .18s var(--spring) both}
+.ctx{display:none;position:fixed;z-index:500;background:var(--surf);border:1px solid var(--border2);border-radius:var(--rlg);padding:5px;min-width:180px;box-shadow:0 20px 60px rgba(0,0,0,.7),0 4px 16px rgba(0,0,0,.4);animation:ctxIn .18s var(--spring) both}
 .ctx.open{display:block}
+/* R56 · a menu is a surface, not a tint: every pack that paints its raised
+   surfaces with a translucent white would let the selected row (and its
+   blue outline) show straight through the menu. Each pack gets a solid
+   colour of its own, sampled from what the tint was landing on. */
+:root[data-theme="light"] .ctx{background:#ffffff}
+:root[data-theme="win11"] .ctx{background:#fbfbfb}
+:root[data-theme="win10"] .ctx{background:#f0f0f0}
+:root[data-theme="win10d"] .ctx,:root[data-theme="win11d"] .ctx{background:#262626}
+:root[data-theme="kali"] .ctx{background:#2f333f}
+:root[data-theme="kalil"] .ctx{background:#efefef}
+
 @keyframes ctxIn{from{opacity:0;transform:scale(.93)}to{opacity:1;transform:none}}
 .ctx-item{display:flex;align-items:center;gap:9px;padding:8px 12px;border-radius:8px;color:var(--t2);font-size:12.5px;font-weight:500;cursor:pointer;transition:background .12s,color .12s;white-space:nowrap;user-select:none}
 .ctx-item svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;flex-shrink:0}
@@ -36011,7 +36022,7 @@ button.rc-row{cursor:pointer}
 .term-toolbar::-webkit-scrollbar{height:0;display:none}
 .term-tile{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:2px;min-width:48px;width:auto;height:46px;padding:4px 5px 0;border:1px solid transparent;border-radius:2px;background:transparent;color:#c0c0c0;cursor:pointer;flex-shrink:0}
 .term-tile svg{width:18px;height:18px;fill:none;stroke:#8fb8d6;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
-.term-tile-cap{font-family:'TerminalTMT',monospace;font-size:10px;line-height:1;color:#b4b4b4;white-space:nowrap;letter-spacing:.1px}
+.term-tile-cap{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:10.5px;line-height:1;color:#b4b4b4;white-space:nowrap;letter-spacing:0}
 .term-tile:hover .term-tile-cap{color:#f0f0f0}
 .term-tile[data-term-act="clear"] svg{stroke:#e0785a}
 .term-tile[data-term-act="paste"] svg{stroke:#d8b23a}
@@ -36046,6 +36057,13 @@ button.rc-row{cursor:pointer}
 /* sidebar: quick connect + session tree inside a light frame */
 .term-side{width:252px;min-width:252px;display:flex;flex-direction:column;background:#141414;border-right:1px solid #303030;flex-shrink:0;min-height:0}
 .term-rail.folded~.term-side{display:none}
+/* the handle that sizes the session sidebar: a hairline that shows itself on
+   hover, the way a desktop splitters do, with the tree scrolling on either side
+   of the range it allows */
+.term-side{position:relative}
+.term-side-split{position:absolute;top:0;right:-3px;width:6px;height:100%;cursor:col-resize;z-index:6;background:transparent}
+.term-side-split:hover,.term-side-split.on{background:linear-gradient(90deg,transparent 40%,#6a6a6a 40%,#6a6a6a 60%,transparent 60%)}
+.term-win.term-side-drag,.term-win.term-side-drag *{cursor:col-resize!important;user-select:none!important}
 .term-qc-row{display:flex;align-items:center;gap:0;padding:4px 4px 3px;flex-shrink:0}
 .term-qc-inp{flex:1;min-width:0;height:21px;background:#0d0d0d;border:1px solid #6f6f6f;border-radius:1px;padding:0 5px;color:#cfcfcf;font-size:11.5px;line-height:19px;outline:none;box-sizing:border-box}
 .term-qc-inp::placeholder{color:#8a8a8a}
@@ -36137,7 +36155,7 @@ button.rc-row{cursor:pointer}
 .term-tool{width:15px;height:15px;display:grid;place-items:center;border:0;border-radius:1px;background:transparent;color:#8f8f8f;cursor:pointer;padding:0}
 .term-tool:hover{background:#2f2f2f;color:#e0e0e0}
 .term-tool svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
-.term-scroll{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;padding:6px 8px 0;scroll-behavior:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#3a3a3a transparent}
+.term-scroll{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;padding:6px 8px 3px;scroll-behavior:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#3a3a3a transparent}
 /* the scrollback is a scroll container of its own: the browser may keep its
    content anchored while lines arrive, and that must never drag a reader who
    scrolled up back down */
@@ -36227,7 +36245,10 @@ button.rc-row{cursor:pointer}
 .term-ghost{display:none;pointer-events:none;white-space:pre;font-family:'TerminalTMT',monospace;font-size:13.5px;line-height:1;color:#6a6a6a;padding:0;margin:0}
 .term-ghost.on{display:inline}
 
-.term-cursor{display:inline-block;width:8px;height:13px;background:#d0d0d0;animation:blink 1s step-end infinite;vertical-align:-2px;margin-left:1px;flex-shrink:0}
+.term-cursor{display:inline-block;width:8px;height:13px;background:#d0d0d0;vertical-align:-2px;margin-left:1px;flex-shrink:0}
+/* R56 · a command editor caret: solid while a key is being typed, and it only
+   starts blinking once the line goes quiet. */
+.term-cursor.blink{animation:blink 1s step-end infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
 .term-suggest{position:absolute;background:#252525;border:1px solid #6a6a6a;border-radius:1px;padding:3px 0;z-index:9;min-width:180px;box-shadow:0 8px 24px rgba(0,0,0,.65)}
 .term-sug-item{padding:4px 12px;font-family:monospace;font-size:12px;color:#26c6da;cursor:pointer}
@@ -36241,20 +36262,27 @@ button.rc-row{cursor:pointer}
 .term-status-sep{width:1px;align-self:stretch;height:auto;background:#3a3a3a;flex-shrink:0}
 .term-status-ico{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
 .term-status-ico svg{width:12px;height:12px;fill:none;stroke:#8f8f8f;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
-.term-status-graph{width:40px;height:11px;background:#0e0e0e;border:1px solid #3a3a3a;overflow:hidden;display:inline-block;vertical-align:middle;flex-shrink:0}
+.term-status-graph{width:44px;height:16px;background:#0e0e0e;border:1px solid #3a3a3a;overflow:hidden;display:inline-block;vertical-align:middle;flex-shrink:0}
 .term-status-graph canvas{width:100%;height:100%;display:block}
 /* the terminal face belongs to the terminal; every strip around it is normal UI text */
 .term-scroll,.term-scroll *{font-family:'TerminalTMT',monospace!important;font-variant-ligatures:none}
 /* R51 · the console is not an island: its own face runs through every bar around it.
    Text the eye reads as prose (the menu words) keeps the system face at the same
    size and weight, so the window reads as one program, not a terminal in a page. */
-.term-win .term-titlebar,.term-win .term-menubar,.term-win .term-toolbar,.term-win .term-tabs,
+/* R56 · only the strips that read as part of the machine keep the console's face.
+   The toolbar captions, the window title and the console's own right-click menu
+   are chrome: they read in the same normal face as the manager's left rail. */
+.term-win .term-menubar,.term-win .term-tabs,
 .term-win .term-rail,.term-win .term-side,.term-win .term-tree,.term-win .term-footer,
 .term-win .term-statusbar,.term-win .term-panel-foot,.term-win .term-menu-pop,
-.term-win .term-tab,.term-win .term-apptitle,.term-win .term-panel-note,
-.term-win .term-qc-inp,.term-win .term-qc-add,.term-win .term-tile,.term-win .term-rail-btn,
+.term-win .term-tab,.term-win .term-panel-note,
+.term-win .term-qc-inp,.term-win .term-qc-add,.term-win .term-rail-btn,
 .term-win .term-tab-new,.term-win .term-wbtn,.term-win .term-panel-foot *{
   font-family:'TerminalTMT',monospace;font-variant-ligatures:none}
+/* the window chrome: title, toolbar captions and the right-click menu */
+.term-win .term-titlebar,.term-win .term-apptitle,.term-win .term-toolbar,
+.term-win .term-tile,.term-win .term-tile-cap,.term-win .term-ctx,.term-win .term-ctx *{
+  font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-variant-ligatures:normal}
 .term-win .term-menu-item,.term-win .term-menu-pop .mi,.term-win .term-rail-btn span,
 .term-win .term-panel-foot-lbl{letter-spacing:.15px}
 .term-win,.term-win *{font-family:'Segoe UI','Segoe UI Variable',Tahoma,Verdana,Arial,sans-serif;font-variant-ligatures:normal}
@@ -36312,7 +36340,7 @@ body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
 .term-toolbar{height:54px;min-height:54px;background:var(--panel);border-bottom:1px solid var(--border)}
 .term-tile{color:var(--t2)}
 .term-tile svg{stroke:var(--t2)}
-.term-tile-cap{color:var(--t2);font-family:'TerminalTMT',monospace}
+.term-tile-cap{color:var(--t2);font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif}
 .term-tile:hover{background:var(--hov);border-color:var(--border2)}
 .term-tile:hover svg,.term-tile:hover .term-tile-cap{color:var(--t1)}
 .term-tile-sep{background:var(--border)}
@@ -36355,7 +36383,7 @@ body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
 /* text size inside the console only: the prompt, the printed lines and the
    answers grow and shrink together, nothing else on the page moves */
 .term-scroll,.term-out,.term-line,.term-ps,.term-inp,.term-sug-item,.term-banner{font-size:var(--term-fs,13.5px)}
-.term-line,.term-ps,.term-inp,.term-out{line-height:calc(var(--term-fs,13.5px) * 1.28)}
+.term-line,.term-ps,.term-inp{line-height:calc(var(--term-fs,13.5px) * 1.245)}
 .term-inp{line-height:1}
 .term-banner{font-size:calc(var(--term-fs,13.5px) * .93)}
 .term-sug-item{font-size:calc(var(--term-fs,13.5px) * .92)}
@@ -36399,9 +36427,9 @@ body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
 .term-win .term-tree-empty{padding:10px 12px}
 .term-ctx{position:fixed;z-index:100000;min-width:236px;max-width:320px;padding:4px;border-radius:var(--r,10px);
   background:var(--surf);border:1px solid var(--border2);box-shadow:0 18px 44px rgba(0,0,0,.38),0 2px 8px rgba(0,0,0,.22);
-  font-family:'TerminalTMT',monospace;font-size:12px;color:var(--t1);animation:termCtxIn .09s ease-out both}
+  font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:12px;color:var(--t1);animation:termCtxIn .09s ease-out both}
 @keyframes termCtxIn{from{opacity:0;transform:translateY(-3px) scale(.985)}to{opacity:1;transform:none}}
-.term-ctx .tm-head{padding:6px 9px 5px;font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--t3);
+.term-ctx .tm-head{padding:6px 9px 5px;font-size:10.5px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--t3);
   border-bottom:1px solid var(--border);margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:ltr;text-align:left}
 .term-ctx .tm-item{display:flex;align-items:center;gap:9px;height:27px;padding:0 9px;border-radius:calc(var(--r,10px) - 6px);cursor:default;white-space:nowrap}
 .term-ctx .tm-item:hover{background:var(--hov);color:var(--t1)}
@@ -39475,6 +39503,8 @@ input.inp,select.inp{height:32px}
 :root[data-theme="win11d"] .ft tbody tr{border-bottom:0;animation:none;background:transparent}
 :root[data-theme="win11d"] .ft tbody tr:hover{background:#282828}
 :root[data-theme="win11d"] .ft tbody tr.selected{background:#2b3a53;box-shadow:inset 0 0 0 1px #3b5a86}
+/* R56 · a menu always floats above the list, whatever a pack paints on a row */
+:root[data-theme="win11d"] .ctx{z-index:520}
 :root[data-theme="win11d"] .ft tbody tr.selected td{color:#ffffff}
 :root[data-theme="win11d"] .ft tbody tr:focus{outline:1px solid var(--wm-accent);outline-offset:-1px}
 :root[data-theme="win11d"] .ft td{padding:5px 10px;border-right:1px solid #262626}
@@ -39935,7 +39965,7 @@ input.inp,select.inp{height:32px}
        </button><?php endif;?>
        <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><button class="sb-item" id="pieBtn" title="Install WordPress plugins from the official repository, and Joomla extensions from a package - search, read, install, activate"><svg viewBox="0 0 24 24" style="stroke:#fbbf24"><path d="M9.4 3.6h5.2a1.4 1.4 0 0 1 1.3.9l.8 2 2.1.8a1.4 1.4 0 0 1 .9 1.3v5.2a1.4 1.4 0 0 1-.9 1.3l-2.1.8-.8 2a1.4 1.4 0 0 1-1.3.9H9.4a1.4 1.4 0 0 1-1.3-.9l-.8-2-2.1-.8a1.4 1.4 0 0 1-.9-1.3V8.6a1.4 1.4 0 0 1 .9-1.3l2.1-.8.8-2a1.4 1.4 0 0 1 1.3-.9z"/></svg></svg><span class="sb-tool-name">Plugins Installer</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
        <?php if(!empty($_SESSION['fm_admin'])&&fm_can('rooting')):?><button class="sb-item" id="rootBtn" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and the tool takes root by itself if any of them is open"><svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m11 12 8-8"/><path d="m17 6 2.5 2.5"/><path d="m14 9 2.5 2.5"/></svg></svg><span class="sb-tool-name">Rooting</span><span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
-       <?php if(!$fm->isRO()&&fm_can('terminal')):?><button class="sb-item" id="termBtn" title="A real shell on this server in a new tab"><svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2"/><polyline points="6.5 9.5 9.5 12 6.5 14.5"/><line x1="11.5" y1="15" x2="16" y2="15"/></svg><span class="sb-tool-name">Terminal</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
+       <?php if(!$fm->isRO()&&fm_can('terminal')):?><button class="sb-item" id="termBtn" title="A real shell on this server in a new tab"><svg viewBox="0 0 24 24" style="stroke:#4ade80"><rect x="2.5" y="4" width="19" height="16" rx="2"/><polyline points="6.5 9.5 9.5 12 6.5 14.5"/><line x1="11.5" y1="15" x2="16" y2="15"/></svg><span class="sb-tool-name">Terminal</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
        <?php $pmNow=$fm->privMode();$pmShort=['server'=>'server','auto'=>'','wordpress'=>'WP','joomla'=>'Joomla'][$pmNow]??'';$pmLabel=['server'=>'Server account only','auto'=>'Automatic','wordpress'=>'WordPress','joomla'=>'Joomla'][$pmNow]??$pmNow;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(fm_can('privmode')):?><button class="sb-item" id="privModeBtn" title="File changes are performed by: <?=htmlspecialchars($pmLabel)?> - click to change"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>Privilege Mode<span id="privModeBadge" style="margin-left:6px;font-size:10px;opacity:.8"><?=trim((string)$pmShort)===''?'':'· '.htmlspecialchars($pmShort)?></span></button><?php endif;?><?php endif;?><?php endif;?>
        <button class="sb-item" id="actBtn" title="Everything this tool has done on this server, newest first"><svg viewBox="0 0 24 24"><path d="M2.5 12h4l2.5-6.5 4 13 2.5-6.5h6"/></svg></svg>Activity Log</button>
@@ -41045,7 +41075,7 @@ input.inp,select.inp{height:32px}
                   <span class="term-banner-tail">Anything the account's shell has works here — <b>ls</b>, <b>cat</b>, <b>grep</b>, <b>du</b>, <b>tar</b> — and <b>cd</b> keeps tab, pill and tree in step.</span>
                 </span>
               </div>
-              <template id="termPromptTemplate"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><input class="term-inp" id="termInp__UID__" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-ghost" id="termGhost__UID__" aria-hidden="true"></span><span class="term-cursor" aria-hidden="true"></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
+              <template id="termPromptTemplate"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><input class="term-inp" id="termInp__UID__" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-ghost" id="termGhost__UID__" aria-hidden="true"></span><span class="term-cursor blink" aria-hidden="true"></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
             </div>
           </div>
         </div>
@@ -51639,6 +51669,38 @@ function termTabNew(initialDir){
   return tab;
 }
 function termTabCurrent(){return TERM_TABS.find(t=>t.active)||TERM_TABS[0];}
+/* ── one row, one prompt ────────────────────────────────────────────────────
+   The live prompt is a child of the prompt row, and so is the caret. Leaving it
+   on screen while the echoed command is appended put a prompt and a command in
+   the same row: the line looked printed twice, the first copy plain. So the row
+   is cleared the moment a command is echoed, and the prompt is put back (row,
+   input, ghost, caret, all of it) when the answer is finished. The folder the
+   console stands in is kept in the tab, so the fresh prompt is right at once. */
+function termPromptClear(tab){
+  tab=tab||termTabCurrent();
+  if(!tab||!tab.wrap)return;
+  /* an input the page had switched off (a read-only console, or an account the
+     server refused) stays switched off when the row is rebuilt */
+  const prev=tab.wrap.querySelector('.term-inp');
+  tab.inputLocked=!!(prev&&prev.disabled);
+  tab.wrap.innerHTML='';
+  tab.wrap.classList.add('term-busy');
+}
+function termPromptRestore(tab){
+  tab=tab||termTabCurrent();
+  if(!tab||!tab.wrap)return;
+  const tpl=document.getElementById('termPromptTemplate');
+  if(!tpl)return;
+  tab.wrap.innerHTML=tpl.innerHTML.replace(/__UID__/g,String(tab.id));
+  const cwd=tab.wrap.querySelector('.term-cwd');
+  if(cwd&&tab.prompt)cwd.textContent=tab.prompt;
+  const inp=tab.wrap.querySelector('.term-inp');
+  if(inp&&tab.inputLocked)inp.disabled=true;
+  tab.wrap.classList.remove('term-busy');
+  termBindTab(tab);
+  if(typeof window.termCaretIdle==='function')window.termCaretIdle();
+  if(tab.active&&!(inp&&inp.disabled))termFocusInput();
+}
 function termTabById(id){return TERM_TABS.find(t=>t.id===Number(id));}
 /* the strip is redrawn by moving existing nodes, never by throwing them away:
    a tab being dragged must survive its own reorder */
@@ -51891,6 +51953,49 @@ function termPanelWire(name){
   });
 }
 document.getElementById('termTabNew')?.addEventListener('mousedown',e=>{e.preventDefault();termTabNew();});
+/* ── the sidebar is as wide as the reader wants it ─────────────────────────
+   A handle on the edge of the session panel drags it wider or narrower, inside
+   limits that keep both halves usable: never thinner than the tree needs, never
+   so wide that the console is left with nothing. A double click puts it back to
+   the width it shipped with, and the width is remembered for the next visit. */
+(function(){
+  const win=document.getElementById('termWin');
+  const side=document.querySelector('.term-side');
+  if(!win||!side)return;
+  const MIN=168,MAX=460,DEFAULT=252;
+  const KEY='mfm-term-sidew';
+  const clamp=v=>Math.max(MIN,Math.min(MAX,Math.round(v)));
+  const apply=v=>{const w=clamp(v);side.style.width=w+'px';side.style.minWidth=w+'px';return w;};
+  try{const saved=parseInt(localStorage.getItem(KEY),10);if(isFinite(saved))apply(saved);}catch(e){}
+  const grip=document.createElement('div');
+  grip.className='term-side-split';
+  grip.title='Drag to size the session panel · double click to reset';
+  grip.setAttribute('role','separator');
+  grip.setAttribute('aria-orientation','vertical');
+  side.appendChild(grip);
+  let start=null;
+  grip.addEventListener('pointerdown',e=>{
+    start={x:e.clientX,w:side.getBoundingClientRect().width};
+    grip.classList.add('on');win.classList.add('term-side-drag');
+    try{grip.setPointerCapture(e.pointerId);}catch(err){}
+    e.preventDefault();e.stopPropagation();
+  });
+  grip.addEventListener('pointermove',e=>{
+    if(!start)return;
+    const w=apply(start.w+(e.clientX-start.x));
+    grip.setAttribute('aria-valuenow',String(w));
+    const box=document.getElementById('termScroll');
+    if(box&&TERM_SCROLL.follow)box.scrollTop=box.scrollHeight;
+  });
+  const end=()=>{
+    if(!start)return;
+    start=null;grip.classList.remove('on');win.classList.remove('term-side-drag');
+    try{localStorage.setItem(KEY,String(clamp(side.getBoundingClientRect().width)));}catch(e){}
+  };
+  grip.addEventListener('pointerup',end);
+  grip.addEventListener('pointercancel',end);
+  grip.addEventListener('dblclick',e=>{apply(DEFAULT);try{localStorage.setItem(KEY,String(DEFAULT));}catch(err){}e.stopPropagation();});
+})();
 document.getElementById('termWinClose')?.addEventListener('click',()=>closeMod('termOv'));
 
 /* R48: the tree draws a file with an icon chosen by its extension, inside the
@@ -52282,15 +52387,28 @@ document.getElementById('termTabs')?.addEventListener('drop',e=>{
 
 /* ── titlebar buttons ─────────────────────────────────────────────────────── */
 function termSetFocused(on){
-  document.body.classList.toggle('term-standalone',!!on);
+  on=!!on;
+  const win=document.getElementById('termWin');
+  /* R56: measured before and after, so the frame animates between the two real
+     rectangles - and the inline frame a drag left behind is handed back to the
+     stylesheet while the console is maximised, then restored down to. */
+  const from=win?win.getBoundingClientRect():null;
+  /* the frame is measured and handed back before the pack swaps the window for
+     the page, so restore down comes back to this exact rectangle */
+  if(on&&typeof window.termClearFrame==='function')window.termClearFrame(from);
+  document.body.classList.toggle('term-standalone',on);
   const ov=document.getElementById('termOv');
   /* the console stays on screen either way - focused view only decides whether
      the manager is behind it */
   if(ov)ov.classList.add('open');
+  if(typeof window.termMaxSync==='function')window.termMaxSync();
+  if(!on&&typeof window.termRestoreFrame==='function')window.termRestoreFrame();
+  const to=win?win.getBoundingClientRect():null;
+  if(typeof window.termAnimateFrame==='function')window.termAnimateFrame(from,to,!on);
   if(typeof window.termToast==='function'){
     window.termToast(on?'Maximised - the console fills the window':'Restored down');
   }
-  if(typeof window.termMaxSync==='function')window.termMaxSync();
+  if(typeof termFocusInput==='function')setTimeout(termFocusInput,0);
 }
 function termHideConsole(){
   const ov=document.getElementById('termOv');
@@ -52385,9 +52503,26 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
      element so a theme redraw or a tab switch never loses it */
   let drag=null;
   const titlebar=win.querySelector('.term-titlebar');
+  /* R56 · a frame set with left/top wins over the maximised rules, so the
+     window used to stay stuck where it was dragged. While the console is
+     maximised it now gives the geometry back to the stylesheet (inset:0), and
+     the inline frame is put back the moment it is restored down. */
+  let savedFrame=null;
+  let animTimer=null;
   function placeFrame(x,y,w,h){
     win.style.left=x+'px';win.style.top=y+'px';win.style.width=w+'px';win.style.height=h+'px';
     win.style.right='auto';win.style.bottom='auto';
+  }
+  function clearFrame(){
+    /* remember the window exactly where it is before the stylesheet takes over */
+    const r=win.getBoundingClientRect();
+    savedFrame={x:r.left,y:r.top,w:r.width,h:r.height};
+    ['left','top','right','bottom','width','height'].forEach(k=>win.style.removeProperty(k));
+    win.dataset.framed='1';
+  }
+  function restoreFrame(){
+    if(!savedFrame)return firstFrame();
+    placeFrame(savedFrame.x,savedFrame.y,savedFrame.w,savedFrame.h);
   }
   function firstFrame(){
     if(win.dataset.framed)return;
@@ -52395,6 +52530,43 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
     placeFrame(Math.round((innerWidth-w)/2),Math.max(24,Math.round(innerHeight*.04)),w,h);
     win.dataset.framed='1';
   }
+  window.termClearFrame=clearFrame;
+  window.termRestoreFrame=restoreFrame;
+  /* the Windows 11 expand/collapse: the frame itself travels from the window
+     the reader was using to the whole page, and back. Measured from the two
+     real rects, so nothing is guessed and nothing jumps at the end. */
+  function termAnimateFrame(fromRect,toRect,collapse){
+    if(!fromRect||!toRect)return;
+    if(matchMedia('(prefers-reduced-motion: reduce)').matches)return;
+    const w0=fromRect.width,h0=fromRect.height,w1=toRect.width,h1=toRect.height;
+    if(!w0||!h0||!w1||!h1)return;
+    if(Math.abs(w1-w0)<2&&Math.abs(h1-h0)<2)return;
+    clearTimeout(animTimer);
+    const x0=fromRect.left,y0=fromRect.top;
+    /* the length of the travel is a variable so a probe can slow it right down;
+       in normal use it stays at 172 ms, the Windows 11 snap timing */
+    const ms=Number(window.FM_TERM_ANIM_MS)||172;
+    try{
+      const anim=win.animate([
+        {left:x0+'px',top:y0+'px',width:w0+'px',height:h0+'px',borderRadius:collapse?'14px':'0px'},
+        {left:toRect.left+'px',top:toRect.top+'px',width:w1+'px',height:h1+'px',borderRadius:collapse?'0px':'14px'}
+      ],{duration:ms,easing:'cubic-bezier(.16,1,.3,1)'});
+      /* the frame is already where it belongs in the stylesheet; the animation is
+         only the travel between the two rectangles, so it is always handed back -
+         even if the tab was throttled and the timeline never came back */
+      const done=()=>{try{anim.cancel();}catch(err){}};
+      if(anim.finished&&anim.finished.then)anim.finished.then(done,done);
+      clearTimeout(animTimer);
+      animTimer=setTimeout(done,ms+80);
+    }catch(err){}
+    /* the content cross-fades instead of stretching: the rows keep their size
+       while the frame grows, the way the Windows 11 snap already behaves */
+    const body=[win.querySelector('.term-toolbar'),win.querySelector('.term-surface'),win.querySelector('.term-tabs')].filter(Boolean);
+    body.forEach(el=>{
+      try{el.animate([{opacity:.55},{opacity:1}],{duration:200,easing:'ease-out'});}catch(err){}
+    });
+  }
+  window.termAnimateFrame=termAnimateFrame;
   titlebar?.addEventListener('pointerdown',e=>{
     if(e.target.closest('.term-wbtn'))return;
     if(document.body.classList.contains('term-standalone'))return;
@@ -52440,6 +52612,34 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
   });
   if(document.getElementById('termOv')?.classList.contains('open')&&!document.body.classList.contains('term-standalone'))firstFrame();
   termMaxSync();
+
+  /* ── R56 · the caret ──────────────────────────────────────────────────
+   Typing a key wakes the caret: it turns solid and stops blinking, exactly
+   while the reader is working. 650 ms after the last key it starts blinking
+   again, the way every command editor does. */
+  const TERM_CARET={t:0};
+  function termCaretWake(){
+    const cur=document.querySelectorAll('.term-row .term-cursor');
+    if(!cur.length)return;
+    cur.forEach(c=>c.classList.remove('blink'));
+    clearTimeout(TERM_CARET.t);
+    TERM_CARET.t=setTimeout(()=>{
+      document.querySelectorAll('.term-row .term-cursor').forEach(c=>c.classList.add('blink'));
+    },650);
+  }
+  function termCaretIdle(){
+    /* a fresh prompt is idle from the first frame, so it blinks at once */
+    document.querySelectorAll('.term-row .term-cursor').forEach(c=>c.classList.add('blink'));
+    clearTimeout(TERM_CARET.t);
+  }
+  window.termCaretIdle=termCaretIdle;
+  window.termCaretWake=termCaretWake;
+  document.addEventListener('keydown',e=>{
+    if(e.target&&e.target.closest&&e.target.closest('.term-inp'))termCaretWake();
+  },true);
+  document.addEventListener('input',e=>{
+    if(e.target&&e.target.closest&&e.target.closest('.term-inp'))termCaretWake();
+  },true);
 
   /* ── keys: text size, and the rest of the shell habits ───────────────── */
   window.addEventListener('keydown',e=>{
@@ -52679,20 +52879,35 @@ function termUptime(seconds){
 }
 function drawTermCpu(){
   if(!termCpuCtx||!termCpuGraph)return;
-  const w=termCpuGraph.width,h=termCpuGraph.height;
-  termCpuCtx.clearRect(0,0,w,h);termCpuCtx.beginPath();termCpuCtx.moveTo(0,h);
-  termCpuData.forEach((v,i)=>termCpuCtx.lineTo(i*(w/(termCpuData.length-1)),h-(v/100*h)));
-  termCpuCtx.lineTo(w,h);termCpuCtx.closePath();
+  /* the canvas is kept at the exact size of the box it fills, so the trace is
+     drawn from the left edge to the right edge instead of being stretched into
+     it - a 50x12 bitmap blown up to a 42x14 box was what made the line thin and
+     the fill stop short of the frame */
+  const rect=termCpuGraph.getBoundingClientRect();
+  const cw=Math.max(2,Math.round(rect.width||termCpuGraph.width));
+  const ch=Math.max(2,Math.round(rect.height||termCpuGraph.height));
+  if(termCpuGraph.width!==cw||termCpuGraph.height!==ch){termCpuGraph.width=cw;termCpuGraph.height=ch;}
+  const w=cw,h=ch;
+  const n=Math.max(2,termCpuData.length-1);
+  /* the trace fills the whole box: the first reading starts at x=0 and the last
+     ends on the very edge, so the graph is not a small line lost in a corner */
+  const x=i=>i*(w/n);
+  const y=v=>Math.min(h-1,h-(v/100)*(h-1));
+  termCpuCtx.setTransform(1,0,0,1,0,0);
+  termCpuCtx.clearRect(0,0,w,h);
   /* a canvas keeps whatever colour it was painted with: in a light pack the
      strip has to be repainted too, or it stays a black slab in a white bar */
   const pack=document.documentElement.getAttribute('data-theme')||'dark';
   const light=pack==='win11'||pack==='win10'||pack==='light'||pack==='kalil';
-  termCpuCtx.fillStyle=light?'rgba(0,103,192,.35)':'#5a9c5f';
-  termCpuCtx.fill();
-  termCpuCtx.strokeStyle=light?'rgba(0,103,192,.8)':'#7fc386';
-  termCpuCtx.lineWidth=1;
   termCpuCtx.beginPath();termCpuCtx.moveTo(0,h);
-  termCpuData.forEach((v,i)=>termCpuCtx.lineTo(i*(w/(termCpuData.length-1)),h-(v/100*h)));
+  termCpuData.forEach((v,i)=>termCpuCtx.lineTo(x(i),y(v)));
+  termCpuCtx.lineTo(w,h);termCpuCtx.closePath();
+  termCpuCtx.fillStyle=light?'rgba(0,103,192,.40)':'rgba(90,156,95,.85)';
+  termCpuCtx.fill();
+  termCpuCtx.strokeStyle=light?'rgba(0,103,192,.9)':'#7fc386';
+  termCpuCtx.lineWidth=1;
+  termCpuCtx.beginPath();
+  termCpuData.forEach((v,i)=>i?termCpuCtx.lineTo(x(i),y(v)):termCpuCtx.moveTo(x(i),y(v)));
   termCpuCtx.stroke();
 }
 async function refreshTermSystemInfo(){
@@ -52765,7 +52980,7 @@ async function runTerm(){
   termRunning=true;
   tab.hist.push(cmd);tab.hIdx=-1;inp.value='';adjustTermInputWidth();
   appendCommandLine(tab,cmd);
-  if(cmd==='clear'||cmd==='cls'){tab.out.innerHTML='';termRunning=false;termTabScroll();return;}
+  if(cmd==='clear'||cmd==='cls'){tab.out.innerHTML='';termRunning=false;termPromptRestore(tab);termTabScroll();return;}
   tab.wrap.classList.add('term-busy');
   try{
     const fd=new FormData();
@@ -52774,7 +52989,7 @@ async function runTerm(){
     let endpoint='?x=run';
     if(FM_SSH_TERMINAL_USER){endpoint='?x=ssh_terminal_run';fd.append('ssh_user',FM_SSH_TERMINAL_USER);}
     const d=await fetch(endpoint,{method:'POST',body:fd}).then(r=>r.json());
-    if(d.error){appendLineTo(tab,'Error: '+d.error,'err-line');}
+    if(d.error){appendLineTo(tab,'Error: '+d.error,'err-line');termFinishRun(tab,inp);}
     else{
       updateTermPrompt(d.prompt,d.cwd);
       if(d.output){
@@ -52789,10 +53004,10 @@ async function runTerm(){
 }
 /* the prompt comes back only when the last line of the answer is on screen */
 function termFinishRun(tab,inp){
-  if(tab)tab.wrap.classList.remove('term-busy');
   termRunning=false;
-  const i=inp||termInput();
-  if(i){try{i.focus({preventScroll:true});}catch(e){i.focus();}}
+  /* the row cleared for the echo gets its prompt back, and the caret lands on it */
+  termPromptRestore(tab);
+  if(tab)tab.wrap.classList.remove('term-busy');
 }
 /* The answer is written to the page in one go - a command is finished when it
    returns, and nobody wants to watch a file crawl in line by line. What steps is
@@ -52821,21 +53036,40 @@ function termDrainResult(tab,lines,exit){
   termScrollWalk(tab,lines.length);
   termFinishRun(tab);
 }
+function termRowPx(){
+  /* the height of one printed row, measured on the lines themselves: the walk
+     and the wheel move by this, never by a guess */
+  const line=document.querySelector('#termScroll .term-line')||document.querySelector('.term-ps');
+  const h=line?parseFloat(getComputedStyle(line).lineHeight):0;
+  if(isFinite(h)&&h>0)return h;
+  const fs=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--term-fs'))||13.5;
+  return fs*1.245;
+}
 function termScrollWalk(tab,count){
   clearInterval(TERM_DRAIN.timer);
   const box=termScrollBox();
   if(!box)return;
-  /* the step is a handful of lines per frame, so the view walks down the answer
-     instead of cutting to the bottom, and it keeps walking while the answer is
-     still being written */
-  const fs=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--term-fs'))||13.5;
-  const row=fs*1.28;
+  /* the step is a handful of rows per frame, and every stop lands on the row grid
+     of the answer itself: the line at the bottom edge is then a whole line instead
+     of two halves of two, which is what looked like a line eaten by the status bar */
+  const row=termRowPx();
+  const first=box.querySelector('.term-line');
+  const gridAt=el=>el?(el.getBoundingClientRect().top-box.getBoundingClientRect().top+box.scrollTop)%row:0;
   const step=Math.max(1,Math.min(6,Math.ceil((count||1)/60)))*row;
+  const place=()=>{
+    const bottom=box.scrollHeight-box.clientHeight;
+    const gap=bottom-box.scrollTop;
+    if(gap<=1){termScrollBy(box,bottom);return true;}
+    const grid=gridAt(first);
+    const want=Math.min(bottom,box.scrollTop+step);
+    const snapped=grid+Math.round((want-grid)/row)*row;
+    termScrollBy(box,Math.max(box.scrollTop,Math.min(bottom,snapped)));
+    return false;
+  };
+  if(place())return;
   TERM_DRAIN.timer=setInterval(()=>{
     if(!TERM_SCROLL.follow||tab!==termTabCurrent()){clearInterval(TERM_DRAIN.timer);TERM_DRAIN.timer=null;return;}
-    const gap=box.scrollHeight-box.scrollTop-box.clientHeight;
-    if(gap<=1){box.scrollTop=box.scrollHeight;clearInterval(TERM_DRAIN.timer);TERM_DRAIN.timer=null;return;}
-    termScrollBy(box,box.scrollTop+Math.min(step,gap));
+    if(place()){clearInterval(TERM_DRAIN.timer);TERM_DRAIN.timer=null;}
   },16);
 }
 /* kept for the helpers that still call the plain form */
@@ -52944,9 +53178,20 @@ function termPromptMarkup(tab){
 }
 function appendCommandLine(tab,cmd){
   if(!tab){return;}
+  /* The live prompt sits in the same flex row the echoed command is about to
+     take: both were children of one row, so the last prompt and the new command
+     were drawn side by side - the line appeared twice, once plain and once
+     coloured. Clearing the row first gives the echo the whole line, and the live
+     prompt comes back when the answer is finished. */
+  const last=tab.out.lastElementChild;
+  if(last&&last.classList&&last.classList.contains('cmd-line')&&last.dataset.cmd===cmd)return;
+  /* the prompt markup is read before the row is cleared: it is what the echo wears */
+  const pm=termPromptMarkup(tab);
+  termPromptClear(tab);
   const s=document.createElement('span');
   s.className='term-line cmd-line';
-  s.innerHTML='<span class="tk-prompt">'+termPromptMarkup(tab)+' </span>'+termPaint(cmd);
+  s.dataset.cmd=cmd;
+  s.innerHTML='<span class="tk-prompt">'+pm+' </span>'+termPaint(cmd);
   const box=termScrollBox();
   const follow=!box||tab!==termTabCurrent()||TERM_SCROLL.follow;
   tab.out.appendChild(s);
