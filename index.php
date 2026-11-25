@@ -1165,7 +1165,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R65');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R67');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -36111,52 +36111,6 @@ button.rc-row{cursor:pointer}
    dialog opens above the window it was asked from. */
 /* R61 · the console is the window on top: 190 put its title bar UNDER .topbar
    (200), so the three buttons and the tool name slid behind the manager's bars */
-/* ══ R65 · CONNECTING - one word, nothing around it ═════════════════════════
-   Four seconds, the first time the console is opened: the word sits in the
-   middle of the console, letterspaced, with a slow light travelling through it
-   and three dots breathing after it. No card, no ring, no veil - the console
-   keeps working underneath and the word never takes a click. ══════════════ */
-.term-connect{position:absolute;inset:0;z-index:9;display:none;align-items:center;justify-content:center;
-  pointer-events:none;opacity:0;transition:opacity .42s ease}
-.term-connect.on{display:flex;opacity:1}
-.term-connect.out{opacity:0}
-.term-connect-word{position:relative;display:inline-flex;align-items:center;
-  font-family:'Inter',system-ui,sans-serif;font-size:15.5px;font-weight:600;
-  line-height:1.5;letter-spacing:.34em;text-transform:lowercase;
-  background:linear-gradient(100deg,#8d9296 22%,#ffffff 50%,#8d9296 78%);
-  background-size:240% 100%;-webkit-background-clip:text;background-clip:text;
-  -webkit-text-fill-color:transparent;color:#ffffff;
-  animation:termConnShimmer 2.4s linear infinite}
-/* a wide, very soft halo - the word stays a word, but it never fights the mark
-   printed behind it */
-.term-connect-word:before{content:"";position:absolute;inset:-26px -44px;z-index:-1;
-  background:radial-gradient(ellipse at center,rgba(8,9,10,.82) 0%,rgba(8,9,10,.55) 45%,rgba(8,9,10,0) 72%);
-  pointer-events:none}
-
-@keyframes termConnShimmer{from{background-position:120% 0}to{background-position:-120% 0}}
-.term-connect-dots{display:inline-flex;gap:5px;margin-left:.5em;align-self:center}
-.term-connect-dots i{width:4px;height:4px;border-radius:50%;background:currentColor;color:#ffffff;
-  opacity:.3;animation:termConnDot 1.25s ease-in-out infinite}
-.term-connect-dots i:nth-child(2){animation-delay:.16s}
-.term-connect-dots i:nth-child(3){animation-delay:.32s}
-@keyframes termConnDot{0%,64%,100%{opacity:.22;transform:translateY(0)}30%{opacity:.95;transform:translateY(-2px)}}
-/* the light packs: the word is dark, the dots follow it */
-:root[data-theme="light"] .term-connect-word,
-:root[data-theme="kalil"] .term-connect-word{
-  background:linear-gradient(100deg,#9aa0a6 22%,#111315 50%,#9aa0a6 78%);
-  background-size:240% 100%;-webkit-background-clip:text;background-clip:text;color:#111315}
-:root[data-theme="light"] .term-connect-dots i,
-:root[data-theme="kalil"] .term-connect-dots i{color:#111315}
-@media(prefers-reduced-motion:reduce){
-  .term-connect-word{animation:none;background:none;-webkit-text-fill-color:#ffffff}
-  :root[data-theme="light"] .term-connect-word,
-  :root[data-theme="kalil"] .term-connect-word{-webkit-text-fill-color:#111315}
-  :root[data-theme="light"] .term-connect-word:before,
-  :root[data-theme="kalil"] .term-connect-word:before{
-    background:radial-gradient(ellipse at center,rgba(250,250,251,.92) 0%,rgba(250,250,251,.6) 45%,rgba(250,250,251,0) 72%)}
-  .term-connect-dots i{animation:none;opacity:.6}
-}
-
 .term-ov{padding:0;background:transparent;backdrop-filter:none;align-items:stretch;justify-content:stretch;z-index:260;pointer-events:none}
 /* R61 · everything behind the console is softly blurred, so the eye has one
    window to read. The blur sits on the console's own layer, not on the page, so
@@ -41439,12 +41393,6 @@ input.inp,select.inp{height:32px}
      nested inside #termOv, so every window was measured against the terminal frame. -->
 <div class="mod-ov term-ov" id="termOv" data-app-dir="<?=htmlspecialchars($termAppDir,ENT_QUOTES)?>" data-home-dir="<?=htmlspecialchars($termTreeDir,ENT_QUOTES)?>">
   <div class="term-win" id="termWin">
-  <!-- R65 · the word, four seconds, the first time the console is opened -->
-  <div class="term-connect" id="termConnect" role="status" aria-live="polite" aria-label="Connecting">
-    <span class="term-connect-word">connecting<span class="term-connect-dots"><i></i><i></i><i></i></span></span>
-  </div>
-
-
     <button type="button" class="btn btn-icon btn-g term-close" id="termClose" title="Close" aria-label="Close the terminal" data-wmclose><svg viewBox="0 0 10 10"><line x1="0.7" y1="0.7" x2="9.3" y2="9.3"/><line x1="9.3" y1="0.7" x2="0.7" y2="9.3"/></svg></button>
 
     <!-- window title bar -->
@@ -52144,11 +52092,36 @@ function termSugBox(){const t=termTabCurrent();return t?t.wrap.querySelector('.t
    "ch": the field and the faint tail have to sit on exactly the same glyph grid,
    and "ch" is a whole-number unit that drifted by a pixel per character. */
 function termMonoPx(){
+  /* R67 · one glyph of the font the FIELD is actually painted with.
+     The old version measured a probe pinned to `var(--term-fs,13.5px)` - a
+     variable this build never defines - and divided an 800px run by 100, which
+     dropped the fraction. On a phone the field is 16px and the probe stayed
+     13.5px, so every character moved the caret 7.8px across 9.9px of text: the
+     error stacked with the length of the line, and the caret walked away from
+     the words. Same font, same size, same letter-spacing, same fraction. */
+  const inp=document.querySelector('textarea.term-inp')||document.querySelector('.term-inp');
   const out=document.getElementById('termMonoProbe');
-  if(!out)return 0;
-  out.style.fontSize=getComputedStyle(document.documentElement).getPropertyValue('--term-fs')||'13.5px';
-  const w=out.getBoundingClientRect().width/100;
-  return w>0?w:0;
+  const base=inp||out;
+  if(!base)return 0;
+  const r=base.getBoundingClientRect();
+  if(r.height<=0&&!out)return 0;
+  const cs=getComputedStyle(base);
+  const span=document.createElement('span');
+  span.textContent='M'.repeat(100);
+  span.style.cssText='position:absolute;left:-9999px;top:0;white-space:pre;visibility:hidden';
+  span.style.fontFamily=cs.fontFamily;
+  span.style.fontSize=cs.fontSize;
+  span.style.letterSpacing=cs.letterSpacing;
+  span.style.fontWeight=cs.fontWeight;
+  span.style.fontStyle=cs.fontStyle;
+  span.style.fontVariant=cs.fontVariant;
+  (document.body||document.documentElement).appendChild(span);
+  const w=span.getBoundingClientRect().width/100;
+  span.remove();
+  if(w>0)return w;
+  /* a field that is not laid out yet: fall back to the classic ratio */
+  const fs=parseFloat(cs.fontSize)||13.5;
+  return fs*0.6018;
 }
 function termGlyphRun(text){
   let n=String(text||'').length;
@@ -52213,8 +52186,17 @@ function adjustTermInputWidth(el){
   if(row)row.classList.toggle('live-wrapped',psW>Math.max(80,rowW*0.5));
   const avail=row&&row.classList.contains('live-wrapped')?Math.max(160,rowW-2):room;
   const want=Math.max(i.value.length,1)*gp;
-  const fw=Math.max(Math.min(want,avail),Math.min(avail,Math.round(avail/3)));
+  /* R67 · the box is a whole number of glyphs wide, and it never offers fewer
+     glyphs than the command needs while the row can still take them: a box that
+     is half a glyph too narrow wraps the last character onto a second line, and
+     then no x can describe where the reader is. */
+  const availGlyphs=Math.max(1,Math.floor((avail-(live?2:0))/gp));
+  const roomGlyphs=Math.max(1,Math.floor(room/gp));
+  const need=Math.max(i.value.length+1,1);
+  const glyphs=Math.max(Math.min(need,availGlyphs),Math.min(availGlyphs,Math.floor(availGlyphs/3)));
+  const fw=Math.round(glyphs*gp);
   if(live){live.style.width=(fw+2)+'px';live.style.maxWidth='100%';}
+  i.style.maxWidth=Math.round(Math.min(availGlyphs,roomGlyphs)*gp)+'px';
   i.style.width=fw+'px';
   i.dataset.full=String(want);
   /* the box the typing happens in is as tall as the text inside it */
@@ -52280,39 +52262,6 @@ function termScrollToBottom(){
 }
 function termScrollBottom(){termScrollToBottom();}
 
-/* ══ R65 · CONNECTING - the word, four seconds, once per browser ═══════════
-   Every open path (sidebar button, window menu, focused view) flips `.open` on
-   #termOv, so one observer covers them all. It never blocks a click. */
-(function(){
-  var KEY='fm.term.connected';
-  var ov=document.getElementById('termConnect');
-  var term=document.getElementById('termOv');
-  if(!ov||!term)return;
-  var t1=0,t2=0,running=false;
-  function seen(){try{return localStorage.getItem(KEY)==='1'}catch(e){return false}}
-  function mark(){try{localStorage.setItem(KEY,'1')}catch(e){}}
-  function stop(){
-    if(!running)return; running=false;
-    clearTimeout(t1); clearTimeout(t2);
-    ov.classList.add('out');
-    t2=setTimeout(function(){ov.classList.remove('on','out');},420);
-    mark();
-  }
-  function start(){
-    if(running||seen())return;
-    running=true;
-    ov.classList.remove('out'); ov.classList.add('on');
-    t1=setTimeout(stop,4000);
-  }
-  if(window.MutationObserver){
-    new MutationObserver(function(){
-      if(term.classList.contains('open'))start();
-    }).observe(term,{attributes:true,attributeFilter:['class']});
-  }
-  term.addEventListener('keydown',stop,true);
-  var c=document.getElementById('termClose');
-  if(c)c.addEventListener('click',stop);
-})();
 document.getElementById('termBtn')?.addEventListener('click',()=>{
   /* a window inside the manager, so its buttons, its theme and its frame are the
      manager's - and its tabs keep running when it is hidden */
@@ -54084,6 +54033,11 @@ function termCaretSync(el){
   let pos=0;
   try{pos=(inp.selectionStart==null?inp.value.length:inp.selectionStart)||0;}catch(err){pos=inp.value.length;}
   const fw=parseFloat(inp.style.width)||0;
+  /* R67 · a wrapped command paints its own text on several rows; a single block
+     caret cannot follow it, and it used to stand far to the right of the last
+     word on the first row. The field keeps its own blinking illusion instead. */
+  const lh=parseFloat(getComputedStyle(inp).lineHeight)||16;
+  if((inp.scrollHeight||0)>lh*1.5){c.classList.remove('on','blink');c.style.left='0px';return;}
   const x=Math.max(pos,0)*gp;
   /* scrollLeft keeps the tail of a long command in step with the field */
   const edge=Math.max(fw-gp,0);
