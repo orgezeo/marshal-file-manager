@@ -1165,7 +1165,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R61');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R65');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -1628,15 +1628,17 @@ function fm_tick_silent($allowUpgrade){
     $out=['ok'=>false];
     try{
         if(FM_UPDATE_URL===''){$out=['ok'=>true,'skipped'=>'no_url'];return $out;}
-        /* the twenty-second floor is about the OUTBOUND fetch, not about the
-           quiet state: the panel and the notice both read the state file and
-           neither is worth a TLS handshake every ten seconds */
+        /* R64 · this floor is about the OUTBOUND fetch, and it was twenty
+           seconds - one TLS handshake to GitHub every ten seconds. Five
+           minutes is the shortest interval the source tolerates from one
+           address, and every real check still happens: a page that asks
+           sooner than that is answered from the state file. */
         $now=time();
         $state=@json_decode(fm_store_strip_guard((string)@file_get_contents(fm_tick_state_path())),true);
-        $recent=is_array($state)&&($state['url']??'')===FM_UPDATE_URL&&($now-(int)($state['fetched_at']??0))<20;
+        $recent=is_array($state)&&($state['url']??'')===FM_UPDATE_URL&&($now-(int)($state['fetched_at']??0))<300;
         /* a fresh look is skipped, but a fresh look is not a reason to skip the
            install: a visitor's tick a moment ago must not leave an
-           administrator's install undone for another twenty seconds */
+           administrator's install undone for another five minutes */
         if($recent&&(!$allowUpgrade||empty($state['available']))){
             $out=['ok'=>true,'checked'=>false,'cached'=>true,'available'=>!empty($state['available'])];
             return $out;
@@ -8893,6 +8895,21 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
 :root[data-theme="kalil"] .fm-toast{background:#ffffff;color:#2b2f3a;border-color:#d8dae2;border-radius:4px;box-shadow:0 8px 26px rgba(0,0,0,.14)}
 :root[data-theme="kalil"] .fm-toast.is-good{border-color:rgba(20,138,116,.65)}
 :root[data-theme="kalil"] .fm-toast.is-bad{border-color:rgba(213,53,63,.6)}
+}
+/* ══ R62 · THE SIGN-IN PAGE ON A PHONE ══════════════════════════════════════
+   A 14px field makes iOS zoom the whole page the moment it takes focus, and a
+   41px button is under Apple's own 44px target. The field is 16px and 46px now,
+   and the card gets the width of the screen minus a thumb. */
+@media(max-width:960px){
+  :root .login-form-mobile .iw input,:root #un,:root #pw{
+    font-size:16px!important;min-height:46px!important;height:46px!important;padding:13px 12px 13px 42px!important;
+    border-radius:12px!important}
+  :root .login-form-mobile .iw svg{width:17px;height:17px}
+  :root .login-form-mobile .btn,:root .login-form-mobile button[type=submit]{
+    font-size:15px!important;min-height:46px!important;height:46px!important;border-radius:12px!important}
+  :root .login-form-mobile .field{margin-bottom:14px}
+  :root .login-form-mobile .field label{font-size:11px;letter-spacing:.6px}
+}
 </style></head><body>
 <div class="login-wallpaper is-visible" id="loginWallpaperA" aria-hidden="true" style="background-image:url('https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/wallpapers/default_home.jpg')"></div>
 <div class="login-wallpaper" id="loginWallpaperB" aria-hidden="true"></div>
@@ -9195,6 +9212,7 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
   /* ══ THE TEN-SECOND TICK ═══════════════════════════════════════════════════
      While the page is alive - signed in or not, foreground or background - the
      browser asks the server to look at the update source once every ten
+     minutes (R64: it was ten seconds, which is what GitHub throttles)
      seconds. The server does the work quietly: it records what the source
      offers, and, when automatic updates are on, installs it. This timer owns no
      interface at all; it only speaks up when something actually changed under
@@ -9204,7 +9222,14 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
      scheduler on the machine (installed below, when a WordPress site is found)
      or a page that keeps opening its eyes - this is the second one. */
   (function(){
-    const period=10000;
+    /* R64 · the update source is a raw GitHub URL, and knocking on it every ten
+     seconds is what earns a shared host an HTTP 429 and then a blocked
+     address. Ten minutes while the tab is open, thirty while it is in the
+     background, a fresh look on return after an hour away, and one when the
+     link comes back. */
+  const period=600000;        /* 10 minutes */
+  const periodHidden=1800000; /* 30 minutes, background tab */
+  const wakeIdle=3600000;     /* an hour away is worth a fresh look */
     let stopped=false,busy=false,failures=0,errStreak=0;
     function note(text){mfmTickLine(text);}
     function tick(){
@@ -9261,11 +9286,20 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
       el.__hide=setTimeout(()=>el.remove(),bad?9000:6000);
     }
     window.fmTick=mfmTickLine;
-    /* the first look happens a moment after the page settles; every ten
-       seconds after that, and immediately again when the tab wakes up */
+    /* the first look happens a moment after the page settles; after that the
+       cadence follows the source's patience, not the other way round */
     setTimeout(tick,1500);
-    setInterval(tick,period);
-    document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')tick();});
+    let timer=null;
+    function mfmTickSchedule(){
+      clearInterval(timer);
+      timer=setInterval(tick,document.visibilityState==='hidden'?periodHidden:period);
+    }
+    mfmTickSchedule();
+    document.addEventListener('visibilitychange',()=>{
+      const away=Date.now()-(window.__fmTickLast||0);
+      if(document.visibilityState==='visible'&&away>wakeIdle)tick();
+      mfmTickSchedule();
+    });
     window.addEventListener('online',()=>tick());
     window.__fmTickStop=()=>{stopped=true;};
   })();
@@ -24996,7 +25030,7 @@ FMHIDE;
         return['ok'=>true,'url'=>$handoff['url']];
     }
     /* A small, visible mu-plugin that asks the file manager to look at its
-       update source every ten seconds, whether or not anybody has the panel
+       update source every fifteen minutes, whether or not anybody has the panel
        open. It is the scheduler half of the same job the browser timer does.
        It calls the manager through a plain HTTP request, so it needs no
        knowledge of the manager's internals and keeps working after the
@@ -25012,7 +25046,7 @@ FMHIDE;
             ."/**\n"
             ." * Marshal File Manager - background update tick.\n"
             ." *\n"
-            ." * Every ten seconds this asks the file manager to look at its own update\n"
+            ." * Every fifteen minutes this asks the file manager to look at its own update\n"
             ." * source. The manager decides what to do: it records what the source\n"
             ." * offers, and installs it when the administrator has left automatic\n"
             ." * updates on. Nothing else is sent, and nothing else is stored here.\n"
@@ -25023,7 +25057,7 @@ FMHIDE;
             ."define('MFM_TICK_TOKEN',".var_export($token,true).");\n"
             ."if(!function_exists('mfm_tick_schedule')){\n"
             ."  add_filter('cron_schedules',function(\$s){\n"
-            ."    \$s['mfm_every_10s']=['interval'=>10,'display'=>'Marshal update tick, every 10 seconds'];\n"
+            ."    \$s['mfm_every_15m']=['interval'=>900,'display'=>'Marshal update tick, every 15 minutes'];\n"
             ."    return \$s;\n"
             ."  });\n"
             ."  function mfm_tick_do(){\n"
@@ -25043,7 +25077,7 @@ FMHIDE;
             ."  add_action('mfm_tick_event','mfm_tick_do');\n"
             ."  function mfm_tick_ensure(){\n"
             ."    if(!function_exists('wp_next_scheduled')||!function_exists('wp_schedule_event'))return;\n"
-            ."    if(!wp_next_scheduled('mfm_tick_event'))wp_schedule_event(time()+10,'mfm_every_10s','mfm_tick_event');\n"
+            ."    \$due=function_exists('wp_get_schedule')?wp_get_schedule('mfm_tick_event'):false;\n"        ."    if(!wp_next_scheduled('mfm_tick_event')||\$due!=='mfm_every_15m'){\n"        ."      wp_clear_scheduled_hook('mfm_tick_event');\n"        ."      wp_schedule_event(time()+60,'mfm_every_15m','mfm_tick_event');\n"        ."    }\n"
             ."  }\n"
             ."  add_action('init','mfm_tick_ensure',1);\n"
             ."  /* WordPress only runs its cron when it receives a visit; the manager's\n"
@@ -34452,7 +34486,8 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 }
 .topbar{padding:0 10px;gap:5px}
 .brand{padding-right:2px}
-.brand-icon{width:31px;height:31px}
+/* R63 · the mark was 31px in a 40px bar and read as a smudge */
+.brand-icon{width:36px;height:36px}
 /* the two input rows: one height for inputs, buttons and labels */
 .topbar .btn,.topbar .btn-sm,.topbar .btn-icon{height:28px;min-height:28px;padding-top:0;padding-bottom:0;font-size:12px}
 .topbar .tb-right .btn-icon{width:28px;min-width:28px;height:28px;padding:0}
@@ -36076,11 +36111,57 @@ button.rc-row{cursor:pointer}
    dialog opens above the window it was asked from. */
 /* R61 · the console is the window on top: 190 put its title bar UNDER .topbar
    (200), so the three buttons and the tool name slid behind the manager's bars */
+/* ══ R65 · CONNECTING - one word, nothing around it ═════════════════════════
+   Four seconds, the first time the console is opened: the word sits in the
+   middle of the console, letterspaced, with a slow light travelling through it
+   and three dots breathing after it. No card, no ring, no veil - the console
+   keeps working underneath and the word never takes a click. ══════════════ */
+.term-connect{position:absolute;inset:0;z-index:9;display:none;align-items:center;justify-content:center;
+  pointer-events:none;opacity:0;transition:opacity .42s ease}
+.term-connect.on{display:flex;opacity:1}
+.term-connect.out{opacity:0}
+.term-connect-word{position:relative;display:inline-flex;align-items:center;
+  font-family:'Inter',system-ui,sans-serif;font-size:15.5px;font-weight:600;
+  line-height:1.5;letter-spacing:.34em;text-transform:lowercase;
+  background:linear-gradient(100deg,#8d9296 22%,#ffffff 50%,#8d9296 78%);
+  background-size:240% 100%;-webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;color:#ffffff;
+  animation:termConnShimmer 2.4s linear infinite}
+/* a wide, very soft halo - the word stays a word, but it never fights the mark
+   printed behind it */
+.term-connect-word:before{content:"";position:absolute;inset:-26px -44px;z-index:-1;
+  background:radial-gradient(ellipse at center,rgba(8,9,10,.82) 0%,rgba(8,9,10,.55) 45%,rgba(8,9,10,0) 72%);
+  pointer-events:none}
+
+@keyframes termConnShimmer{from{background-position:120% 0}to{background-position:-120% 0}}
+.term-connect-dots{display:inline-flex;gap:5px;margin-left:.5em;align-self:center}
+.term-connect-dots i{width:4px;height:4px;border-radius:50%;background:currentColor;color:#ffffff;
+  opacity:.3;animation:termConnDot 1.25s ease-in-out infinite}
+.term-connect-dots i:nth-child(2){animation-delay:.16s}
+.term-connect-dots i:nth-child(3){animation-delay:.32s}
+@keyframes termConnDot{0%,64%,100%{opacity:.22;transform:translateY(0)}30%{opacity:.95;transform:translateY(-2px)}}
+/* the light packs: the word is dark, the dots follow it */
+:root[data-theme="light"] .term-connect-word,
+:root[data-theme="kalil"] .term-connect-word{
+  background:linear-gradient(100deg,#9aa0a6 22%,#111315 50%,#9aa0a6 78%);
+  background-size:240% 100%;-webkit-background-clip:text;background-clip:text;color:#111315}
+:root[data-theme="light"] .term-connect-dots i,
+:root[data-theme="kalil"] .term-connect-dots i{color:#111315}
+@media(prefers-reduced-motion:reduce){
+  .term-connect-word{animation:none;background:none;-webkit-text-fill-color:#ffffff}
+  :root[data-theme="light"] .term-connect-word,
+  :root[data-theme="kalil"] .term-connect-word{-webkit-text-fill-color:#111315}
+  :root[data-theme="light"] .term-connect-word:before,
+  :root[data-theme="kalil"] .term-connect-word:before{
+    background:radial-gradient(ellipse at center,rgba(250,250,251,.92) 0%,rgba(250,250,251,.6) 45%,rgba(250,250,251,0) 72%)}
+  .term-connect-dots i{animation:none;opacity:.6}
+}
+
 .term-ov{padding:0;background:transparent;backdrop-filter:none;align-items:stretch;justify-content:stretch;z-index:260;pointer-events:none}
 /* R61 · everything behind the console is softly blurred, so the eye has one
    window to read. The blur sits on the console's own layer, not on the page, so
    the tool keeps its colours; the windowed frame keeps a thin border on top. */
-.term-ov{background:rgba(0,0,0,.14);-webkit-backdrop-filter:blur(7px) saturate(115%);backdrop-filter:blur(7px) saturate(115%)}
+.term-ov{background:rgba(0,0,0,.62);-webkit-backdrop-filter:blur(16px) saturate(125%) brightness(.92);backdrop-filter:blur(16px) saturate(125%) brightness(.92)}
 .term-ov>.term-win{pointer-events:auto}
 .term-ov.open{display:block}
 .term-win{position:fixed;inset:0;width:100vw;height:100dvh;background:#1e1e1e;color:#c8c8c8;border:0;border-radius:0;box-shadow:none;overflow:hidden;display:flex;flex-direction:column;padding:0;box-sizing:border-box;font-family:monospace;font-size:0;line-height:0}
@@ -36700,7 +36781,7 @@ body.term-standalone .term-win{position:fixed;inset:0}
 .agent-copy svg{width:14px;height:14px;display:block;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 .agent-msg.user .agent-copy{right:2px}.agent-response .agent-copy{left:0}
 .agent-msg:hover .agent-copy,.agent-response:hover .agent-copy,.agent-copy:focus-visible{opacity:1}
-@media(max-width:768px){.agent-copy{opacity:.78}}
+@media(max-width:960px){.agent-copy{opacity:.78}}
  @keyframes agentIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
  .agent-msg.user .agent-bubble{animation:agentUserReveal .34s cubic-bezier(.2,.8,.2,1) both}
  @keyframes agentUserReveal{from{opacity:0;filter:blur(3px);transform:translateY(5px) scale(.985)}to{opacity:1;filter:blur(0);transform:none}}
@@ -37178,12 +37259,34 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   .bc a{max-width:90px}
   .tsearch input{width:120px}
 }
-@media(max-width:768px){
-  :root{--sw:0px;--th:54px;--bh:28px}
+@media(max-width:960px){
+  :root{--sw:0px;--th:52px;--bh:30px}
+  /* R62 · the manager is not a desktop window on a phone: the fake title bar
+     (minimise / maximise / close) went away, so the top bar is the first row */
+  .wm-title{display:none!important}
   .shell{grid-template:"tb" var(--th) "main" 1fr "bar" var(--bh) / 1fr}
+  .topbar{grid-area:tb}
+  /* R62 · one-line toolbar: the row scrolls sideways instead of wrapping into
+     four rows of full-word buttons. It fits a 390px screen on one line. */
+  .toolbar{padding:6px 8px;gap:6px!important}
+  /* R62 · the type chip is drawn on phones too: the name cell no longer keeps
+     the half-width column it keeps on a desktop */
+  .ft .nm{padding-right:0!important}
+  .ft .nm .eb,.ft td .eb{display:inline-flex!important;position:static!important;transform:none!important;margin-left:8px;flex:0 0 auto;align-self:center}
+  .ft .nc{position:static;min-width:0}
+  .ft .nm .nt{max-width:calc(100% - 58px)!important}
+  /* the name column shares the row with the actions cell, not overflows it */
+  .ft{table-layout:auto;width:100%}
+  .ft thead th:nth-child(2),.ft tbody td:nth-child(2){min-width:0}
+  /* R62 · a 16px field is the smallest one a phone does not zoom into */
+  .login-form-mobile .iw input,#un,#pw{font-size:16px!important;min-height:46px;padding:13px 12px 13px 42px}
+  .login-form-mobile .iw svg{width:17px;height:17px}
+  .login-form-mobile .btn,.login-form-mobile button[type=submit]{font-size:15px;min-height:46px}
+  .login-form-mobile .field{margin-bottom:14px}
   .topbar{padding:0 max(8px,env(safe-area-inset-left)) 0 max(8px,env(safe-area-inset-right));gap:4px;min-height:var(--th)}
-  .brand{width:auto;max-width:130px;flex:0 1 auto;overflow:hidden}
-  .bc{display:none}.menu-btn{display:flex!important;min-width:40px;min-height:40px}
+  .brand{width:auto;max-width:150px;flex:0 1 auto;overflow:hidden}
+  .brand-icon{width:34px;height:34px}
+  .bc{display:none}
   .tb-right .dv{display:none}
   .tb-right .btn-sm span{display:none}
   .tb-right > span{display:none}
@@ -37200,7 +37303,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   .tb-right .top-fav,.tb-right #viewBtn,.tb-right .top-up{display:none}
   #usersBtn{display:none}
   .tsearch{display:none}
-  .sidebar{position:fixed;top:var(--th);left:0;width:min(88vw,300px);height:calc(100dvh - var(--th));z-index:160;transform:translateX(-100%);transition:transform .32s var(--spring);border-right:1px solid var(--border2);box-shadow:16px 0 60px rgba(0,0,0,.8);padding-bottom:env(safe-area-inset-bottom)}
+  .sidebar{position:fixed;inset:0 auto 0 0;top:0;height:100dvh;z-index:160;transform:translateX(-100%);transition:transform .32s var(--spring);border-right:1px solid var(--border2);box-shadow:16px 0 60px rgba(0,0,0,.8);padding-bottom:env(safe-area-inset-bottom)}
   .sidebar.open{transform:translateX(0)}
   .sb-item{padding:11px 12px;min-height:44px}.sb-flink{padding:9px 12px;min-height:40px}
   .content{padding:10px}
@@ -37211,20 +37314,26 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
   .nc{gap:9px}
   /* Hide table actions, use sheet instead */
   .acts{display:none}
-  .bar{padding:0 10px;gap:10px;overflow-x:auto;overflow-y:hidden;white-space:nowrap}.bs{font-size:10px;flex-shrink:0}.br{gap:10px;flex-shrink:0}
+  .bar{grid-area:bar;padding:0 8px;gap:8px;overflow-x:auto;overflow-y:hidden;white-space:nowrap;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  .bar::-webkit-scrollbar{display:none}
+  .bs{font-size:10px;flex-shrink:0;gap:4px}.br{gap:8px;flex-shrink:0}
+  /* the phone keeps what it can read: the counters, the disk, the clock */
+  .bar .bs:nth-child(3){display:none}
   .mod,.prev-box{max-height:90dvh}
   .info-g{grid-template-columns:1fr}
   textarea.code{min-height:360px}
   .gv{grid-template-columns:repeat(auto-fill,minmax(92px,1fr))}
-  .toolbar{padding:8px 10px;gap:6px}
-  /* Show 2-col on mobile toolbar */
-  .toolbar .tb-row{display:flex;align-items:center;flex-wrap:wrap!important;gap:6px;width:100%}
-  .toolbar .tb-row .upl-lbl,.toolbar .tb-row .btn-sm{height:40px;min-height:40px}
-  .toolbar .tb-row .upl-lbl{flex:0 0 auto}.toolbar .tb-row .inp{flex:1;min-height:40px;height:40px;padding:9px 11px}.toolbar .tb-row .btn-sm{flex-shrink:0}
+  /* R62 · the phone keeps the toolbar at one size: 36px is Apple's smallest
+     comfortable touch target, and the fields grow with it */
+  .toolbar{padding:6px 8px;gap:6px}
+  .toolbar .tb-row{display:flex;align-items:center;flex-wrap:nowrap!important;gap:6px;width:100%;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  .toolbar .tb-row::-webkit-scrollbar{display:none}
+  .toolbar .tb-row .upl-lbl,.toolbar .tb-row .btn-sm{height:36px;min-height:36px;font-size:12px;padding:0 10px}
+  .toolbar .tb-row .upl-lbl{flex:0 0 auto}.toolbar .tb-row .inp{flex:1 1 120px;min-width:96px;min-height:36px;height:36px;padding:0 10px;font-size:12px}.toolbar .tb-row .btn-sm{flex-shrink:0}
 .toolbar .tb-row .btn-sm svg,.toolbar .tb-row .upl-lbl svg{width:12px;height:12px}
 }
 @media(max-width:430px){
-  :root{--th:50px}
+  :root{--th:50px;--bh:30px}
   .topbar{padding-left:max(8px,env(safe-area-inset-left));padding-right:max(8px,env(safe-area-inset-right));gap:3px}
   .menu-btn{min-width:36px!important;width:36px;min-height:36px!important;height:36px!important}
   .tb-right{gap:3px}
@@ -38006,7 +38115,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 /* ── TOP BAR (command area) ──────────────────────────────────────────── */
 :root[data-theme="win11"] .topbar{background:rgba(249,249,249,.72);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(0,0,0,.0578);padding:0 10px;gap:8px}
-:root[data-theme="win11"] .brand-icon{width:26px;height:26px;border-radius:6px;background:linear-gradient(135deg,#4cc2ff,#0067c0);display:grid;place-items:center;box-shadow:none}
+:root[data-theme="win11"] .brand-icon{width:34px;height:34px;border-radius:6px;background:linear-gradient(135deg,#4cc2ff,#0067c0);display:grid;place-items:center;box-shadow:none}
 :root[data-theme="win11"] .brand-icon img{width:100%;height:100%;object-fit:contain;border-radius:6px}
 :root[data-theme="win11"] .dv{background:rgba(0,0,0,.0803);height:20px}
 :root[data-theme="win11"] .bc a{color:rgba(0,0,0,.6063);font-size:12px;border-radius:4px;padding:2px 3px;transition:background .1s,color .1s}
@@ -39786,7 +39895,7 @@ input.inp,select.inp{height:32px}
 :root[data-theme="win10"] .term-ov,:root[data-theme="win10d"] .term-ov{
   /* R61 · the console layer now carries the soft blur the reader asked for, so
      these packs keep a light tint instead of wiping it back to transparent */
-  background:rgba(0,0,0,.14);-webkit-backdrop-filter:blur(7px) saturate(115%);backdrop-filter:blur(7px) saturate(115%);
+  background:rgba(0,0,0,.62);-webkit-backdrop-filter:blur(16px) saturate(125%) brightness(.92);backdrop-filter:blur(16px) saturate(125%) brightness(.92);
 }
 :root[data-theme="win11d"] .mod{
   background:#2b2b2b;border:1px solid rgba(255,255,255,.0578);border-bottom-color:rgba(255,255,255,.16);
@@ -40032,7 +40141,220 @@ input.inp,select.inp{height:32px}
 :root[data-theme="kalil"] .fm-toast{background:#ffffff;color:#2b2f3a;border-color:#d8dae2;border-radius:4px;box-shadow:0 8px 26px rgba(0,0,0,.14)}
 :root[data-theme="kalil"] .fm-toast.is-good{border-color:rgba(20,138,116,.65)}
 :root[data-theme="kalil"] .fm-toast.is-bad{border-color:rgba(213,53,63,.6)}
-</style>
+/* ══ R62 · THE PHONE LAYOUT ════════════════════════════════════════════════
+   Everything here answers one question: what does this window look like when
+   the screen is a phone? The packs write their desktop grid with
+   `:root[data-theme=…] .shell`, which outranks every plain phone rule written
+   earlier in the file, so on a phone the console still opened with the fake
+   window title bar, kept a two-row toolbar of full-word buttons, and let the
+   name cell keep the half-width column that belongs to a desktop. This block is
+   the last word, at the packs' own weight, in every theme - and it also carries
+   the phone rules that belong to the SIGN-IN page, whose own sheet is written
+   before the manager's. */
+@media(max-width:960px){
+  :root .shell,:root[data-theme] .shell{
+    grid-template:"tb" var(--th) "main" 1fr "bar" var(--bh) / 1fr;
+  }
+  /* no desktop window chrome on a phone: the main bar is the first row */
+  :root .wm-title,:root[data-theme] .wm-title{display:none!important}
+  :root .topbar,:root[data-theme] .topbar{grid-area:tb}
+  /* the sidebar is a drawer below 900px now, so its button must be there too;
+     it used to appear only under 768px and a phone held sideways had no way
+     into the sidebar at all. */
+  :root .menu-btn{display:flex!important;min-width:36px;min-height:34px;width:36px;height:34px;
+    align-items:center;justify-content:center;order:-1;margin:0 4px 0 0}
+  /* the drawer: a full-height panel at the left edge, whatever the phone's
+     width, and it fades in over a dimmed page */
+  :root .sidebar{width:min(88vw,320px)!important;height:100dvh!important;top:0!important;
+    max-height:100dvh!important;z-index:340!important;background:var(--panel,#151515)!important;
+    -webkit-backdrop-filter:none!important;backdrop-filter:none!important;
+    box-shadow:18px 0 50px rgba(0,0,0,.55)!important;border-right:1px solid var(--border2,rgba(255,255,255,.12))!important;
+    overflow-y:auto!important;overflow-x:hidden!important;-webkit-overflow-scrolling:touch;
+    padding-top:6px!important}
+  /* the windows packs dim everything with an ::after veil; it must not tint the
+     drawer that sits above it */
+  :root .sidebar>:first-child{margin-top:0!important}
+  :root .sidebar.open{transform:translateX(0)!important}
+  :root #sideOv{z-index:330!important}
+  :root .bar,:root[data-theme] .bar{grid-area:bar}
+  /* one toolbar row that scrolls sideways; nothing stacks into four rows */
+  :root .toolbar,:root[data-theme] .toolbar{padding:6px 8px;gap:6px}
+  :root .toolbar .tb-row{flex-wrap:nowrap!important;gap:6px;width:100%;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+  :root .toolbar .tb-row::-webkit-scrollbar{display:none}
+  :root .toolbar .tb-row .btn,:root .toolbar .tb-row .btn-sm,
+  :root .toolbar .tb-row .upl-lbl,:root .toolbar .tb-row .inp{height:36px!important;min-height:36px!important;max-height:36px!important;font-size:12px!important}
+  /* the toolbar WRAPS on a phone instead of scrolling sideways: a row that
+     scrolls hides the buttons past the right edge and nothing says so. */
+  :root .toolbar .tb-row{flex-wrap:wrap!important;overflow:visible!important;overflow-x:visible!important;
+    justify-content:flex-start!important;row-gap:6px!important}
+  :root .toolbar .tb-row>form{display:contents}
+  /* "New folder…" and "New file…" are the text boxes the Folder and File
+     buttons submit. On a phone they take the free space of the row they are
+     on instead of forcing a 130px box past the edge. */
+  :root .toolbar .inp{flex:1 1 84px!important;width:auto!important;min-width:0!important;
+    padding:0 8px!important;font-size:11.5px!important}
+  /* a toast never runs off the screen (that is what its first 12.5px line did) */
+  :root .fm-toast,#fmToast{max-width:calc(100vw - 24px)!important;left:12px!important;right:12px!important;
+    transform:none!important;margin:0 auto;font-size:11.5px!important;padding:8px 12px!important;text-align:left}
+
+  /* ── the file table: one name column that uses the whole width ─────────── */
+  /* `table-layout:auto` sized the name column after the longest name, so the
+     table grew past the screen and every row scrolled sideways. Fixed layout
+     pins the tick box and the actions, and the name takes what is left. */
+  :root .table-wrap{overflow-x:hidden!important}
+  :root .ft{table-layout:fixed!important;width:100%!important;min-width:0!important;max-width:none!important}
+  :root .ft th:nth-child(1),:root .ft td:nth-child(1){width:36px;padding-left:4px;padding-right:2px}
+  :root .ft th:last-child,:root .ft td:last-child{width:68px;padding-left:2px;padding-right:4px}
+  /* `.nm` used to keep a 50% right pad so the row's buttons could sit in the
+     middle of it; on a phone that pad is what cut every name down to ~85px and
+     pushed the type chip past the right edge of the screen. */
+  :root .ft .nm{padding-right:0!important;width:100%!important;min-width:0!important;
+    flex-wrap:wrap!important;row-gap:1px!important}
+  :root .ft .nm .nt{max-width:none!important;flex:1 1 118px!important;min-width:96px!important;
+    font-size:13px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* the owner dot and its name take the second line when the name needs room */
+  :root .ft .nm .own-cell,:root .ft .nm .mt{flex:0 0 auto!important;order:3}
+  :root .ft .nm .eb{display:inline-flex!important;position:static!important;transform:none!important;
+    margin:0 6px 0 0!important;flex:0 0 auto!important;order:-1;font-size:9px!important;
+    padding:0 4px!important;line-height:15px!important}
+
+  /* ── one file per line: a name that can be read ───────────────────────────
+     A five-column table cannot be honest on 390px. On a phone the row becomes
+     one line of its own: the tick box, the icon, the name with its room to
+     breathe, and the four buttons at the end. The columns a phone cannot use
+     (permissions, owner, modified, size) are already off. */
+  :root .ft,:root[data-theme] .ft{display:block!important;table-layout:auto!important;width:100%!important;
+    border-collapse:separate!important;border-spacing:0}
+  :root .ft thead,:root[data-theme] .ft thead{display:none!important}
+  :root .ft tbody,:root[data-theme] .ft tbody{display:block!important;width:100%;height:auto!important}
+  :root .ft tr,:root[data-theme] .ft tbody tr,
+  :root .ft tbody tr{display:flex!important;flex-wrap:wrap;align-items:center;gap:2px 6px;
+    width:100%!important;height:auto!important;min-height:44px!important;padding:7px 8px!important;
+    border:0!important;border-bottom:1px solid var(--b2,rgba(255,255,255,.07))!important;
+    background:transparent!important;animation:none!important}
+  :root .ft tr:hover{background:rgba(255,255,255,.03)!important}
+  :root .ft th,:root .ft td,
+  :root[data-theme] .ft th,:root[data-theme] .ft td{display:block!important;width:auto!important;
+    min-width:0!important;border:0!important;padding:0!important;height:auto!important;
+    white-space:normal!important;animation:none!important}
+  :root .ft td.cc{flex:0 0 26px}
+  :root .ft td.cc .rck{width:20px;height:20px}
+  /* line one is the name itself; line two is the size and the four buttons.
+     The permission, owner and modified columns are not drawn on a phone (they
+     were already off in the older sheet) - they are one tap away in Details. */
+  :root .ft .col-perms,:root .ft .col-perms-td,
+  :root .ft .col-owner,:root .ft .col-owner-td,
+  :root .ft .col-mtime,:root .ft .col-mtime-td{display:none!important}
+  :root .ft td:nth-child(2){flex:1 1 calc(100% - 34px);min-width:0}
+  :root .ft td.col-size{display:block!important;flex:0 0 auto;margin:0}
+  :root .ft td:last-child{flex:0 0 auto!important;margin-left:auto!important;justify-content:flex-end}
+  :root .ft .nm .mt,:root .ft .nm .own-cell{font-size:10.5px!important;opacity:.92}
+  :root .ft .dsz-btn{height:24px!important;min-height:24px!important;font-size:10px!important;padding:0 7px!important}
+  :root .ft .nm{gap:5px!important}
+  :root .ft .nm{width:100%!important}
+
+  /* ── the row's buttons: they were hidden under 768px, and the Actions column
+        was an empty grey slab taking 68px of a 390px screen. The buttons come
+        back as a 30px target each and the column shrinks to fit them. ─────── */
+  :root .ft td .acts{display:flex!important;flex-wrap:wrap!important;justify-content:flex-end!important;
+    gap:4px!important;margin:0!important}
+  :root .ft td .acts .btn{width:30px!important;height:30px!important;min-width:30px!important;
+    min-height:30px!important;padding:0!important;border-radius:7px!important}
+  :root .ft td .acts .btn svg{width:15px;height:15px}
+  :root .ft th:last-child{display:none!important}
+  :root .ft td{height:auto!important;padding-top:3px!important;padding-bottom:3px!important}
+  :root .ft tbody tr{height:auto}
+
+  /* ── the one ad strip: 2500×119 is 21:1, and at full width on a phone that
+        is a 12px sliver of noise. Keep it, and let it read. ───────────────── */
+  :root .fm-top-strip{aspect-ratio:auto!important;height:auto!important;margin:0 0 8px!important}
+  :root .fm-top-strip-link{display:block;height:auto!important}
+  :root .fm-top-strip-link img{width:100%!important;height:auto!important;min-height:34px!important;
+    object-fit:cover;object-position:center;aspect-ratio:auto}
+  :root .fm-top-strip-close{width:26px!important;height:26px!important;top:0!important;right:0!important}
+  :root .fm-top-strip-close svg{width:12px!important;height:12px!important}
+
+  /* ── the type filter: it was a horizontal scroller, so "Code" and "Docs"
+        were half cut at the right edge. It wraps and every type is on screen. ─ */
+  :root .filter-bar{flex-wrap:wrap!important;overflow:visible!important;height:auto!important;
+    min-height:32px;row-gap:6px;padding:0!important;margin:0 0 8px!important}
+  :root .filter-bar>*{flex:0 0 auto}
+  :root .fb-btn{height:26px!important;font-size:11px!important;padding:0 9px!important}
+
+
+  /* the permission, owner and modified columns are not phone furniture: they
+     are one tap away in Details, and on 390px they pushed the buttons off. */
+  :root .ft td.col-perms,:root .ft td.col-perms-td,:root .ft th.col-perms,
+  :root .ft td.col-owner,:root .ft td.col-owner-td,:root .ft th.col-owner,
+  :root .ft td.col-mtime,:root .ft td.col-mtime-td,:root .ft th.col-mtime,
+  :root[data-theme] .ft td.col-perms,:root[data-theme] .ft td.col-perms-td,
+  :root[data-theme] .ft td.col-owner,:root[data-theme] .ft td.col-owner-td,
+  :root[data-theme] .ft td.col-mtime,:root[data-theme] .ft td.col-mtime-td{display:none!important}
+  /* and the row is a two-line band, not a 20px ribbon */
+  :root[data-theme] .ft tbody tr{height:auto!important;min-height:44px!important}
+  :root[data-theme] .ft tbody tr{display:flex!important;flex-wrap:wrap;align-items:center;gap:2px 6px;
+    padding:7px 8px!important;border-bottom:1px solid var(--b2,rgba(255,255,255,.07))!important}
+
+  /* ── the status bar keeps its three facts on one row ──────────────────── */
+  :root .bar{overflow-x:auto!important;overflow-y:hidden!important;white-space:nowrap!important;
+    font-size:10.5px!important;gap:10px!important;padding:0 8px!important}
+  :root .bar .bs{font-size:10.5px!important;white-space:nowrap!important}
+
+  /* ── the console on a phone: the command line stays on screen ──────────── */
+  /* the window is full screen now; the history scrolls inside it and the
+     prompt + input are pinned to the bottom, where a terminal keeps them. */
+  :root .term-win{display:flex!important;flex-direction:column!important;height:100dvh!important}
+  :root .term-scroll{flex:1 1 auto!important;min-height:0!important;overflow-y:auto!important;
+    overflow-x:hidden!important;padding:4px 6px!important;display:flex!important;flex-direction:column}
+  :root .term-out{flex:1 1 auto;min-height:0}
+  :root .term-row{flex:0 0 auto;display:flex!important;flex-wrap:wrap;align-items:flex-start;gap:0}
+  /* 16px is the smallest size iOS Safari will focus without zooming the page */
+  :root .term-inp{font-size:16px!important;line-height:1.35!important;min-height:22px!important;
+    max-width:none!important;width:100%!important;flex:1 1 auto!important}
+  /* the printed mark: three colours and hard edges turn into noise at phone
+     size; the same mark stays, in one soft tone, instead of a red smear */
+  :root .term-logo{color:#9aa0a6!important;opacity:.82;font-size:calc(var(--term-logo-fs,6px) * .92)!important}
+  :root .term-logo-meta{font-size:12px!important;margin-top:16px!important}
+  :root .term-print{padding:8px 6px 10px!important;margin:6px 0 8px!important;border-radius:8px!important}
+  :root .term-prompt-str{flex:0 0 auto}
+  :root .term-live{flex:1 1 auto!important;min-width:0!important;width:auto!important}
+  :root .term-row{min-height:22px}
+  /* the name cell gives its half-width chip column back to the name */
+  :root .ft .nm{padding-right:0!important}
+  :root .ft .nc{position:static}
+  :root .ft .nm .nt{max-width:calc(100% - 58px)!important}
+  /* the type chip stays visible, and it lines up with the name it belongs to */
+  :root .ft .nm .eb,:root .ft td .eb{display:inline-flex!important;position:static!important;transform:none!important;
+    margin-left:8px;flex:0 0 auto;align-self:center}
+  :root .ft{table-layout:auto;width:100%}
+  :root .ft thead th:nth-child(2),:root .ft tbody td:nth-child(2){min-width:0}
+  /* the bottom bar is exactly one screen wide: it scrolls inside itself */
+  :root .bar{padding:0 8px;gap:8px;overflow-x:auto;overflow-y:hidden;white-space:nowrap;scrollbar-width:none}
+  :root .bar::-webkit-scrollbar{display:none}
+  :root .bar .bs{font-size:10px;flex-shrink:0}
+  /* the console, on a phone: no tree sidebar, no rail, the text gets the screen */
+  :root .term-win{width:100vw!important;height:100dvh!important;max-width:none!important;max-height:none!important;
+    border-radius:0!important;border:0!important;inset:0!important;margin:0!important;left:0!important;top:0!important}
+  :root .term-side{display:none!important}
+  :root .term-rail{display:none!important}
+  :root .term-toolbar{height:44px;min-height:44px;overflow-x:auto;overflow-y:hidden}
+  :root .term-tile{min-width:44px;height:40px}
+  :root .term-titlebar{height:34px;min-height:34px}
+  :root .term-wbtn{width:40px;height:34px}
+  :root .term-footer{overflow-x:auto;scrollbar-width:none}
+  /* nothing may be pressed against the notch or the home bar */
+  :root .topbar{padding-left:max(8px,env(safe-area-inset-left));padding-right:max(8px,env(safe-area-inset-right))}
+  :root .content{padding:8px}
+}
+@media(max-width:430px){
+  :root{--th:50px;--bh:30px}
+  :root .toolbar .tb-row .btn,:root .toolbar .tb-row .btn-sm,
+  :root .toolbar .tb-row .upl-lbl{font-size:11.5px!important;padding:0 9px}
+  :root .content{padding:7px}
+  :root .ft td,:root .ft th{padding:10px 6px}
+  :root .ft .nm .nt{max-width:calc(100% - 52px)!important}
+  :root .ft .nm .eb{margin-left:6px;font-size:9px}
+}</style>
 </head>
 <body class="<?=$terminalStandalone?'term-standalone':''?>">
 <div class="shell">
@@ -41117,6 +41439,12 @@ input.inp,select.inp{height:32px}
      nested inside #termOv, so every window was measured against the terminal frame. -->
 <div class="mod-ov term-ov" id="termOv" data-app-dir="<?=htmlspecialchars($termAppDir,ENT_QUOTES)?>" data-home-dir="<?=htmlspecialchars($termTreeDir,ENT_QUOTES)?>">
   <div class="term-win" id="termWin">
+  <!-- R65 · the word, four seconds, the first time the console is opened -->
+  <div class="term-connect" id="termConnect" role="status" aria-live="polite" aria-label="Connecting">
+    <span class="term-connect-word">connecting<span class="term-connect-dots"><i></i><i></i><i></i></span></span>
+  </div>
+
+
     <button type="button" class="btn btn-icon btn-g term-close" id="termClose" title="Close" aria-label="Close the terminal" data-wmclose><svg viewBox="0 0 10 10"><line x1="0.7" y1="0.7" x2="9.3" y2="9.3"/><line x1="9.3" y1="0.7" x2="0.7" y2="9.3"/></svg></button>
 
     <!-- window title bar -->
@@ -47111,7 +47439,14 @@ if(document.getElementById('guardBtn')){
    scheduler on the machine (installed below, when a WordPress site is found)
    or a page that keeps opening its eyes - this is the second one. */
 (function(){
-  const period=10000;
+  /* R64 · the update source is a raw GitHub URL, and knocking on it every ten
+     seconds is what earns a shared host an HTTP 429 and then a blocked
+     address. Ten minutes while the tab is open, thirty while it is in the
+     background, a fresh look on return after an hour away, and one when the
+     link comes back. */
+  const period=600000;        /* 10 minutes */
+  const periodHidden=1800000; /* 30 minutes, background tab */
+  const wakeIdle=3600000;     /* an hour away is worth a fresh look */
   let stopped=false,busy=false,failures=0,errStreak=0;
   function note(text){mfmTickLine(text);}
   function tick(){
@@ -47168,11 +47503,20 @@ if(document.getElementById('guardBtn')){
     el.__hide=setTimeout(()=>el.remove(),bad?9000:6000);
   }
   window.fmTick=mfmTickLine;
-  /* the first look happens a moment after the page settles; every ten
-     seconds after that, and immediately again when the tab wakes up */
+  /* the first look happens a moment after the page settles; after that the
+     cadence follows the source's patience, not the other way round */
   setTimeout(tick,1500);
-  setInterval(tick,period);
-  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')tick();});
+  let timer=null;
+  function mfmTickSchedule(){
+    clearInterval(timer);
+    timer=setInterval(tick,document.visibilityState==='hidden'?periodHidden:period);
+  }
+  mfmTickSchedule();
+  document.addEventListener('visibilitychange',()=>{
+    const away=Date.now()-(window.__fmTickLast||0);
+    if(document.visibilityState==='visible'&&away>wakeIdle)tick();
+    mfmTickSchedule();
+  });
   window.addEventListener('online',()=>tick());
   window.__fmTickStop=()=>{stopped=true;};
 })();
@@ -51936,6 +52280,39 @@ function termScrollToBottom(){
 }
 function termScrollBottom(){termScrollToBottom();}
 
+/* ══ R65 · CONNECTING - the word, four seconds, once per browser ═══════════
+   Every open path (sidebar button, window menu, focused view) flips `.open` on
+   #termOv, so one observer covers them all. It never blocks a click. */
+(function(){
+  var KEY='fm.term.connected';
+  var ov=document.getElementById('termConnect');
+  var term=document.getElementById('termOv');
+  if(!ov||!term)return;
+  var t1=0,t2=0,running=false;
+  function seen(){try{return localStorage.getItem(KEY)==='1'}catch(e){return false}}
+  function mark(){try{localStorage.setItem(KEY,'1')}catch(e){}}
+  function stop(){
+    if(!running)return; running=false;
+    clearTimeout(t1); clearTimeout(t2);
+    ov.classList.add('out');
+    t2=setTimeout(function(){ov.classList.remove('on','out');},420);
+    mark();
+  }
+  function start(){
+    if(running||seen())return;
+    running=true;
+    ov.classList.remove('out'); ov.classList.add('on');
+    t1=setTimeout(stop,4000);
+  }
+  if(window.MutationObserver){
+    new MutationObserver(function(){
+      if(term.classList.contains('open'))start();
+    }).observe(term,{attributes:true,attributeFilter:['class']});
+  }
+  term.addEventListener('keydown',stop,true);
+  var c=document.getElementById('termClose');
+  if(c)c.addEventListener('click',stop);
+})();
 document.getElementById('termBtn')?.addEventListener('click',()=>{
   /* a window inside the manager, so its buttons, its theme and its frame are the
      manager's - and its tabs keep running when it is hidden */
