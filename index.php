@@ -1155,6 +1155,13 @@ function fm_ensure_terminal_font(){
    (see FM_UPDATE_PAUSED below, false = running), which resumes the
    moment the pause is lifted. */
 if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/index.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file
+/* the console's watermark: one place that names the build, its version, its
+   date and the system it was first written for */
+if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
+if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R57');
+if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
+if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
 
 /* Prefer the database the project already uses. Replit and most modern PHP
@@ -36216,20 +36223,36 @@ button.rc-row{cursor:pointer}
 .term-dollar{color:#c8c8c8}
 
 /* welcome banner, outlined like the MobaXterm greeting box */
-.term-banner{display:block;margin:2px 0 10px;padding:9px 12px 10px;border:1px solid #8c8c8c;border-radius:0;background:transparent;color:#c0c0c0;font-size:12.5px;line-height:1.6;text-align:center;white-space:normal}
-.term-banner-title{display:block;color:#c8c8c8;font-size:13px;line-height:1.6}
-.term-banner-sub{display:block;color:#d0d0d0;font-size:12.5px;line-height:1.6;margin-bottom:6px}
-.term-banner-list{display:block;text-align:left;margin:0 auto;max-width:780px}
-.term-banner-row{display:flex;align-items:flex-start;gap:6px;font-size:12.5px;line-height:1.65;color:#c0c0c0;text-align:left}
-.term-banner-row b{color:#e0e0e0;font-weight:400}
-.term-banner-row i{color:#26c6da;font-style:normal}
-.term-banner-row em{color:#35d07f;font-style:normal}
-.term-banner-row u{color:#cf6bcf;text-decoration:none}
-.term-banner-bullet{color:#9a9a9a;flex-shrink:0}
-.term-banner-note{display:block;text-align:left;margin:8px auto 0;max-width:780px;font-size:12.5px;line-height:1.65;color:#a4a4a4}
-.term-banner-note b{color:#d0d0d0;font-weight:400}
-.term-banner-tail{display:block;text-align:left;margin:4px auto 0;max-width:780px;font-size:12.5px;line-height:1.65;color:#a4a4a4}
-.term-banner-tail b{color:#d8d8d8;font-weight:400}
+/* R57 · the greeting box is gone. The console opens with a watermark printed
+   the way a real one is: the mark itself, then its name and build underneath,
+   all of it in the terminal's own face and its own colour.
+   The type size of the mark is NOT the console size: it is one number of its
+   own (--term-logo-fs), because an ASCII mark is ~100 characters wide and has
+   to be read as a picture. Its leading is 1 for the same reason: any extra
+   line height breaks the rows away from each other. */
+/* R57b · the mark and its caption sit on the middle of the console: both blocks
+   are centred, but the mark's own lines keep their exact columns, which is what
+   a picture drawn in characters needs. */
+.term-logo{display:block;width:max-content;max-width:100%;overflow-x:auto;overflow-y:hidden;margin:0 auto;color:#c98b8b;white-space:pre;line-height:1;letter-spacing:0;font-size:var(--term-logo-fs,6px);font-family:'TerminalTMT',monospace;tab-size:4}
+/* exactly two terminal lines of air between the mark and its caption: the gap
+   follows the console's own line pitch, so it stays right at any text size */
+.term-logo-meta{display:block;margin:calc(var(--term-fs,13.5px) * 1.245 * 2) auto 0;text-align:center;font-size:var(--term-fs,13.5px);line-height:calc(var(--term-fs,13.5px) * 1.245);white-space:normal;word-break:break-word}
+/* R57d · the frame is back: one quiet box around the mark and its caption, and it
+   is part of the printed output - clear removes it with the rest of the screen. */
+/* R57e · the frame takes the console's width by itself: it is a block, so its left
+   and right edges sit on the console's own padding whatever the window is, and
+   it re-fits on every resize without a single line of script. */
+.term-print{display:block;width:auto;max-width:none;margin:8px 0 10px;padding:10px 18px 12px;
+  border:1px solid #8c8c8c;border-radius:0;background:transparent;box-sizing:border-box}
+/* R57c · the caption under the mark reads in white, in three weights of the same
+   white: the product name full, every value a little paler, and the labels and
+   the dots below both - the order the eye is meant to take them in. */
+.term-logo-meta .lg-name{color:#ffffff}
+.term-logo-meta .lg-val{color:rgba(255,255,255,.82)}
+.term-logo-meta .lg-key{color:rgba(255,255,255,.55)}
+.term-logo-meta .lg-sep{color:rgba(255,255,255,.30)}
+/* the second line is the session, not the identity: one step smaller and quieter */
+.term-logo-meta .lg-sub{display:block;font-size:calc(var(--term-fs,13.5px) * .92);color:rgba(255,255,255,.62)}
 
 /* prompt row */
 .term-prompt-wrap.term-busy .term-row{visibility:hidden}
@@ -36382,10 +36405,9 @@ body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
 
 /* text size inside the console only: the prompt, the printed lines and the
    answers grow and shrink together, nothing else on the page moves */
-.term-scroll,.term-out,.term-line,.term-ps,.term-inp,.term-sug-item,.term-banner{font-size:var(--term-fs,13.5px)}
+.term-scroll,.term-out,.term-line,.term-ps,.term-inp,.term-sug-item{font-size:var(--term-fs,13.5px)}
 .term-line,.term-ps,.term-inp{line-height:calc(var(--term-fs,13.5px) * 1.245)}
 .term-inp{line-height:1}
-.term-banner{font-size:calc(var(--term-fs,13.5px) * .93)}
 .term-sug-item{font-size:calc(var(--term-fs,13.5px) * .92)}
 /* ══ R53c · context menu, toast, resize grip, and the windowed console ═════ */
 /* the strips that were still painted by hand follow the pack now: labels, values,
@@ -41062,19 +41084,47 @@ input.inp,select.inp{height:32px}
 
             <div class="term-scroll" id="termScroll">
               <div class="term-out" id="termOut">
-                <span class="term-banner">
-                  <span class="term-banner-title">· Marshall FM Console ·</span>
-                  <span class="term-banner-sub">A shell on this hosting account, inside the manager root</span>
-                  <span class="term-banner-list">
-                    <span class="term-banner-row"><span class="term-banner-bullet">▶</span><span>Working directory is <i id="termWorkingDir"><?=htmlspecialchars($termTreeDir)?></i> — <b>cd</b> changes it and moves the tree on the left.</span></span>
-                    <span class="term-banner-row"><span class="term-banner-bullet">▶</span><span><b>Tab</b> completes a path · <b>↑</b>/<b>↓</b> walk the history · <b>clear</b> empties the screen · <b>Ctrl+C</b> cancels the line.</span></span>
-                    <span class="term-banner-row"><span class="term-banner-bullet">▶</span><span>Server IP <i id="termBannerIp"><?=htmlspecialchars($_SERVER['SERVER_ADDR']?:'-')?></i> · host <i><?=htmlspecialchars($termHostLabel)?></i> · user <em><?=htmlspecialchars($termUserLabel)?></em> · link <em id="termConnBadge">connected</em></span></span>
-                    <span class="term-banner-row"><span class="term-banner-bullet">▶</span><span>Quick connect above takes a folder, not a host: this console runs commands here, it is not an SSH client.</span></span>
-                  </span>
-                  <span class="term-banner-note"><b>Note:</b> every command runs in its own shell, so exported variables do not survive from one command to the next, and each one is written to the manager audit log.</span>
-                  <span class="term-banner-tail">Anything the account's shell has works here — <b>ls</b>, <b>cat</b>, <b>grep</b>, <b>du</b>, <b>tar</b> — and <b>cd</b> keeps tab, pill and tree in step.</span>
-                </span>
-              </div>
+                <!-- R57 · the watermark: the mark, its caption, and the frame around them.
+     The mark is printed here, in this file - it is not fetched from anywhere. -->
+                <div class="term-print">
+                <pre class="term-logo" id="termLogo" aria-hidden="true">                                         -###%MMMMMMMMMMM%##*
+                                    :%@MMMMMMMMMMMMMMMMMMMMMMM#
+                                   %MMMMMMMMMMMMMMMMMMMMMMMMMMM#  *#:
+                                  @MMMMMMMMMMMMMMMMMMMMMMMMMMMMM@  #MMM@#.
+                                =@MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM@# =@MMMMMM@%#+
+                                #MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM@#=%MMMMMMM%
+                               -@MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM%%MMMMM#
+                               #MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM#
+                               @MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM@.
+                              :MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM%
+                              %MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM@-
+           *##%@@MMMMM@@@%%####- :#@MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM%MMM@
+      -%@MMMMMMMMMMMMMMMMMMMMMMMM@@#. -%MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM=MMMM+
+   =@MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM@%= +%@MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM+#MMM@
+ #MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM#: +%MMMMMMMMMMMMMMMMMMMMMMMMMMMMMM%#MMM%
+#MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM%# :@MMMMMMMMMMMMMMMMMMMMMMMMMMMM*MMM*##=
+#MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM@# *@MMMMMMMMMMMMMMMMMMMMMMMMMMMMM+%MM%+
+ #MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM@+=%MMMMMMMMMMMMMMMMMMMMMMMMMMM#%MMMM%
+   +MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM# :#MMMMMMMMMMMMMMMMMMMMMMMMM- @MMMM%
+      #@MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM@*    =%@MMMMMMMMMMMMMMMMMMMM%+#MMMM@*
+          -#%@@@@@%%%%%%%%%%@@@@@MMMMMMMMMMMMMMMMMMMMMMMMMM@=          =#%@@@@@@@@* %MMMM@=%MMM@+
+                                     **#@MMMMMMMMMMMMMMMMMMMM@=                     %MMMMMMM%*MMM@.
+                                            -@MMMMMMMMMMMMMMMMM@*                   %MMMMMMMMM%#MMM%
+                                                *@MMMMMMMMMMMMMMM@+                 @MMMMMMMMMMM#@MM@
+                                                   +%MMMMMMMMMMMMMM@: *%=           %MMMMMMMMMMMM@#MM#
+                                                      -*@MMMMMMMMMMMM%.=MMMMMMMMMMMMMMMMMMMMMMMMMMMMMM#
+                                                          +@MMMMMMMMMMM%+#MMMMMMMMMMMMMMMMMMMMMMMMMMMM%
+                                                             +@MMMMMMMMMM@-%MMMMMMMMMMMMMMMMMMMMMMMMMM@
+                                                                *%MMMMMMMMM@-#MMMMMMMMMMMMMMMMMMMMMMMM@
+                                                                    =@MMMMMMMM*+@MMMMMMMMMMMMMMMMMMMMM@
+                                                                       .%MMMMMMM@*#MMMMMMMMMMMMMMMMMMM%
+                                                                           *%@MMMMM@##@MMMMMMMMMMMMMM#
+                                                                               +#%MMMMMMMM@@@MMMMMM%*
+                                                                                      +%@@MMMM@%+</pre>
+                <span class="term-logo-meta">
+                  <span class="lg-name"><?=htmlspecialchars(FM_PRODUCT_NAME)?></span><span class="lg-sep"> · </span><span class="lg-key">version</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_VERSION)?></span><span class="lg-sep"> · </span><span class="lg-key">build</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_RELEASE)?></span><span class="lg-sep"> · </span><span class="lg-key">since</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_DATE)?></span><span class="lg-sep"> · </span><span class="lg-key"><?=htmlspecialchars(FM_PRODUCT_SYSTEM)?></span>
+                  <span class="lg-sub"><span class="lg-key">cwd</span> <span class="lg-val" id="termWorkingDir"><?=htmlspecialchars($termTreeDir)?></span><span class="lg-sep"> · </span><span class="lg-key">host</span> <span class="lg-val"><?=htmlspecialchars($termHostLabel)?></span><span class="lg-sep"> · </span><span class="lg-key">user</span> <span class="lg-val"><?=htmlspecialchars($termUserLabel)?></span><span class="lg-sep"> · </span><span class="lg-key">link</span> <span class="lg-val" id="termConnBadge">ready</span></span>
+                </div>
               <template id="termPromptTemplate"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><input class="term-inp" id="termInp__UID__" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-ghost" id="termGhost__UID__" aria-hidden="true"></span><span class="term-cursor blink" aria-hidden="true"></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
             </div>
           </div>
