@@ -9319,7 +9319,7 @@ class FileManager {
         $base=$this->root?:__DIR__;
         $this->currentDir=isset($_GET['dir'])&&$_GET['dir']?realpath($_GET['dir']):$base;
         $terminalPage=isset($_GET['terminal'])&&$_GET['terminal']==='1';
-        $terminalApi=isset($_GET['x'])&&in_array($_GET['x'],['run','ac'],true);
+        $terminalApi=isset($_GET['x'])&&in_array($_GET['x'],['run','ac','dirlist'],true);
         if(!$terminalPage&&$terminalApi&&!empty($_SESSION['fm_terminal_dir'])){
             $terminalDir=realpath($_SESSION['fm_terminal_dir']);
             if($terminalDir!==false)$this->currentDir=$terminalDir;
@@ -32840,6 +32840,18 @@ if(isset($_GET['x'])){
         echo json_encode(fm_server_speed_test());exit;
     }
     if($xop==='ls'){echo json_encode(array_values(array_filter(scandir($fm->getCwd())?:[],fn($x)=>$x!=='.'&&$x!=='..')));exit;}
+    /* R48: the session tree in the terminal sidebar follows the shell. It asks
+       for the current folder only - folders first, a hard cap, no recursion -
+       so a huge directory costs one scandir and never a walk. */
+    if($xop==='dirlist'){
+        $dir=(string)$fm->getCwd();$rows=[];
+        foreach((@scandir($dir)?:[]) as $name){
+            if($name==='.'||$name==='..')continue;
+            $rows[]=['name'=>$name,'dir'=>@is_dir($dir.'/'.$name)?1:0];
+        }
+        usort($rows,function($a,$b){if($a['dir']!==$b['dir'])return $b['dir']-$a['dir'];return strnatcasecmp($a['name'],$b['name']);});
+        echo json_encode(['cwd'=>$dir,'root'=>(string)($fm->getRoot()?:'/'),'items'=>array_slice($rows,0,40),'total'=>count($rows)],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
+    }
     if($xop==='global_search'){
         $q=trim((string)($_GET['gsq']??''));
         $base=realpath($fm->getCwd());
@@ -35892,60 +35904,207 @@ button.rc-row{cursor:pointer}
 .sh-btn.sh-amb:hover{background:rgba(245,158,11,.08);color:#fcd34d;border-color:rgba(245,158,11,.2)}
 .sh-btn.sh-purp:hover{background:rgba(139,92,246,.08);color:#c4b5fd;border-color:rgba(139,92,246,.2)}
 
-/* ══ TERMINAL (the supplied DNT Shell layout, full-screen and borderless) ══ */
+/* ══ TERMINAL (MobaXterm-style dark shell: title bar, black menu, icon toolbar, rail, session tree, chevron status bar) ══ */
 .term-ov{padding:0;background:#1c1c1c;backdrop-filter:none;align-items:stretch;justify-content:stretch}
 .term-ov.open{display:block}
-.term-win{position:fixed;inset:0;width:100vw;height:100dvh;background:#1c1c1c;color:#b3b3b3;border:0;border-radius:0;box-shadow:none;overflow-y:auto;overflow-x:hidden;display:block;padding-bottom:35px;box-sizing:border-box;font-family:monospace;font-size:0;line-height:0}
-.term-out{display:block;overflow:visible;padding:8px 0 0;font-family:monospace;font-size:0;line-height:0;color:#b3b3b3;background:#1c1c1c;white-space:pre-wrap;word-break:break-word}
-.term-out::-webkit-scrollbar{width:5px}.term-out::-webkit-scrollbar-thumb{background:#4a4a4a;border-radius:4px}
-.term-line{display:block;font-size:14px;line-height:1.25;min-height:0;margin:0 0 0 2px;white-space:pre-wrap;word-break:break-word}
-.term-line.cmd-line{color:#7db8ba}
-.term-line.ok-line{color:#b3b3b3}
+.term-win{position:fixed;inset:0;width:100vw;height:100dvh;background:#1e1e1e;color:#c8c8c8;border:0;border-radius:0;box-shadow:none;overflow:hidden;display:flex;flex-direction:column;padding:0;box-sizing:border-box;font-family:monospace;font-size:0;line-height:0}
+
+/* ── window title bar ── */
+.term-titlebar{display:flex;align-items:center;gap:7px;height:26px;min-height:26px;padding:0 0 0 7px;background:#0b0b0b;border-bottom:1px solid #262626;flex-shrink:0;overflow:hidden}
+.term-applogo{width:16px;height:16px;display:grid;place-items:center;flex-shrink:0}
+.term-applogo svg{width:16px;height:16px;fill:none;stroke:#5ec97e;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.term-apptitle{font-size:11.5px;line-height:1;color:#bdbdbd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.term-apptitle b{color:#e6e6e6;font-weight:400}
+.term-title-spacer{flex:1;min-width:0}
+.term-wbtn{width:36px;height:26px;display:grid;place-items:center;border:0;background:transparent;color:#9a9a9a;cursor:pointer;padding:0;line-height:0;flex-shrink:0}
+.term-wbtn svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.term-wbtn:hover{background:#262626;color:#e8e8e8}
+.term-wbtn-close:hover{background:#c0392b;color:#fff}
+
+/* ── black menu strip ── */
+.term-menubar{display:flex;align-items:center;gap:1px;height:22px;min-height:22px;padding:0 6px;background:#000;border-bottom:1px solid #1f1f1f;flex-shrink:0;overflow:hidden;white-space:nowrap}
+.term-menu-item{font-size:12px;line-height:22px;color:#d8d8d8;padding:0 8px;cursor:default;text-decoration:none}
+.term-menu-item:hover,.term-menu-item:focus{background:#1f3550;color:#fff;outline:none}
+.term-menu-brand{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11px;color:#7d7d7d;padding:0 4px 0 10px;white-space:nowrap}
+.term-menu-brand b{color:#5ec97e;font-weight:400}
+
+/* ── icon toolbar with captions ── */
+.term-toolbar{display:flex;align-items:stretch;gap:0;height:48px;min-height:48px;padding:0 4px;background:#141414;border-bottom:1px solid #2b2b2b;flex-shrink:0;overflow:hidden}
+.term-tile{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-width:58px;padding:2px 6px;border:1px solid transparent;border-radius:2px;background:transparent;color:#c0c0c0;cursor:pointer;flex-shrink:0}
+.term-tile svg{width:20px;height:20px;fill:none;stroke:#8fb8d6;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+.term-tile span{font-size:10.5px;line-height:1;color:#b4b4b4;white-space:nowrap}
+.term-tile[data-term-act="clear"] svg{stroke:#e0785a}
+.term-tile[data-term-act="paste"] svg{stroke:#d8b23a}
+.term-tile[data-term-act="bottom"] svg{stroke:#5ec97e}
+.term-tile[data-term-act="refresh"] svg{stroke:#4fb6d6}
+.term-tile[data-term-act="cwd"] svg{stroke:#e0c060;fill:rgba(224,192,96,.16)}
+.term-tile[data-term-act="up"] svg{stroke:#8fd3e0}
+.term-tile[data-term-act="home"] svg{stroke:#7fa8e0}
+.term-tile[data-term-act="files"] svg{stroke:#e0c060;fill:rgba(224,192,96,.16)}
+.term-tile[data-term-act="help"] svg{stroke:#9fb6c8}
+.term-tile:hover{background:#232323;border-color:#3a3a3a}
+.term-tile:hover span{color:#e8e8e8}
+.term-tile:active{background:#2c2c2c}
+.term-tile-sep{width:1px;margin:7px 4px;background:#2e2e2e;flex-shrink:0}
+
+/* ── content row ── */
+.term-body{flex:1;display:flex;min-height:0;min-width:0;position:relative}
+
+/* left icon rail */
+.term-rail{width:34px;min-width:34px;background:#131313;border-right:1px solid #303030;display:flex;flex-direction:column;align-items:center;padding:2px 0 4px;gap:1px;flex-shrink:0;overflow:hidden}
+.term-rail-fold{width:34px;height:20px;display:grid;place-items:center;border:0;border-bottom:1px solid #2a2a2a;background:transparent;color:#7fbfe0;cursor:pointer;padding:0;flex-shrink:0}
+.term-rail-fold svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s}
+.term-rail-fold:hover{background:#1f1f1f;color:#cfe9f7}
+.term-rail.folded .term-rail-fold svg{transform:rotate(180deg)}
+.term-rail-btn{width:32px;height:78px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:6px;padding-top:8px;border:0;border-left:0;border-radius:0;background:transparent;color:#9a9a9a;cursor:pointer;flex-shrink:0;position:relative}
+.term-rail-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+.term-rail-btn span{writing-mode:vertical-rl;font-size:10px;line-height:1;color:inherit;letter-spacing:.2px}
+.term-rail-btn:hover{background:#1f1f1f;color:#d8d8d8}
+.term-rail-btn.on{background:#1e1e1e;color:#f0f0f0}
+.term-rail-btn.on::before{content:'';position:absolute;left:0;top:6px;bottom:6px;width:2px;background:#e8c33a}
+.term-rail-spacer{flex:1}
+
+/* sidebar: quick connect + session tree inside a light frame */
+.term-side{width:252px;min-width:252px;display:flex;flex-direction:column;background:#141414;border-right:1px solid #303030;flex-shrink:0;min-height:0}
+.term-rail.folded~.term-side{display:none}
+.term-qc-row{display:flex;align-items:center;gap:0;padding:4px 4px 3px;flex-shrink:0}
+.term-qc-inp{flex:1;min-width:0;height:21px;background:#0d0d0d;border:1px solid #6f6f6f;border-radius:1px;padding:0 5px;color:#cfcfcf;font-size:11.5px;line-height:19px;outline:none;box-sizing:border-box}
+.term-qc-inp::placeholder{color:#8a8a8a}
+.term-qc-inp:focus{border-color:#8fb8d6;background:#111}
+.term-qc-add{width:21px;height:21px;display:grid;place-items:center;border:1px solid #6f6f6f;border-left:0;border-radius:0 1px 1px 0;background:#232323;color:#cfcfcf;cursor:pointer;padding:0;flex-shrink:0;line-height:0}
+.term-qc-add:hover{background:#333}
+.term-qc-add svg{width:9px;height:9px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}
+.term-tree{flex:1;overflow-y:auto;overflow-x:hidden;margin:0 4px 4px;padding:2px 0;min-height:0;background:#141414;border:1px solid #6a6a6a;border-radius:1px}
+.term-tree::-webkit-scrollbar{width:12px}
+.term-tree::-webkit-scrollbar-track{background:#1b1b1b}
+.term-tree::-webkit-scrollbar-thumb{background:#5a5a5a;border:2px solid #1b1b1b;border-radius:0}
+.term-tree-row{display:flex;align-items:center;gap:5px;height:22px;padding:0 6px 0 2px;font-size:12px;line-height:22px;color:#d0d0d0;cursor:pointer;white-space:nowrap;overflow:hidden}
+.term-tree-row:hover{background:#242424}
+.term-tree-row.on{background:#1d3a55;color:#fff}
+.term-tree-row.on .term-tree-name{color:#fff}
+.term-tree-tw{width:14px;min-width:14px;display:grid;place-items:center;color:#9a9a9a;flex-shrink:0}
+.term-tree-tw svg{width:7px;height:9px;fill:none;stroke:#a8a8a8;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;transition:transform .12s}
+.term-tree-row.open .term-tree-tw svg{transform:rotate(90deg)}
+.term-tree-ico{width:16px;min-width:16px;display:grid;place-items:center}
+.term-tree-ico svg{width:15px;height:15px;fill:none;stroke:#9fb6c8;stroke-width:1.2;stroke-linecap:round;stroke-linejoin:round}
+.term-tree-row.folder .term-tree-ico svg{stroke:#6fa8cf;fill:rgba(111,168,207,.18)}
+.term-tree-row.server .term-tree-ico svg{stroke:#9fc3e0;fill:rgba(159,195,224,.12)}
+.term-tree-row.file .term-tree-ico svg{stroke:#a8a8a8;fill:none}
+.term-tree-row.hostrow .term-tree-ico svg{stroke:#f0c85a;fill:rgba(240,200,90,.14)}
+.term-tree-name{overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.term-tree-badge{margin-left:auto;font-size:9px;line-height:1;color:#9a9a9a;border:1px solid #4a4a4a;border-radius:4px;padding:2px 4px;flex-shrink:0}
+.term-tree-children{display:block}
+.term-tree-children.collapsed{display:none}
+.term-tree-empty{padding:7px 10px;font-size:11px;line-height:1.5;color:#8a8a8a}
+.term-panel-note{padding:10px 12px;font-size:11px;line-height:1.6;color:#9a9a9a}
+
+/* main column: tabs + terminal surface */
+.term-main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;background:#1e1e1e}
+.term-tabs{display:flex;align-items:stretch;height:24px;min-height:24px;background:#141414;border-bottom:1px solid #303030;flex-shrink:0;overflow:hidden;padding-left:2px}
+.term-tab{display:flex;align-items:center;gap:6px;max-width:280px;min-width:0;padding:0 7px;font-size:11.5px;line-height:23px;color:#c6c6c6;background:#1e1e1e;border:1px solid #4a4a4a;border-bottom-color:#1e1e1e;margin-top:1px;margin-right:2px;cursor:default;white-space:nowrap}
+.term-tab svg{width:12px;height:12px;fill:none;stroke:#8fb8d6;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+.term-tab-num{color:#8a8a8a;font-size:11px}
+.term-tab-label{overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.term-tab-close{width:13px;height:13px;display:grid;place-items:center;flex-shrink:0;color:#a8a8a8;border-radius:1px;text-decoration:none;cursor:pointer}
+.term-tab-close:hover{background:#555;color:#fff}
+.term-tab-close svg{width:7px;height:7px;stroke:currentColor;stroke-width:1.6}
+.term-tab-new{width:24px;min-width:24px;display:grid;place-items:center;background:#1a1a1a;border:1px solid #4a4a4a;border-bottom-color:#303030;margin-top:1px;color:#c0c0c0;cursor:pointer;font-size:13px;line-height:22px;padding:0}
+.term-tab-new:hover{background:#2a2a2a;color:#fff}
+.term-tab-fill{flex:1;border-bottom:1px solid transparent}
+
+/* the terminal surface */
+.term-surface{flex:1;display:flex;flex-direction:column;min-height:0;min-width:0;padding:4px 4px 0;box-sizing:border-box}
+.term-shell{flex:1;display:flex;flex-direction:column;min-height:0;background:#1e1e1e;border:1px solid #6a6a6a;border-radius:1px;overflow:hidden;position:relative}
+.term-toolrow{display:flex;align-items:center;justify-content:flex-end;gap:3px;height:18px;min-height:18px;padding:0 4px;background:#1e1e1e;border-bottom:1px solid #2a2a2a;flex-shrink:0}
+.term-tool{width:15px;height:15px;display:grid;place-items:center;border:0;border-radius:1px;background:transparent;color:#8f8f8f;cursor:pointer;padding:0}
+.term-tool:hover{background:#2f2f2f;color:#e0e0e0}
+.term-tool svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.term-scroll{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;padding:6px 8px 0}
+.term-scroll::-webkit-scrollbar{width:14px}
+.term-scroll::-webkit-scrollbar-track{background:#191919;border-left:1px solid #2a2a2a}
+.term-scroll::-webkit-scrollbar-thumb{background:#6a6a6a;border:2px solid #191919;border-radius:0}
+.term-out{display:block;overflow:visible;padding:0;font-family:monospace;font-size:0;line-height:0;color:#c8c8c8;background:transparent;white-space:pre-wrap;word-break:break-word}
+.term-line{display:block;font-size:13.5px;line-height:1.28;min-height:0;margin:0 0 0 1px;white-space:pre-wrap;word-break:break-word}
+.term-line.cmd-line{color:#26c6da}
+.term-line.ok-line{color:#c8c8c8}
 .term-line.err-line{color:#e88080}
-.term-line.info-line{color:#7db8ba;font-style:normal}
-.term-line.success-line{color:#5ec97e}
-.term-prompt-str{color:#5ec97e}
+.term-line.info-line{color:#8fd3e0;font-style:normal}
+.term-line.success-line{color:#35d07f}
+.term-prompt-str{color:#35d07f}
 .term-at{color:#d4d454}
-.term-path{color:#7db8ba}
-.term-dollar{color:#b3b3b3}
-.term-prompt-wrap{position:relative;display:block;background:#1c1c1c;font-size:14px;line-height:normal}
-.term-row{display:flex;align-items:center;padding:0;margin:0 0 -2px 2px;background:#1c1c1c;gap:0;font-size:14px;line-height:normal}
-.term-ps{font-family:monospace;font-size:14px;line-height:normal;white-space:nowrap;flex-shrink:0}
-.term-inp{flex:0 1 auto;width:.1ch;max-width:calc(100vw - 220px);background:transparent;border:none;outline:none;font-family:monospace;font-size:14px;line-height:1;color:#b3b3b3;caret-color:transparent;padding:0;margin:0;resize:none;letter-spacing:0}
+.term-path{color:#26c6da}
+.term-dollar{color:#c8c8c8}
+
+/* welcome banner, outlined like the MobaXterm greeting box */
+.term-banner{display:block;margin:2px 0 10px;padding:9px 12px 10px;border:1px solid #8c8c8c;border-radius:0;background:transparent;color:#c0c0c0;font-size:12.5px;line-height:1.6;text-align:center;white-space:normal}
+.term-banner-title{display:block;color:#c8c8c8;font-size:13px;line-height:1.6}
+.term-banner-sub{display:block;color:#d0d0d0;font-size:12.5px;line-height:1.6;margin-bottom:6px}
+.term-banner-list{display:block;text-align:left;margin:0 auto;max-width:780px}
+.term-banner-row{display:flex;align-items:flex-start;gap:6px;font-size:12.5px;line-height:1.65;color:#c0c0c0;text-align:left}
+.term-banner-row b{color:#e0e0e0;font-weight:400}
+.term-banner-row i{color:#26c6da;font-style:normal}
+.term-banner-row em{color:#35d07f;font-style:normal}
+.term-banner-row u{color:#cf6bcf;text-decoration:none}
+.term-banner-bullet{color:#9a9a9a;flex-shrink:0}
+.term-banner-note{display:block;text-align:left;margin:8px auto 0;max-width:780px;font-size:12.5px;line-height:1.65;color:#a4a4a4}
+.term-banner-note b{color:#d0d0d0;font-weight:400}
+.term-banner-tail{display:block;text-align:left;margin:4px auto 0;max-width:780px;font-size:12.5px;line-height:1.65;color:#a4a4a4}
+.term-banner-tail b{color:#d8d8d8;font-weight:400}
+
+/* prompt row */
+.term-prompt-wrap{position:relative;display:block;background:transparent;font-size:13.5px;line-height:normal;padding:2px 0 8px}
+.term-row{display:flex;align-items:center;padding:0;margin:0 0 -2px 1px;background:transparent;gap:0;font-size:13.5px;line-height:normal}
+.term-ps{font-family:monospace;font-size:13.5px;line-height:normal;white-space:nowrap;flex-shrink:0}
+.term-inp{flex:0 1 auto;width:.1ch;max-width:calc(100vw - 360px);background:transparent;border:none;outline:none;font-family:monospace;font-size:13.5px;line-height:1;color:#e0e0e0;caret-color:transparent;padding:0;margin:0;resize:none;letter-spacing:0}
 .term-inp::placeholder{color:#636363}
-.term-cursor{display:inline-block;width:8px;height:14px;background:#b3b3b3;animation:blink 1s step-end infinite;vertical-align:-2px;margin-left:1px;flex-shrink:0}
+.term-cursor{display:inline-block;width:8px;height:13px;background:#d0d0d0;animation:blink 1s step-end infinite;vertical-align:-2px;margin-left:1px;flex-shrink:0}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
-.term-suggest{position:absolute;background:#252525;border:1px solid #555;border-radius:4px;padding:4px 0;z-index:9;min-width:180px;box-shadow:0 8px 24px rgba(0,0,0,.6)}
-.term-sug-item{padding:5px 12px;font-family:monospace;font-size:12px;color:#d4d454;cursor:pointer;transition:background .1s}
-.term-sug-item:hover,.term-sug-item.active{background:#3b3b3b}
-.term-footer{position:fixed;left:0;right:0;bottom:0;z-index:1000;display:flex;align-items:center;min-height:25px;height:25px;background:#131313;border:1px solid #636363;padding-left:5px;box-sizing:border-box;overflow:hidden;font-family:monospace;font-size:10px;line-height:1;color:#fff}
-.term-footer-item{display:flex;align-items:center;margin-right:8px;white-space:nowrap;font-size:10px!important;line-height:1;flex-shrink:0}
-.term-footer-label{display:inline-block;color:#d4d454;font-size:10px!important;line-height:1;font-weight:700;margin:0 3px}
-.term-footer-value{display:inline-block;color:#fff;font-size:10px!important;line-height:1;margin-right:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
-.term-footer-sep{width:2px;height:60%;background:#7db8ba;margin:0 5px;flex-shrink:0}
-.term-footer-graph{width:50px;height:12px;background:#000;border:.5px solid #646464;overflow:hidden;display:inline-block;vertical-align:middle}
+.term-suggest{position:absolute;background:#252525;border:1px solid #6a6a6a;border-radius:1px;padding:3px 0;z-index:9;min-width:180px;box-shadow:0 8px 24px rgba(0,0,0,.65)}
+.term-sug-item{padding:4px 12px;font-family:monospace;font-size:12px;color:#26c6da;cursor:pointer}
+.term-sug-item:hover,.term-sug-item.active{background:#2f4a5f;color:#fff}
+
+/* ── status bar: MobaXterm chevron segments ── */
+.term-footer{display:flex;align-items:stretch;gap:0;min-height:23px;height:23px;padding:0;background:#0a0a0a;border-top:1px solid #262626;box-sizing:border-box;overflow:hidden;font-family:monospace;font-size:11px;line-height:1;color:#0a1418;flex-shrink:0}
+.term-pill{display:flex;align-items:center;gap:4px;height:23px;padding:0 11px 0 7px;background:var(--pb,#1296be);color:var(--pf,#08151a);font-size:11px!important;line-height:1;white-space:nowrap;flex-shrink:0;clip-path:polygon(0 0,calc(100% - 8px) 0,100% 50%,calc(100% - 8px) 100%,0 100%)}
+.term-pill svg{width:11px;height:11px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;opacity:.9}
+.term-pill-label{font-size:9px!important;line-height:1;opacity:.72;text-transform:uppercase;letter-spacing:.3px}
+.term-pill-value{display:inline-block;font-size:10.5px!important;line-height:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px;color:inherit}
+.term-pill.p-cyan{--pb:#1296be;--pf:#04161c}
+.term-pill.p-green{--pb:#0eb16c;--pf:#02170e}
+.term-pill.p-yellow{--pb:#c3c22c;--pf:#141400}
+.term-pill.p-orange{--pb:#cf7a2a;--pf:#160c02}
+.term-pill.p-magenta{--pb:#b45fb0;--pf:#180418}
+.term-pill.p-steel{--pb:#4a8fb0;--pf:#02141c}
+.term-pill.p-teal{--pb:#2f8f8a;--pf:#021615}
+.term-pill.p-slate{--pb:#5a6a7a;--pf:#05090c}
+.term-footer-graph{width:38px;height:11px;background:rgba(0,0,0,.42);border:1px solid rgba(0,0,0,.5);overflow:hidden;display:inline-block;vertical-align:middle;flex-shrink:0}
 .term-footer-graph canvas{width:100%;height:100%;display:block}
 .term-win,.term-win *{font-family:'TerminalTMT',monospace!important;font-variant-ligatures:none}
-.term-footer-spacer{flex:1}
-.term-footer-hide-sm,.term-footer-hide-md,.term-footer-hide-lg{display:none}
-@media (min-width:768px){
-  .term-footer-hide-sm{display:flex}
-  .term-footer-sep.term-footer-hide-sm{display:block}
-}
-@media (min-width:1024px){
-  .term-footer-hide-md{display:flex}
-  .term-footer-sep.term-footer-hide-md{display:block}
-}
-@media (min-width:1280px){
-  .term-footer-hide-lg{display:flex}
-  .term-footer-sep.term-footer-hide-lg{display:block}
+.term-footer-spacer{flex:1;min-width:0;background:#0a0a0a}
+.term-pill-end{width:5px;height:14px;background:#8fa8bf;opacity:.55;flex-shrink:0;align-self:center}
+.term-footer-hide-sm,.term-footer-hide-md,.term-footer-hide-lg,.term-footer-hide-xl{display:none}
+@media (min-width:820px){.term-pill.term-footer-hide-sm{display:flex}}
+@media (min-width:1040px){.term-pill.term-footer-hide-md{display:flex}}
+@media (min-width:1280px){.term-pill.term-footer-hide-lg{display:flex}}
+@media (min-width:1560px){.term-pill.term-footer-hide-xl{display:flex}}
+/* the sidebar is a wide-screen luxury: collapse it on small windows */
+@media (max-width:980px){.term-side{width:216px;min-width:216px}}
+@media (max-width:700px){
+  .term-side{display:none}
+  .term-inp{max-width:calc(100vw - 100px)}
+  .term-toolbar{display:none}
+  .term-toolrow{display:none}
 }
 /* A terminal opened from the manager gets its own browser tab/window. */
-body.term-standalone{background:#1c1c1c;overflow:hidden}
+body.term-standalone{background:#1e1e1e;overflow:hidden}
 body.term-standalone .shell{display:none!important}
 body.term-standalone .mod-ov:not(.term-ov){display:none!important}
 body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
 body.term-standalone .term-win{position:fixed;inset:0}
+.term-close{display:none}
+.term-close{position:fixed;top:3px;right:5px;z-index:1202;width:18px;height:18px;border-radius:3px;background:#2b2b2b;border:1px solid #4a4a4a;color:#c8c8c8;padding:0;place-items:center;cursor:pointer}
+.term-close:hover{background:#7a2b2b;border-color:#a04040;color:#fff}
+.term-close svg{width:9px;height:9px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}
 
 /* ══ ASSISTANT AGENT ══ */
  .shell{--agent-w:420px;--fm-music-pane-w:min(560px,max(360px,calc(100vw - 520px)))}
@@ -40359,36 +40518,187 @@ input.inp,select.inp{height:32px}
 
 <!-- TERMINAL MODAL -->
 <?php if(!$fm->isRO()):?>
+<?php
+  /* R48: the session tree is built on the server, once, so it is correct before
+     any script runs; later refreshes only read the current folder. */
+  $termTreeDir=(string)$fm->getCwd();
+  $termTreeEntries=[];
+  $termTreeScan=@scandir($termTreeDir);
+  if(is_array($termTreeScan)){
+    $termTreeDirs=[];$termTreeFiles=[];
+    foreach($termTreeScan as $termTreeEntry){
+      if($termTreeEntry==='.'||$termTreeEntry==='..')continue;
+      $termTreePath=$termTreeDir.'/'.$termTreeEntry;
+      if(is_dir($termTreePath))$termTreeDirs[]=$termTreeEntry;
+      else $termTreeFiles[]=$termTreeEntry;
+    }
+    sort($termTreeDirs,SORT_NATURAL|SORT_FLAG_CASE);
+    sort($termTreeFiles,SORT_NATURAL|SORT_FLAG_CASE);
+    $termTreeEntries=array_merge(array_map(fn($n)=>[$n,true],array_slice($termTreeDirs,0,9)),array_map(fn($n)=>[$n,false],array_slice($termTreeFiles,0,5)));
+  }
+  $termRootPath=(string)($fm->getRoot()?:DIRECTORY_SEPARATOR);
+  $termHostLabel=gethostname()?:'server';
+  $termUserLabel=(string)($sshTerminalUser?:($_SESSION['fm_user']??'user'));
+  $termDirLabel=basename(rtrim($termTreeDir,'/\\'))?:$termTreeDir;
+?>
 <div class="mod-ov term-ov" id="termOv">
   <div class="term-win" id="termWin">
     <button type="button" class="btn btn-icon btn-g term-close" id="termClose" title="Close" aria-label="Close the terminal" data-wmclose><svg viewBox="0 0 10 10"><line x1="0.7" y1="0.7" x2="9.3" y2="9.3"/><line x1="9.3" y1="0.7" x2="0.7" y2="9.3"/></svg></button>
-    <div class="term-out" id="termOut"><span class="term-line info-line">Powered by Marshall File Manager [2019]</span><span class="term-line info-line">All rights reserved 2019 - 2026 LiquidState</span><span class="term-line"><span class="term-at">Server IP:</span> <span class="term-path"><?=htmlspecialchars($_SERVER['SERVER_ADDR']??'Unknown')?></span></span><span class="term-line"><span class="term-at">Connection status:</span> <span class="term-prompt-str" id="termConnectionStatus">GOOD</span></span><span class="term-line"><span class="term-at">Working dir:</span> <span id="termWorkingDir"><?=htmlspecialchars($fm->getCwd())?></span></span></div>
-    <div class="term-prompt-wrap"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($sshTerminalUser?:($_SESSION['fm_user']??'user'))?></span><span class="term-at">@</span><span class="term-path"><?=htmlspecialchars(gethostname()?:'server')?></span><span class="term-dollar">:<?=htmlspecialchars($fm->getTerminalPromptPath())?>$ </span></span><input class="term-inp" id="termInp" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"><span class="term-cursor" aria-hidden="true"></span></div>
-      <div class="term-suggest" id="termSug" style="display:none;bottom:100%;left:2px"></div>
+
+    <!-- window title bar -->
+    <div class="term-titlebar">
+      <span class="term-applogo" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="15" rx="2"/><path d="M6.5 9.5l2.6 2.4-2.6 2.4M12 14.5h5"/></svg></span>
+      <span class="term-apptitle">Marshall FM Console <b>· terminal</b> — <span id="termTitleHost"><?=htmlspecialchars($termHostLabel)?></span></span>
+      <span class="term-title-spacer"></span>
+      <span class="term-apptitle" style="color:#7d7d7d"><?=htmlspecialchars($termUserLabel)?>@<?=htmlspecialchars($termHostLabel)?> · <span id="termConnectionStatus">READY</span></span>
+      <button type="button" class="term-wbtn" title="Minimise is not available in the browser" aria-label="Minimise" data-term-noop><svg viewBox="0 0 10 10"><path d="M1 5h8"/></svg></button>
+      <button type="button" class="term-wbtn" title="Maximise is not available in the browser" aria-label="Maximise" data-term-noop><svg viewBox="0 0 10 10"><rect x="1.2" y="1.2" width="7.6" height="7.6"/></svg></button>
+      <button type="button" class="term-wbtn term-wbtn-close" id="termWinClose" title="Close" aria-label="Close the terminal"><svg viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8"/></svg></button>
     </div>
-    <div class="term-footer">
-          <div class="term-footer-item"><span class="term-footer-label">[DN]</span><span class="term-footer-value" id="termHost"><?=htmlspecialchars($_SERVER['HTTP_HOST']??'localhost')?></span></div>
-          <div class="term-footer-sep"></div>
-          <div class="term-footer-item"><span class="term-footer-value" id="termIp">IP: <?=htmlspecialchars($_SERVER['SERVER_ADDR']??'-')?></span></div>
-          <div class="term-footer-sep"></div>
-          <div class="term-footer-item"><span class="term-footer-label">[CPU]</span><span class="term-footer-value" id="termCpu">0%</span><span class="term-footer-graph"><canvas id="termCpuGraph" width="50" height="12"></canvas></span></div>
-          <div class="term-footer-sep"></div>
-          <div class="term-footer-item"><span class="term-footer-label">[RAM]</span><span class="term-footer-value" id="termRam">0 B / 0 B</span></div>
-          <div class="term-footer-sep term-footer-hide-sm"></div>
-          <div class="term-footer-item term-footer-hide-sm"><span class="term-footer-label">[DSK]</span><span class="term-footer-value" id="termDisk">0 B / 0 B</span></div>
-          <div class="term-footer-sep term-footer-hide-sm"></div>
-          <div class="term-footer-item term-footer-hide-sm"><span class="term-footer-label">[UPT]</span><span class="term-footer-value" id="termUptime">0s</span></div>
-          <div class="term-footer-sep term-footer-hide-sm"></div>
-          <div class="term-footer-item term-footer-hide-sm"><span class="term-footer-label">[PRC]</span><span class="term-footer-value" id="termProc">0</span></div>
-          <div class="term-footer-sep term-footer-hide-md"></div>
-          <div class="term-footer-item term-footer-hide-md"><span class="term-footer-label">[TIME]</span><span class="term-footer-value" id="termTime">00:00:00</span></div>
-          <div class="term-footer-sep term-footer-hide-md"></div>
-          <div class="term-footer-item term-footer-hide-md"><span class="term-footer-label">[USR]</span><span class="term-footer-value" id="termUser"><?=htmlspecialchars($sshTerminalUser?:($_SESSION['fm_user']??'user'))?></span></div>
-          <div class="term-footer-sep term-footer-hide-lg"></div>
-          <div class="term-footer-item term-footer-hide-lg"><span class="term-footer-label">[HOS]</span><span class="term-footer-value" id="termHostname"><?=htmlspecialchars(gethostname()?:'server')?></span></div>
-          <div class="term-footer-sep term-footer-hide-lg"></div>
-          <div class="term-footer-item term-footer-hide-lg"><span class="term-footer-label">[VER]</span><span class="term-footer-value">1.0.0</span></div>
+
+    <!-- black menu strip -->
+    <div class="term-menubar" role="menubar" aria-label="Terminal menu">
+      <span class="term-menu-item" data-term-noop tabindex="0">Terminal</span>
+      <span class="term-menu-item" data-term-noop tabindex="0">Sessions</span>
+      <span class="term-menu-item" data-term-noop tabindex="0">View</span>
+      <span class="term-menu-item" data-term-noop tabindex="0">X server</span>
+      <span class="term-menu-item" data-term-noop tabindex="0">Tools</span>
+      <span class="term-menu-item" data-term-noop tabindex="0">Settings</span>
+      <span class="term-menu-item" data-term-noop tabindex="0">Macros</span>
+      <span class="term-menu-item" data-term-noop tabindex="0">Help</span>
+      <span class="term-menu-brand"><b>◆</b> web console · not an SSH client</span>
+    </div>
+
+    <!-- icon toolbar -->
+    <div class="term-toolbar" role="toolbar" aria-label="Terminal actions">
+      <button type="button" class="term-tile" data-term-act="clear"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg><span>Clear</span></button>
+      <button type="button" class="term-tile" data-term-act="paste"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z"/></svg><span>Paste</span></button>
+      <button type="button" class="term-tile" data-term-act="bottom"><svg viewBox="0 0 24 24"><path d="M12 4v12M7 12l5 5 5-5M4 20h16"/></svg><span>Bottom</span></button>
+      <span class="term-tile-sep"></span>
+      <button type="button" class="term-tile" data-term-act="refresh"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-2.4 5.7"/><path d="M20 5v5h-5"/></svg><span>Refresh</span></button>
+      <button type="button" class="term-tile" data-term-act="cwd"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 12v4M10 14h4"/></svg><span>New folder</span></button>
+      <button type="button" class="term-tile" data-term-act="up"><svg viewBox="0 0 24 24"><path d="M12 20V5M6 11l6-6 6 6"/></svg><span>Up</span></button>
+      <span class="term-tile-sep"></span>
+      <button type="button" class="term-tile" data-term-act="home"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v9H4z"/><path d="M10 20v-5h4v5"/></svg><span>Home</span></button>
+      <button type="button" class="term-tile" data-term-act="files"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M3 7V5h5l2 2"/></svg><span>File manager</span></button>
+      <button type="button" class="term-tile" data-term-act="help"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M7 9l2.5 2L7 13M12 13h4"/></svg><span>Help</span></button>
+    </div>
+
+    <div class="term-body">
+      <!-- left icon rail -->
+      <div class="term-rail" id="termRail" role="toolbar" aria-label="Terminal panels">
+        <button type="button" class="term-rail-fold" id="termRailFold" title="Hide or show the sidebar" aria-label="Toggle sidebar"><svg viewBox="0 0 12 12"><path d="M8 2L4 6l4 4"/></svg></button>
+        <button type="button" class="term-rail-btn on" data-term-rail="sessions" title="Sessions"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M3 12h18M9 20h6"/></svg><span>Sessions</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="tools" title="Tools"><svg viewBox="0 0 24 24"><path d="M14.5 4.5a4 4 0 105.2 5.2L21 8.4 15.6 3z"/><path d="M13 6L3.6 15.4a2 2 0 102.9 2.9L16 8.8"/></svg><span>Tools</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="macros" title="Macros"><svg viewBox="0 0 24 24"><path d="M7 4h10l3 3v13H4V4z"/><path d="M8 11h8M8 15h5"/></svg><span>Macros</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="sftp" title="Sftp"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M8 15l3-3 2 2 3-3"/></svg><span>Sftp</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="log" title="Log"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>Log</span></button>
+        <div class="term-rail-spacer"></div>
+      </div>
+
+      <!-- sidebar: quick connect + session tree -->
+      <div class="term-side">
+        <div class="term-qc-row">
+          <input class="term-qc-inp" id="termQcInp" type="text" autocomplete="off" spellcheck="false" placeholder="Quick connect…" aria-label="Quick connect: type a folder and press Enter">
+          <button type="button" class="term-qc-add" title="New session" data-term-noop><svg viewBox="0 0 10 10"><path d="M5 1v8M1 5h8"/></svg></button>
+        </div>
+        <div class="term-tree" id="termTree">
+          <div class="term-tree-row on open" data-term-toggle="termTreeSessions" style="padding-left:2px">
+            <span class="term-tree-tw"><svg viewBox="0 0 8 12"><path d="M1 1l5 5-5 5"/></svg></span>
+            <span class="term-tree-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="9" r="3.4"/><path d="M5.5 20a6.5 6.5 0 0113 0"/></svg></span>
+            <span class="term-tree-name">User sessions</span>
+          </div>
+          <div class="term-tree-children" id="termTreeSessions">
+            <div class="term-tree-row server open" data-term-toggle="termTreeHost" style="padding-left:16px">
+              <span class="term-tree-tw"><svg viewBox="0 0 8 12"><path d="M1 1l5 5-5 5"/></svg></span>
+              <span class="term-tree-ico"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M8 20h8"/></svg></span>
+              <span class="term-tree-name"><?=htmlspecialchars($termHostLabel)?></span>
+              <span class="term-tree-badge">SSH-1</span>
+            </div>
+            <div class="term-tree-children" id="termTreeHost">
+              <div class="term-tree-row hostrow open" data-term-toggle="termTreeCwd" style="padding-left:30px">
+                <span class="term-tree-tw"><svg viewBox="0 0 8 12"><path d="M1 1l5 5-5 5"/></svg></span>
+                <span class="term-tree-ico"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg></span>
+                <span class="term-tree-name" id="termTreeCwdName" title="<?=htmlspecialchars($termTreeDir)?>"><?=htmlspecialchars($termDirLabel)?></span>
+              </div>
+              <div class="term-tree-children" id="termTreeCwd">
+                <?php if(!$termTreeEntries):?>
+                <div class="term-tree-empty">This folder is empty.</div>
+                <?php else: foreach($termTreeEntries as [$termEntryName,$termEntryIsDir]):?>
+                <div class="term-tree-row <?=$termEntryIsDir?'folder':'file'?>" style="padding-left:46px" data-term-path="<?=htmlspecialchars($termEntryName,ENT_QUOTES)?>" data-term-dir="<?=$termEntryIsDir?'1':'0'?>" title="<?=htmlspecialchars($termEntryName)?>">
+                  <span class="term-tree-tw"></span>
+                  <span class="term-tree-ico"><svg viewBox="0 0 24 24"><?php if($termEntryIsDir):?><path d="M3 7h6l2 2h10v10H3z"/><?php else:?><path d="M6 3h7l5 5v13H6z"/><path d="M13 3v5h5"/><?php endif;?></svg></span>
+                  <span class="term-tree-name"><?=htmlspecialchars($termEntryName)?></span>
+                </div>
+                <?php endforeach; endif;?>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="term-panel-note" id="termTreeRootNote" style="padding:4px 8px 6px">Paths are relative to <b><?=htmlspecialchars($termRootPath)?></b>. Click a folder to <i>cd</i> into it.</div>
+      </div>
+
+      <!-- main column -->
+      <div class="term-main">
+        <div class="term-tabs">
+          <div class="term-tab">
+            <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M7 9l2.5 2L7 13M12 13h4"/></svg>
+            <span class="term-tab-num">1</span>
+            <span class="term-tab-label" id="termTabLabel" title="<?=htmlspecialchars($termTreeDir)?>"><?=htmlspecialchars($termTreeDir)?></span>
+            <span class="term-tab-close" title="Close tab" id="termTabClose" role="button" tabindex="-1"><svg viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8"/></svg></span>
+          </div>
+          <button type="button" class="term-tab-new" title="New tab" data-term-noop>+</button>
+          <div class="term-tab-fill"></div>
+        </div>
+
+        <div class="term-surface">
+          <div class="term-shell">
+            <div class="term-toolrow">
+              <button type="button" class="term-tool" title="Clear screen" data-term-act="clear"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
+              <button type="button" class="term-tool" title="Paste" data-term-act="paste"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z"/></svg></button>
+              <button type="button" class="term-tool" title="Scroll to bottom" data-term-act="bottom"><svg viewBox="0 0 24 24"><path d="M12 4v12M7 12l5 5 5-5M4 20h16"/></svg></button>
+            </div>
+
+            <div class="term-scroll" id="termScroll">
+              <div class="term-out" id="termOut">
+                <span class="term-banner">
+                  <span class="term-banner-title">· Marshall FM Console ·</span>
+                  <span class="term-banner-sub">A shell on this hosting account, inside the manager root</span>
+                  <span class="term-banner-list">
+                    <span class="term-banner-row"><span class="term-banner-bullet">▶</span><span>Working directory is <i id="termWorkingDir"><?=htmlspecialchars($termTreeDir)?></i> — <b>cd</b> changes it and moves the tree on the left.</span></span>
+                    <span class="term-banner-row"><span class="term-banner-bullet">▶</span><span><b>Tab</b> completes a path · <b>↑</b>/<b>↓</b> walk the history · <b>clear</b> empties the screen · <b>Ctrl+C</b> cancels the line.</span></span>
+                    <span class="term-banner-row"><span class="term-banner-bullet">▶</span><span>Server IP <i id="termBannerIp"><?=htmlspecialchars($_SERVER['SERVER_ADDR']?:'-')?></i> · host <i><?=htmlspecialchars($termHostLabel)?></i> · user <em><?=htmlspecialchars($termUserLabel)?></em> · link <em id="termConnBadge">connected</em></span></span>
+                    <span class="term-banner-row"><span class="term-banner-bullet">▶</span><span>Quick connect above takes a folder, not a host: this console runs commands here, it is not an SSH client.</span></span>
+                  </span>
+                  <span class="term-banner-note"><b>Note:</b> every command runs in its own shell, so exported variables do not survive from one command to the next, and each one is written to the manager audit log.</span>
+                  <span class="term-banner-tail">Anything the account's shell has works here — <b>ls</b>, <b>cat</b>, <b>grep</b>, <b>du</b>, <b>tar</b> — and <b>cd</b> keeps tab, pill and tree in step.</span>
+                </span>
+              </div>
+              <div class="term-prompt-wrap"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-path"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:<?=htmlspecialchars($fm->getTerminalPromptPath())?>$ </span></span><input class="term-inp" id="termInp" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-cursor" aria-hidden="true"></span></div>
+                <div class="term-suggest" id="termSug" style="display:none;bottom:100%;left:2px"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- status bar: chevron segments, like the MobaXterm bar -->
+        <div class="term-footer">
+          <div class="term-pill p-cyan"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 11h18"/></svg><span class="term-pill-value" id="termDate">--/--/----</span></div>
+          <div class="term-pill p-green"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span class="term-pill-value" id="termTime">00:00:00</span></div>
+          <div class="term-pill p-yellow"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg><span class="term-pill-value" id="termFooterDir" title="<?=htmlspecialchars($termTreeDir)?>"><?=htmlspecialchars($termTreeDir)?></span></div>
+          <div class="term-pill p-orange"><svg viewBox="0 0 24 24"><path d="M4 16l4-5 3 3 4-6 5 8"/></svg><span class="term-pill-label">CPU</span><span class="term-pill-value" id="termCpu">0%</span><span class="term-footer-graph"><canvas id="termCpuGraph" width="50" height="12"></canvas></span></div>
+          <div class="term-pill p-magenta"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="10" rx="2"/><path d="M7 10v4M7 10h6v4H7z"/></svg><span class="term-pill-label">RAM</span><span class="term-pill-value" id="termRam">0 B / 0 B</span></div>
+          <div class="term-pill p-steel term-footer-hide-sm"><span class="term-pill-label">DSK</span><span class="term-pill-value" id="termDisk">0 B / 0 B</span></div>
+          <div class="term-pill p-teal term-footer-hide-md"><span class="term-pill-label">UPT</span><span class="term-pill-value" id="termUptime">0s</span></div>
+          <div class="term-pill p-slate term-footer-hide-lg"><span class="term-pill-label">PRC</span><span class="term-pill-value" id="termProc">0</span></div>
+          <div class="term-pill p-steel term-footer-hide-md"><span class="term-pill-label">IP</span><span class="term-pill-value" id="termIp"><?=htmlspecialchars($_SERVER['SERVER_ADDR']??'-')?></span></div>
+          <div class="term-pill p-teal term-footer-hide-xl"><span class="term-pill-label">HOS</span><span class="term-pill-value" id="termHostname"><?=htmlspecialchars($termHostLabel)?></span></div>
+          <div class="term-pill p-slate term-footer-hide-xl"><span class="term-pill-label">USR</span><span class="term-pill-value" id="termUser"><?=htmlspecialchars($termUserLabel)?></span></div>
+          <div class="term-pill p-steel term-footer-hide-xl"><span class="term-pill-label">DN</span><span class="term-pill-value" id="termHost"><?=htmlspecialchars($_SERVER['HTTP_HOST']??'localhost')?></span></div>
           <div class="term-footer-spacer"></div>
+          <span class="term-pill-end" aria-hidden="true"></span>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -50743,6 +51053,10 @@ let termCpuData=Array(50).fill(0);
 let termSystemInfoReady=false,termSystemInfoBusy=false;
 const termHist=[];let hIdx=-1,sugIdx=-1,sugList=[];
 
+/* R48: the scrollable element is its own box now, so every scroll request goes
+   through one helper instead of touching the window frame. */
+function termScrollBottom(){const box=document.getElementById('termScroll');if(box)box.scrollTop=box.scrollHeight;}
+
 document.getElementById('termBtn')?.addEventListener('click',()=>{
   const terminalUrl=new URL(window.location.href);
   terminalUrl.searchParams.set('terminal','1');
@@ -50756,6 +51070,142 @@ termWin?.addEventListener('click',e=>{
   if(!e.target.closest('.term-suggest'))termInp?.focus();
 });
 
+/* ── R48 shell: sidebar tree, rail, tabs, toolbar ───────────────────────── */
+const TERM_PANEL_NOTE={tools:'The Tools panel is a desktop-only MobaXterm feature; the web console keeps the tools that work here (clear, paste, scroll).',macros:'Macros are not stored by this console. Type the command you need, or keep it in the history with ↑.',sftp:'File transfer lives in the file manager. Use Home to open it, then upload or download there.',log:'Every command is written to the manager audit log; the Log panel of the desktop app is not mirrored here.'};
+function termPanel(name){
+  const tree=document.getElementById('termTree');
+  const qc=document.getElementById('termQcInp');
+  const add=document.querySelector('.term-qc-add');
+  const note=document.getElementById('termPanelNote');
+  document.querySelectorAll('.term-rail-btn').forEach(b=>b.classList.toggle('on',b.dataset.termRail===name));
+  if(name==='sessions'){
+    if(tree)tree.style.display='';
+    if(qc)qc.placeholder='Quick connect…';
+    if(add)add.style.display='';
+    if(note)note.remove();
+    return;
+  }
+  if(tree)tree.style.display='none';
+  if(qc)qc.placeholder=name.charAt(0).toUpperCase()+name.slice(1);
+  if(add)add.style.display='none';
+  if(!note){
+    const box=document.createElement('div');
+    box.id='termPanelNote';
+    box.className='term-panel-note';
+    document.querySelector('.term-side')?.appendChild(box);
+  }
+  const box=document.getElementById('termPanelNote');
+  if(box)box.textContent=TERM_PANEL_NOTE[name]||'This panel is not part of the web console.';
+}
+document.querySelectorAll('.term-rail-btn').forEach(b=>b.addEventListener('click',()=>termPanel(b.dataset.termRail||'sessions')));
+document.getElementById('termRailFold')?.addEventListener('click',()=>{
+  const rail=document.getElementById('termRail');
+  const folded=rail?.classList.toggle('folded');
+  try{localStorage.setItem('mfm.termSidebar',folded?'0':'1');}catch{}
+  termScrollBottom();
+});
+try{if(localStorage.getItem('mfm.termSidebar')==='0')document.getElementById('termRail')?.classList.add('folded');}catch{}
+document.getElementById('termTabClose')?.addEventListener('click',()=>closeMod('termOv'));
+document.getElementById('termWinClose')?.addEventListener('click',()=>closeMod('termOv'));
+document.querySelectorAll('[data-term-noop]').forEach(el=>{
+  const say=e=>{
+    e.preventDefault();
+    if(el.classList.contains('term-menu-item'))appendLine('This menu is a visual match for the desktop client; the same actions live on the toolbar above.','info-line');
+    else appendLine('This build keeps one console session, so extra tabs and window buttons are not opened.','info-line');
+  };
+  el.addEventListener('click',say);
+  if(el.classList.contains('term-menu-item'))el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')say(e);});
+});
+document.querySelectorAll('[data-term-act]').forEach(b=>b.addEventListener('click',async()=>{
+  const act=b.dataset.termAct;
+  if(act==='clear'){if(termOut)termOut.innerHTML='';termScrollBottom();termInp?.focus();return;}
+  if(act==='bottom'){termScrollBottom();termInp?.focus();return;}
+  if(act==='paste'){
+    try{const txt=await navigator.clipboard.readText();if(txt&&termInp){termInp.value+=txt.replace(/\s+$/,'');adjustTermInputWidth();termInp.focus();}}
+    catch{appendLine('The browser did not allow reading the clipboard here; paste with Ctrl+V instead.','err-line');}
+    return;
+  }
+  if(act==='refresh'){termRefreshTree();refreshTermSystemInfo();appendLine('Session tree and status bar refreshed.','info-line');return;}
+  if(act==='cwd'){termRunCommand('pwd');return;}
+  if(act==='up'){termRunCommand('cd ..');return;}
+  if(act==='home'){window.location.href=window.location.pathname;return;}
+  if(act==='files'){window.location.href=window.location.pathname;return;}
+  if(act==='help'){termRunCommand('ls -la');return;}
+}));
+
+/* tree: folders expand/collapse, folder rows cd, file rows complete the word */
+function termRunCommand(cmd){
+  if(!termInp)return;
+  termInp.value=cmd;
+  adjustTermInputWidth();
+  termInp.focus();
+  runTerm();
+}
+function termTreeCd(name){
+  termRunCommand(/^cd(\s|$)/.test(name)?name:'cd '+name);
+}
+document.querySelectorAll('.term-tree-row[data-term-toggle]').forEach(row=>{
+  row.addEventListener('click',()=>{
+    const box=document.getElementById(row.dataset.termToggle);
+    if(!box)return;
+    const collapsed=box.classList.toggle('collapsed');
+    row.classList.toggle('open',!collapsed);
+  });
+});
+function termTreeBind(box){
+  if(!box)return;
+  box.querySelectorAll('.term-tree-row[data-term-path]').forEach(row=>{
+    row.addEventListener('click',()=>{
+      const nm=row.dataset.termPath||'';
+      if(row.dataset.termDir==='1'){termTreeCd(nm);return;}
+      if(!termInp)return;
+      termInp.value=getTermBase()+nm;adjustTermInputWidth();termInp.focus();hideSug();
+    });
+  });
+}
+termTreeBind(document.getElementById('termTreeCwd'));
+async function termRefreshTree(){
+  const box=document.getElementById('termTreeCwd');
+  const label=document.getElementById('termTreeCwdName');
+  if(!box)return;
+  try{
+    const d=await fetch('?x=dirlist',{cache:'no-store',credentials:'same-origin'}).then(r=>r.json());
+    if(!d||!Array.isArray(d.items))return;
+    if(label&&d.cwd){
+      const parts=String(d.cwd).replace(/[\\/]+$/,'').split(/[\\/]/);
+      label.textContent=parts.pop()||String(d.cwd);label.title=d.cwd;
+    }
+    box.innerHTML=d.items.length?d.items.map(it=>{
+      const name=esc(it.name),isDir=Number(it.dir)===1;
+      const ico=isDir?'<path d="M3 7h6l2 2h10v10H3z"/>':'<path d="M6 3h7l5 5v13H6z"/><path d="M13 3v5h5"/>';
+      return '<div class="term-tree-row '+(isDir?'folder':'file')+'" style="padding-left:46px" data-term-path="'+name.replace(/"/g,'&quot;')+'" data-term-dir="'+(isDir?'1':'0')+'" title="'+name.replace(/"/g,'&quot;')+'">'
+        +'<span class="term-tree-tw"></span><span class="term-tree-ico"><svg viewBox="0 0 24 24">'+ico+'</svg></span>'
+        +'<span class="term-tree-name">'+name+'</span></div>';
+    }).join(''):'<div class="term-tree-empty">This folder is empty.</div>';
+    termTreeBind(box);
+    const rootNote=document.getElementById('termTreeRootNote');
+    if(rootNote&&d.root)rootNote.innerHTML='Paths are relative to <b>'+esc(d.root)+'</b>. Click a folder to <i>cd</i> into it.';
+  }catch{}
+}
+
+/* quick connect: one folder, typed; Enter runs the real cd and the tree follows */
+document.getElementById('termQcInp')?.addEventListener('keydown',e=>{
+  if(e.key!=='Enter')return;
+  const el=e.currentTarget,v=el.value.trim();
+  if(!v)return;
+  el.value='';
+  termRunCommand(/^cd(\s|$)/.test(v)?v:'cd '+v);
+});
+
+/* status bar clock: one timer for the whole bar */
+function termClock(){
+  const now=new Date();
+  const time=document.getElementById('termTime');
+  const date=document.getElementById('termDate');
+  if(time)time.textContent=now.toLocaleTimeString('en-GB',{hour12:false});
+  if(date)date.textContent=String(now.getDate()).padStart(2,'0')+'/'+String(now.getMonth()+1).padStart(2,'0')+'/'+now.getFullYear();
+}
+termClock();setInterval(termClock,1000);
 if(termInp){
   termInp.addEventListener('keydown',async e=>{
     if(e.key==='Enter'){hideSug();await runTerm();return;}
@@ -50796,7 +51246,7 @@ async function refreshTermSystemInfo(){
   // Keep the footer useful even if a hosting environment blocks the stats request.
   if(!termSystemInfoReady){
     set('termHost',location.host||'localhost');
-    set('termIp','IP: '+(location.hostname||'-'));
+    set('termIp',location.hostname||'-');
     set('termCpu','0%');
     set('termRam','0 B / 0 B');
     set('termDisk','0 B / 0 B');
@@ -50811,7 +51261,8 @@ async function refreshTermSystemInfo(){
     const cpu=Math.min(100,Math.round(load/cores*1000)/10);
     termCpuData.shift();termCpuData.push(cpu);drawTermCpu();
     set('termHost',location.host||'localhost');
-    set('termIp','IP: '+(d.server_ip||location.hostname||'-'));
+    set('termIp',d.server_ip||location.hostname||'-');
+    set('termBannerIp',d.server_ip||location.hostname||'-');
     set('termCpu',cpu+'%');
     set('termRam',formatBytes(d.mem_used||0)+' / '+formatBytes(d.mem_total||0));
     set('termDisk',formatBytes(d.disk_used||0)+' / '+formatBytes(d.disk_total||0));
@@ -50828,6 +51279,7 @@ if(document.getElementById('termWin')){
   if(FM_SSH_TERMINAL_REQUEST_ERROR){
     if(termInp)termInp.disabled=true;
     const status=document.getElementById('termConnectionStatus');if(status)status.textContent='UNAVAILABLE';
+    const badge=document.getElementById('termConnBadge');if(badge)badge.textContent='unavailable';
     appendLine('Login as failed: '+FM_SSH_TERMINAL_REQUEST_ERROR,'err-line');
   }
   if(FM_SSH_TERMINAL_USER){
@@ -50839,6 +51291,7 @@ if(document.getElementById('termWin')){
         .then(d=>{
           if(d.error)throw new Error(d.error);
           const status=document.getElementById('termConnectionStatus');if(status)status.textContent='READY';
+          const badge=document.getElementById('termConnBadge');if(badge)badge.textContent='ready';
           const workdir=document.getElementById('termWorkingDir');if(workdir)workdir.textContent=d.home||'';
           const user=document.getElementById('termUser');if(user)user.textContent=d.username||FM_SSH_TERMINAL_USER;
           updateTermPrompt('~',d.home||'');
@@ -50847,6 +51300,7 @@ if(document.getElementById('termWin')){
         })
         .catch(err=>{
           const status=document.getElementById('termConnectionStatus');if(status)status.textContent='UNAVAILABLE';
+          const badge=document.getElementById('termConnBadge');if(badge)badge.textContent='unavailable';
           appendLine('Login as unavailable: '+(err.message||'The server cannot switch to this Linux account.'),'err-line');
         });
     }
@@ -50858,6 +51312,18 @@ function updateTermPrompt(prompt,cwd){
   if(cwd)termCwd=cwd;
   const el=document.querySelector('.term-dollar');
   if(el&&prompt)el.textContent=':'+prompt+'$ ';
+  /* R48: the tab title and the status bar pill follow the working directory. */
+  if(termCwd){
+    const dir=String(termCwd).replace(/[\\/]+$/,'');
+    /* R48: the banner's working-directory line is not a leftover of page load */
+    const bannerDir=document.getElementById('termWorkingDir');
+    if(bannerDir)bannerDir.textContent=termCwd;
+    const base=dir.split(/[\\/]/).pop()||dir||'/';
+    const tab=document.getElementById('termTabLabel');
+    if(tab){tab.textContent=dir;tab.title=dir;}
+    const pill=document.getElementById('termFooterDir');
+    if(pill){pill.textContent=dir;pill.title=dir;}
+  }
 }
 async function fetchSug(){
   if(FM_SSH_TERMINAL_USER){hideSug();return;}
@@ -50888,9 +51354,11 @@ async function runTerm(){
     else{
       updateTermPrompt(d.prompt,d.cwd);
       if(d.output){d.output.replace(/\r/g,'').split('\n').forEach(line=>appendLine(line,d.exit===0?'ok-line':'err-line'));}
+      /* cd and anything else that moves the shell shows up in the session tree */
+      if(d.cwd)termRefreshTree();
     }
   }catch(err){appendLine('Request failed: '+err.message,'err-line');}
-  if(termWin)termWin.scrollTop=termWin.scrollHeight;
+  termScrollBottom();
 }
 function appendLine(text,cls){
   if(!termOut)return;
@@ -50898,7 +51366,7 @@ function appendLine(text,cls){
   s.className='term-line'+(cls?' '+cls:'');
   s.textContent=text;
   termOut.appendChild(s);
-  if(termWin)termWin.scrollTop=termWin.scrollHeight;
+  termScrollBottom();
 }
 
 /* ═══════════════════════════════════════
