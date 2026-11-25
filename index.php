@@ -1165,7 +1165,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R70');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R71');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -36315,7 +36315,7 @@ button.rc-row{cursor:pointer}
 .term-scroll::-webkit-scrollbar-track{background:#191919;border-left:1px solid #2a2a2a}
 .term-scroll::-webkit-scrollbar-thumb{background:#6a6a6a;border:2px solid #191919;border-radius:0}
 .term-out{display:block;overflow:visible;padding:0;font-family:monospace;font-size:0;line-height:0;color:#c8c8c8;background:transparent;white-space:pre-wrap;word-break:break-word}
-.term-line{display:block;font-size:13.5px;line-height:1.28;min-height:0;margin:0 0 0 1px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;max-width:100%}
+.term-line{display:block;font-size:var(--term-fs,13.5px);line-height:1.28;min-height:0;margin:0 0 0 1px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;max-width:100%}
 .term-line.cmd-line{color:#26c6da}
 .term-line.ok-line{color:#c8c8c8}
 .term-line.err-line{color:#e88080}
@@ -36402,9 +36402,9 @@ button.rc-row{cursor:pointer}
 .term-prompt-wrap.term-busy .term-row{visibility:hidden}
 .term-prompt-wrap.term-busy::after{content:'running…';display:block;font-size:12px;line-height:1.6;color:#7a7a7a;padding:2px 0 6px}
 .term-prompt-wrap{position:relative;display:block;background:transparent;font-size:13.5px;line-height:normal;padding:2px 0 8px}
-.term-row{display:flex;align-items:center;padding:0;margin:0 0 -2px 1px;background:transparent;gap:0;font-size:13.5px;line-height:normal;flex-wrap:wrap;min-width:0}
-.term-ps{font-family:monospace;font-size:13.5px;line-height:normal;white-space:pre-wrap;overflow-wrap:anywhere;flex:0 1 auto;min-width:0}
-.term-inp{flex:0 1 auto;width:.1ch;max-width:calc(100vw - 360px);background:transparent;border:none;outline:none;font-family:monospace;font-size:13.5px;line-height:1;color:#e0e0e0;caret-color:transparent;padding:0;margin:0;resize:none;letter-spacing:0;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;display:block;box-sizing:content-box}
+.term-row{display:flex;align-items:center;padding:0;margin:0 0 -2px 1px;background:transparent;gap:0;font-size:var(--term-fs,13.5px);line-height:normal;flex-wrap:wrap;min-width:0}
+.term-ps{font-family:monospace;font-size:var(--term-fs,13.5px);line-height:normal;white-space:pre-wrap;overflow-wrap:anywhere;flex:0 1 auto;min-width:0}
+.term-inp{flex:0 1 auto;width:.1ch;max-width:calc(100vw - 360px);background:transparent;border:none;outline:none;font-family:monospace;font-size:var(--term-fs,13.5px);line-height:1;color:#e0e0e0;caret-color:transparent;padding:0;margin:0;resize:none;letter-spacing:0;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;display:block;box-sizing:content-box}
 .term-inp::placeholder{color:#636363}
 /* R52 · the faint tail of a completion, drawn the way PowerShell and fish do it */
 .term-prompt-wrap{--ghost:''}
@@ -36419,7 +36419,7 @@ button.rc-row{cursor:pointer}
    that character is printed dark inside the light caret, the way a shell shows a
    completion. Nothing in this box is in the flow, so nothing here can reflow. */
 .term-live{position:relative;display:inline-block;vertical-align:baseline;flex:0 0 auto;min-width:0;max-width:100%;
-  font-size:var(--term-fs,13.5px);
+  font-size:inherit;
   height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));white-space:pre;max-width:calc(100vw - 200px)}
 /* R61 · a command longer than the room it has wraps onto a new line instead of
    scrolling its own tail out of the window, and the box grows with it */
@@ -40270,6 +40270,13 @@ input.inp,select.inp{height:32px}
   /* 16px is the smallest size iOS Safari will focus without zooming the page */
   :root .term-inp{font-size:16px!important;line-height:1.35!important;min-height:22px!important;
     max-width:none!important;width:100%!important;flex:1 1 auto!important}
+  /* R71 · the prompt is not a caption: it is painted at the size of the field
+     it leads into (16px on a phone), so `admin@…:~$` and the command read as one
+     line. The console's own output follows the same number. */
+  :root{--term-fs:16px!important}
+  :root :is(.term-ps,.term-row,.term-line,.term-live){font-size:16px!important}
+  :root .term-line{line-height:1.4!important}
+  :root .term-row{line-height:normal!important}
   /* the printed mark: three colours and hard edges turn into noise at phone
      size; the same mark stays, in one soft tone, instead of a red smear */
   :root .term-logo{color:#9aa0a6!important;opacity:.82;font-size:calc(var(--term-logo-fs,6px) * .92)!important}
