@@ -547,7 +547,13 @@ function fm_theme_packs(){return [
     'kalil' =>['name'=>'Kali Linux Light','author'=>'mfm']];}
 function fm_theme_allowed($t){return in_array($t,['light','dark','win11d','kalil'],true)||isset(fm_theme_packs()[$t]);}
 function fm_theme_active($t){global $currentTheme;return isset($currentTheme)&&$currentTheme===(string)$t;}
-function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);$t=(is_array($d)&&isset($d['theme']))?(string)$d['theme']:'';return fm_theme_allowed($t)?$t:'dark';}
+/* R59 · a fresh install opens in the Windows 11 Dark pack. This is only the
+   DEFAULT: nothing is deleted, every pack stays, and one pick in MFM Theme
+   replaces it for good (the choice is stored below and read from there). The
+   older "dark" look was not touched - it is still the fallback, and still one
+   click away in the gallery. */
+function fm_theme_default(){return 'win11d';}
+function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);$t=(is_array($d)&&isset($d['theme']))?(string)$d['theme']:'';return fm_theme_allowed($t)?$t:fm_theme_default();}
 /* One owner cell: the account name, its home directory, and a soft green
    tint when the account is the one running this manager. */
 function fm_owner_cell($info){
@@ -586,7 +592,7 @@ fm_store_migrate(__DIR__.'/.shares.php',__DIR__.'/.shares.json');
 fm_store_migrate(__DIR__.'/.cms_pw_vault.php',__DIR__.'/.cms_pw_vault.json');
 fm_store_migrate(__DIR__.'/.cms_vault_key.php',__DIR__.'/.cms_vault_key');
 fm_store_migrate(__DIR__.'/.guardian_update_state.php',__DIR__.'/.guardian_update_state.json');
-function fm_save_theme($f,$t){$t=fm_theme_allowed((string)$t)?(string)$t:'dark';@file_put_contents($f,json_encode(['theme'=>$t]),LOCK_EX);return $t;}
+function fm_save_theme($f,$t){$t=fm_theme_allowed((string)$t)?(string)$t:fm_theme_default();@file_put_contents($f,json_encode(['theme'=>$t]),LOCK_EX);return $t;}
 $currentTheme = fm_get_theme($themeFile);
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -1159,7 +1165,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R58');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R59');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -35997,7 +36003,15 @@ button.rc-row{cursor:pointer}
 .sh-btn.sh-purp:hover{background:rgba(139,92,246,.08);color:#c4b5fd;border-color:rgba(139,92,246,.2)}
 
 /* ══ TERMINAL (MobaXterm-style dark shell: title bar, black menu, icon toolbar, rail, session tree, chevron status bar) ══ */
-.term-ov{padding:0;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);align-items:stretch;justify-content:stretch}
+/* R59 · the console is a WINDOW, and a window does not own the screen. Two things
+   were wrong: the layer under it captured every click on the manager (so a tool in
+   the sidebar seemed dead until the console was closed), and that layer sat above
+   the pages' dialogs, so a tool opened behind it. Now the layer is transparent and
+   lets the page through, the frame itself keeps the mouse, and the layer sits
+   UNDER the manager's dialogs - so a tool opens above the console, the way a
+   dialog opens above the window it was asked from. */
+.term-ov{padding:0;background:transparent;backdrop-filter:none;align-items:stretch;justify-content:stretch;z-index:190;pointer-events:none}
+.term-ov>.term-win{pointer-events:auto}
 .term-ov.open{display:block}
 .term-win{position:fixed;inset:0;width:100vw;height:100dvh;background:#1e1e1e;color:#c8c8c8;border:0;border-radius:0;box-shadow:none;overflow:hidden;display:flex;flex-direction:column;padding:0;box-sizing:border-box;font-family:monospace;font-size:0;line-height:0}
 
@@ -36054,12 +36068,12 @@ button.rc-row{cursor:pointer}
 .term-body{flex:1;display:flex;min-height:0;min-width:0;position:relative}
 
 /* left icon rail */
-.term-rail{width:34px;min-width:34px;background:#131313;border-right:1px solid #303030;display:flex;flex-direction:column;align-items:center;padding:2px 0 4px;gap:1px;flex-shrink:0;overflow:hidden}
+.term-rail{width:34px;min-width:34px;background:#131313;border-right:1px solid #303030;display:flex;flex-direction:column;align-items:center;padding:2px 0 4px;gap:1px;flex-shrink:0;overflow-y:auto;overflow-x:hidden}
 .term-rail-fold{width:34px;height:20px;display:grid;place-items:center;border:0;border-bottom:1px solid #2a2a2a;background:transparent;color:#7fbfe0;cursor:pointer;padding:0;flex-shrink:0}
 .term-rail-fold svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s}
 .term-rail-fold:hover{background:#1f1f1f;color:#cfe9f7}
 .term-rail.folded .term-rail-fold svg{transform:rotate(180deg)}
-.term-rail-btn{width:32px;height:78px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:6px;padding-top:8px;border:0;border-left:0;border-radius:0;background:transparent;color:#9a9a9a;cursor:pointer;flex-shrink:0;position:relative}
+.term-rail-btn{width:32px;height:64px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:6px;padding-top:8px;border:0;border-left:0;border-radius:0;background:transparent;color:#9a9a9a;cursor:pointer;flex-shrink:0;position:relative}
 .term-rail-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
 .term-rail-btn span{writing-mode:vertical-rl;font-size:10px;line-height:1;color:inherit;letter-spacing:.2px}
 .term-rail-btn:hover{background:#1f1f1f;color:#d8d8d8}
@@ -36104,6 +36118,19 @@ button.rc-row{cursor:pointer}
 .term-log-c{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr}
 .term-panel-btn{margin-top:8px;padding:6px 10px;font-family:'TerminalTMT',monospace;font-size:11.5px;color:#cfe6f5;background:#1e3a52;border:1px solid #3d6a92;cursor:pointer}
 .term-panel-btn:hover{background:#27506f}
+/* R59 · the three new panels read like the rest of the rail: a row, its name,
+   and the value it stands for */
+.term-place{display:flex;flex-direction:column;gap:1px;padding:4px 6px;background:#1b1b1b;border:1px solid #2e2e2e;cursor:pointer;font-family:'TerminalTMT',monospace}
+.term-place:hover{background:#22384d;border-color:#3d6a92}
+.term-place-n{font-size:11.5px;color:#cfcfcf}
+.term-place:hover .term-place-n{color:#fff}
+.term-place-d{font-size:10px;color:#7d7d7d;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr}
+.term-display-row{display:flex;align-items:center;gap:5px;padding:2px 0 4px;flex-wrap:wrap}
+.term-display-val{font-family:'TerminalTMT',monospace;font-size:11.5px;color:#dcdcdc;min-width:56px;text-align:center}
+.term-mini{font-family:'TerminalTMT',monospace;font-size:11px;color:#cfcfcf;background:#1b1b1b;border:1px solid #3a3a3a;padding:4px 8px;cursor:pointer}
+.term-mini:hover{background:#22384d;border-color:#3d6a92;color:#fff}
+.term-mini.on{background:#1e3a52;border-color:#3d6a92;color:#cfe6f5}
+.term-q-idx{color:#6f6f6f;min-width:16px;text-align:right;flex-shrink:0;font-size:10px}
 .term-tile[data-term-act="keep"] svg{stroke:#f0c85a}
 .term-panel-foot::before{content:'';width:10px;height:10px;flex-shrink:0;background:currentColor;color:#6fa8cf;clip-path:polygon(0 0,72% 0,100% 28%,100% 100%,0 100%)}
 .term-tree::-webkit-scrollbar{width:12px}
@@ -39664,6 +39691,13 @@ input.inp,select.inp{height:32px}
 :root[data-theme="win11d"] .mod-ov{
   background:rgba(0,0,0,.55);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);padding:24px;
 }
+/* R59 · the console keeps its own layer in every pack: the Windows 11 packs paint
+   every overlay dark, and the console's layer must stay clear so the manager
+   underneath it is still the page - a window, not a full-screen dimmer. */
+:root[data-theme="win11"] .term-ov,:root[data-theme="win11d"] .term-ov,
+:root[data-theme="win10"] .term-ov,:root[data-theme="win10d"] .term-ov{
+  background:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;
+}
 :root[data-theme="win11d"] .mod{
   background:#2b2b2b;border:1px solid rgba(255,255,255,.0578);border-bottom-color:rgba(255,255,255,.16);
   border-radius:8px;box-shadow:var(--wm-shadow-win);overflow:hidden;max-height:88vh;padding:0;
@@ -40934,6 +40968,7 @@ input.inp,select.inp{height:32px}
   /* R48: the session tree is built on the server, once, so it is correct before
      any script runs; later refreshes only read the current folder. */
   $termTreeDir=(string)$fm->getCwd();
+  $termAppDir=__DIR__;                 /* R59 · where this manager itself lives */
   $termTreeEntries=[];
   $termTreeScan=@scandir($termTreeDir);
   if(is_array($termTreeScan)){
@@ -40990,7 +41025,7 @@ input.inp,select.inp{height:32px}
 <span id="termMonoProbe" aria-hidden="true" style="position:absolute;left:-9999px;top:0;white-space:pre;font-family:'TerminalTMT',monospace;font-size:var(--term-fs,13.5px);line-height:1;visibility:hidden">MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM</span>
 <!-- R58 · a tool window centres on the screen, not on the console: this overlay held 58 of them
      nested inside #termOv, so every window was measured against the terminal frame. -->
-<div class="mod-ov term-ov" id="termOv">
+<div class="mod-ov term-ov" id="termOv" data-app-dir="<?=htmlspecialchars($termAppDir,ENT_QUOTES)?>" data-home-dir="<?=htmlspecialchars($termTreeDir,ENT_QUOTES)?>">
   <div class="term-win" id="termWin">
     <button type="button" class="btn btn-icon btn-g term-close" id="termClose" title="Close" aria-label="Close the terminal" data-wmclose><svg viewBox="0 0 10 10"><line x1="0.7" y1="0.7" x2="9.3" y2="9.3"/><line x1="9.3" y1="0.7" x2="0.7" y2="9.3"/></svg></button>
 
@@ -41058,6 +41093,12 @@ input.inp,select.inp{height:32px}
         <button type="button" class="term-rail-btn" data-term-rail="macros" title="Macros"><svg viewBox="0 0 24 24"><path d="M7 4h10l3 3v13H4V4z"/><path d="M8 11h8M8 15h5"/></svg><span>Macros</span></button>
         <button type="button" class="term-rail-btn" data-term-rail="sftp" title="Sftp"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M8 15l3-3 2 2 3-3"/></svg><span>Sftp</span></button>
         <button type="button" class="term-rail-btn" data-term-rail="log" title="Log"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>Log</span></button>
+        <!-- R59 · three more panels, each a real tool: the places a shell keeps
+             being opened in, the queue of what has been run in this window, and the
+             screen's own output controls (word wrap, bells, the text size). -->
+        <button type="button" class="term-rail-btn" data-term-rail="places" title="Places"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M3 11h18"/></svg><span>Places</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="queue" title="Queue"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/><path d="M17 15l3 2-3 2z"/></svg><span>Queue</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="display" title="Display"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M8 9h8M8 13h5M9 20h6"/></svg><span>View</span></button>
         <div class="term-rail-spacer"></div>
       </div>
 
@@ -41165,7 +41206,7 @@ input.inp,select.inp{height:32px}
                   <span class="lg-name"><?=htmlspecialchars(FM_PRODUCT_NAME)?></span><span class="lg-sep"> · </span><span class="lg-key">version</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_VERSION)?></span><span class="lg-sep"> · </span><span class="lg-key">build</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_RELEASE)?></span><span class="lg-sep"> · </span><span class="lg-key">since</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_DATE)?></span><span class="lg-sep"> · </span><span class="lg-key"><?=htmlspecialchars(FM_PRODUCT_SYSTEM)?></span>
                   <span class="lg-sub"><span class="lg-key">cwd</span> <span class="lg-val" id="termWorkingDir"><?=htmlspecialchars($termTreeDir)?></span><span class="lg-sep"> · </span><span class="lg-key">host</span> <span class="lg-val"><?=htmlspecialchars($termHostLabel)?></span><span class="lg-sep"> · </span><span class="lg-key">user</span> <span class="lg-val"><?=htmlspecialchars($termUserLabel)?></span><span class="lg-sep"> · </span><span class="lg-key">link</span> <span class="lg-val" id="termConnBadge">ready</span></span>
                 </div>
-              <template id="termPromptTemplate"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><span class="term-live" id="termLive__UID__"><input class="term-inp" id="termInp__UID__" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-ghost term-ghost-tail" id="termGhost__UID__" aria-hidden="true"></span><span class="term-int-caret" id="termCaret__UID__" aria-hidden="true"></span></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
+              <template id="termPromptTemplate"><div class="term-row" data-tab="__UID__"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><span class="term-live" id="termLive__UID__"><input class="term-inp" id="termInp__UID__" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-ghost term-ghost-tail" id="termGhost__UID__" aria-hidden="true"></span><span class="term-int-caret" id="termCaret__UID__" aria-hidden="true"></span></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
             </div>
           </div>
         </div>
@@ -44804,7 +44845,14 @@ document.getElementById('bpBtn')?.addEventListener('click',()=>{
 });
 bpEl('bpPath')?.addEventListener('keydown',e=>{if(e.key==='Enter'){bpRun();}});
 /* <<BPJS-END>> */
-function openMod(id){document.getElementById(id)?.classList.add('open');}
+function openMod(id){
+  /* R59 · a tool opened from the sidebar while the console is on screen opens ON
+     TOP of it, not behind it: the console's layer already sits under the dialogs,
+     and a window that was opened from the page keeps the page's order. */
+  const el=document.getElementById(id);
+  if(!el)return;
+  el.classList.add('open');
+}
 function closeMod(id){document.getElementById(id)?.classList.remove('open');if(id==='configInspectorOv'&&typeof resetConfigInspectorView==='function')resetConfigInspectorView();if(id==='rootingScanOv'&&typeof resetRootingScanView==='function')resetRootingScanView();if(id==='mfmOv'&&typeof mfaWatch==='function')[mfaWatch(false),typeof mfaDrawer==='function'&&mfaDrawer(false)];}
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
@@ -47417,7 +47465,14 @@ function openUpdatesPanel(){
   UPD_STATE=null;
   updLoad(false);
 }
-document.getElementById('updBtn')?.addEventListener('click',openUpdatesPanel);
+document.getElementById('updBtn')?.addEventListener('click',()=>{
+  /* R59 · clicking the tool again while its window is on screen used to close it:
+     the overlay's own click handler read the click that bubbled out of the window
+     as a backdrop click. A window that is already open is left alone. */
+  const ov=document.getElementById('updOv');
+  if(ov&&ov.classList.contains('open'))return;
+  openUpdatesPanel();
+});
 document.getElementById('updClose')?.addEventListener('click',()=>{clearInterval(UPD_TIMER);closeMod('updOv');});
 /* the notice in the content area now sends people to this panel */
 document.addEventListener('click',e=>{
@@ -51643,7 +51698,6 @@ let termRunning=false;
 let sugIdx=-1,sugList=[];
 
 /* ── the tab in front owns the input, the output and the folder ───────────── */
-function termInput(){const t=termTabCurrent();return t?t.wrap.querySelector('.term-inp'):null;}
 /* putting the caret back is not the same as scrolling: a reader who moved up
    keeps their place when a command ends, a menu closes or a tab is opened */
 function termFocusInput(){
@@ -51680,6 +51734,11 @@ function termGhostPlace(inp,gp){
 }
 /* the room one prompt row has, minus the prompt itself: the field never grows
    past the right edge of the console */
+/* the console's text size, wherever a panel needs to show it */
+function termFontPx(){
+  const v=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--term-fs'));
+  return isFinite(v)&&v>0?v:13.5;
+}
 function termRowRoom(i){
   const row=i&&i.closest('.term-row');
   if(!row)return Math.max(160,innerWidth-240);
@@ -51795,10 +51854,18 @@ function termTabNew(initialDir){
   const promptWrap=document.createElement('div');
   promptWrap.className='term-prompt-wrap';
   promptWrap.dataset.tab=String(id);
-  promptWrap.innerHTML=(document.getElementById('termPromptTemplate')?.innerHTML||'').replace(/__UID__/g,String(id));
+  /* R59 · the row is built from the template only AFTER it has been re-homed out
+     of the scrollback: read from inside #termOut, the first tab's wipe took the
+     template with it and every later tab was born without a prompt. */
+  const tplHTML=(document.getElementById('termPromptTemplate')?.innerHTML||'').replace(/__UID__/g,String(id));
+  promptWrap.innerHTML=tplHTML;
   const scroll=document.getElementById('termScroll');
   const seed=document.getElementById('termOut');
-  if(seed&&seed.dataset.tab===undefined&&TERM_TABS.length===0){seed.dataset.tab=String(id);out=seed;}
+  if(seed&&seed.dataset.tab===undefined&&TERM_TABS.length===0){
+    seed.dataset.tab=String(id);out=seed;
+    /* the page's own greeting is this tab's greeting from now on */
+    try{if(typeof termBootstrapConsole==='function')termBootstrapConsole();}catch(e){}
+  }
   if(scroll){
     if(out!==seed)scroll.appendChild(out);
     scroll.appendChild(promptWrap);
@@ -51808,7 +51875,11 @@ function termTabNew(initialDir){
   }
   /* a fresh tab starts ready: its prompt is on screen until a command runs */
   promptWrap.classList.remove('term-busy');
-  const tab={id:Number(id),cwd:base,hist:[],hIdx:-1,out,wrap:promptWrap,lines:0};
+  const keepPrint=termKeepGreeting();
+  const tab={id:Number(id),cwd:base,hist:[],hIdx:-1,out,wrap:promptWrap,lines:0,printHTML:keepPrint||null};
+  /* every tab opens on its own watermark, the way the console opens: the tab that
+     is not on screen prints nothing, and the one that comes back still has it */
+  if(out!==seed)termPaintGreeting(tab);
   TERM_TABS.push(tab);
   termBindTab(tab);
   termTabRender();
@@ -51816,6 +51887,67 @@ function termTabNew(initialDir){
   return tab;
 }
 function termTabCurrent(){return TERM_TABS.find(t=>t.active)||TERM_TABS[0];}
+function termInput(){const t=termTabCurrent();return t?t.wrap.querySelector('.term-inp'):null;}
+/* ── the greeting, and the row template that must not be part of the output ──
+   Both used to live inside #termOut - the box a command prints into. So a new tab
+   inherited the previous tab's greeting, and `clear` deleted the template the
+   prompt is built from. They are now copied out of the output the first time the
+   console is used: the greeting is kept as markup, the template is moved up into
+   the console shell itself. Nothing about how they look changed. */
+function termPrintNode(){return document.querySelector('#termOut .term-print');}
+function termKeepGreeting(){
+  const t=termTabCurrent();
+  const src=termPrintNode()||document.getElementById('termPrintSeed');
+  if(!t)return null;
+  if(!src&&t.printHTML)return t.printHTML;
+  if(!t.printHTML)t.printHTML=src.innerHTML;
+  t.printHTML=src.innerHTML;             /* the markup is the same in every tab */
+  return t.printHTML;
+}
+function termBootstrapConsole(){
+  const tpl=document.getElementById('termPromptTemplate');
+  const scroll=document.getElementById('termScroll');
+  if(!tpl||!scroll)return;
+  if(!document.getElementById('termPrintSeed')){
+    const t=termTabCurrent();
+    const node=termPrintNode();
+    const seed=document.createElement('template');
+    seed.id='termPrintSeed';
+    if(node)seed.innerHTML=node.innerHTML;
+    else if(t&&t.printHTML)seed.innerHTML=t.printHTML;
+    const holder=scroll.parentElement||document.querySelector('.term-surface')||document.body;
+    holder.appendChild(seed);
+  }
+  /* the template belongs to the console, not to the scrollback */
+  if(tpl.closest('#termScroll')){
+    const holder=scroll.parentElement||document.querySelector('.term-surface')||document.body;
+    holder.appendChild(tpl);
+  }
+}
+function termClearScreen(tab){
+  tab=tab||termTabCurrent();
+  if(!tab||!tab.out)return;
+  if(!termKeepGreeting())tab.printHTML=null;
+  tab.out.innerHTML='';
+  tab.lines=0;
+  TERM_SCROLL.follow=true;
+  const box=termScrollBox();
+  if(box)box.scrollTop=0;
+}
+/* the greeting is printed by a fresh tab the way the console opens: the mark, its
+   frame, its caption - the copy kept above, not a second copy in the page */
+function termPaintGreeting(tab){
+  if(!tab||!tab.out)return;
+  const html=tab.printHTML||termKeepGreeting();
+  if(!html)return;
+  const wrap=document.createElement('div');
+  wrap.className='term-print';
+  wrap.innerHTML=html;
+  tab.out.appendChild(wrap);
+  const dir=wrap.querySelector('#termWorkingDir');
+  if(dir&&tab.cwd)dir.textContent=tab.cwd;
+}
+window.termBootstrapConsole=termBootstrapConsole;
 /* ── one row, one prompt ────────────────────────────────────────────────────
    The live prompt is a child of the prompt row, and so is the caret. Leaving it
    on screen while the echoed command is appended put a prompt and a command in
@@ -51849,6 +51981,20 @@ function termPromptRestore(tab){
   if(tab.active&&!(inp&&inp.disabled))termFocusInput();
 }
 function termTabById(id){return TERM_TABS.find(t=>t.id===Number(id));}
+/* R59 · the tab that is not on screen is not drawn. Its output and its prompt row
+   stay in the page (so nothing is lost when it comes back), but only the current
+   tab's prompt is on screen - before this, every row was visible and a message
+   typed into the first tab could land in the second one. */
+function termTabShow(t){
+  TERM_TABS.forEach(x=>{
+    const on=(x===t);
+    if(x.out)x.out.style.display=on?'':'none';
+    if(x.wrap){
+      x.wrap.style.display=on?'':'none';
+      x.wrap.querySelectorAll('.term-inp').forEach(i=>{i.disabled=false;});
+    }
+  });
+}
 /* the strip is redrawn by moving existing nodes, never by throwing them away:
    a tab being dragged must survive its own reorder */
 const TERM_TAB_EL={};
@@ -51906,7 +52052,9 @@ function termTabCreate(t){
 }
 function termTabPaint(el,t,i,total){
   el.classList.toggle('on',!!t.active);
-  el.title=(t.cwd||'')+(total>1?' · drag to reorder':'');
+  /* R59 · the tab's tooltip says how much it is holding, so a busy tab is known
+     without switching to it */
+  el.title=(t.cwd||'')+' · '+(t.lines||0)+' line'+((t.lines||0)===1?'':'s')+(total>1?' · drag to reorder':'');
   const num=el.querySelector('.term-tab-num');
   if(num)num.textContent=String(i+1);
   const lbl=el.querySelector('.term-tab-label');
@@ -51938,7 +52086,11 @@ function termTabRender(){
 function termTabSelect(id,skipTree){
   const tab=termTabById(id);
   if(!tab)return;
-  TERM_TABS.forEach(t=>{t.active=t.id===tab.id;t.out.style.display=t.active?'':'none';t.wrap.style.display=t.active?'':'none';});
+  TERM_TABS.forEach(t=>{t.active=t.id===tab.id;});
+  termTabShow(tab);
+  /* the tab is on screen with its greeting: a tab that was empty gets the
+     watermark now, so every view opens the way the console opens */
+  if(!tab.out.children.length)termPaintGreeting(tab);
   termCwd=tab.cwd;
   const dollar=document.querySelector('.term-tab-prompt-src');
   updateTermPromptLabels(tab);
@@ -52065,6 +52217,68 @@ function termPanelHTML(name){
       +'<div class="term-panel-empty">A command that uploads or downloads is a transfer. Nothing has run a transfer in this tab yet.</div>'
       +'<button type="button" class="term-panel-btn" id="termOpenManager">Open the file manager</button></div>';
   }
+  if(name==='places'){
+    /* the folders a shell on this server is actually opened in, as one click */
+    const ov=document.getElementById('termOv');
+    const app=(ov&&ov.dataset.appDir)||'';
+    const home=(ov&&ov.dataset.homeDir)||'';
+    const here=termCurrentDir()||home;
+    const raw=[
+      ['The manager\'s own folder',app],
+      ['Home of this console',home],
+      ['The folder on screen now',here],
+      ['The web root',app.replace(/\/[^/]+$/,'')||'/'],
+      ['/tmp - scratch space','/tmp'],
+      ['/ - the root of the server','/']
+    ];
+    const seen=new Set();
+    const places=raw.filter(p=>{
+      if(!p[1]||seen.has(p[1]))return false;
+      seen.add(p[1]);return true;
+    });
+    return '<div class="term-panel-wrap">'
+      +'<div class="term-panel-h">Go to</div>'
+      +'<div class="term-panel-list">'
+      +places.map((p,i)=>'<div class="term-place" data-dir="'+esc2(p[1])+'" title="'+esc2(p[1])+'"><span class="term-place-n">'+esc2(p[0])+'</span><span class="term-place-d">'+esc2(p[1])+'</span></div>').join('')
+      +'</div>'
+      +'<div class="term-panel-h">Copy a path</div>'
+      +'<div class="term-panel-list">'
+      +'<div class="term-place" data-copy="'+esc2(here)+'"><span class="term-place-n">Copy this folder\'s path</span><span class="term-place-d">'+esc2(here)+'</span></div>'
+      +'</div>'
+      +'</div>';
+  }
+  if(name==='queue'){
+    /* what this window has run, newest first, one click to run it again */
+    const rows=termQueueList();
+    return '<div class="term-panel-wrap">'
+      +'<div class="term-panel-h">Run again</div>'
+      +'<div class="term-panel-list" id="termQueueList">'
+      +(rows.length?rows.map((c,i)=>'<div class="term-recent" data-cmd="'+esc2(c)+'"><span class="term-q-idx">'+(i+1)+'</span>'+esc2(c)+'</div>').join('')
+                     :'<div class="term-panel-empty">Nothing has run in this window yet. A command you run lands here, newest first.</div>')
+      +'</div>'
+      +'<button type="button" class="term-panel-btn" id="termQueueClear">Empty this list</button>'
+      +'</div>';
+  }
+  if(name==='display'){
+    /* the screen's own controls, the ones a terminal window keeps in a menu */
+    const fs=termFontPx();
+    const wrap=termWrapOn();
+    return '<div class="term-panel-wrap">'
+      +'<div class="term-panel-h">Text size</div>'
+      +'<div class="term-display-row"><button type="button" class="term-mini" data-fs="-1">A-</button>'
+      +'<span class="term-display-val" id="termFsVal">'+Math.round(fs*10)/10+' px</span>'
+      +'<button type="button" class="term-mini" data-fs="1">A+</button>'
+      +'<button type="button" class="term-mini" data-fs="0">Reset</button></div>'
+      +'<div class="term-panel-h">Lines</div>'
+      +'<div class="term-display-row"><button type="button" class="term-mini'+(wrap?' on':'')+'" id="termWrapBtn">Wrap long lines</button></div>'
+      +'<div class="term-panel-h">The screen</div>'
+      +'<div class="term-panel-list">'
+      +'<div class="term-place" data-display="clear"><span class="term-place-n">Clear the screen</span><span class="term-place-d">keeps the prompt</span></div>'
+      +'<div class="term-place" data-display="bottom"><span class="term-place-n">Scroll to the newest line</span><span class="term-place-d">the end of the output</span></div>'
+      +'<div class="term-place" data-display="quit"><span class="term-place-n">Quit this window</span><span class="term-place-d">close the console</span></div>'
+      +'</div>'
+      +'</div>';
+  }
   if(name==='log'){
     const tab=termTabCurrent();
     const hist=(tab&&tab.hist)||[];
@@ -52079,7 +52293,57 @@ function termPanelFillRecent(){
   const tab=termTabCurrent(),h=(tab&&tab.hist)||[];
   box.innerHTML=h.length?h.slice().reverse().slice(0,12).map(c=>'<div class="term-recent" data-cmd="'+esc(c)+'">'+esc(c)+'</div>').join(''):'<div class="term-panel-empty">The history of this tab is empty.</div>';
 }
+/* R59 · the queue of this window: every command that ran in any tab, newest
+   first, kept in memory only (a refresh starts a clean list again) */
+function termQueueList(){return (window.TERM_QUEUE||[]).slice().reverse();}
+function termQueuePush(cmd){
+  const q=window.TERM_QUEUE||(window.TERM_QUEUE=[]);
+  if(!cmd)return;
+  if(q[q.length-1]===cmd)return;
+  q.push(cmd);
+  if(q.length>60)q.shift();
+  if(document.getElementById('termQueueList'))termPanel('queue');
+}
+/* word wrap: a switch, remembered for the next visit */
+function termWrapOn(){try{return localStorage.getItem('mfm-term-wrap')==='1';}catch(e){return false;}}
+function termWrapSet(on){
+  try{localStorage.setItem('mfm-term-wrap',on?'1':'0');}catch(e){}
+  document.querySelectorAll('#termScroll .term-out').forEach(o=>{o.style.whiteSpace=on?'pre-wrap':'pre';o.style.overflowX=on?'hidden':'auto';});
+  document.querySelectorAll('#termScroll .term-line').forEach(l=>{l.style.whiteSpace=on?'pre-wrap':'pre';});
+}
 function termPanelWire(name){
+  document.querySelectorAll('#termPanelNote .term-place').forEach(row=>{
+    row.addEventListener('click',()=>{
+      if(row.dataset.dir){termRunCommand('cd '+JSON.stringify(row.dataset.dir));return;}
+      if(row.dataset.copy){
+        const txt=row.dataset.copy;
+        try{navigator.clipboard.writeText(txt);}catch(e){}
+        if(typeof window.termToast==='function')window.termToast('Path copied');
+        return;
+      }
+      const d=row.dataset.display;
+      if(d==='clear'){doTermAct('clear');return;}
+      if(d==='bottom'){doTermAct('bottom');return;}
+      if(d==='quit'){termHideConsole();return;}
+    });
+  });
+  document.getElementById('termQueueClear')?.addEventListener('click',()=>{
+    window.TERM_QUEUE=[];termPanel('queue');
+    if(typeof window.termToast==='function')window.termToast('Queue emptied');
+  });
+  document.getElementById('termWrapBtn')?.addEventListener('click',e=>{
+    const on=!termWrapOn();termWrapSet(on);
+    e.currentTarget.classList.toggle('on',on);
+    if(typeof window.termToast==='function')window.termToast('Long lines '+(on?'wrap':'do not wrap'));
+  });
+  document.querySelectorAll('#termPanelNote [data-fs]').forEach(b=>{
+    b.addEventListener('click',()=>{
+      const d=Number(b.dataset.fs);
+      if(d===0){if(typeof window.termSetFont==='function')window.termSetFont(13.5,true);}
+      else if(typeof window.termStepFont==='function')window.termStepFont(d);
+      const out=document.getElementById('termFsVal');if(out)out.textContent=Math.round(termFontPx()*10)/10+' px';
+    });
+  });
   document.getElementById('termOpenManager')?.addEventListener('click',()=>{window.location.href=window.location.pathname.replace(/\/+$/,'')+'/index.php';});
   document.querySelectorAll('#termSnipList .term-snip').forEach(row=>{
     row.addEventListener('click',e=>{
@@ -52176,6 +52440,7 @@ function termFileIcon(name){
 function termRunCommand(cmd){
   const ii=termInput();
   if(!ii)return;
+  try{if(typeof termQueuePush==='function')termQueuePush(cmd);}catch(e){}
   ii.value=cmd;
   adjustTermInputWidth();
   ii.focus();
@@ -52615,6 +52880,7 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
     if(isFinite(saved)&&saved>0)termSetFont(saved,false);
   }catch(e){}
   window.termStepFont=termStepFont;
+  window.termSetFont=termSetFont;
 
   /* a small toast in the corner of the console, never over the output */
   let toastEl=null;
@@ -53139,8 +53405,22 @@ async function runTerm(){
   if(!cmd||!inp||!tab||termRunning)return;
   termRunning=true;
   tab.hist.push(cmd);tab.hIdx=-1;inp.value='';adjustTermInputWidth();
+  try{if(typeof termQueuePush==='function')termQueuePush(cmd);}catch(e){}
   appendCommandLine(tab,cmd);
-  if(cmd==='clear'||cmd==='cls'){tab.out.innerHTML='';termRunning=false;termPromptRestore(tab);termTabScroll();return;}
+  /* R59 · `clear` used to blank the console AND take the prompt with it: the
+     prompt could not come back because the row template lives INSIDE #termOut,
+     so wiping the output wiped the template too - no input, no focus, nothing to
+     type into. The greeting is now kept as a copy before the wipe, the template is
+     re-homed to the console shell on first use, and the prompt is restored from
+     it. Clear clears the screen; it never takes the console with it. */
+  if(cmd==='clear'||cmd==='cls'){
+    termRunning=false;
+    termClearScreen(tab);
+    termPromptRestore(tab);
+    termTabScroll();
+    termFocusInput();
+    return;
+  }
   tab.wrap.classList.add('term-busy');
   try{
     const fd=new FormData();
