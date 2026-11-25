@@ -9334,6 +9334,8 @@ class FileManager {
     public function isRO(){return $this->readonly;}
     public function getRoot(){return $this->root;}
     public function getCwd(){return $this->currentDir;}
+    /* R48: the terminal endpoints set the folder of the tab they are serving */
+    public function setCwd($dir){if(is_string($dir)&&@is_dir($dir))$this->currentDir=$dir;return $this->currentDir;}
     public function getMsgs(){return $this->messages;}
     public function addMsg($m,$t){$this->messages[]=['text'=>$m,'type'=>$t];}
     public function getSysRoot(){return strtoupper(substr(PHP_OS,0,3))==='WIN'?getenv('SystemDrive')."\\":"/"; }
@@ -32678,6 +32680,10 @@ if(isset($_GET['x'])){
         if($fm->isRO()){echo json_encode(['error'=>'Read-only.']);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
         $qi=isset($_POST['qi'])?trim($_POST['qi']):'';
+        /* one session, many tabs: the tab tells us which folder it is in, so a
+           command typed in tab 2 never runs in tab 1's directory */
+        $termDir=isset($_POST['term_dir'])?trim((string)$_POST['term_dir']):'';
+        if($termDir!==''&&$fm->setCwd($termDir))$_SESSION['fm_terminal_dir']=$termDir;
         echo json_encode($fm->runCmd($qi));exit;
     }
     if($xop==='ssh_terminal_info'){
@@ -32693,7 +32699,16 @@ if(isset($_GET['x'])){
     }
     if($xop==='ac'){
         $prefix=isset($_GET['prefix'])?$_GET['prefix']:'';
-        echo json_encode($fm->autocomplete($prefix));exit;
+        /* R48: completion happens in the tab's own folder, not the manager's */
+        $beforeAc=$fm->getCwd();
+        $acDir=isset($_GET['dir'])?trim((string)$_GET['dir']):'';
+        if($acDir!==''&&$acDir[0]==='/'){
+            $acReal=@realpath($acDir);$acRoot=$fm->getRoot();
+            if($acReal!==false&&@is_dir($acReal)&&(!$acRoot||$acReal===$acRoot||strpos($acReal.DIRECTORY_SEPARATOR,rtrim($acRoot,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR)===0))$fm->setCwd($acReal);
+        }
+        $acItems=$fm->autocomplete($prefix);
+        if($fm->getCwd()!==$beforeAc)$fm->setCwd($beforeAc);
+        echo json_encode($acItems);exit;
     }
     if($xop==='cs'){$fn=isset($_GET['f'])?basename($_GET['f']):'';echo json_encode($fn?$fm->checksum($fn):['error'=>'No file']);exit;}
     if($xop==='dirsize'){
@@ -32706,8 +32721,15 @@ if(isset($_GET['x'])){
     if($xop==='lg'){echo json_encode(array_slice($fm->getLogs(),0,300));exit;}
     if($xop==='sv'){
         $ss=$fm->sysStats();
-        echo json_encode(['php'=>PHP_VERSION,'os'=>PHP_OS.' '.php_uname('r'),'server'=>$_SERVER['SERVER_SOFTWARE']??'PHP Built-in','memory_limit'=>ini_get('memory_limit'),'mem_usage'=>fmtSz(memory_get_usage(true)),'mem_peak'=>fmtSz(memory_get_peak_usage(true)),'upload_max'=>ini_get('upload_max_filesize'),'post_max'=>ini_get('post_max_size'),'max_exec'=>ini_get('max_execution_time').'s','exts'=>get_loaded_extensions(),'disk_total'=>fmtSz(@disk_total_space(__DIR__)?:0),'disk_free'=>fmtSz(@disk_free_space(__DIR__)?:0),'sapi'=>PHP_SAPI,'tz'=>date_default_timezone_get(),'cwd'=>getcwd(),
-            'load'=>$ss['load'],'mem_total'=>fmtSz($ss['mem_total']),'mem_used'=>fmtSz($ss['mem_used']),'mem_pct'=>$ss['mem_pct'],'uptime'=>fmtUptime($ss['uptime']),'hostname'=>$ss['hostname'],'server_ip'=>$ss['server_ip'],'client_ip'=>$ss['client_ip'],'disk_pct'=>$ss['disk_pct'],'cpu_cores'=>$ss['cpu_cores'],'cpu_model'=>$ss['cpu_model']]);exit;
+        /* R52 · the panel reads like a system monitor, so send it what the monitor
+           shows: memory as gigabytes with a percentage, disk as used of total, and
+           the PHP limits under the names the panel prints */
+        $ss['mem']=fmtSz($ss['mem_used']).' / '.fmtSz($ss['mem_total']);
+        $ss['ram_pct']=$ss['mem_pct'];
+        $ss['disk']=fmtSz((int)round(max(0,$ss['disk_total']-$ss['disk_free']))).' / '.fmtSz($ss['disk_total']);
+        $ss['disk_total_b']=$ss['disk_total'];$ss['disk_free_b']=$ss['disk_free'];
+        echo json_encode(['php'=>PHP_VERSION,'os'=>PHP_OS.' '.php_uname('r'),'server'=>$_SERVER['SERVER_SOFTWARE']??'PHP Built-in','memory_limit'=>ini_get('memory_limit'),'mem_usage'=>fmtSz(memory_get_usage(true)),'mem_peak'=>fmtSz(memory_get_peak_usage(true)),'upload_max'=>ini_get('upload_max_filesize'),'post_max'=>ini_get('post_max_size'),'max_exec'=>ini_get('max_execution_time').'s','exts'=>get_loaded_extensions(),'disk_total'=>fmtSz(@disk_total_space(__DIR__)?:0),'disk_free'=>fmtSz(@disk_free_space(__DIR__)?:0),'sapi'=>PHP_SAPI,'tz'=>date_default_timezone_get(),'cwd'=>getcwd(),'timezone'=>date_default_timezone_get(),'php_version'=>PHP_VERSION,'mem_limit'=>ini_get('memory_limit'),'peak'=>fmtSz(memory_get_peak_usage(true)),'post_max'=>ini_get('post_max_size'),'load'=>$ss['load'],
+            'load'=>$ss['load'],'mem_total'=>fmtSz($ss['mem_total']),'mem_used'=>fmtSz($ss['mem_used']),'mem_pct'=>$ss['mem_pct'],'uptime'=>fmtUptime($ss['uptime']),'hostname'=>$ss['hostname'],'server_ip'=>$ss['server_ip'],'client_ip'=>$ss['client_ip'],'disk_pct'=>$ss['disk_pct'],'cpu_cores'=>$ss['cpu_cores'],'cpu_model'=>$ss['cpu_model'],'mem'=>$ss['mem'],'ram_pct'=>$ss['ram_pct'],'disk'=>$ss['disk']]);exit;
     }
     if($xop==='svlite'){echo json_encode($fm->sysStats());exit;}
     if($xop==='errlog'){
@@ -34532,6 +34554,23 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .content::-webkit-scrollbar{width:4px}.content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.07);border-radius:6px}
 .content.drag-over::after{content:'Drop files to upload';position:absolute;inset:8px;border:2px dashed var(--indigo);border-radius:var(--rlg);background:rgba(133,137,140,.07);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:var(--link);pointer-events:none;z-index:50}
 
+/* ══ R52 · the panels here are read, not clicked, so they borrow the shape of a
+   real system monitor: a coloured glyph per fact, a value, and one quiet line
+   under it. Same width as the rest of the manager, no taller. */
+.srv-wrap{padding:0 !important}
+.srv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(228px,1fr));gap:1px;background:var(--border);border-bottom:1px solid var(--border)}
+.srv-cell{display:flex;gap:10px;align-items:flex-start;padding:11px 13px;background:var(--panel)}
+.srv-glyph{width:26px;height:26px;flex-shrink:0;display:grid;place-items:center;border-radius:7px;background:rgba(255,255,255,.045);border:1px solid var(--border)}
+.srv-glyph svg{width:14px;height:14px;fill:none;stroke:var(--gc,#60a5fa);stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.srv-lab{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--t3);line-height:1.5}
+.srv-val{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:var(--t1);line-height:1.5;word-break:break-word}
+.srv-sub{font-size:10.5px;color:var(--t2);margin-top:1px;line-height:1.5}
+.srv-bar{height:4px;border-radius:4px;background:var(--raised);overflow:hidden;margin-top:6px}
+.srv-bar i{display:block;height:100%;border-radius:4px;background:var(--sc,#22c55e)}
+.srv-sec{display:flex;align-items:center;gap:8px;padding:11px 13px 7px;font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--t3)}
+.srv-sec::after{content:'';flex:1;height:1px;background:var(--border)}
+.srv-exts{padding:0 13px 13px}
+
 /* ══ ALERTS ══ */
 .alerts{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
 .alert{display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:var(--r);font-size:13px;border:1px solid transparent;animation:alertIn .3s var(--spring) both}
@@ -34539,6 +34578,10 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .sb-item .sb-star{margin-left:auto;padding-left:8px;display:inline-flex;align-items:center;flex:0 0 auto}
 .sb-item .sb-star svg{width:12px;height:12px;display:block}
 .sb-item .sb-star svg polygon{fill:#facc15;stroke:#facc15;stroke-width:1;stroke-linejoin:round}
+/* the pinned tool leads the pane: its star is the same size as the icons beside it,
+   so the row reads as "this one is pinned", not as a different kind of row */
+.sb-item .sb-star-hero svg{width:16px;height:16px}
+.sb-item .sb-star-hero{filter:drop-shadow(0 0 3px rgba(250,204,21,.45))}
 /* the star that marks a featured tool must not sit glued to the pane's
    edge: the compact rows of the packs left it as little as 5px of air */
 :root[data-theme="kali"] .sb-item .sb-star,
@@ -35277,6 +35320,33 @@ input[type=file]{display:none}
 .ov.vis{opacity:1}
 .mod-ov{display:none;position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.8);backdrop-filter:blur(10px);align-items:center;justify-content:center;padding:20px}
 .mod-ov.open{display:flex}
+/* ── R53 · About / Help: one window, the three things a shell console owes
+   you - where it runs, what it can do, and the keys that do it ───────────── */
+#aboutOv .mod{width:min(620px,95vw)}
+.abt-hero{display:flex;gap:12px;align-items:center;padding:14px 18px 0}
+.abt-logo{width:44px;height:44px;flex:0 0 44px;border-radius:11px;display:grid;place-items:center;
+  background:linear-gradient(160deg,rgba(245,197,66,.26),rgba(245,197,66,.04));
+  border:1px solid rgba(245,197,66,.34);color:#f5c542}
+.abt-logo svg{width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.abt-name{font-family:'TerminalTMT',monospace;font-size:15px;color:var(--t1);letter-spacing:.01em;line-height:1.3}
+.abt-ver{font-family:'TerminalTMT',monospace;font-size:11.5px;color:var(--t3);margin-top:3px}
+.abt-ver b{color:#f5c542;font-weight:400}
+.abt-lede{padding:10px 18px 0;margin:0;font-size:12px;line-height:1.6;color:var(--t2)}
+.abt-sec{padding:11px 18px 0}
+.abt-sec h4{margin:0 0 6px;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--t3);font-weight:600}
+.abt-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--border);border:1px solid var(--border);border-radius:9px;overflow:hidden}
+.abt-fact{background:var(--surf);padding:6px 11px;min-width:0}
+.abt-fact span{display:block;font-size:10.5px;color:var(--t3);margin-bottom:2px}
+.abt-fact b{display:block;font-family:'TerminalTMT',monospace;font-size:11.5px;font-weight:400;color:var(--t1);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:ltr;text-align:left;unicode-bidi:plaintext}
+.abt-keys{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;align-items:baseline;font-size:12px;color:var(--t2)}
+.abt-keys kbd{font-family:'TerminalTMT',monospace;font-size:11px;color:var(--t1);background:rgba(255,255,255,.05);
+  border:1px solid var(--border2);border-bottom-width:2px;border-radius:5px;padding:1px 6px;white-space:nowrap}
+.abt-foot{display:flex;gap:8px;align-items:center;padding:13px 18px;margin-top:12px;border-top:1px solid var(--border);flex-wrap:wrap}
+.abt-foot .abt-note{flex:1;min-width:150px;font-size:11px;color:var(--t3);line-height:1.5}
+:root[data-theme="win11"] #aboutOv .abt-keys kbd{background:#f5f5f5;border-color:#e2e2e2;color:#1b1b1b}
+:root[data-theme="win10"] #aboutOv .abt-keys kbd{background:#f2f2f2;border-color:#d8d8d8;color:#000}
+:root[data-theme="win10d"] #aboutOv .abt-keys kbd{background:#2b2b2b;border-color:#4a4a4a;color:#fff}
 .mod-ov#fileInfoOv{z-index:450}
 .mod{background:var(--surf);border:1px solid var(--border2);border-radius:var(--rlg);display:flex;flex-direction:column;overflow:hidden;animation:fadeUp .3s var(--spring) both;max-height:88vh}
 .mod-sm{width:min(400px,92vw)}.mod-md{width:min(560px,94vw)}.mod-lg{width:min(760px,95vw)}
@@ -35913,7 +35983,7 @@ button.rc-row{cursor:pointer}
 .term-titlebar{display:flex;align-items:center;gap:7px;height:26px;min-height:26px;padding:0 0 0 7px;background:#0b0b0b;border-bottom:1px solid #262626;flex-shrink:0;overflow:hidden}
 .term-applogo{width:16px;height:16px;display:grid;place-items:center;flex-shrink:0}
 .term-applogo svg{width:16px;height:16px;fill:none;stroke:#5ec97e;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
-.term-apptitle{font-size:11.5px;line-height:1;color:#bdbdbd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.term-apptitle{font-size:11.5px;line-height:1;color:#bdbdbd;letter-spacing:.1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .term-apptitle b{color:#e6e6e6;font-weight:400}
 .term-title-spacer{flex:1;min-width:0}
 .term-wbtn{width:36px;height:26px;display:grid;place-items:center;border:0;background:transparent;color:#9a9a9a;cursor:pointer;padding:0;line-height:0;flex-shrink:0}
@@ -35922,16 +35992,29 @@ button.rc-row{cursor:pointer}
 .term-wbtn-close:hover{background:#c0392b;color:#fff}
 
 /* ── black menu strip ── */
-.term-menubar{display:flex;align-items:center;gap:1px;height:22px;min-height:22px;padding:0 6px;background:#000;border-bottom:1px solid #1f1f1f;flex-shrink:0;overflow:hidden;white-space:nowrap}
-.term-menu-item{font-size:12px;line-height:22px;color:#d8d8d8;padding:0 8px;cursor:default;text-decoration:none}
-.term-menu-item:hover,.term-menu-item:focus{background:#1f3550;color:#fff;outline:none}
+.term-menubar{display:flex;align-items:center;gap:1px;height:22px;min-height:22px;padding:0 6px;background:#000;border-bottom:1px solid #1f1f1f;flex-shrink:0;overflow:visible;white-space:nowrap;position:relative;z-index:40}
+.term-menu-item{font-size:11.5px;line-height:20px;height:22px;color:#d8d8d8;padding:0 8px;cursor:default;text-decoration:none;display:inline-block;user-select:none;border:0;border-radius:0;background:transparent;box-shadow:none;margin:0;vertical-align:top;font-family:'Segoe UI',Tahoma,sans-serif;appearance:none;-webkit-appearance:none;text-align:left}
+.term-menu-item:hover,.term-menu-item.on{background:#1f3550;color:#fff}
+.term-menu-item:focus-visible{outline:1px solid #4f7fae;outline-offset:-2px}
+.term-menu-pop{position:absolute;top:22px;left:0;min-width:222px;padding:3px 0;background:#2b2b2b;border:1px solid #454545;box-shadow:0 6px 18px rgba(0,0,0,.55);z-index:60;display:none}
+.term-menu-pop.open{display:block}
+.term-menu-pop .mi{display:flex;align-items:center;gap:8px;height:23px;padding:0 12px 0 10px;font-size:11.5px;color:#e2e2e2;cursor:pointer;white-space:nowrap}
+.term-menu-pop .mi:hover{background:#1f3550;color:#fff}
+.term-menu-pop .mi.dim{color:#8a8a8a}
+.term-menu-pop .mi .mk{margin-left:auto;font-size:10.5px;color:#8a8a8a}
+.term-menu-pop .mi .mi-ico{width:13px;height:13px;flex-shrink:0;display:grid;place-items:center}
+.term-menu-pop .mi .mi-ico svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
+.term-menu-pop .msep{height:1px;margin:3px 8px;background:#414141}
 .term-menu-brand{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11px;color:#7d7d7d;padding:0 4px 0 10px;white-space:nowrap}
 .term-menu-brand b{color:#5ec97e;font-weight:400}
 
 /* ── icon toolbar with captions ── */
-.term-toolbar{display:flex;align-items:center;gap:2px;height:36px;min-height:36px;padding:0 6px;background:#141414;border-bottom:1px solid #2b2b2b;flex-shrink:0;overflow:hidden}
-.term-tile{display:flex;align-items:center;justify-content:center;min-width:34px;width:34px;height:30px;padding:0;border:1px solid transparent;border-radius:2px;background:transparent;color:#c0c0c0;cursor:pointer;flex-shrink:0}
-.term-tile svg{width:17px;height:17px;fill:none;stroke:#8fb8d6;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+.term-toolbar{display:flex;align-items:flex-end;gap:1px;height:52px;min-height:52px;padding:2px 5px 3px;background:#121212;border-bottom:1px solid #2b2b2b;flex-shrink:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.term-toolbar::-webkit-scrollbar{height:0;display:none}
+.term-tile{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:2px;min-width:48px;width:auto;height:46px;padding:4px 5px 0;border:1px solid transparent;border-radius:2px;background:transparent;color:#c0c0c0;cursor:pointer;flex-shrink:0}
+.term-tile svg{width:18px;height:18px;fill:none;stroke:#8fb8d6;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+.term-tile-cap{font-family:'TerminalTMT',monospace;font-size:10px;line-height:1;color:#b4b4b4;white-space:nowrap;letter-spacing:.1px}
+.term-tile:hover .term-tile-cap{color:#f0f0f0}
 .term-tile[data-term-act="clear"] svg{stroke:#e0785a}
 .term-tile[data-term-act="paste"] svg{stroke:#d8b23a}
 .term-tile[data-term-act="bottom"] svg{stroke:#5ec97e}
@@ -35973,6 +36056,27 @@ button.rc-row{cursor:pointer}
 .term-qc-add:hover{background:#333}
 .term-qc-add svg{width:9px;height:9px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}
 .term-tree{flex:1;overflow-y:auto;overflow-x:hidden;margin:0 4px 4px;padding:2px 0;min-height:0;background:#141414;border:1px solid #6a6a6a;border-radius:1px}
+.term-panel-foot{display:flex;align-items:center;gap:6px;height:22px;min-height:22px;margin:0 4px 4px;padding:0 7px;background:#1b1b1b;border:1px solid #3a3a3a;border-radius:1px;font-family:'Segoe UI',Tahoma,sans-serif;font-size:11px;line-height:1;color:#9a9a9a;flex-shrink:0;overflow:hidden}
+.term-panel-foot-lbl{color:#7d7d7d;text-transform:uppercase;letter-spacing:.4px;font-size:9.5px;flex-shrink:0}
+.term-panel-foot-val{color:#dcdcdc;font-family:'Consolas','Courier New',monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.term-panel-body{margin:0 4px 4px;padding:0;background:#141414;border:1px solid #3a3a3a;overflow-y:auto;min-height:0;flex:1}
+.term-panel-body.term-panel-note{padding:0;font-size:11.5px}
+.term-panel-wrap{display:flex;flex-direction:column;gap:2px;padding:6px 6px 8px;font-family:'TerminalTMT',monospace}
+.term-panel-h{font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:#7d7d7d;padding:5px 2px 3px}
+.term-panel-list{display:flex;flex-direction:column;gap:1px}
+.term-panel-empty{font-size:11px;line-height:1.5;color:#7a7a7a;padding:5px 2px 7px}
+.term-snip,.term-recent{display:flex;align-items:center;gap:6px;padding:4px 6px;font-size:11.5px;color:#cfcfcf;background:#1b1b1b;border:1px solid #2e2e2e;cursor:pointer}
+.term-snip:hover,.term-recent:hover{background:#22384d;border-color:#3d6a92;color:#fff}
+.term-snip-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.term-snip-x{width:14px;text-align:center;color:#8a8a8a;flex-shrink:0}
+.term-snip-x:hover{color:#e88080}
+.term-log-row{display:flex;gap:6px;padding:2px 2px;font-size:11px;color:#b8b8b8}
+.term-log-n{color:#6f6f6f;min-width:16px;text-align:right}
+.term-log-c{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr}
+.term-panel-btn{margin-top:8px;padding:6px 10px;font-family:'TerminalTMT',monospace;font-size:11.5px;color:#cfe6f5;background:#1e3a52;border:1px solid #3d6a92;cursor:pointer}
+.term-panel-btn:hover{background:#27506f}
+.term-tile[data-term-act="keep"] svg{stroke:#f0c85a}
+.term-panel-foot::before{content:'';width:10px;height:10px;flex-shrink:0;background:currentColor;color:#6fa8cf;clip-path:polygon(0 0,72% 0,100% 28%,100% 100%,0 100%)}
 .term-tree::-webkit-scrollbar{width:12px}
 .term-tree::-webkit-scrollbar-track{background:#1b1b1b}
 .term-tree::-webkit-scrollbar-thumb{background:#5a5a5a;border:2px solid #1b1b1b;border-radius:0}
@@ -35983,6 +36087,10 @@ button.rc-row{cursor:pointer}
 .term-tree-tw{width:14px;min-width:14px;display:grid;place-items:center;color:#9a9a9a;flex-shrink:0}
 .term-tree-tw svg{width:7px;height:9px;fill:none;stroke:#a8a8a8;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;transition:transform .12s}
 .term-tree-row.open .term-tree-tw svg{transform:rotate(90deg)}
+.term-tree-open{width:16px;height:16px;margin-left:auto;margin-right:2px;display:grid;place-items:center;padding:0;border:0;border-radius:2px;background:transparent;color:#8fb8d6;cursor:pointer;flex-shrink:0;opacity:0}
+.term-tree-row:hover .term-tree-open,.term-tree-row.on .term-tree-open,.term-tree-row:focus-within .term-tree-open{opacity:1}
+.term-tree-open:hover{background:#2f5a7a;color:#fff}
+.term-tree-open svg{width:9px;height:9px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .term-tree-ico{width:16px;min-width:16px;display:grid;place-items:center}
 .term-tree-ico svg{width:15px;height:15px;fill:none;stroke:#9fb6c8;stroke-width:1.2;stroke-linecap:round;stroke-linejoin:round}
 .term-tree-row.folder .term-tree-ico svg{stroke:#6fa8cf;fill:rgba(111,168,207,.18)}
@@ -35999,15 +36107,28 @@ button.rc-row{cursor:pointer}
 
 /* main column: tabs + terminal surface */
 .term-main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;background:#1e1e1e}
-.term-tabs{display:flex;align-items:stretch;height:24px;min-height:24px;background:#141414;border-bottom:1px solid #303030;flex-shrink:0;overflow:hidden;padding-left:2px}
-.term-tab{display:flex;align-items:center;gap:6px;max-width:280px;min-width:0;padding:0 7px;font-size:11.5px;line-height:23px;color:#c6c6c6;background:#1e1e1e;border:1px solid #4a4a4a;border-bottom-color:#1e1e1e;margin-top:1px;margin-right:2px;cursor:default;white-space:nowrap}
-.term-tab svg{width:12px;height:12px;fill:none;stroke:#8fb8d6;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
-.term-tab-num{color:#8a8a8a;font-size:11px}
-.term-tab-label{overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
-.term-tab-close{width:13px;height:13px;display:grid;place-items:center;flex-shrink:0;color:#a8a8a8;border-radius:1px;text-decoration:none;cursor:pointer}
-.term-tab-close:hover{background:#555;color:#fff}
+.term-tabs{display:flex;align-items:flex-end;height:26px;min-height:26px;background:#0f0f0f;border-bottom:1px solid #3a3a3a;flex-shrink:0;overflow-x:auto;overflow-y:hidden;padding:0 4px;gap:2px;scrollbar-width:none}
+.term-tabs::-webkit-scrollbar{height:0;display:none}
+.term-tab{display:flex;align-items:center;gap:6px;height:22px;max-width:260px;min-width:104px;flex:0 1 210px;padding:0 18px;user-select:none;-webkit-user-drag:element;font-size:10.5px;line-height:22px;color:#9a9a9a;background:#1a1a1a;border:0;border-radius:0;margin:0;cursor:default;white-space:nowrap;
+  clip-path:polygon(9px 0,calc(100% - 9px) 0,100% 100%,0 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+.term-tab.drag{opacity:.42}
+.term-tab.dragover{box-shadow:inset 2px 0 0 #4fb6d6}
+.term-tab:hover{background:#232323;color:#c8c8c8}
+.term-tab.on{background:#2b2b2b;color:#f0f0f0;height:24px;line-height:24px}
+.term-tab.on .term-tab-ico svg{stroke:#7fd0e0}
+.term-tab-ico{display:inline-flex;align-items:center;flex-shrink:0}
+.term-tab-ico svg{width:12px;height:12px;fill:none;stroke:#8f8f8f;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
+.term-tab-num{color:#7a7a7a;font-size:10px;min-width:8px;text-align:center}
+.term-tab-label{overflow:hidden;text-overflow:ellipsis;flex:1;min-width:42px}
+.term-tab{container-type:inline-size}
+.term-tab .term-tab-close{opacity:0;transition:opacity .1s}
+.term-tab:hover .term-tab-close,.term-tab.on .term-tab-close{opacity:1}
+@container (max-width:118px){.term-tab-ico{display:none}}
+.term-tab-close{width:14px;height:14px;display:grid;place-items:center;flex-shrink:0;color:#9a9a9a;border-radius:2px;text-decoration:none;cursor:pointer;margin-right:-6px}
+.term-tab-close:hover{background:#c0392b;color:#fff}
 .term-tab-close svg{width:7px;height:7px;stroke:currentColor;stroke-width:1.6}
-.term-tab-new{width:24px;min-width:24px;display:grid;place-items:center;background:#1a1a1a;border:1px solid #4a4a4a;border-bottom-color:#303030;margin-top:1px;color:#c0c0c0;cursor:pointer;font-size:13px;line-height:22px;padding:0}
+.term-tab-new{width:22px;min-width:22px;height:20px;display:grid;place-items:center;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:2px;margin-bottom:2px;color:#b0b0b0;cursor:pointer;font-size:14px;line-height:18px;padding:0}
 .term-tab-new:hover{background:#2a2a2a;color:#fff}
 .term-tab-fill{flex:1;border-bottom:1px solid transparent}
 
@@ -36018,7 +36139,17 @@ button.rc-row{cursor:pointer}
 .term-tool{width:15px;height:15px;display:grid;place-items:center;border:0;border-radius:1px;background:transparent;color:#8f8f8f;cursor:pointer;padding:0}
 .term-tool:hover{background:#2f2f2f;color:#e0e0e0}
 .term-tool svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
-.term-scroll{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;padding:6px 8px 0}
+.term-scroll{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;padding:6px 8px 0;scroll-behavior:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#3a3a3a transparent}
+/* the scrollback is a scroll container of its own: the browser may keep its
+   content anchored while lines arrive, and that must never drag a reader who
+   scrolled up back down */
+.term-scroll{overflow-anchor:none}
+.term-scroll::-webkit-scrollbar{width:11px}
+.term-scroll::-webkit-scrollbar-track{background:#161616}
+.term-scroll::-webkit-scrollbar-thumb{background:#3a3a3a;border:2px solid #161616;border-radius:6px}
+.term-scroll::-webkit-scrollbar-thumb:hover{background:#4d4d4d}
+.term-scroll::-webkit-scrollbar-button:single-button{background:#1f1f1f;height:11px;border:1px solid #2e2e2e;display:block}
+.term-scroll::-webkit-scrollbar-button:single-button:vertical:decrement{background-image:linear-gradient(135deg,transparent 62%,#8a8a8a 62%),linear-gradient(225deg,transparent 62%,#8a8a8a 62%)}
 .term-scroll::-webkit-scrollbar{width:14px}
 .term-scroll::-webkit-scrollbar-track{background:#191919;border-left:1px solid #2a2a2a}
 .term-scroll::-webkit-scrollbar-thumb{background:#6a6a6a;border:2px solid #191919;border-radius:0}
@@ -36030,6 +36161,40 @@ button.rc-row{cursor:pointer}
 .term-line.info-line{color:#8fd3e0;font-style:normal}
 .term-line.success-line{color:#35d07f}
 .term-prompt-str{color:#35d07f}
+.term-at{color:#8a8a8a}
+.term-prompt-wrap .term-at{color:#8a8a8a}
+.term-host{color:#e0b060}
+.term-path{color:#35a0f0}
+.term-cwd{color:#35a0f0}
+.term-dollar{color:#c8c8c8}
+/* the command you typed keeps its own colours after it has run: the prompt is
+   green/blue, the command is plain, the answer takes the colours of what it is */
+.term-line.cmd-line{color:#d8d8d8}
+.term-line.cmd-line .tk-cmd{color:#e8e8e8;font-weight:600}
+.term-line .tk-flag{color:#f0c060}
+.term-line .tk-path{color:#5fb0f0}
+.term-line .tk-str{color:#8fd3a0}
+.term-line .tk-op{color:#e08080}
+.term-line .tk-num{color:#c8a0e0}.term-line .tk-prompt{white-space:pre}
+.term-line .tk-user{color:#35d07f}
+.term-line .tk-at{color:#8a8a8a}
+.term-line .tk-host{color:#e0b060}
+.term-line .tk-cwd{color:#35a0f0}
+.term-line .tk-dollar{color:#c8c8c8}
+/* results: the Kali-style split - a folder is blue, a script green, an archive
+   amber, a link teal, and the permission columns stay quiet so the names read */
+.term-line.res-dim{color:#7d7d7d}
+.term-line.res-ls{color:#b8b8b8}
+.term-line .res-perm{color:#8a8a8a}
+.term-line .res-user{color:#c8b070}
+.term-line .res-size{color:#9a9a9a}
+.term-line .res-date{color:#8f9a8f}
+.term-line .res-dir{color:#4fa8f0;font-weight:700}
+.term-line .res-exec{color:#5fd08a;font-weight:700}
+.term-line .res-zip{color:#e0a050;font-weight:700}
+.term-line .res-media{color:#c07ae0;font-weight:700}
+.term-line .res-link{color:#5fd0c0;font-weight:700}
+.term-line .res-err{color:#e88080}
 .term-at{color:#d4d454}
 .term-path{color:#26c6da}
 .term-dollar{color:#c8c8c8}
@@ -36058,6 +36223,12 @@ button.rc-row{cursor:pointer}
 .term-ps{font-family:monospace;font-size:13.5px;line-height:normal;white-space:nowrap;flex-shrink:0}
 .term-inp{flex:0 1 auto;width:.1ch;max-width:calc(100vw - 360px);background:transparent;border:none;outline:none;font-family:monospace;font-size:13.5px;line-height:1;color:#e0e0e0;caret-color:transparent;padding:0;margin:0;resize:none;letter-spacing:0}
 .term-inp::placeholder{color:#636363}
+/* R52 · the faint tail of a completion, drawn the way PowerShell and fish do it */
+.term-prompt-wrap{--ghost:''}
+.term-row{position:relative}
+.term-ghost{display:none;pointer-events:none;white-space:pre;font-family:'TerminalTMT',monospace;font-size:13.5px;line-height:1;color:#6a6a6a;padding:0;margin:0}
+.term-ghost.on{display:inline}
+
 .term-cursor{display:inline-block;width:8px;height:13px;background:#d0d0d0;animation:blink 1s step-end infinite;vertical-align:-2px;margin-left:1px;flex-shrink:0}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
 .term-suggest{position:absolute;background:#252525;border:1px solid #6a6a6a;border-radius:1px;padding:3px 0;z-index:9;min-width:180px;box-shadow:0 8px 24px rgba(0,0,0,.65)}
@@ -36068,33 +36239,53 @@ button.rc-row{cursor:pointer}
 .term-footer{display:flex;align-items:stretch;gap:0;min-height:24px;height:24px;padding:0;background:#141414;border-top:1px solid #2e2e2e;box-sizing:border-box;overflow:hidden;font-family:monospace;font-size:11px;line-height:1;color:#b0b0b0;flex-shrink:0}
 .term-status-item{display:flex;align-items:center;gap:5px;height:24px;padding:0 9px;white-space:nowrap;flex-shrink:0;background:transparent;border:0;border-radius:0}
 .term-status-label{color:#7a7a7a;font-size:10px!important;line-height:1;text-transform:uppercase;letter-spacing:.3px}
-.term-status-value{color:#c4c4c4;font-size:10.5px!important;line-height:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px}
+.term-status-value{color:#c4c4c4;font-size:11px!important;line-height:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px}
 .term-status-sep{width:1px;align-self:stretch;height:auto;background:#3a3a3a;flex-shrink:0}
 .term-status-ico{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
 .term-status-ico svg{width:12px;height:12px;fill:none;stroke:#8f8f8f;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .term-status-graph{width:40px;height:11px;background:#0e0e0e;border:1px solid #3a3a3a;overflow:hidden;display:inline-block;vertical-align:middle;flex-shrink:0}
 .term-status-graph canvas{width:100%;height:100%;display:block}
-.term-win,.term-win *{font-family:'TerminalTMT',monospace!important;font-variant-ligatures:none}
+/* the terminal face belongs to the terminal; every strip around it is normal UI text */
+.term-scroll,.term-scroll *{font-family:'TerminalTMT',monospace!important;font-variant-ligatures:none}
+/* R51 · the console is not an island: its own face runs through every bar around it.
+   Text the eye reads as prose (the menu words) keeps the system face at the same
+   size and weight, so the window reads as one program, not a terminal in a page. */
+.term-win .term-titlebar,.term-win .term-menubar,.term-win .term-toolbar,.term-win .term-tabs,
+.term-win .term-rail,.term-win .term-side,.term-win .term-tree,.term-win .term-footer,
+.term-win .term-statusbar,.term-win .term-panel-foot,.term-win .term-menu-pop,
+.term-win .term-tab,.term-win .term-apptitle,.term-win .term-panel-note,
+.term-win .term-qc-inp,.term-win .term-qc-add,.term-win .term-tile,.term-win .term-rail-btn,
+.term-win .term-tab-new,.term-win .term-wbtn,.term-win .term-panel-foot *{
+  font-family:'TerminalTMT',monospace;font-variant-ligatures:none}
+.term-win .term-menu-item,.term-win .term-menu-pop .mi,.term-win .term-rail-btn span,
+.term-win .term-panel-foot-lbl{letter-spacing:.15px}
+.term-win,.term-win *{font-family:'Segoe UI','Segoe UI Variable',Tahoma,Verdana,Arial,sans-serif;font-variant-ligatures:normal}
 .term-status-spacer{flex:1;min-width:0}
 .term-status-hide-sm,.term-status-hide-md,.term-status-hide-lg{display:none}
 .term-footer-hide-sm,.term-footer-hide-md,.term-footer-hide-lg,.term-footer-hide-xl{display:none}
 /* every tier was measured: a segment set is only shown when it fits the bar */
-@media (min-width:1000px){.term-footer-hide-sm{display:flex}.term-footer-hide-sm.term-status-sep{display:block}}
-@media (min-width:1130px){.term-footer-hide-md{display:flex}.term-footer-hide-md.term-status-sep{display:block}}
-@media (min-width:1330px){.term-footer-hide-lg{display:flex}.term-footer-hide-lg.term-status-sep{display:block}}
-@media (min-width:1560px){.term-footer-hide-xl{display:flex}.term-footer-hide-xl.term-status-sep{display:block}}
+@media (min-width:1080px){.term-footer-hide-sm{display:flex}.term-footer-hide-sm.term-status-sep{display:block}}
+@media (min-width:1220px){.term-footer-hide-md{display:flex}.term-footer-hide-md.term-status-sep{display:block}}
+@media (min-width:1400px){.term-footer-hide-lg{display:flex}.term-footer-hide-lg.term-status-sep{display:block}}
+@media (min-width:1620px){.term-footer-hide-xl{display:flex}.term-footer-hide-xl.term-status-sep{display:block}}
 /* the sidebar is a wide-screen luxury: collapse it on small windows */
 @media (max-width:980px){.term-side{width:216px;min-width:216px}}
 @media (max-width:700px){
   .term-side{display:none}
-  .term-inp{max-width:calc(100vw - 100px)}
-  .term-toolbar{display:none}
+  .term-inp{max-width:calc(100vw - 130px)}
+  /* the toolbar keeps every tool on a narrow screen: names off, icons on, and it
+     scrolls sideways rather than hiding the row */
+  .term-tile-cap{display:none}
+  .term-toolbar{height:34px;min-height:34px;align-items:center;padding:1px 3px}
+  .term-tile{height:30px;min-width:32px;justify-content:center;padding:0 3px}
   .term-toolrow{display:none}
 }
 /* A terminal opened from the manager gets its own browser tab/window. */
 body.term-standalone{background:#1e1e1e;overflow:hidden}
 body.term-standalone .shell{display:none!important}
-body.term-standalone .mod-ov:not(.term-ov){display:none!important}
+/* in the standalone console only the terminal's own windows open; a window
+   that belongs to the console asks for it with .term-allow */
+body.term-standalone .mod-ov:not(.term-ov):not(.term-allow){display:none!important}
 body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
 body.term-standalone .term-win{position:fixed;inset:0}
 /* the three window buttons replace the floating close box */
@@ -39597,22 +39788,21 @@ input.inp,select.inp{height:32px}
   <div class="sb-div"></div>
   <div class="sb-sec" style="flex-shrink:1;min-height:0;display:flex;flex-direction:column"><div class="sb-label">Tools</div>
     <div class="sb-nav" style="overflow-y:auto;overflow-x:hidden;min-height:0;flex:1">
-       <?php if(!empty($_SESSION['fm_admin'])&&fm_can('guard')):?><button class="sb-item" id="updBtn" title="Check for a newer version of this file manager, read exactly what changed, and install it when you decide to - separately from the File Guardian tool, which only keeps the backup"><svg viewBox="0 0 24 24" style="stroke:#34d399"><path d="M20.3 12.6a8.3 8.3 0 1 1-2.4-6.5"/><path d="M20.6 4.2v4.6h-4.6"/><circle cx="12" cy="12" r="1.6"/></svg></svg><span class="sb-tool-name">Check Updates</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
+       <?php if(!empty($_SESSION['fm_admin'])&&fm_can('guard')):?><button class="sb-item" id="termBtn" title="A real shell on this server in a new tab"><svg viewBox="0 0 24 24" style="stroke:#22c55e"><rect x="2.5" y="4" width="19" height="16" rx="2"/><polyline points="6.5 9.5 9.5 12 6.5 14.5"/><line x1="11.5" y1="15" x2="16" y2="15"/></svg><span class="sb-tool-name">Terminal</span><span class="sb-star sb-star-hero" title="Pinned tool" aria-label="Pinned tool"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span></button><button class="sb-item" id="updBtn" title="Check for a newer version of this file manager, read exactly what changed, and install it when you decide to - separately from the File Guardian tool, which only keeps the backup"><svg viewBox="0 0 24 24" style="stroke:#34d399" style="stroke:#34d399"><path d="M20.3 12.6a8.3 8.3 0 1 1-2.4-6.5"/><path d="M20.6 4.2v4.6h-4.6"/><circle cx="12" cy="12" r="1.6"/></svg></svg><span class="sb-tool-name">Check Updates</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button><?php endif;?>
-       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="cmsBtn" title="Every WordPress, Joomla and Drupal site on this host: its config, its database, its users, its plugins and its files"><svg viewBox="0 0 24 24" style="stroke:#a78bfa"><circle cx="12" cy="12" r="9.2"/><path d="M2.8 12h18.4"/><path d="M12 2.8a15 15 0 0 1 4 9.2 15 15 0 0 1-4 9.2 15 15 0 0 1-4-9.2 15 15 0 0 1 4-9.2z"/></svg></svg><span class="sb-tool-name">CMS Manager</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?><?php endif;?>
-       <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?><button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account"><svg viewBox="0 0 24 24" style="stroke:#2563eb"><path d="M14.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8.5"/><path d="M14.5 3 19 7.5h-4.5z"/><path d="M9.5 13.5h5"/><path d="m12.6 11.4 2.1 2.1-2.1 2.1"/></svg></svg><span class="sb-tool-name">MFM ACC Login</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
+       <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="cmsBtn" title="Every WordPress, Joomla and Drupal site on this host: its config, its database, its users, its plugins and its files"><svg viewBox="0 0 24 24" style="stroke:#a78bfa" style="stroke:#a78bfa"><circle cx="12" cy="12" r="9.2"/><path d="M2.8 12h18.4"/><path d="M12 2.8a15 15 0 0 1 4 9.2 15 15 0 0 1-4 9.2 15 15 0 0 1-4-9.2 15 15 0 0 1 4-9.2z"/></svg></svg><span class="sb-tool-name">CMS Manager</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?><?php endif;?>
+       <?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?><button class="sb-item" id="cmsQuickBtn" title="Open the configured CMS administrator account"><svg viewBox="0 0 24 24" style="stroke:#3b82f6" style="stroke:#2563eb"><path d="M14.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8.5"/><path d="M14.5 3 19 7.5h-4.5z"/><path d="M9.5 13.5h5"/><path d="m12.6 11.4 2.1 2.1-2.1 2.1"/></svg></svg><span class="sb-tool-name">MFM ACC Login</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button><?php endif;?>
-       <?php if(function_exists('fm_mfm_is_primary')&&fm_mfm_is_primary()):?><button class="sb-item" id="mfaBtn" title="Every account of this file manager: what each one may do, which of their sessions are open, and everything an administrator can change about them"><svg viewBox="0 0 24 24" style="stroke:#93c5fd"><path d="M12 21.5s7.5-3.6 7.5-9.5V5.6L12 2.5 4.5 5.6V12c0 5.9 7.5 9.5 7.5 9.5z"/><circle cx="12" cy="10" r="2.3"/><path d="M8.4 16c.7-1.7 2-2.6 3.6-2.6s2.9.9 3.6 2.6"/></svg></svg><span class="sb-tool-name">MFM Admin</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
+       <?php if(function_exists('fm_mfm_is_primary')&&fm_mfm_is_primary()):?><button class="sb-item" id="mfaBtn" title="Every account of this file manager: what each one may do, which of their sessions are open, and everything an administrator can change about them"><svg viewBox="0 0 24 24" style="stroke:#38bdf8" style="stroke:#93c5fd"><path d="M12 21.5s7.5-3.6 7.5-9.5V5.6L12 2.5 4.5 5.6V12c0 5.9 7.5 9.5 7.5 9.5z"/><circle cx="12" cy="10" r="2.3"/><path d="M8.4 16c.7-1.7 2-2.6 3.6-2.6s2.9.9 3.6 2.6"/></svg></svg><span class="sb-tool-name">MFM Admin</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span>
        </button><?php endif;?>
-       <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><button class="sb-item" id="pieBtn" title="Install WordPress plugins from the official repository, and Joomla extensions from a package - search, read, install, activate"><svg viewBox="0 0 24 24" style="stroke:#fbbf24"><path d="M9.4 3.6h5.2a1.4 1.4 0 0 1 1.3.9l.8 2 2.1.8a1.4 1.4 0 0 1 .9 1.3v5.2a1.4 1.4 0 0 1-.9 1.3l-2.1.8-.8 2a1.4 1.4 0 0 1-1.3.9H9.4a1.4 1.4 0 0 1-1.3-.9l-.8-2-2.1-.8a1.4 1.4 0 0 1-.9-1.3V8.6a1.4 1.4 0 0 1 .9-1.3l2.1-.8.8-2a1.4 1.4 0 0 1 1.3-.9z"/></svg></svg><span class="sb-tool-name">Plugins Installer</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
-       <?php if(!empty($_SESSION['fm_admin'])&&fm_can('rooting')):?><button class="sb-item" id="rootBtn" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and the tool takes root by itself if any of them is open"><svg viewBox="0 0 24 24" style="stroke:#fca5a5"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m11 12 8-8"/><path d="m17 6 2.5 2.5"/><path d="m14 9 2.5 2.5"/></svg></svg><span class="sb-tool-name">Rooting</span><span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
+       <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><button class="sb-item" id="pieBtn" title="Install WordPress plugins from the official repository, and Joomla extensions from a package - search, read, install, activate"><svg viewBox="0 0 24 24" style="stroke:#f472b6" style="stroke:#fbbf24"><path d="M9.4 3.6h5.2a1.4 1.4 0 0 1 1.3.9l.8 2 2.1.8a1.4 1.4 0 0 1 .9 1.3v5.2a1.4 1.4 0 0 1-.9 1.3l-2.1.8-.8 2a1.4 1.4 0 0 1-1.3.9H9.4a1.4 1.4 0 0 1-1.3-.9l-.8-2-2.1-.8a1.4 1.4 0 0 1-.9-1.3V8.6a1.4 1.4 0 0 1 .9-1.3l2.1-.8.8-2a1.4 1.4 0 0 1 1.3-.9z"/></svg></svg><span class="sb-tool-name">Plugins Installer</span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
+       <?php if(!empty($_SESSION['fm_admin'])&&fm_can('rooting')):?><button class="sb-item" id="rootBtn" title="Every known Linux privilege-escalation vulnerability, whether this server is exposed to it, and the tool takes root by itself if any of them is open"><svg viewBox="0 0 24 24" style="stroke:#ef4444" style="stroke:#fca5a5"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m11 12 8-8"/><path d="m17 6 2.5 2.5"/><path d="m14 9 2.5 2.5"/></svg></svg><span class="sb-tool-name">Rooting</span><span id="rootBadge" style="margin-left:6px;font-size:10px;opacity:.85"></span><span class="sb-star" title="Installed tool" aria-label="Installed tool"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.6 14.9 8.6 21.4 9.5 16.7 14.1 17.8 20.6 12 17.5 6.2 20.6 7.3 14.1 2.6 9.5 9.1 8.6" style="fill:#facc15;stroke:#facc15;stroke-width:1.1;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg></span></button><?php endif;?>
        <?php $pmNow=$fm->privMode();$pmShort=['server'=>'server','auto'=>'','wordpress'=>'WP','joomla'=>'Joomla'][$pmNow]??'';$pmLabel=['server'=>'Server account only','auto'=>'Automatic','wordpress'=>'WordPress','joomla'=>'Joomla'][$pmNow]??$pmNow;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(fm_can('privmode')):?><button class="sb-item" id="privModeBtn" title="File changes are performed by: <?=htmlspecialchars($pmLabel)?> - click to change"><svg viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>Privilege Mode<span id="privModeBadge" style="margin-left:6px;font-size:10px;opacity:.8"><?=trim((string)$pmShort)===''?'':'· '.htmlspecialchars($pmShort)?></span></button><?php endif;?><?php endif;?><?php endif;?>
-       <button class="sb-item" id="actBtn" title="Everything this tool has done on this server, newest first"><svg viewBox="0 0 24 24"><path d="M2.5 12h4l2.5-6.5 4 13 2.5-6.5h6"/></svg></svg>Activity Log</button>
-       <button class="sb-item" id="mfmThemeBtn" title="MFM Theme - pick a look for this file manager"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="16" rx="2.5"/><path d="M2 8h20"/><circle cx="5.5" cy="5.5" r=".9"/><circle cx="8.3" cy="5.5" r=".9"/><path d="M6 13l2.6 4 2.4-3 2 2.4"/></svg><span class="sb-tool-name">MFM Theme</span></button>
-       <button class="sb-item" id="agentBtn" title="Open Assistant Agent"><svg viewBox="0 0 24 24"><path d="M20.5 12.4a7.5 7.5 0 0 1-10.9 6.7L4.2 20.6l1.5-5.1a7.5 7.5 0 1 1 14.8-3.1z"/><path d="M8.6 11.2h.01M12 11.2h.01M15.4 11.2h.01"/></svg></svg>Assistant Agent
-       </button>
-       <?php if(!$fm->isRO()):?><button class="sb-item" id="brBtn" title="Rename many selected files at once with a pattern, a number series or a find-and-replace"><svg viewBox="0 0 24 24"><path d="M4 7V4.5h16V7"/><path d="M12 4.5v15"/><path d="M8.5 19.5h7"/><path d="m18.5 12-2-2"/><path d="m16.5 10 2 2"/></svg></svg>Batch Rename</button>
+       <button class="sb-item" id="actBtn" title="Everything this tool has done on this server, newest first"><svg viewBox="0 0 24 24" style="stroke:#fbbf24"><path d="M2.5 12h4l2.5-6.5 4 13 2.5-6.5h6"/></svg><span class="sb-tool-name">Activity Log</span><span class="sb-tool-name">Activity</span><span class="sb-star" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span></button>
+       <button class="sb-item" id="mfmThemeBtn" title="MFM Theme - pick a look for this file manager"><svg viewBox="0 0 24 24" style="stroke:#c084fc"><rect x="2" y="3" width="20" height="16" rx="2.5"/><path d="M2 8h20"/><circle cx="5.5" cy="5.5" r=".9"/><circle cx="8.3" cy="5.5" r=".9"/><path d="M6 13l2.6 4 2.4-3 2 2.4"/></svg><span class="sb-tool-name">MFM Theme</span><span class="sb-tool-name">Theme</span><span class="sb-star" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span></button>
+       <button class="sb-item" id="agentBtn" title="Open Assistant Agent"><svg viewBox="0 0 24 24" style="stroke:#22d3ee"><path d="M20.5 12.4a7.5 7.5 0 0 1-10.9 6.7L4.2 20.6l1.5-5.1a7.5 7.5 0 1 1 14.8-3.1z"/><path d="M8.6 11.2h.01M12 11.2h.01M15.4 11.2h.01"/></svg><span class="sb-tool-name">Assistant Agent</span><span class="sb-tool-name">Agent</span><span class="sb-star" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span></button>
+       <?php if(!$fm->isRO()):?><button class="sb-item" id="brBtn" title="Rename many selected files at once with a pattern, a number series or a find-and-replace"><svg viewBox="0 0 24 24" style="stroke:#fb923c"><path d="M4 7V4.5h16V7"/><path d="M12 4.5v15"/><path d="M8.5 19.5h7"/><path d="m18.5 12-2-2"/><path d="m16.5 10 2 2"/></svg><span class="sb-tool-name">Batch Rename</span><span class="sb-tool-name">Rename</span><span class="sb-star" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span></button>
        <?php if(!$fm->isRO()):?><form method="post" style="width:100%">
         <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($_SESSION['csrf_token'])?>">
         <input type="hidden" name="action" value="backup_dir">
@@ -39645,7 +39835,7 @@ input.inp,select.inp{height:32px}
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="sqlBtn" title="Run SQL against a database on this host and read the answer"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.6" rx="7.4" ry="2.9"/><path d="M4.6 5.6v12.8c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9V5.6"/><path d="M4.6 12c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9"/></svg></svg>SQL Manager</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="sshBtn" title="Manage SSH accounts and keys on this server"><svg viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="12" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/><polyline points="6.5 9 8.5 11 6.5 13"/><path d="M11 13h3.5"/></svg></svg>SSH Access</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><button class="sb-item" id="symlinkBtn" title="Create a symbolic link where the filesystem does not offer one"><svg viewBox="0 0 24 24"><path d="M10 13.5a4.5 4.5 0 0 0 6.8.5l2.7-2.7a4.5 4.5 0 0 0-6.4-6.4l-1.5 1.5"/><path d="M14 10.5a4.5 4.5 0 0 0-6.8-.5l-2.7 2.7a4.5 4.5 0 0 0 6.4 6.4l1.5-1.5"/></svg></svg>Symlink</button><?php endif;?>
-       <?php if(!$fm->isRO()&&fm_can('terminal')):?><button class="sb-item" id="termBtn" title="A real shell on this server in a new tab"><svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2"/><polyline points="6.5 9.5 9.5 12 6.5 14.5"/><line x1="11.5" y1="15" x2="16" y2="15"/></svg></svg>Terminal</button><?php endif;?>
+       <?php if(!$fm->isRO()&&fm_can('terminal')):?><button <?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><button class="sb-item" id="threatsBtn" title="Review suspicious small files and CMS accounts"><svg viewBox="0 0 24 24"><path d="M12 3 2.9 19.2a1.4 1.4 0 0 0 1.2 2.1h15.8a1.4 1.4 0 0 0 1.2-2.1z"/><path d="M12 9v4.6"/><path d="M12 17h.01"/></svg></svg>Threats Alerts</button><?php endif;?><?php endif;?>
        <?php if(!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])):?><?php if(!empty($_SESSION['auth'])&&fm_can('cms')):?><button class="sb-item" id="webmailBtn" title="Every mailbox on this host - WordPress, Joomla, mail folders, mail servers and cPanel accounts - opened without a sign-in"><svg viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="m3.4 6.6 8.6 6.4 8.6-6.4"/></svg></svg>Webmail Manager</button><?php endif;?><?php endif;?><?php endif;?>
        <?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><?php if(!empty($_SESSION['fm_admin'])&&!$fm->isRO()):?><button class="sb-item" id="wfcBtn" title="Drive the Wordfence plugin installed on this server - firewall, blocks, scans, logs and every setting"><svg viewBox="0 0 24 24"><rect x="2.6" y="4" width="18.8" height="16" rx="1.6"/><path d="M2.6 9.3h18.8M2.6 14.7h18.8"/><path d="M8.5 4v5.3M15.5 9.3v5.4M8.5 14.7V20M15.5 4v5.3"/></svg></svg>Wordfence Controller
@@ -40576,44 +40766,56 @@ input.inp,select.inp{height:32px}
     <!-- window title bar -->
     <div class="term-titlebar">
       <span class="term-applogo" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="15" rx="2"/><path d="M6.5 9.5l2.6 2.4-2.6 2.4M12 14.5h5"/></svg></span>
-      <span class="term-apptitle">Marshall FM Console <b>· terminal</b> — <span id="termTitleHost"><?=htmlspecialchars($termHostLabel)?></span></span>
+      <span class="term-apptitle">Marshall FM Console <b>· terminal</b><span id="termTitleCount"></span> — <span id="termTitleHost"><?=htmlspecialchars($termHostLabel)?></span></span>
       <span class="term-title-spacer"></span>
       <span class="term-apptitle" style="color:#7d7d7d"><?=htmlspecialchars($termUserLabel)?>@<?=htmlspecialchars($termHostLabel)?> · <span id="termConnectionStatus">READY</span></span>
-      <button type="button" class="term-wbtn" title="Minimise is not available in the browser" aria-label="Minimise" data-term-noop><svg viewBox="0 0 10 10"><path d="M1 5h8"/></svg></button>
-      <button type="button" class="term-wbtn" title="Maximise is not available in the browser" aria-label="Maximise" data-term-noop><svg viewBox="0 0 10 10"><rect x="1.2" y="1.2" width="7.6" height="7.6"/></svg></button>
+      <button type="button" class="term-wbtn" id="termWinMin" title="Hide the console - the tabs keep running when you open it again" aria-label="Hide the console"><svg viewBox="0 0 10 10"><path d="M1 5h8"/></svg></button>
+      <button type="button" class="term-wbtn" id="termWinMax" title="Switch the console between full screen and the manager" aria-label="Toggle full screen"><svg viewBox="0 0 10 10"><rect x="1.2" y="1.2" width="7.6" height="7.6"/></svg></button>
       <button type="button" class="term-wbtn term-wbtn-close" id="termWinClose" title="Close" aria-label="Close the terminal"><svg viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8"/></svg></button>
     </div>
 
     <!-- black menu strip -->
-    <div class="term-menubar" role="menubar" aria-label="Terminal menu">
-      <span class="term-menu-item" data-term-noop tabindex="0">Terminal</span>
-      <span class="term-menu-item" data-term-noop tabindex="0">Sessions</span>
-      <span class="term-menu-item" data-term-noop tabindex="0">View</span>
-      <span class="term-menu-item" data-term-noop tabindex="0">X server</span>
-      <span class="term-menu-item" data-term-noop tabindex="0">Tools</span>
-      <span class="term-menu-item" data-term-noop tabindex="0">Settings</span>
-      <span class="term-menu-item" data-term-noop tabindex="0">Macros</span>
-      <span class="term-menu-item" data-term-noop tabindex="0">Help</span>
-      <span class="term-menu-brand"><b>◆</b> web console · not an SSH client</span>
+    <div class="term-menubar" id="termMenuBar" role="menubar" aria-label="Console menu">
+      <button type="button" class="term-menu-item" role="menuitem" data-menu="terminal" aria-haspopup="true" aria-expanded="false">Terminal</button>
+      <button type="button" class="term-menu-item" role="menuitem" data-menu="sessions" aria-haspopup="true" aria-expanded="false">Sessions</button>
+      <button type="button" class="term-menu-item" role="menuitem" data-menu="view" aria-haspopup="true" aria-expanded="false">View</button>
+      <button type="button" class="term-menu-item" role="menuitem" data-menu="tools" aria-haspopup="true" aria-expanded="false">Tools</button>
+      <button type="button" class="term-menu-item" role="menuitem" data-menu="help" aria-haspopup="true" aria-expanded="false">Help</button>
+      <span class="term-menu-brand" id="termMenuBrand"><b>◆</b> web console · not an SSH client</span>
+      <div class="term-menu-pop" id="termMenuPop" role="menu" aria-label="Menu"></div>
     </div>
 
     <!-- icon toolbar: icons only, tooltips carry the names -->
     <div class="term-toolbar" role="toolbar" aria-label="Terminal actions">
-      <button type="button" class="term-tile" data-term-act="clear" title="Clear the screen" aria-label="Clear the screen"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
-      <button type="button" class="term-tile" data-term-act="paste" title="Paste into the prompt" aria-label="Paste"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z"/></svg></button>
-      <button type="button" class="term-tile" data-term-act="bottom" title="Scroll to the bottom" aria-label="Scroll to the bottom"><svg viewBox="0 0 24 24"><path d="M12 4v12M7 12l5 5 5-5M4 20h16"/></svg></button>
+      <button type="button" class="term-tile" data-term-act="newtab" title="New tab · Ctrl+Shift+T" aria-label="New tab"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/></svg>
+      <span class="term-tile-cap">New</span></button>
+      <button type="button" class="term-tile" data-term-act="closetab" title="Close this tab · Ctrl+Shift+W" aria-label="Close tab"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/><path d="M9.5 8.5l4 3-4 3"/></svg>
+      <span class="term-tile-cap">Close</span></button>
       <span class="term-tile-sep"></span>
-      <button type="button" class="term-tile" data-term-act="refresh" title="Refresh the tree and the status bar" aria-label="Refresh"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-2.4 5.7"/><path d="M20 5v5h-5"/></svg></button>
-      <button type="button" class="term-tile" data-term-act="cwd" title="Print the working directory" aria-label="Working directory"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 12v4M10 14h4"/></svg></button>
-      <button type="button" class="term-tile" data-term-act="up" title="Go to the parent folder" aria-label="Parent folder"><svg viewBox="0 0 24 24"><path d="M12 20V5M6 11l6-6 6 6"/></svg></button>
+      <button type="button" class="term-tile" data-term-act="clear" title="Clear the screen" aria-label="Clear the screen"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
+      <span class="term-tile-cap">Clear</span></button>
+      <button type="button" class="term-tile" data-term-act="paste" title="Paste into the prompt" aria-label="Paste"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z"/></svg>
+      <span class="term-tile-cap">Paste</span></button>
+      <button type="button" class="term-tile" data-term-act="bottom" title="Scroll to the bottom" aria-label="Scroll to the bottom"><svg viewBox="0 0 24 24"><path d="M12 4v12M7 12l5 5 5-5M4 20h16"/></svg>
+      <span class="term-tile-cap">Bottom</span></button>
       <span class="term-tile-sep"></span>
-      <button type="button" class="term-tile" data-term-act="home" title="Open the file manager" aria-label="File manager"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M3 7V5h5l2 2"/></svg></button>
-      <button type="button" class="term-tile" data-term-act="help" title="List this folder in detail" aria-label="List in detail"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M7 9l2.5 2L7 13M12 13h4"/></svg></button>
+      <button type="button" class="term-tile" data-term-act="up" title="cd .. · go to the parent folder" aria-label="Parent folder"><svg viewBox="0 0 24 24"><path d="M12 20V5M6 11l6-6 6 6"/></svg>
+      <span class="term-tile-cap">Up</span></button>
+      <button type="button" class="term-tile" data-term-act="cwd" title="pwd · print the working directory" aria-label="Working directory"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 12v4M10 14h4"/></svg>
+      <span class="term-tile-cap">Pwd</span></button>
+      <button type="button" class="term-tile" data-term-act="help" title="ls -la · list this folder in detail" aria-label="List in detail"><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      <span class="term-tile-cap">List</span></button>
+      <button type="button" class="term-tile" data-term-act="refresh" title="Refresh the tree and the status bar" aria-label="Refresh"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-2.4 5.7"/><path d="M20 5v5h-5"/></svg>
+      <span class="term-tile-cap">Refresh</span></button>
       <span class="term-tile-sep"></span>
-      <button type="button" class="term-tile" data-term-act="noop" title="This web console has one session" aria-label="New session"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/></svg></button>
-      <button type="button" class="term-tile" data-term-act="noop" title="Split view is not part of this web console" aria-label="Split"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M12 4v16"/></svg></button>
-      <button type="button" class="term-tile" data-term-act="noop" title="Settings live in the manager" aria-label="Settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg></button>
-      <button type="button" class="term-tile" data-term-act="noop" title="Help" aria-label="Help"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9a2.4 2.4 0 114.2 1.6c-1.1 1-1.8 1.3-1.8 2.9"/><path d="M12 17h.01"/></svg></button>
+      <button type="button" class="term-tile term-tile-go" id="termGo" data-term-act="openhere" title="Open the selected folder in the file manager" aria-label="Open the selected folder in the file manager"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 13h6M15 10l3 3-3 3"/></svg>
+      <span class="term-tile-cap">Open</span></button>
+      <button type="button" class="term-tile" data-term-act="menu" title="The console menu: tabs, view, shortcuts and help" aria-label="Menus"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      <span class="term-tile-cap">Menu</span></button>
+      <button type="button" class="term-tile" data-term-act="keep" title="Keep the command in this prompt as a saved command" aria-label="Save this command"><svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/></svg>
+      <span class="term-tile-cap">Save</span></button>
+      <button type="button" class="term-tile" data-term-act="panel" title="Show or hide the session sidebar" aria-label="Toggle sidebar"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M9 4v16"/></svg>
+      <span class="term-tile-cap">Sidebar</span></button>
     </div>
 
     <div class="term-body">
@@ -40632,7 +40834,7 @@ input.inp,select.inp{height:32px}
       <div class="term-side">
         <div class="term-qc-row">
           <input class="term-qc-inp" id="termQcInp" type="text" autocomplete="off" spellcheck="false" placeholder="Quick connect…" aria-label="Quick connect: type a folder and press Enter">
-          <button type="button" class="term-qc-add" title="New session" data-term-noop><svg viewBox="0 0 10 10"><path d="M5 1v8M1 5h8"/></svg></button>
+          <button type="button" class="term-qc-add" id="termQcAdd" title="New tab in this folder" aria-label="New tab in this folder"><svg viewBox="0 0 10 10"><path d="M5 1v8M1 5h8"/></svg></button>
         </div>
         <div class="term-tree" id="termTree">
           <div class="term-tree-row on open" data-term-toggle="termTreeSessions" style="padding-left:2px">
@@ -40652,6 +40854,7 @@ input.inp,select.inp{height:32px}
                 <span class="term-tree-tw"><svg viewBox="0 0 8 12"><path d="M1 1l5 5-5 5"/></svg></span>
                 <span class="term-tree-ico"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg></span>
                 <span class="term-tree-name" id="termTreeCwdName" title="<?=htmlspecialchars($termTreeDir)?>"><?=htmlspecialchars($termDirLabel)?></span>
+                <button type="button" class="term-tree-open" id="termTreeCwdOpen" title="Open this folder in the file manager" aria-label="Open this folder"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>
               </div>
               <div class="term-tree-children" id="termTreeCwd">
                 <?php if(!$termTreeEntries):?>
@@ -40667,19 +40870,16 @@ input.inp,select.inp{height:32px}
             </div>
           </div>
         </div>
-        <div class="term-panel-note" id="termTreeRootNote" style="padding:4px 8px 6px">Paths are relative to <b><?=htmlspecialchars($termRootPath)?></b>. Click a folder to <i>cd</i> into it.</div>
+        <div class="term-panel-foot">
+          <span class="term-panel-foot-lbl">Selected</span>
+          <span class="term-panel-foot-val" id="termSelectedFolder" title="<?=htmlspecialchars($termTreeDir)?>"><?=htmlspecialchars($termDirLabel)?></span>
+        </div>
       </div>
 
       <!-- main column -->
       <div class="term-main">
-        <div class="term-tabs">
-          <div class="term-tab">
-            <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M7 9l2.5 2L7 13M12 13h4"/></svg>
-            <span class="term-tab-num">1</span>
-            <span class="term-tab-label" id="termTabLabel" title="<?=htmlspecialchars($termTreeDir)?>"><?=htmlspecialchars($termTreeDir)?></span>
-            <span class="term-tab-close" title="Close tab" id="termTabClose" role="button" tabindex="-1"><svg viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8"/></svg></span>
-          </div>
-          <button type="button" class="term-tab-new" title="New tab" data-term-noop>+</button>
+        <div class="term-tabs" id="termTabs">
+          <button type="button" class="term-tab-new" id="termTabNew" title="New terminal tab" aria-label="New terminal tab">+</button>
           <div class="term-tab-fill"></div>
         </div>
 
@@ -40706,9 +40906,7 @@ input.inp,select.inp{height:32px}
                   <span class="term-banner-tail">Anything the account's shell has works here — <b>ls</b>, <b>cat</b>, <b>grep</b>, <b>du</b>, <b>tar</b> — and <b>cd</b> keeps tab, pill and tree in step.</span>
                 </span>
               </div>
-              <div class="term-prompt-wrap"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-path"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:<?=htmlspecialchars($fm->getTerminalPromptPath())?>$ </span></span><input class="term-inp" id="termInp" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-cursor" aria-hidden="true"></span></div>
-                <div class="term-suggest" id="termSug" style="display:none;bottom:100%;left:2px"></div>
-              </div>
+              <template id="termPromptTemplate"><div class="term-row"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><input class="term-inp" id="termInp__UID__" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"><span class="term-ghost" id="termGhost__UID__" aria-hidden="true"></span><span class="term-cursor" aria-hidden="true"></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
             </div>
           </div>
         </div>
@@ -40770,6 +40968,51 @@ input.inp,select.inp{height:32px}
   <div class="mod mod-lg">
     <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div><span class="mod-title">Server Information</span><button class="btn btn-icon btn-g" id="srvClose"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
     <div class="mod-body" id="srvBody"><div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div></div>
+  </div>
+</div>
+
+<!-- ABOUT / HELP MODAL -->
+<div class="mod-ov term-allow" id="aboutOv">
+  <div class="mod mod-md">
+    <div class="mod-head"><div class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16.5"/><line x1="12" y1="7.6" x2="12.01" y2="7.6"/></svg></div><span class="mod-title">About &amp; Help</span><button class="btn btn-icon btn-g" id="aboutClose" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+    <div class="mod-body" style="padding:0">
+      <div class="abt-hero"><div class="abt-logo"><svg viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="15" rx="2.2"/><path d="M6.5 9.5l2.6 2.6-2.6 2.6M12 14.7h5"/></svg></div>
+        <div><div class="abt-name">Marshal File Manager</div><div class="abt-ver">Terminal console <b id="abtVer">R53</b></div></div></div>
+      <p class="abt-lede">A real shell inside the file manager: every tab is its own session, output arrives line by line, and the prompt keeps its colours after a command has run. Nothing in the menus is decoration - each item runs a command or opens a panel.</p>
+      <div class="abt-sec"><h4>This session</h4>
+        <div class="abt-facts">
+          <div class="abt-fact"><span>User and host</span><b id="abtWho">-</b></div>
+          <div class="abt-fact"><span>Working directory</span><b id="abtCwd">-</b></div>
+          <div class="abt-fact"><span>Tabs open</span><b id="abtTabs">-</b></div>
+          <div class="abt-fact"><span>Output</span><b id="abtLines">-</b></div>
+        </div>
+      </div>
+      <div class="abt-sec"><h4>Tabs</h4>
+        <div class="abt-keys">
+          <kbd>Ctrl+Shift+T</kbd><span>New tab, in the current folder</span>
+          <kbd>Ctrl+Shift+W</kbd><span>Close the active tab</span>
+          <kbd>Ctrl+Shift+&larr; &rarr;</kbd><span>Move the active tab along the strip</span>
+          <kbd>Drag a tab</kbd><span>Drop it anywhere on the strip to reorder</span>
+        </div>
+      </div>
+      <div class="abt-sec"><h4>Typing</h4>
+        <div class="abt-keys">
+          <kbd>Tab</kbd><span>Complete a file, folder or command</span>
+          <kbd>&rarr;</kbd><span>Accept the faint completion of the line</span>
+          <kbd>&uarr; &darr;</kbd><span>History of this tab, newest first</span>
+          <kbd>Ctrl+C</kbd><span>Drop the line you are typing</span>
+          <kbd>Esc</kbd><span>Close a menu, a suggestion list or this window</span>
+        </div>
+      </div>
+      <div class="abt-sec"><h4>Reading the output</h4>
+        <div class="abt-keys">
+          <kbd>Wheel</kbd><span>A few lines per notch, never a whole page</span>
+          <kbd>PgUp / PgDn</kbd><span>One screen of scrollback</span>
+          <kbd>Ctrl+End</kbd><span>Back to the newest line and follow the output</span>
+        </div>
+      </div>
+      <div class="abt-foot"><div class="abt-note">Scrolled up while a command runs? The view stays where you put it, and follows again once you return to the bottom.</div><button class="btn btn-p" id="abtOk">Close</button></div>
+    </div>
   </div>
 </div>
 
@@ -44306,7 +44549,7 @@ document.addEventListener('keydown',e=>{
   ['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','privOv','sessOv','guardOv','updOv','sfgOv','ownOv','rootOv','bpOv','mfmOv','pmaOv'].forEach(closeMod);
   closeSheet();closeCtx();
 });
-['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','ownOv','rootOv','bpOv'].forEach(id=>{
+['prevOv','fileInfoOv','termOv','hashOv','actOv','srvOv','aboutOv','brOv','symlinkOv','usersOv','ownerOv','permOv','shareCreateOv','sharesOv','largeOv','dupOv','errLogOv','envOv','configInspectorOv','rootingScanOv','speedOv','wpNumbersOv','wpImagesOv','responseChangerOv','ownOv','rootOv','bpOv'].forEach(id=>{
   document.getElementById(id)?.addEventListener('click',e=>{if(e.target===document.getElementById(id))closeMod(id);});
 });
 document.getElementById('fileInfoClose')?.addEventListener('click',()=>closeMod('fileInfoOv'));
@@ -46227,19 +46470,63 @@ document.getElementById('actClose')?.addEventListener('click',()=>closeMod('actO
 /* ═══════════════════════════════════════
    SERVER INFO
 ═══════════════════════════════════════ */
+const SRV_ICON={
+  host:'<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 17.5h.01"/>',
+  ip:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  cpu:'<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M10 2v3M14 2v3M10 19v3M14 19v3M2 10h3M2 14h3M19 10h3M19 14h3"/>',
+  ram:'<rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 17v3M12 17v3M17 17v3M7 11h10"/>',
+  disk:'<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  php:'<path d="M8.5 8 4 12l4.5 4M15.5 8 20 12l-4.5 4M13.5 6l-3 12"/>',
+  web:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 3 2.5 15 0 18M12 3c-2.5 3-2.5 15 0 18"/>',
+  os:'<rect x="2.5" y="4" width="19" height="14" rx="2"/><path d="M8 21h8M12 18v3"/><path d="M6 9l2.5 2L6 13M11 13h4"/>',
+  limit:'<path d="M12 3 3 20h18z"/><path d="M12 9v5M12 17h.01"/>'
+};
+function srvCell(label,value,sub,icon,gc,extra){
+  return '<div class="srv-cell"><div class="srv-glyph" style="--gc:'+(gc||'#60a5fa')+'"><svg viewBox="0 0 24 24">'+(SRV_ICON[icon]||SRV_ICON.host)+'</svg></div>'
+    +'<div style="min-width:0;flex:1"><div class="srv-lab">'+esc(label)+'</div>'
+    +'<div class="srv-val">'+esc(String(value==null||value===''?'-':value))+'</div>'
+    +(sub?'<div class="srv-sub">'+esc(sub)+'</div>':'')
+    +(extra||'')+'</div></div>';
+}
+function srvBar(pct,colour){
+  const p=Math.max(0,Math.min(100,Number(pct)||0));
+  return '<div class="srv-bar"><i style="width:'+p+'%;--sc:'+(colour||'#22c55e')+'"></i></div>';
+}
 document.getElementById('srvBtn')?.addEventListener('click',async()=>{
   openMod('srvOv');
   document.getElementById('srvBody').innerHTML='<div style="text-align:center;padding:32px;color:var(--t3)">Loading…</div>';
   try{
     const d=await fetch('?x=sv').then(r=>r.json());
-    document.getElementById('srvBody').innerHTML=`<div style="padding:16px">
-      <div class="info-g">${[['Hostname',d.hostname||'-',''],['Server IP',d.server_ip||'-',''],['Client IP',d.client_ip||'-',''],['Uptime',d.uptime||'-',''],['CPU Cores',d.cpu_cores||'n/a',d.cpu_model||''],['CPU Load',d.load?d.load.join(' / '):'n/a','1m / 5m / 15m'],['RAM Usage',d.mem_pct!=null?d.mem_pct+'%':'n/a',d.mem_used?d.mem_used+' / '+d.mem_total:''],['PHP Version',d.php,'Runtime'],['OS',d.os,''],['Web Server',d.server,''],['SAPI',d.sapi,''],['Memory Limit',d.memory_limit,'Peak: '+d.mem_peak],['PHP Memory Usage',d.mem_usage,''],['Disk Total',d.disk_total,'Free: '+d.disk_free+' ('+d.disk_pct+'% used)'],['Upload Max',d.upload_max,'POST Max: '+d.post_max],['Max Exec',d.max_exec,''],['Timezone',d.tz,'']].map(([l,v,s])=>`<div class="info-c"><div class="info-cl">${l}</div><div class="info-cv">${esc(String(v))}</div>${s?`<div class="info-cs">${esc(s)}</div>`:''}</div>`).join('')}</div>
-      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--t3);margin-bottom:8px">Extensions (${d.exts.length})</div>
-      <div class="ext-wrap">${d.exts.sort().map(e=>`<span class="ext-tag">${esc(e)}</span>`).join('')}</div>
-    </div>`;
+    const ramPct=d.ram_pct!=null?d.ram_pct:(d.mem_pct!=null?d.mem_pct:null);
+    const cells=[
+      srvCell('Hostname',d.hostname,'', 'host','#60a5fa'),
+      srvCell('Server IP',d.server_ip,'','ip','#22d3ee'),
+      srvCell('Client IP',d.client_ip,'','ip','#38bdf8'),
+      srvCell('Uptime',d.uptime,'since boot','clock','#34d399'),
+      srvCell('CPU cores',d.cpu_cores,d.cpu_model,'cpu','#f59e0b'),
+      srvCell('CPU load',Array.isArray(d.load)?d.load.join('  '):(d.load||'-'),'1m / 5m / 15m','cpu','#fb923c'),
+      srvCell('RAM',d.mem||'-',(ramPct!=null?ramPct+'% used in this container':'')+'','ram','#a78bfa',ramPct!=null?srvBar(ramPct,ramPct>85?'#ef4444':(ramPct>65?'#f59e0b':'#22c55e')):''),
+      srvCell('Disk',d.disk||'-',(d.disk_pct!=null?d.disk_pct+'% used':'')+'','disk','#f472b6',d.disk_pct!=null?srvBar(d.disk_pct,d.disk_pct>85?'#ef4444':(d.disk_pct>65?'#f59e0b':'#22c55e')):''),
+      srvCell('OS',d.os,'', 'os','#94a3b8'),
+      srvCell('Web server',d.server||d.software,'', 'web','#7dd3fc'),
+      srvCell('PHP',d.php_version,'','php','#c084fc'),
+      srvCell('Memory limit',(String(d.mem_limit)==='-1'?'unlimited':d.mem_limit),d.peak?'peak '+d.peak:'','limit','#facc15'),
+      srvCell('Upload max',d.upload_max,d.post_max?'POST '+d.post_max:'','limit','#fbbf24'),
+      srvCell('Max exec',d.max_exec,'per command','clock','#fb7185'),
+      srvCell('Timezone',d.timezone,'','clock','#34d399')
+    ];
+    document.getElementById('srvBody').innerHTML='<div class="srv-wrap">'
+      +'<div class="srv-grid">'+cells.join('')+'</div>'
+      +'<div class="srv-sec">Extensions ('+(d.exts||[]).length+')</div>'
+      +'<div class="srv-exts"><div class="ext-wrap">'+(d.exts||[]).slice().sort().map(e=>'<span class="ext-tag">'+esc(e)+'</span>').join('')+'</div></div>'
+      +'</div>';
   }catch{document.getElementById('srvBody').innerHTML='<div style="padding:20px;color:#fca5a5">Failed.</div>';}
 });
 document.getElementById('srvClose')?.addEventListener('click',()=>closeMod('srvOv'));
+document.getElementById('aboutClose')?.addEventListener('click',()=>{closeMod('aboutOv');termFocusInput();});
+document.getElementById('abtOk')?.addEventListener('click',()=>{closeMod('aboutOv');termFocusInput();});
+document.getElementById('aboutOv')?.addEventListener('click',e=>{if(e.target&&e.target.id==='aboutOv')closeMod('aboutOv');});
 document.querySelectorAll('.bs-click').forEach(el=>el.addEventListener('click',()=>document.getElementById('srvBtn')?.click()));
 
 /* Live status-bar refresh: CPU load / RAM / disk every 6s, clock every 1s */
@@ -51085,20 +51372,73 @@ document.querySelectorAll('.dsz-btn').forEach(b=>b.addEventListener('click',e=>{
 /* ═══════════════════════════════════════
    TERMINAL
 ═══════════════════════════════════════ */
-const termInp=document.getElementById('termInp');
-const termOut=document.getElementById('termOut');
 const termWin=document.getElementById('termWin');
-const termSug=document.getElementById('termSug');
 const termCpuGraph=document.getElementById('termCpuGraph');
 const termCpuCtx=termCpuGraph?.getContext('2d');
 let termCpuData=Array(50).fill(0);
 let termSystemInfoReady=false,termSystemInfoBusy=false;
-const termHist=[];let hIdx=-1,sugIdx=-1,sugList=[];
 let termRunning=false;
+let sugIdx=-1,sugList=[];
 
-/* R48: the scrollable element is its own box now, so every scroll request goes
-   through one helper instead of touching the window frame. */
-function termScrollBottom(){const box=document.getElementById('termScroll');if(box)box.scrollTop=box.scrollHeight;}
+/* ── the tab in front owns the input, the output and the folder ───────────── */
+function termInput(){const t=termTabCurrent();return t?t.wrap.querySelector('.term-inp'):null;}
+/* putting the caret back is not the same as scrolling: a reader who moved up
+   keeps their place when a command ends, a menu closes or a tab is opened */
+function termFocusInput(){
+  const i=termInput();
+  if(i){try{i.focus({preventScroll:true});}catch(e){i.focus();}}
+  return i;
+}
+function termSugBox(){const t=termTabCurrent();return t?t.wrap.querySelector('.term-suggest'):null;}
+function adjustTermInputWidth(){const i=termInput();if(i)i.style.width=(i.value.length||0.1)+'ch';}
+/* ══ R53 · scrolling that behaves like a terminal ════════════════════════════
+   A terminal does not slide a page: output arrives line by line, and the view
+   follows it in small instant steps - and only when the reader is already at the
+   bottom, so scrolling up to read is never yanked away. */
+/* follow  · is the reader sitting on the newest line?
+   self    · the next scroll event comes from our own move, not from the reader */
+const TERM_SCROLL={byTab:new WeakMap(),follow:true,self:false};
+function termScrollBox(){return document.getElementById('termScroll');}
+function termAtBottom(box){
+  box=box||termScrollBox();
+  if(!box)return true;
+  return (box.scrollHeight-box.scrollTop-box.clientHeight)<=6;
+}
+function termRememberScroll(){
+  const box=termScrollBox(),tab=termTabCurrent();
+  if(!box)return;
+  if(tab)TERM_SCROLL.byTab.set(tab,box.scrollTop);
+  if(TERM_SCROLL.self){TERM_SCROLL.self=false;return;} /* our own move */
+  /* where the reader is, taken from their own movement - never guessed when the
+     next line of output lands */
+  TERM_SCROLL.follow=termAtBottom(box);
+}
+function termScrollBy(box,top){
+  if(!box)return;
+  TERM_SCROLL.self=true;
+  box.scrollTop=top;
+}
+function termJumpBottom(){
+  const box=termScrollBox();
+  if(box)termScrollBy(box,box.scrollHeight);
+}
+function termScrollNow(){
+  /* one definition of "the newest line is on screen": the distance from the
+     bottom edge of the view to the end of the output */
+  const box=termScrollBox();
+  return box?Math.max(0,box.scrollHeight-box.scrollTop-box.clientHeight):0;
+}
+function termScrollToBottom(){
+  /* the view lands on the newest line at once - a terminal steps, it does not
+     glide. The callers only ask for it when the reader is already at the bottom,
+     so a reader who scrolled up to read is never pulled back down. Asking for
+     the bottom from the toolbar button or Ctrl+End goes through termTabScroll. */
+  const box=termScrollBox();
+  if(!box)return;
+  termScrollBy(box,box.scrollHeight);
+  TERM_SCROLL.follow=true;
+}
+function termScrollBottom(){termScrollToBottom();}
 
 document.getElementById('termBtn')?.addEventListener('click',()=>{
   const terminalUrl=new URL(window.location.href);
@@ -51108,10 +51448,197 @@ document.getElementById('termBtn')?.addEventListener('click',()=>{
   window.open(terminalUrl.toString(),'_blank','noopener,noreferrer');
 });
 document.getElementById('termClose')?.addEventListener('click',()=>closeMod('termOv'));
-if(document.body.classList.contains('term-standalone'))setTimeout(()=>termInp?.focus(),80);
 termWin?.addEventListener('click',e=>{
-  if(!e.target.closest('.term-suggest'))termInp?.focus();
+  const t=e.target;
+  if(!t||typeof t.closest!=='function')return; /* a click can land on a text node */
+  if(t.closest('.term-suggest'))return;
+  if(t.closest('button,a,input,select,textarea'))return;
+  if(t.closest('.term-tree-row, .term-rail, .term-footer, .term-toolbar, .term-tabs, .term-titlebar, .term-menubar'))return;
+  termFocusInput();
 });
+
+/* ═══ R48 · real tabs ═══════════════════════════════════════════════════════
+   A second tab is a second shell: its own folder, its own history, its own
+   output. Each tab talks to the same `?x=run` endpoint, carrying `term_dir`,
+   and only the tab in front is on screen. Nothing is faked: pressing + really
+   creates one, × really closes it, and the tab you pick really becomes the one
+   that runs your commands. */
+const TERM_TABS=[];
+let termTabSeq=0;
+/* the folder this page was rendered for, so "open here" works before any tab
+   has reported its own cwd */
+window.FM_CWD=window.FM_CWD||<?=json_encode($termTreeDir,JSON_UNESCAPED_SLASHES)?>;
+function termTabNew(initialDir){
+  const base=initialDir||termCwd||'';
+  const id=++termTabSeq;
+  let out=document.createElement('div');
+  out.className='term-out';
+  out.dataset.tab=String(id);
+  const promptWrap=document.createElement('div');
+  promptWrap.className='term-prompt-wrap';
+  promptWrap.dataset.tab=String(id);
+  promptWrap.innerHTML=(document.getElementById('termPromptTemplate')?.innerHTML||'').replace(/__UID__/g,String(id));
+  const scroll=document.getElementById('termScroll');
+  const seed=document.getElementById('termOut');
+  if(seed&&seed.dataset.tab===undefined&&TERM_TABS.length===0){seed.dataset.tab=String(id);out=seed;}
+  if(scroll){
+    if(out!==seed)scroll.appendChild(out);
+    scroll.appendChild(promptWrap);
+    const tpl=document.getElementById('termPromptTemplate');
+    const oldTpl=tpl?tpl.previousElementSibling:null;
+    if(tpl&&oldTpl&&oldTpl.id==='termSeed')oldTpl.remove();
+  }
+  /* a fresh tab starts ready: its prompt is on screen until a command runs */
+  promptWrap.classList.remove('term-busy');
+  const tab={id:Number(id),cwd:base,hist:[],hIdx:-1,out,wrap:promptWrap,lines:0};
+  TERM_TABS.push(tab);
+  termBindTab(tab);
+  termTabRender();
+  termTabSelect(id,true);
+  return tab;
+}
+function termTabCurrent(){return TERM_TABS.find(t=>t.active)||TERM_TABS[0];}
+function termTabById(id){return TERM_TABS.find(t=>t.id===Number(id));}
+/* the strip is redrawn by moving existing nodes, never by throwing them away:
+   a tab being dragged must survive its own reorder */
+const TERM_TAB_EL={};
+function termTabCreate(t){
+  const el=document.createElement('div');
+  el.className='term-tab';
+  el.dataset.tab=String(t.id);
+  el.innerHTML='<span class="term-tab-ico"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M7 9l2.5 2L7 13M12 13h4"/></svg></span>'
+    +'<span class="term-tab-num"></span>'
+    +'<span class="term-tab-label"></span>'
+    +'<span class="term-tab-close" role="button" tabindex="-1" title="Close this tab"><svg viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8"/></svg></span>';
+  el.draggable=true;
+  /* no preventDefault on mousedown here: Chromium never starts a drag from a
+     press it has been told to cancel, and the drag is the point */
+  el.addEventListener('click',e=>{
+    if(e.target.closest('.term-tab-close'))return;
+    termTabSelect(t.id);
+  });
+  el.querySelector('.term-tab-close').addEventListener('mousedown',e=>{
+    e.preventDefault();e.stopPropagation();
+    termTabClose(t.id);
+  });
+  el.addEventListener('dragstart',e=>{
+    window.FM_DRAG_TAB=t.id;
+    e.dataTransfer.effectAllowed='move';
+    e.dataTransfer.setData('text/plain',String(t.id));
+    el.classList.add('drag');
+  });
+  el.addEventListener('dragend',()=>{
+    el.classList.remove('drag');
+    window.FM_DRAG_TAB=null;
+    document.querySelectorAll('.term-tab.dragover').forEach(x=>x.classList.remove('dragover'));
+  });
+  el.addEventListener('dragover',e=>{
+    if(el.classList.contains('drag'))return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect='move';
+    el.classList.add('dragover');
+  });
+  el.addEventListener('dragleave',()=>el.classList.remove('dragover'));
+  el.addEventListener('drop',e=>{
+    e.preventDefault();e.stopPropagation();
+    el.classList.remove('dragover');
+    const src=Number(e.dataTransfer.getData('text/plain'))||window.FM_DRAG_TAB;
+    termTabDropOn(src,t.id);
+  });
+  /* a full strip scrolls sideways with the wheel, the way PowerShell does */
+  el.addEventListener('wheel',e=>{
+    if(!e.deltaY)return;
+    e.preventDefault();
+    const st=document.getElementById('termTabs');
+    if(st)st.scrollLeft+=e.deltaY;
+  },{passive:false});
+  return el;
+}
+function termTabPaint(el,t,i,total){
+  el.classList.toggle('on',!!t.active);
+  el.title=(t.cwd||'')+(total>1?' · drag to reorder':'');
+  const num=el.querySelector('.term-tab-num');
+  if(num)num.textContent=String(i+1);
+  const lbl=el.querySelector('.term-tab-label');
+  if(lbl){lbl.textContent=termFolderName(t.cwd||'');lbl.title=t.cwd||'';}
+  const close=el.querySelector('.term-tab-close');
+  if(close)close.style.display=total>1?'':'none';
+}
+function termTabRender(){
+  const strip=document.getElementById('termTabs');
+  if(!strip)return;
+  const live=new Set(TERM_TABS.map(t=>String(t.id)));
+  strip.querySelectorAll('.term-tab').forEach(el=>{
+    if(!live.has(el.dataset.tab)){el.remove();delete TERM_TAB_EL[el.dataset.tab];}
+  });
+  const addBtn=document.getElementById('termTabNew');
+  TERM_TABS.forEach((t,i)=>{
+    let el=TERM_TAB_EL[t.id];
+    if(!el||!el.parentElement){el=termTabCreate(t);TERM_TAB_EL[t.id]=el;}
+    termTabPaint(el,t,i,TERM_TABS.length);
+    if(addBtn)strip.insertBefore(el,addBtn);
+    else strip.appendChild(el);
+  });
+  const cur=termTabCurrent();
+  if(cur)termTabScrollIntoView(cur.id);
+  const multi=TERM_TABS.length>1;
+  const cnt=document.getElementById('termTitleCount');
+  if(cnt)cnt.textContent=multi?(' · '+TERM_TABS.length+' tabs'):'';
+}
+function termTabSelect(id,skipTree){
+  const tab=termTabById(id);
+  if(!tab)return;
+  TERM_TABS.forEach(t=>{t.active=t.id===tab.id;t.out.style.display=t.active?'':'none';t.wrap.style.display=t.active?'':'none';});
+  termCwd=tab.cwd;
+  const dollar=document.querySelector('.term-tab-prompt-src');
+  updateTermPromptLabels(tab);
+  termTabRender();
+  if(!skipTree)termRefreshTree();
+  termFocusInput();
+}
+function termTabClose(id){
+  const idx=TERM_TABS.findIndex(t=>t.id===Number(id));
+  if(idx<0||TERM_TABS.length<2)return;
+  const wasActive=TERM_TABS[idx].active;
+  TERM_TABS[idx].out.remove();
+  TERM_TABS[idx].wrap.remove();
+  TERM_TABS.splice(idx,1);
+  if(wasActive)termTabSelect(TERM_TABS[Math.max(0,idx-1)].id);
+  else termTabRender();
+}
+function termTabScroll(){ /* the toolbar button and Ctrl+End: land at once */
+  clearInterval(TERM_SCROLL.timer);
+  const box=termScrollBox();
+  if(box)termScrollBy(box,box.scrollHeight);
+  TERM_SCROLL.follow=true;
+}
+/* every command line and every answer goes to the tab that produced it */
+function appendLineTo(tab,text,cls){
+  if(!tab)return;
+  /* the view follows the output only when the reader was already at the bottom,
+     and then in small instant steps - never as one page-sized jump */
+  const box=termScrollBox();
+  const follow=!box||tab!==termTabCurrent()||TERM_SCROLL.follow;
+  const s=document.createElement('span');
+  s.className='term-line'+(cls?' '+cls:'');
+  s.textContent=text;
+  tab.out.appendChild(s);
+  tab.lines++;
+  if(tab.active&&follow)termScrollToBottom();
+}
+function updateTermPromptLabels(tab){
+  if(!tab)return;
+  const ps=tab.wrap.querySelector('.term-cwd');
+  if(ps&&tab.prompt)ps.textContent=tab.prompt;
+  const lbl=document.getElementById('termTabLabel');
+  if(tab.active){
+    const dir=String(tab.cwd||'').replace(/[\\/]+$/,'');
+    const tabEl=document.querySelector('.term-tab.on .term-tab-label');
+    if(tabEl){tabEl.textContent=dir;tabEl.parentElement.title=dir;}
+    const pill=document.getElementById('termFooterDir');
+    if(pill){pill.textContent=dir;pill.title=dir;}
+  }
+}
 
 /* ── R48 shell: sidebar tree, rail, tabs, toolbar ───────────────────────── */
 const TERM_PANEL_NOTE={tools:'The Tools panel is a desktop-only MobaXterm feature; the web console keeps the tools that work here (clear, paste, scroll).',macros:'Macros are not stored by this console. Type the command you need, or keep it in the history with ↑.',sftp:'File transfer lives in the file manager. Use Home to open it, then upload or download there.',log:'Every command is written to the manager audit log; the Log panel of the desktop app is not mirrored here.'};
@@ -51131,6 +51658,19 @@ function termPanel(name){
   if(tree)tree.style.display='none';
   if(qc)qc.placeholder=name.charAt(0).toUpperCase()+name.slice(1);
   if(add)add.style.display='none';
+  const body=(typeof termPanelHTML==='function')?termPanelHTML(name):'';
+  if(body){
+    if(!note){
+      const box=document.createElement('div');
+      box.id='termPanelNote';
+      box.className='term-panel-note term-panel-body';
+      document.querySelector('.term-side')?.appendChild(box);
+    }
+    const box=document.getElementById('termPanelNote');
+    if(box){box.className='term-panel-note term-panel-body';box.innerHTML=body;}
+    if(typeof termPanelWire==='function')termPanelWire(name);
+    return;
+  }
   if(!note){
     const box=document.createElement('div');
     box.id='termPanelNote';
@@ -51138,43 +51678,79 @@ function termPanel(name){
     document.querySelector('.term-side')?.appendChild(box);
   }
   const box=document.getElementById('termPanelNote');
-  if(box)box.textContent=TERM_PANEL_NOTE[name]||'This panel is not part of the web console.';
+  if(box){box.className='term-panel-note';box.textContent=TERM_PANEL_NOTE[name]||'This panel is not part of the web console.';}
 }
-document.querySelectorAll('.term-rail-btn').forEach(b=>b.addEventListener('click',()=>termPanel(b.dataset.termRail||'sessions')));
-document.getElementById('termRailFold')?.addEventListener('click',()=>{
-  const rail=document.getElementById('termRail');
-  const folded=rail?.classList.toggle('folded');
-  try{localStorage.setItem('mfm.termSidebar',folded?'0':'1');}catch{}
-  termScrollBottom();
+/* the rail is wired once, after every function above exists */
+document.querySelectorAll('.term-rail-btn').forEach(b=>{
+  b.addEventListener('click',()=>{
+    try{termPanel(b.dataset.termRail||'sessions');}
+    catch(err){console.warn('panel',b.dataset.termRail,err);}
+  });
 });
-try{if(localStorage.getItem('mfm.termSidebar')==='0')document.getElementById('termRail')?.classList.add('folded');}catch{}
-document.getElementById('termTabClose')?.addEventListener('click',()=>closeMod('termOv'));
-document.getElementById('termWinClose')?.addEventListener('click',()=>closeMod('termOv'));
-document.querySelectorAll('[data-term-noop]').forEach(el=>{
-  const say=e=>{
-    e.preventDefault();
-    if(el.classList.contains('term-menu-item'))appendLine('This menu is a visual match for the desktop client; the same actions live on the toolbar above.','info-line');
-    else appendLine('This build keeps one console session, so extra tabs and window buttons are not opened.','info-line');
-  };
-  el.addEventListener('click',say);
-  if(el.classList.contains('term-menu-item'))el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')say(e);});
-});
-document.querySelectorAll('[data-term-act]').forEach(b=>b.addEventListener('click',async()=>{
-  const act=b.dataset.termAct;
-  if(act==='clear'){if(termOut)termOut.innerHTML='';termScrollBottom();termInp?.focus();return;}
-  if(act==='bottom'){termScrollBottom();termInp?.focus();return;}
-  if(act==='paste'){
-    try{const txt=await navigator.clipboard.readText();if(txt&&termInp){termInp.value+=txt.replace(/\s+$/,'');adjustTermInputWidth();termInp.focus();}}
-    catch{appendLine('The browser did not allow reading the clipboard here; paste with Ctrl+V instead.','err-line');}
-    return;
+/* ═══ R52 · the rail panels are tools, not notes ══════════════════════════════
+   MobaXterm's rails each do a job. The ones the browser can do are here as real
+   controls: a searchable folder tree, a command palette, saved snippets, a live
+   transfer list, and the command log. The rest say so in one line. */
+const TERM_SNIPPETS_KEY='mfm.termSnippets';
+function termSnippets(){
+  try{return JSON.parse(localStorage.getItem(TERM_SNIPPETS_KEY)||'[]');}catch{return [];}
+}
+function termSnippetsSave(list){try{localStorage.setItem(TERM_SNIPPETS_KEY,JSON.stringify(list.slice(0,40)));}catch{}}
+function termPanelHTML(name){
+  const esc2=esc;
+  if(name==='tools'){
+    const snips=termSnippets();
+    return '<div class="term-panel-wrap">'
+      +'<div class="term-panel-h">Saved commands</div>'
+      +'<div class="term-panel-list" id="termSnipList">'
+      +(snips.length?snips.map((s,i)=>'<div class="term-snip" data-i="'+i+'" title="Click to run · shift-click to delete"><span class="term-snip-t">'+esc2(s)+'</span><span class="term-snip-x" data-del="'+i+'">×</span></div>').join(''):'<div class="term-panel-empty">Nothing saved yet. Run a command, then press &#9733; in the toolbar to keep it.</div>')
+      +'</div>'
+      +'<div class="term-panel-h">Recent commands</div>'
+      +'<div class="term-panel-list" id="termRecentList"></div>'
+      +'</div>';
   }
-  if(act==='refresh'){termRefreshTree();refreshTermSystemInfo();appendLine('Session tree and status bar refreshed.','info-line');return;}
-  if(act==='cwd'){termRunCommand('pwd');return;}
-  if(act==='up'){termRunCommand('cd ..');return;}
-  if(act==='home'){window.location.href=window.location.pathname;return;}
-  if(act==='files'){window.location.href=window.location.pathname;return;}
-  if(act==='help'){termRunCommand('ls -la');return;}
-}));
+  if(name==='macros')return '';
+  if(name==='sftp'){
+    return '<div class="term-panel-wrap"><div class="term-panel-h">Transfers</div>'
+      +'<div class="term-panel-empty">A command that uploads or downloads is a transfer. Nothing has run a transfer in this tab yet.</div>'
+      +'<button type="button" class="term-panel-btn" id="termOpenManager">Open the file manager</button></div>';
+  }
+  if(name==='log'){
+    const tab=termTabCurrent();
+    const hist=(tab&&tab.hist)||[];
+    return '<div class="term-panel-wrap"><div class="term-panel-h">Command log · this tab</div>'
+      +'<div class="term-panel-list">'+(hist.length?hist.map((h,i)=>'<div class="term-log-row"><span class="term-log-n">'+(i+1)+'</span><span class="term-log-c">'+esc2(h)+'</span></div>').join(''):'<div class="term-panel-empty">No command has run in this tab yet.</div>')+'</div></div>';
+  }
+  return '';
+}
+function termPanelFillRecent(){
+  const box=document.getElementById('termRecentList');
+  if(!box)return;
+  const tab=termTabCurrent(),h=(tab&&tab.hist)||[];
+  box.innerHTML=h.length?h.slice().reverse().slice(0,12).map(c=>'<div class="term-recent" data-cmd="'+esc(c)+'">'+esc(c)+'</div>').join(''):'<div class="term-panel-empty">The history of this tab is empty.</div>';
+}
+function termPanelWire(name){
+  document.getElementById('termOpenManager')?.addEventListener('click',()=>{window.location.href=window.location.pathname.replace(/\/+$/,'')+'/index.php';});
+  document.querySelectorAll('#termSnipList .term-snip').forEach(row=>{
+    row.addEventListener('click',e=>{
+      if(e.target.dataset.del!=null){
+        const list=termSnippets();list.splice(Number(e.target.dataset.del),1);termSnippetsSave(list);
+        termPanel('tools');return;
+      }
+      const cmd=row.querySelector('.term-snip-t')?.textContent||'';
+      termRunCommand(cmd);
+    });
+  });
+  termPanelFillRecent();
+  document.querySelectorAll('#termRecentList .term-recent').forEach(row=>{
+    row.addEventListener('click',()=>{
+      const i=termInput();if(!i)return;
+      i.value=row.dataset.cmd||'';adjustTermInputWidth();i.focus();termGhostHint();
+    });
+  });
+}
+document.getElementById('termTabNew')?.addEventListener('mousedown',e=>{e.preventDefault();termTabNew();});
+document.getElementById('termWinClose')?.addEventListener('click',()=>closeMod('termOv'));
 
 /* R48: the tree draws a file with an icon chosen by its extension, inside the
    same outlined family as the folders - readable before a word is read. */
@@ -51205,10 +51781,11 @@ function termFileIcon(name){
 
 /* tree: folders expand/collapse, folder rows cd, file rows complete the word */
 function termRunCommand(cmd){
-  if(!termInp)return;
-  termInp.value=cmd;
+  const ii=termInput();
+  if(!ii)return;
+  ii.value=cmd;
   adjustTermInputWidth();
-  termInp.focus();
+  ii.focus();
   runTerm();
 }
 function termTreeCd(name){
@@ -51225,15 +51802,53 @@ document.querySelectorAll('.term-tree-row[data-term-toggle]').forEach(row=>{
 function termTreeBind(box){
   if(!box)return;
   box.querySelectorAll('.term-tree-row[data-term-path]').forEach(row=>{
+    row.addEventListener('dblclick',()=>{if(row.dataset.termDir==='1')termOpenFolder(row.dataset.termPath||'');});
     row.addEventListener('click',()=>{
       const nm=row.dataset.termPath||'';
-      if(row.dataset.termDir==='1'){termTreeCd(nm);return;}
-      if(!termInp)return;
-      termInp.value=getTermBase()+nm;adjustTermInputWidth();termInp.focus();hideSug();
+      /* a folder opens in the file manager - the real tool for browsing it.
+         One click selects it, a double click (or the arrow button) opens it. */
+      if(row.dataset.termDir==='1'){termSelectFolder(nm,row);return;}
+      termPutName(nm);
     });
   });
 }
 termTreeBind(document.getElementById('termTreeCwd'));
+/* the manager keeps a hidden dir input of its own; navigation goes through it */
+function termCurrentDir(){
+  const t=termTabCurrent();
+  const fromTab=(t&&t.cwd)?t.cwd:'';
+  return String(fromTab||window.FM_CWD||'').replace(/[\\/]+$/,'');
+}
+function termOpenFolder(name,cwd){
+  const base=(cwd||termCurrentDir()).replace(/[\\/]+$/,'');
+  const target=name?base+'/'+name:base;
+  if(!target){window.location.reload();return;}
+  const url=new URL(window.location.href);
+  url.searchParams.set('dir',target);
+  url.searchParams.delete('x');url.searchParams.delete('raw');url.searchParams.delete('terminal');
+  window.location.href=url.toString();
+}
+function termSelectFolder(name,row){
+  window.FM_SEL=name||'';
+  const box=document.getElementById('termTreeCwd');
+  if(box)box.querySelectorAll('.term-tree-row.on').forEach(r=>r.classList.remove('on'));
+  if(row)row.classList.add('on');
+  const lbl=document.getElementById('termSelectedFolder');
+  if(lbl)lbl.textContent=name||termFolderName(termCurrentDir());
+}
+function termFolderName(dir){
+  const parts=String(dir||'').replace(/[\\/]+$/,'').split(/[\\/]/);
+  return parts.pop()||dir||'/';
+}
+function termOpenHere(){
+  const sel=window.FM_SEL||'';
+  window.FM_SEL='';
+  termOpenFolder(sel);
+}
+function termPutName(name){
+  const ii=termInput();if(!ii)return;
+  ii.value=getTermBase()+name;adjustTermInputWidth();ii.focus();hideSug();
+}
 async function termRefreshTree(){
   const box=document.getElementById('termTreeCwd');
   const label=document.getElementById('termTreeCwdName');
@@ -51267,6 +51882,301 @@ document.getElementById('termQcInp')?.addEventListener('keydown',e=>{
   termRunCommand(/^cd(\s|$)/.test(v)?v:'cd '+v);
 });
 
+/* ═══ R51 · the menu bar is a menu ══════════════════════════════════════════
+   Every label opens a real popup, every popup item runs something the console
+   can really do. Items that would need a desktop feature are either missing or
+   plainly disabled - nothing here pretends. */
+const TERM_MENUS={
+  terminal:function(){return [
+    {ico:'tab',   label:'New tab',              key:'Ctrl+Shift+T', run:()=>termTabNew(termCurrentDir())},
+    {ico:'close', label:'Close this tab',       key:'Ctrl+Shift+W', run:()=>termTabClose(termTabCurrent()?.id), dis:TERM_TABS.length<2},
+    {ico:'swap',  label:'Move tab left',        key:'Alt+Shift+←',  run:()=>termTabMove(termTabCurrent()?.id,-1), dis:TERM_TABS.indexOf(termTabCurrent())<=0},
+    {ico:'swap',  label:'Move tab right',       key:'Alt+Shift+→',  run:()=>termTabMove(termTabCurrent()?.id,1), dis:TERM_TABS.indexOf(termTabCurrent())>=TERM_TABS.length-1},
+    {sep:true},
+    {ico:'clip',  label:'Paste into the prompt',key:'Ctrl+V',        run:()=>doTermAct('paste')},
+    {ico:'broom', label:'Clear the screen',     key:'',             run:()=>doTermAct('clear')},
+    {ico:'down',  label:'Scroll to the bottom', key:'Ctrl+End',     run:()=>doTermAct('bottom')},
+    {sep:true},
+    {ico:'hide',  label:'Hide the console',     key:'',             run:()=>termHideConsole()}
+  ];},
+  sessions:function(){return [
+    {ico:'refresh',label:'Refresh the folder tree', key:'', run:()=>doTermAct('refresh')},
+    {ico:'up',    label:'cd .. - parent folder',    key:'', run:()=>termRunCommand('cd ..')},
+    {ico:'folder',label:'New tab in this folder',  key:'', run:()=>termTabNew(termCurrentDir())},
+    {sep:true},
+    TERM_TABS.map((t,i)=>({ico:'tab',label:(i+1)+'. '+termFolderName(t.cwd||'/'),key:t.active?'active':'',run:()=>termTabSelect(t.id)})),
+    {sep:true},
+    {ico:'folder',label:'Open this folder in the file manager',key:'',run:()=>termOpenHere()}
+  ];},
+  view:function(){return [
+    {ico:'side',  label:(document.getElementById('termRail')?.classList.contains('folded')?'Show':'Hide')+' the session sidebar', key:'', run:()=>document.getElementById('termRailFold')?.click()},
+    {ico:'full',  label:(document.body.classList.contains('term-standalone')?'Leave':'Enter')+' focused console view', key:'', run:()=>termSetFocused(!document.body.classList.contains('term-standalone'))},
+    {sep:true},
+    {ico:'tree',  label:'Sessions panel', key:'', run:()=>termPanel('sessions')},
+    {ico:'tool',  label:'Tools panel',    key:'', run:()=>termPanel('tools')},
+    {ico:'tree',  label:'Sftp panel (points to the file manager)', key:'', run:()=>termPanel('sftp')},
+    {ico:'tree',  label:'Log panel',      key:'', run:()=>termPanel('log')}
+  ];},
+  tools:function(){return [
+    {ico:'clip',  label:'Paste',            key:'', run:()=>doTermAct('paste')},
+    {ico:'broom', label:'Clear',            key:'', run:()=>doTermAct('clear')},
+    {ico:'down',  label:'Scroll to bottom', key:'', run:()=>doTermAct('bottom')},
+    {ico:'refresh',label:'Refresh status',  key:'', run:()=>doTermAct('refresh')},
+    {sep:true},
+    {ico:'term',  label:'Print the working directory (pwd)', key:'', run:()=>termRunCommand('pwd')},
+    {ico:'term',  label:'List this folder in detail (ls -la)', key:'', run:()=>termRunCommand('ls -la')},
+    {ico:'folder',label:'Open this folder in the file manager',key:'', run:()=>termOpenHere()}
+  ];},
+  help:function(){return [
+    {ico:'tab',   label:'Keyboard shortcuts',key:'',run:()=>termRunCommand('help')},
+    {ico:'folder',label:'Go to the file manager',key:'',run:()=>{window.location.href=window.location.pathname.replace(/\/+$/,'')+'/index.php';}},
+    {sep:true},
+    {ico:'info',  label:'About & help',key:'',run:()=>termAboutOpen()}
+  ];}
+};
+const TERM_MI_ICO={
+  tab:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M8 13l2 2-2 2M13 17h4"/>',
+  close:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8.5 10l4 4M12.5 10l-4 4"/>',
+  swap:'<path d="M4 8h13M13 4l4 4-4 4M20 16H7M11 12l-4 4 4 4"/>',
+  clip:'<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z"/>',
+  broom:'<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
+  down:'<path d="M12 4v12M7 12l5 5 5-5M4 20h16"/>',
+  hide:'<path d="M3 9l9 7 9-7"/>',
+  refresh:'<path d="M20 12a8 8 0 10-2.4 5.7"/><path d="M20 5v5h-5"/>',
+  up:'<path d="M12 20V5M6 11l6-6 6 6"/>',
+  folder:'<path d="M3 7h6l2 2h10v10H3z"/>',
+  side:'<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M9 4v16"/>',
+  full:'<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M8 9h8M8 13h5"/>',
+  tree:'<circle cx="12" cy="9" r="3.4"/><path d="M5.5 20a6.5 6.5 0 0113 0"/>',
+  tool:'<path d="M14.5 4.5a4 4 0 105.2 5.2L21 8.4 15.6 3z"/><path d="M13 6L3.6 15.4a2 2 0 102.9 2.9L16 8.8"/>',
+  term:'<rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M7 9l2.5 2L7 13M12 13h4"/>',
+  info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 8h.01"/>'
+};
+let termMenuOpen=null;
+function termMenuHide(){
+  const pop=document.getElementById('termMenuPop');
+  if(pop){pop.classList.remove('open');pop.innerHTML='';}
+  document.querySelectorAll('.term-menu-item.on').forEach(b=>{b.classList.remove('on');b.setAttribute('aria-expanded','false');});
+  termMenuOpen=null;
+}
+function termMenuFlatten(name){
+  const out=[];
+  (TERM_MENUS[name]?TERM_MENUS[name]():[]).forEach(it=>{
+    if(!it)return;
+    if(Array.isArray(it))it.forEach(x=>{if(x&&!x.sep)out.push(x);});
+    else if(!it.sep)out.push(it);
+  });
+  return out;
+}
+function termMenuBuild(name){
+  const rows=[];
+  (TERM_MENUS[name]?TERM_MENUS[name]():[]).forEach(it=>{
+    if(!it)return;
+    if(it.sep){rows.push('<div class="msep"></div>');return;}
+    if(Array.isArray(it)){it.forEach(x=>{if(x&&!x.sep)rows.push(termMenuRow(x));});return;}
+    rows.push(termMenuRow(it));
+  });
+  return rows.join('');
+}
+function termMenuRow(it){
+  return '<div class="mi'+(it.dis?' dim':'')+'" role="menuitem" tabindex="-1" data-menu-run="1">'
+    +'<span class="mi-ico"><svg viewBox="0 0 24 24">'+(TERM_MI_ICO[it.ico]||TERM_MI_ICO.info)+'</svg></span>'
+    +'<span>'+esc(it.label)+'</span>'
+    +(it.key?'<span class="mk">'+esc(it.key)+'</span>':'')+'</div>';
+}
+function termMenuOpenFor(name,btn){
+  const pop=document.getElementById('termMenuPop');
+  if(!pop)return;
+  if(termMenuOpen===name){termMenuHide();return;}
+  pop.innerHTML=termMenuBuild(name);
+  pop.style.left=Math.max(0,btn.offsetLeft)+'px';
+  pop.classList.add('open');
+  document.querySelectorAll('.term-menu-item').forEach(b=>{const on=b===btn;b.classList.toggle('on',on);b.setAttribute('aria-expanded',on?'true':'false');});
+  termMenuOpen=name;
+  const actions=termMenuFlatten(name);
+  pop.querySelectorAll('.mi').forEach((row,i)=>{
+    const it=actions[i];
+    if(!it)return;
+    row.addEventListener('click',()=>{
+      if(it.dis)return;
+      termMenuHide();
+      it.run();
+      termFocusInput();
+    });
+    row.addEventListener('mouseenter',()=>row.focus());
+  });
+  pop.querySelector('.mi')?.focus();
+}
+document.querySelectorAll('.term-menu-item[data-menu]').forEach(btn=>{
+  const open=()=>termMenuOpenFor(btn.dataset.menu,btn);
+  btn.addEventListener('click',open);
+  btn.addEventListener('mouseenter',()=>{if(termMenuOpen&&termMenuOpen!==btn.dataset.menu)termMenuOpenFor(btn.dataset.menu,btn);});
+  btn.addEventListener('keydown',e=>{if(e.key==='ArrowDown'||e.key==='Enter'||e.key===' '){e.preventDefault();open();}});
+});
+document.addEventListener('mousedown',e=>{
+  if(!termMenuOpen)return;
+  if(!e.target||typeof e.target.closest!=='function'){termMenuHide();return;}
+  if(e.target.closest('#termMenuBar'))return;
+  termMenuHide();
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&termMenuOpen){e.stopPropagation();termMenuHide();}},true);
+
+/* one dispatcher for every toolbar tile, menu item and shortcut */
+function doTermAct(act){
+  if(act==='clear'){const t0=termTabCurrent();if(t0)t0.out.innerHTML='';termTabScroll();termFocusInput();return;}
+  if(act==='bottom'){termTabScroll();termFocusInput();return;}
+  if(act==='newtab'){termTabNew(termCurrentDir());termFocusInput();return;}
+  if(act==='closetab'){const t=termTabCurrent();if(!t)return;if(TERM_TABS.length<2){appendLine('This is the last tab; use the close button in the title bar to leave the console.','info-line');return;}termTabClose(t.id);return;}
+  if(act==='menu'){const btn=document.querySelector('.term-menu-item[data-menu="terminal"]');if(btn)termMenuOpenFor('terminal',btn);return;}
+  if(act==='panel'){document.getElementById('termRailFold')?.click();return;}
+  if(act==='keep'){
+    const i=termInput(),cmd=(i&&i.value.trim())||'';
+    if(!cmd){appendLine('Type the command you want to keep, then press Save.','info-line');return;}
+    const list=termSnippets();
+    if(!list.includes(cmd)){list.unshift(cmd);termSnippetsSave(list);}
+    appendLine('Saved for this browser: '+cmd,'info-line');
+    return;
+  }
+  if(act==='paste'){
+    (async()=>{
+      try{const txt=await navigator.clipboard.readText(),ii=termInput();if(txt&&ii){ii.value+=txt.replace(/\s+$/,'');adjustTermInputWidth();ii.focus();}}
+      catch{appendLine('The browser did not allow reading the clipboard here; paste with Ctrl+V instead.','err-line');}
+    })();
+    return;
+  }
+  if(act==='refresh'){termRefreshTree();refreshTermSystemInfo();appendLine('Session tree and status bar refreshed.','info-line');return;}
+  if(act==='cwd'){termRunCommand('pwd');return;}
+  if(act==='up'){termRunCommand('cd ..');return;}
+  if(act==='home'||act==='files'){window.location.href=window.location.pathname.replace(/\/+$/,'/')+'index.php';return;}
+  if(act==='openhere'){termOpenHere();return;}
+  if(act==='help'){termRunCommand('ls -la');return;}
+}
+document.querySelectorAll('[data-term-act]').forEach(b=>b.addEventListener('click',()=>doTermAct(b.dataset.termAct)));
+
+/* ── About & Help · real numbers, read from the live console ─────────────── */
+function termAboutOpen(){
+  const tab=termTabCurrent();
+  const ps=tab&&tab.wrap?tab.wrap.querySelector('.term-ps'):null;
+  const who=ps?ps.querySelector('.term-user, .tk-user'):null;
+  const host=ps?ps.querySelector('.term-host, .tk-host'):null;
+  const at=ps?ps.querySelector('.term-at, .tk-at'):null;
+  const set=(id,val)=>{const el=document.getElementById(id);if(el)el.textContent=val;};
+  set('abtWho',(who?who.textContent.trim():'user')+(at?at.textContent.trim():'@')+(host?host.textContent.trim():'host'));
+  set('abtCwd',(tab&&tab.cwd)||termCwd||'~');
+  set('abtTabs',TERM_TABS.length+' of '+TERM_TABS.length+' open');
+  const lines=tab&&tab.out?tab.out.querySelectorAll('.term-line').length:0;
+  set('abtLines',lines+' lines in this tab');
+  openMod('aboutOv');
+  const ok=document.getElementById('abtOk');
+  if(ok)ok.focus({preventScroll:true});
+}
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape')return;
+  const ov=document.getElementById('aboutOv');
+  if(!ov||!ov.classList.contains('open'))return;
+  e.preventDefault();e.stopPropagation();
+  closeMod('aboutOv');
+  termFocusInput();
+},true);
+function termHelp(){
+  appendLineTo(termTabCurrent(),'  Ctrl+End                           jump to the newest line','info-line');
+  appendLine('Shortcuts in this console:','info-line');
+  appendLine('  Ctrl+Shift+T   new tab            Ctrl+Shift+W   close this tab','info-line');
+  appendLine('  Alt+Shift+Left / Right             move the tab along the strip','info-line');
+  appendLine('  Up / Down                          command history of this tab','info-line');
+  appendLine('  Tab                                complete a file or folder','info-line');
+  appendLine('  Esc                                close the suggestion list or an open menu','info-line');
+}
+
+/* ── tabs: order is real, and you can drag it ─────────────────────────────── */
+function termTabMove(id,delta){
+  const i=TERM_TABS.findIndex(t=>t.id===Number(id));
+  const j=i+delta;
+  if(i<0||j<0||j>=TERM_TABS.length)return;
+  const [t]=TERM_TABS.splice(i,1);
+  TERM_TABS.splice(j,0,t);
+  termTabRender();
+  termTabScrollIntoView(t.id);
+  termFocusInput();
+}
+function termTabScrollIntoView(id){
+  const el=document.querySelector('.term-tab[data-tab="'+id+'"]');
+  if(!el)return;
+  const strip=document.getElementById('termTabs');
+  if(!strip)return;
+  const a=el.offsetLeft,b=a+el.offsetWidth;
+  if(a<strip.scrollLeft)strip.scrollLeft=a-4;
+  else if(b>strip.scrollLeft+strip.clientWidth)strip.scrollLeft=b-strip.clientWidth+4;
+}
+/* dropping tab `src` on tab `dst`: the dragged tab lands where the cursor points */
+function termTabDropOn(src,dst){
+  if(!src||src===dst)return;
+  const from=TERM_TABS.findIndex(t=>t.id===Number(src));
+  const to=TERM_TABS.findIndex(t=>t.id===Number(dst));
+  if(from<0||to<0)return;
+  const [t]=TERM_TABS.splice(from,1);
+  TERM_TABS.splice(to,0,t);
+  termTabRender();
+  termTabScrollIntoView(t.id);
+  termFocusInput();
+}
+function termTabDropEnd(src){
+  const from=TERM_TABS.findIndex(t=>t.id===Number(src));
+  if(from<0||from===TERM_TABS.length-1)return;
+  const [t]=TERM_TABS.splice(from,1);
+  TERM_TABS.push(t);
+  termTabRender();
+  termFocusInput();
+}
+/* the empty part of the strip: dropping there moves a tab to the end */
+document.getElementById('termTabs')?.addEventListener('dragover',e=>{
+  if(e.target&&e.target.closest&&e.target.closest('.term-tab'))return;
+  e.preventDefault();
+});
+document.getElementById('termTabs')?.addEventListener('drop',e=>{
+  if(e.target&&e.target.closest&&e.target.closest('.term-tab'))return;
+  e.preventDefault();
+  termTabDropEnd(Number(e.dataTransfer.getData('text/plain')));
+});
+
+/* ── titlebar buttons ─────────────────────────────────────────────────────── */
+function termSetFocused(on){
+  document.body.classList.toggle('term-standalone',!!on);
+  const ov=document.getElementById('termOv');
+  /* the console stays on screen either way - focused view only decides whether
+     the manager is behind it */
+  if(ov)ov.classList.add('open');
+  termScrollBottom();
+  appendLine(on?'Focused view: the console now fills the page. The restore button brings the manager back.'
+               :'Manager view restored; the console is in front, its tabs are untouched.','info-line');
+}
+function termHideConsole(){
+  const ov=document.getElementById('termOv');
+  if(document.body.classList.contains('term-standalone')){
+    document.body.classList.remove('term-standalone');
+    if(ov)ov.classList.remove('open');
+    return;
+  }
+  closeMod('termOv');
+}
+document.getElementById('termWinMin')?.addEventListener('click',termHideConsole);
+document.getElementById('termWinMax')?.addEventListener('click',()=>{
+  termSetFocused(!document.body.classList.contains('term-standalone'));
+});
+document.getElementById('termQcAdd')?.addEventListener('click',()=>termTabNew(termCurrentDir()));
+document.getElementById('termTreeCwdOpen')?.addEventListener('click',e=>{e.stopPropagation();termOpenHere();});
+
+/* ── shortcuts ───────────────────────────────────────────────────────────── */
+document.addEventListener('keydown',e=>{
+  if(!document.getElementById('termWin'))return;
+  const winOpen=document.getElementById('termOv')?.classList.contains('open')||document.body.classList.contains('term-standalone');
+  if(!winOpen)return;
+  const k=String(e.key||'').toLowerCase();
+  if(e.ctrlKey&&e.shiftKey&&(k==='t'||e.code==='KeyT')){e.preventDefault();e.stopPropagation();doTermAct('newtab');termFocusInput();return;}
+  if(e.ctrlKey&&e.shiftKey&&(k==='w'||e.code==='KeyW')){e.preventDefault();e.stopPropagation();doTermAct('closetab');termFocusInput();return;}
+  if(e.altKey&&e.shiftKey&&e.key==='ArrowLeft'){e.preventDefault();e.stopPropagation();termTabMove(termTabCurrent()?.id,-1);return;}
+  if(e.altKey&&e.shiftKey&&e.key==='ArrowRight'){e.preventDefault();e.stopPropagation();termTabMove(termTabCurrent()?.id,1);return;}
+},true); /* capture: the prompt's own handler stops propagation after its keys */
 /* status bar clock: one timer for the whole bar */
 function termClock(){
   const now=new Date();
@@ -51276,25 +52186,6 @@ function termClock(){
   if(date)date.textContent=String(now.getDate()).padStart(2,'0')+'/'+String(now.getMonth()+1).padStart(2,'0')+'/'+now.getFullYear();
 }
 termClock();setInterval(termClock,1000);
-if(termInp){
-  termInp.addEventListener('keydown',async e=>{
-    if(e.key==='Enter'){hideSug();await runTerm();return;}
-    if(termRunning){if(!e.ctrlKey)e.preventDefault();return;}
-    if(e.key==='ArrowUp'){e.preventDefault();if(hIdx<termHist.length-1){hIdx++;termInp.value=termHist[termHist.length-1-hIdx]||'';}adjustTermInputWidth();return;}
-    if(e.key==='ArrowDown'){e.preventDefault();if(hIdx>0){hIdx--;termInp.value=termHist[termHist.length-1-hIdx]||'';}else{hIdx=-1;termInp.value='';}adjustTermInputWidth();return;}
-    if(e.key==='Tab'){e.preventDefault();if(sugList.length>0){sugIdx=(sugIdx+1)%sugList.length;termInp.value=getTermBase()+sugList[sugIdx];adjustTermInputWidth();}else await fetchSug();return;}
-    if(e.key==='Escape'){hideSug();return;}
-    if(e.ctrlKey&&e.key==='c'){e.preventDefault();termInp.value='';adjustTermInputWidth();appendLine('^C','cmd-line');return;}
-    if(e.key.length===1)setTimeout(()=>fetchSug(),50);
-  });
-  termInp.addEventListener('input',()=>{adjustTermInputWidth();fetchSug();});
-}
-
-function adjustTermInputWidth(){
-  if(termInp)termInp.style.width=(termInp.value.length||0.1)+'ch';
-}
-adjustTermInputWidth();
-
 function termUptime(seconds){
   seconds=Math.max(0,Number(seconds)||0);
   const days=Math.floor(seconds/86400),hours=Math.floor((seconds%86400)/3600),minutes=Math.floor((seconds%3600)/60),secs=Math.floor(seconds%60);
@@ -51308,13 +52199,12 @@ function drawTermCpu(){
   const w=termCpuGraph.width,h=termCpuGraph.height;
   termCpuCtx.clearRect(0,0,w,h);termCpuCtx.beginPath();termCpuCtx.moveTo(0,h);
   termCpuData.forEach((v,i)=>termCpuCtx.lineTo(i*(w/(termCpuData.length-1)),h-(v/100*h)));
-  termCpuCtx.lineTo(w,h);termCpuCtx.closePath();termCpuCtx.fillStyle='#027c05';termCpuCtx.fill();
+  termCpuCtx.lineTo(w,h);termCpuCtx.closePath();termCpuCtx.fillStyle='#5a9c5f';termCpuCtx.fill();
 }
 async function refreshTermSystemInfo(){
   if(termSystemInfoBusy)return;
   termSystemInfoBusy=true;
   const set=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=String(value);};
-  // Keep the footer useful even if a hosting environment blocks the stats request.
   if(!termSystemInfoReady){
     set('termHost',location.host||'localhost');
     set('termIp',location.hostname||'-');
@@ -51323,7 +52213,6 @@ async function refreshTermSystemInfo(){
     set('termDisk','0 B / 0 B');
     set('termUptime','0s');
     set('termProc','-');
-    set('termTime',new Date().toLocaleTimeString('en-GB',{hour12:false}));
     set('termHostname',location.hostname||'server');
   }
   try{
@@ -51339,22 +52228,326 @@ async function refreshTermSystemInfo(){
     set('termDisk',formatBytes(d.disk_used||0)+' / '+formatBytes(d.disk_total||0));
     set('termUptime',termUptime(d.uptime));
     set('termProc',String(d.processes??'-'));
-    set('termTime',new Date().toLocaleTimeString('en-GB',{hour12:false}));
     set('termHostname',d.hostname||'server');
     termSystemInfoReady=true;
-  }catch{}finally{termSystemInfoBusy=false;}
+  }catch{}
+  finally{termSystemInfoBusy=false;}
 }
+
+function getTermBase(){const i=termInput();const v=i?i.value:'';const sp=v.lastIndexOf(' ');return sp>=0?v.slice(0,sp+1):'';}
+function updateTermPrompt(prompt,cwd){
+  const tab=termTabCurrent();
+  if(!tab)return;
+  if(cwd)tab.cwd=cwd;
+  if(prompt)tab.prompt=prompt;
+  updateTermPromptLabels(tab);
+}
+async function fetchSug(){
+  const inp=termInput();
+  if(FM_SSH_TERMINAL_USER||!inp){hideSug();return;}
+  const v=inp.value||'';const last=v.split(' ').pop();
+  if(!last){hideSug();return;}
+  const box=termSugBox();
+  try{
+    const r=await fetch('?x=ac&prefix='+encodeURIComponent(last)+'&dir='+encodeURIComponent(termTabCurrent()?.cwd||'')).then(x=>x.json());
+    sugList=Array.isArray(r)?r:[];sugIdx=-1;
+    if(sugList.length>0&&box){
+      box.innerHTML=sugList.map((x,i)=>`<div class="term-sug-item" data-i="${i}">${esc(x)}</div>`).join('');
+      box.style.display='block';
+      box.querySelectorAll('.term-sug-item').forEach(el=>el.addEventListener('mousedown',ev=>{
+        ev.preventDefault();inp.value=getTermBase()+el.textContent;hideSug();inp.focus();
+      }));
+    }else hideSug();
+  }catch{hideSug();}
+}
+function hideSug(){const box=termSugBox();if(box)box.style.display='none';sugList=[];sugIdx=-1;}
+
+/* one command at a time, and the prompt only comes back with the answer */
+async function runTerm(){
+  const inp=termInput();
+  const tab=termTabCurrent();
+  const cmd=inp?.value.trim();
+  if(!cmd||!inp||!tab||termRunning)return;
+  termRunning=true;
+  tab.hist.push(cmd);tab.hIdx=-1;inp.value='';adjustTermInputWidth();
+  const promptText=(tab.wrap.querySelector('.term-ps')?.textContent||'$').trim();
+  appendLineTo(tab,promptText+' ', 'cmd-line');
+  appendCommandLine(tab,cmd);
+  if(cmd==='clear'||cmd==='cls'){tab.out.innerHTML='';termRunning=false;termTabScroll();return;}
+  tab.wrap.classList.add('term-busy');
+  try{
+    const fd=new FormData();
+    fd.append('csrf_token',CSRF);fd.append('qi',cmd);
+    fd.append('term_dir',tab.cwd||termCwd||'');
+    let endpoint='?x=run';
+    if(FM_SSH_TERMINAL_USER){endpoint='?x=ssh_terminal_run';fd.append('ssh_user',FM_SSH_TERMINAL_USER);}
+    const d=await fetch(endpoint,{method:'POST',body:fd}).then(r=>r.json());
+    if(d.error){appendLineTo(tab,'Error: '+d.error,'err-line');}
+    else{
+      updateTermPrompt(d.prompt,d.cwd);
+      if(d.output){
+        const lines=d.output.replace(/\r/g,'').split('\n');
+        if(lines.length&&lines[lines.length-1]==='')lines.pop();
+        termDrainResult(tab,lines,d.exit);
+      }else{termFinishRun(tab,inp);}
+      if(d.cwd){termGhostHint();}
+      if(d.cwd)termRefreshTree();
+    }
+  }catch(err){appendLineTo(tab,'Request failed: '+err.message,'err-line');termFinishRun(tab,inp);}
+}
+/* the prompt comes back only when the last line of the answer is on screen */
+function termFinishRun(tab,inp){
+  if(tab)tab.wrap.classList.remove('term-busy');
+  termRunning=false;
+  const i=inp||termInput();
+  if(i){try{i.focus({preventScroll:true});}catch(e){i.focus();}}
+}
+/* output is written a line at a time, so the scrollback steps like a terminal
+   instead of the whole block appearing and the page jumping in one go */
+const TERM_DRAIN={timer:null};
+function termDrainResult(tab,lines,exit){
+  clearInterval(TERM_DRAIN.timer);
+  /* whether the reader was at the bottom when the answer started: if they had
+     scrolled up to read, their place is kept until they come back down */
+  const box=termScrollBox();
+  const follow=!box||termAtBottom(box);
+  let i=0;
+  /* even a 300-line answer lands a few lines at a time, so the scrollback steps
+     like a terminal instead of jumping a screen at a time */
+  const burst=lines.length>240?4:(lines.length>100?2:1);
+  const step=()=>{
+    if(!tab||!tab.out){
+      clearInterval(TERM_DRAIN.timer);termFinishRun(tab);return;
+    }
+    for(let k=0;k<burst&&i<lines.length;k++,i++)appendResultLine(tab,lines[i],exit);
+    if(i>=lines.length){
+      clearInterval(TERM_DRAIN.timer);
+      if(TERM_SCROLL.follow)termScrollToBottom();
+      termFinishRun(tab);
+      return;
+    }
+  };
+  step();
+  TERM_DRAIN.timer=setInterval(step,14);
+}
+/* kept for the helpers that still call the plain form */
+function appendLine(text,cls){appendLineTo(termTabCurrent(),text,cls);}
+
+/* every tab gets the same key handling, bound to its own input */
+function termBindTab(tab){
+  const inp=tab.wrap.querySelector('.term-inp');
+  if(!inp)return;
+  inp.addEventListener('keydown',async e=>{
+    if(!tab.active){termTabSelect(tab.id);}
+    e.stopPropagation();
+    if(e.key==='Enter'){e.preventDefault();hideSug();await runTerm();return;}
+    if(termRunning){if(!e.ctrlKey)e.preventDefault();return;}
+    if(e.key==='ArrowUp'){e.preventDefault();if(tab.hIdx<tab.hist.length-1){tab.hIdx++;inp.value=tab.hist[tab.hist.length-1-tab.hIdx]||'';}adjustTermInputWidth();return;}
+    if(e.key==='ArrowDown'){e.preventDefault();if(tab.hIdx>0){tab.hIdx--;inp.value=tab.hist[tab.hist.length-1-tab.hIdx]||'';}else{tab.hIdx=-1;inp.value='';}adjustTermInputWidth();return;}
+    if(e.key==='Tab'){e.preventDefault();if(sugList.length>0){sugIdx=(sugIdx+1)%sugList.length;inp.value=getTermBase()+sugList[sugIdx];adjustTermInputWidth();}else{await fetchSug();termGhostHint();termAcceptGhost();}return;}
+    if(e.key==='ArrowRight'&&inp.selectionStart===inp.value.length&&termGhostEl()?.classList.contains('on')){e.preventDefault();termAcceptGhost();return;}
+    if(e.key==='Escape'){hideSug();return;}
+    if(e.ctrlKey&&e.key==='c'){e.preventDefault();inp.value='';adjustTermInputWidth();appendLineTo(tab,'^C','cmd-line');return;}
+    if(e.key.length===1)setTimeout(()=>{fetchSug();termGhostHint();},60);
+    if(['Backspace','Delete'].includes(e.key))setTimeout(()=>{fetchSug();termGhostHint();},30);
+  });
+  inp.addEventListener('input',()=>{adjustTermInputWidth();fetchSug();termGhostHint();});
+  inp.addEventListener('blur',()=>setTimeout(termHideGhost,120));
+  inp.addEventListener('focus',()=>{if(!tab.active)termTabSelect(tab.id);});
+}
+
+/* ═══ R52 · the prompt behaves like a shell ══════════════════════════════════
+   Three things the user asked for by name: a line that keeps its colours after
+   it runs, a faint completion of what you are typing (the way PowerShell and
+   fish do it), and words that light up when they are complete - commands, paths,
+   options, strings and numbers. */
+const TERM_CMDS=['cd','ls','pwd','cat','grep','find','du','df','free','whoami','id','uname','date','echo','mkdir','rmdir','rm','mv','cp','touch','chmod','chown','tar','zip','unzip','gzip','curl','wget','head','tail','less','more','awk','sed','sort','uniq','wc','ps','kill','top','uptime','php','node','python3','git','composer','mysql','mysqldump','bash','sh','clear','env','export','history','which','ln','stat','file','md5sum','sha256sum','nano','vi','vim'];
+const TERM_OPTS=['-la','-al','-l','-a','-h','-r','-R','-rf','-f','-v','-n','-c','-p','-i','-m','-d','-s','-t','-x','--help','--version'];
+function termGhostEl(){const t=termTabCurrent();return t?t.wrap.querySelector('.term-ghost'):null;}
+function termHideGhost(){const g=termGhostEl();if(g){g.textContent='';g.classList.remove('on');}}
+function termSugItemAt(sel){return [...(termSugBox()?.querySelectorAll('.term-sug-item')||[])].find(el=>el.textContent===sel)||null;}
+/* the faint tail: the rest of a file name, a folder, a command or a past line */
+function termGhostHint(){
+  const t=termTabCurrent(),inp=termInput();
+  if(!t||!inp){return;}
+  const v=inp.value;
+  if(!v){termHideGhost();return;}
+  if(!/[\s]$/.test(v)&&/\s/.test(v)){
+    const last=v.split(' ').pop();
+    const hit=termSugItemAt(last);
+    if(hit&&hit.textContent.length>last.length){termShowGhost(last,hit.textContent,hit.dataset.extra||'');return;}
+  }
+  if(!/\s/.test(v)){
+    const cmd=TERM_CMDS.find(c=>c.length>v.length&&c.startsWith(v));
+    if(cmd){termShowGhost(v,cmd+v.slice(v.length));return;}
+  }
+  /* the last line typed in this tab, the way a shell remembers it */
+  const prev=(t.hist||[]).slice().reverse().find(x=>x.length>v.length&&x.startsWith(v));
+  if(prev){termShowGhost(v,prev);return;}
+  termHideGhost();
+}
+function termShowGhost(typed,full){
+  const g=termGhostEl();
+  if(!g){return;}
+  const tail=String(full).slice(String(typed).length); /* the input already holds the typed part */
+  if(!tail){termHideGhost();return;}
+  g.textContent=tail;
+  g.classList.add('on');
+}
+function termAcceptGhost(){
+  const g=termGhostEl(),inp=termInput();
+  if(!g||!g.classList.contains('on')||!inp){return false;}
+  const tail=g.textContent.slice((inp.value||'').length);
+  if(!tail){return false;}
+  inp.value=inp.value+tail;
+  termHideGhost();
+  adjustTermInputWidth();
+  return true;
+}
+/* one highlighter for the echoed command and for the answers that look like code */
+function termPaint(text,cls){
+  const s=esc(String(text));
+  if(!s){return '';}
+  let out=s;
+  if(cls==='cmd-line'){
+    out=s.replace(/^(\S+)/,m=>'<span class="tk-cmd">'+m+'</span>')
+           .replace(/(\s)(-{1,2}[A-Za-z0-9][\w-]*)/g,'$1<span class="tk-flag">$2</span>')
+           .replace(/(\s)(\/[^\s'"]+)/g,'$1<span class="tk-path">$2</span>')
+           .replace(/('[^']*'|&quot;[^&]*?&quot;)/g,'<span class="tk-str">$1</span>')
+           .replace(/(&gt;|&gt;&gt;|\||&amp;&amp;|;)/g,'<span class="tk-op">$1</span>');
+    return out;
+  }
+  return s;
+}
+/* the line you typed keeps the colours of the line you were typing on: the same
+   prompt markup, then the command painted word by word. Nothing turns white. */
+function termPromptMarkup(tab){
+  const ps=tab&&tab.wrap?tab.wrap.querySelector('.term-ps'):null;
+  if(!ps)return '<span class="tk-user">admin</span><span class="tk-at">@</span><span class="tk-host">host</span><span class="tk-dollar">:</span><span class="tk-cwd">~</span><span class="tk-dollar">$</span>&#160;';
+  /* the prompt is copied as markup, so the line you typed is coloured exactly
+     like the line you are typing on - a literal space, never a wrapped one */
+  return ps.innerHTML.replace(/\s+$/,'')+' ';
+}
+function appendCommandLine(tab,cmd){
+  if(!tab){return;}
+  const s=document.createElement('span');
+  s.className='term-line cmd-line';
+  s.innerHTML='<span class="tk-prompt">'+termPromptMarkup(tab)+'</span>'+termPaint(cmd);
+  const box=termScrollBox();
+  const follow=!box||tab!==termTabCurrent()||TERM_SCROLL.follow;
+  tab.out.appendChild(s);
+  tab.lines++;
+  if(tab.active&&follow)termScrollToBottom();
+}
+/* a command or a file that is fully written is worth a single keystroke less */
+function termCompleteWord(){
+  const inp=termInput();
+  if(!inp){return;}
+  if(sugList.length>0){sugIdx=(sugIdx+1)%sugList.length;inp.value=getTermBase()+sugList[sugIdx];}
+  else{termGhostHint();termAcceptGhost();}
+  adjustTermInputWidth();
+}
+
+/* a result line takes the colour of what it holds: folder names blue and bold,
+   executables and archives green, sizes and dates quiet, a failure red. This is
+   the Kali-style split the console was missing. */
+const TERM_ARCHIVE=/\.(zip|tar|gz|tgz|bz2|xz|rar|7z|zst)$/i;
+const TERM_SCRIPTS=/\.(sh|bash|py|pl|rb|php|js)$/i;
+const TERM_MEDIA=/\.(png|jpe?g|gif|webp|svg|ico|mp4|mkv|mp3|wav|flac)$/i;
+function termResultClass(line,exit){
+  if(exit!==0)return 'err-line';
+  if(/^total\s+\d+/.test(line))return 'res-dim';
+  if(/^[dlcbps-][rwxsStT-]{9}/.test(line))return 'res-ls';
+  if(/(No such file|not found|Permission denied|cannot|failed)/i.test(line))return 'err-line';
+  return 'ok-line';
+}
+function termPaintResult(line,cls){
+  if(cls==='res-dim')return esc(line);
+  if(cls==='res-ls'){
+    const m=line.match(/^([dlcbps-][rwxsStT-]{9}[+.]?)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\w{3}\s+\d+\s+[\d:]+)\s+(.*)$/);
+    if(m){
+      const isDir=m[1][0]==='d',isLink=m[1][0]==='l';
+      const nameCls=isDir?'res-dir':(TERM_ARCHIVE.test(m[7])?'res-zip':(TERM_SCRIPTS.test(m[7])?'res-exec':(isLink?'res-link':'')));
+      return '<span class="res-perm">'+esc(m[1])+'</span> '+esc(m[2])+' '
+        +'<span class="res-user">'+esc(m[3])+'</span> <span class="res-user">'+esc(m[4])+'</span> '
+        +'<span class="res-size">'+esc(m[5])+'</span> <span class="res-date">'+esc(m[6])+'</span> '
+        +'<span class="'+nameCls+'">'+esc(m[7])+'</span>';
+    }
+  }
+  if(/^[^\s<>]+$/.test(line)){
+    const nm=esc(line);
+    if(line.endsWith('/'))return '<span class="res-dir">'+nm+'</span>';
+    if(TERM_ARCHIVE.test(line))return '<span class="res-zip">'+nm+'</span>';
+    if(TERM_SCRIPTS.test(line))return '<span class="res-exec">'+nm+'</span>';
+    if(TERM_MEDIA.test(line))return '<span class="res-media">'+nm+'</span>';
+    if(/(No such file|not found)/i.test(line))return '<span class="res-err">'+nm+'</span>';
+  }
+  return esc(line);
+}
+function appendResultLine(tab,line,exit){
+  if(!tab)return;
+  const s=document.createElement('span');
+  const cls=termResultClass(line,exit);
+  s.className='term-line '+cls;
+  s.innerHTML=termPaintResult(line,cls);
+  const box=termScrollBox();
+  const follow=!box||tab!==termTabCurrent()||TERM_SCROLL.follow;
+  tab.out.appendChild(s);
+  tab.lines++;
+  if(tab.active&&follow)termScrollToBottom();
+}
+
+/* the command line you wrote, coloured the way a shell prints it back */
+
+/* the wheel moves the scrollback by lines, not by pages - a terminal never
+   throws a whole screen at the reader for one notch */
+document.getElementById('termScroll')?.addEventListener('wheel',e=>{
+  if(e.ctrlKey)return; /* ctrl+wheel stays the browser's zoom */
+  const box=e.currentTarget;
+  if(box.scrollHeight<=box.clientHeight)return;
+  /* about six short lines a notch, in whichever direction the wheel turned */
+  const px=Math.round(e.deltaY*0.85);
+  const lines=px<0?-Math.max(1,Math.round(-px/14)):Math.max(1,Math.round(px/14));
+  termScrollBy(box,box.scrollTop+lines*14);
+  TERM_SCROLL.follow=termAtBottom(box);
+  e.preventDefault();
+},{passive:false});
+document.getElementById('termScroll')?.addEventListener('scroll',termRememberScroll,{passive:true});
+/* PageUp / PageDown stay a screen, Home / End go to the ends, and the prompt keeps
+   its keys because it stops their propagation first */
+function termScrollKeys(){
+  const page=()=>{const box=termScrollBox();return box?Math.max(60,box.clientHeight-60):0;};
+  /* one handler on the window, in the capture phase: the whole view belongs to
+     the reader, whether the caret is in the prompt or not */
+  window.addEventListener('keydown',e=>{
+    const box=termScrollBox();
+    if(!box)return;
+    if(e.key==='PageUp'){termScrollBy(box,box.scrollTop-page());TERM_SCROLL.follow=termAtBottom(box);e.preventDefault();}
+    else if(e.key==='PageDown'){termScrollBy(box,box.scrollTop+page());TERM_SCROLL.follow=termAtBottom(box);e.preventDefault();}
+    else if(e.key==='Home'&&(e.ctrlKey||e.shiftKey)){termScrollBy(box,0);TERM_SCROLL.follow=false;e.preventDefault();}
+    else if(e.key==='End'&&(e.ctrlKey||e.shiftKey)){termScrollBy(box,box.scrollHeight);TERM_SCROLL.follow=true;e.preventDefault();}
+  },true);
+}
+termScrollKeys();
+
+/* ── first paint: one tab always exists ───────────────────────────────────── */
+if(document.getElementById('termWin')){
+  termTabNew('<?=addslashes((string)$fm->getCwd())?>','first');
+  termBindTab(termTabCurrent());
+  termFocusInput();
+}
+
 if(document.getElementById('termWin')){
   refreshTermSystemInfo();
   setInterval(refreshTermSystemInfo,2000);
   if(FM_SSH_TERMINAL_REQUEST_ERROR){
-    if(termInp)termInp.disabled=true;
+    const i0=termInput();if(i0)i0.disabled=true;
     const status=document.getElementById('termConnectionStatus');if(status)status.textContent='UNAVAILABLE';
     const badge=document.getElementById('termConnBadge');if(badge)badge.textContent='unavailable';
     appendLine('Login as failed: '+FM_SSH_TERMINAL_REQUEST_ERROR,'err-line');
   }
   if(FM_SSH_TERMINAL_USER){
-    if(termInp)termInp.disabled=true;
+    const i1=termInput();if(i1)i1.disabled=true;
     if(!FM_SSH_TERMINAL_REQUEST_ERROR){
       const status=document.getElementById('termConnectionStatus');if(status)status.textContent='CHECKING';
       fetch('?x=ssh_terminal_info&ssh_user='+encodeURIComponent(FM_SSH_TERMINAL_USER))
@@ -51367,7 +52560,7 @@ if(document.getElementById('termWin')){
           const user=document.getElementById('termUser');if(user)user.textContent=d.username||FM_SSH_TERMINAL_USER;
           updateTermPrompt('~',d.home||'');
           appendLine('Browser terminal ready as Linux account '+(d.username||FM_SSH_TERMINAL_USER)+'.','info-line');
-          if(termInp){termInp.disabled=false;termInp.focus();}
+          const i2=termInput();if(i2){i2.disabled=false;i2.focus();}
         })
         .catch(err=>{
           const status=document.getElementById('termConnectionStatus');if(status)status.textContent='UNAVAILABLE';
@@ -51378,77 +52571,6 @@ if(document.getElementById('termWin')){
   }
 }
 
-function getTermBase(){const v=termInp.value;const sp=v.lastIndexOf(' ');return sp>=0?v.slice(0,sp+1):'';}
-function updateTermPrompt(prompt,cwd){
-  if(cwd)termCwd=cwd;
-  const el=document.querySelector('.term-dollar');
-  if(el&&prompt)el.textContent=':'+prompt+'$ ';
-  /* R48: the tab title and the status bar pill follow the working directory. */
-  if(termCwd){
-    const dir=String(termCwd).replace(/[\\/]+$/,'');
-    /* R48: the banner's working-directory line is not a leftover of page load */
-    const bannerDir=document.getElementById('termWorkingDir');
-    if(bannerDir)bannerDir.textContent=termCwd;
-    const base=dir.split(/[\\/]/).pop()||dir||'/';
-    const tab=document.getElementById('termTabLabel');
-    if(tab){tab.textContent=dir;tab.title=dir;}
-    const pill=document.getElementById('termFooterDir');
-    if(pill){pill.textContent=dir;pill.title=dir;}
-  }
-}
-async function fetchSug(){
-  if(FM_SSH_TERMINAL_USER){hideSug();return;}
-  const v=termInp?.value||'';const last=v.split(' ').pop();
-  if(!last){hideSug();return;}
-  try{const r=await fetch('?x=ac&prefix='+encodeURIComponent(last)).then(r=>r.json());
-    sugList=r;sugIdx=-1;
-    if(r.length>0){if(!termSug)return;termSug.innerHTML=r.map((x,i)=>`<div class="term-sug-item" data-i="${i}">${esc(x)}</div>`).join('');termSug.style.display='block';
-      termSug.querySelectorAll('.term-sug-item').forEach(el=>el.addEventListener('mousedown',ev=>{ev.preventDefault();termInp.value=getTermBase()+el.textContent;hideSug();termInp.focus();}));
-    }else hideSug();
-  }catch{hideSug();}
-}
-function hideSug(){if(termSug)termSug.style.display='none';sugList=[];sugIdx=-1;}
-
-async function runTerm(){
-  const cmd=termInp?.value.trim();if(!cmd||!termInp)return;
-  if(termRunning)return;
-  termRunning=true;
-  termHist.push(cmd);hIdx=-1;termInp.value='';adjustTermInputWidth();
-  const promptText=(document.querySelector('.term-ps')?.textContent||'$').trim();
-  appendLine(promptText+' '+cmd,'cmd-line');
-  if(cmd==='clear'||cmd==='cls'){if(termOut)termOut.innerHTML='';termRunning=false;return;}
-  const wrap=document.querySelector('.term-prompt-wrap');
-  const busy=t=>{if(wrap)wrap.classList.toggle('term-busy',t);};
-  busy(true);
-  try{
-    const fd=new FormData();fd.append('csrf_token',CSRF);fd.append('qi',cmd);
-    let endpoint='?x=run';
-    if(FM_SSH_TERMINAL_USER){endpoint='?x=ssh_terminal_run';fd.append('ssh_user',FM_SSH_TERMINAL_USER);}
-    const d=await fetch(endpoint,{method:'POST',body:fd}).then(r=>r.json());
-    if(d.error){appendLine('Error: '+d.error,'err-line');}
-    else{
-      updateTermPrompt(d.prompt,d.cwd);
-      if(d.output){d.output.replace(/\r/g,'').split('\n').forEach(line=>appendLine(line,d.exit===0?'ok-line':'err-line'));}
-      /* cd and anything else that moves the shell shows up in the session tree */
-      if(d.cwd)termRefreshTree();
-    }
-  }catch(err){appendLine('Request failed: '+err.message,'err-line');}
-  busy(false);termRunning=false;
-  termScrollBottom();
-  termInp?.focus();
-}
-function appendLine(text,cls){
-  if(!termOut)return;
-  const s=document.createElement('span');
-  s.className='term-line'+(cls?' '+cls:'');
-  s.textContent=text;
-  termOut.appendChild(s);
-  termScrollBottom();
-}
-
-/* ═══════════════════════════════════════
-   EDITOR SHORTCUTS
-═══════════════════════════════════════ */
 /* The standalone code editor is initialized with the editor form below. */
 
 /* ═══════════════════════════════════════
@@ -51542,9 +52664,9 @@ const rs=document.createElement('style');rs.textContent='@keyframes rip{to{trans
 ═══════════════════════════════════════ */
 function toast(msg,dur=2000){
   const el=document.createElement('div');
-  el.style.cssText='position:fixed;bottom:calc(var(--bh,26px) + 12px);left:50%;transform:translate(-50%,0);background:var(--raised);border:1px solid var(--border2);color:var(--t1);padding:8px 16px;border-radius:10px;font-size:13px;font-weight:500;z-index:9999;white-space:nowrap;box-shadow:0 8px 32px rgba(0,0,0,.5);animation:fadeUp .25s cubic-bezier(.34,1.56,.64,1) both';
+  el.style.cssText='position:fixed;bottom:calc(var(--bh,26px) + 12px);right:16px;max-width:320px;pointer-events:none;z-index:99999;background:var(--raised);border:1px solid var(--border2);color:var(--t1);padding:8px 16px;border-radius:10px;font-size:13px;font-weight:500;z-index:9999;white-space:nowrap;box-shadow:0 8px 32px rgba(0,0,0,.5);animation:fadeUp .25s cubic-bezier(.34,1.56,.64,1) both';
   el.textContent=msg;document.body.appendChild(el);
-  setTimeout(()=>{el.style.opacity='0';el.style.transform='translate(-50%,8px)';el.style.transition='.2s';setTimeout(()=>el.remove(),220);},dur);
+  setTimeout(()=>{el.style.opacity='0';el.style.transform='translateY(8px)';el.style.transition='.2s';setTimeout(()=>el.remove(),220);},dur);
 }
 
 
