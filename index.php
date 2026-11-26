@@ -1165,7 +1165,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R74');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R76');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -36600,13 +36600,27 @@ button.rc-row{cursor:pointer}
 .term-row{position:relative}
 /* R61 · a prompt deeper than half the row takes the whole line, so the field
    starts on a new line instead of being pushed out of the window */
-.term-row.live-wrapped .term-live{flex:0 0 100%;margin-top:1px}
+.term-row.live-wrapped .term-live{flex:0 0 100%;min-width:0;margin-top:1px}
+/* R76 · one line: the prompt is painted at the left, the command starts after it
+   on the same row and wraps by character at the right edge */
+.term-row{position:relative;flex-wrap:nowrap;align-items:flex-start}
+.term-row>.term-ps{position:absolute;left:0;top:0;z-index:2;pointer-events:none;white-space:pre}
+.term-row>.term-live{flex:1 1 100%;width:100%;max-width:100%;min-width:0;left:0}
+.term-live>.term-inp{text-indent:var(--ps-indent,0px)}
 /* R58 · the line the reader is typing on is one positioned box (.term-live): the
    field, the faint completion and the caret are all drawn in it by coordinate, so
    a suggestion can never push the field - or the caret - sideways. The suggestion
    starts where the typing ends, and the caret stays on the character being typed:
    that character is printed dark inside the light caret, the way a shell shows a
    completion. Nothing in this box is in the flow, so nothing here can reflow. */
+/* R76 · the visible command: painted text that wraps by character at the right
+   edge and starts after the prompt, exactly like a shell's line */
+.term-paint{display:block;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;
+  color:#e0e0e0;min-width:0;pointer-events:none;text-indent:var(--ps-indent,0px)}
+.term-paint .tp-ch{white-space:pre}
+.term-paint.mp-on .tp-before{background:rgba(120,170,255,.28)}
+.term-paint.mp-on .tp-sel{background:rgba(120,170,255,.42)}
+.term-inp.mp-hidden{opacity:0!important;caret-color:transparent!important}
 .term-live{position:relative;display:inline-block;vertical-align:baseline;flex:0 0 auto;min-width:0;max-width:100%;
   font-size:inherit;
   height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));white-space:pre;max-width:calc(100vw - 200px)}
@@ -36614,7 +36628,7 @@ button.rc-row{cursor:pointer}
    scrolling its own tail out of the window, and the box grows with it */
 .term-live .term-inp.term-inp{background:transparent!important;border:0!important;box-shadow:none!important;border-radius:0!important;
   padding:0!important;margin:0!important;outline:none!important;appearance:none;-webkit-appearance:none;min-height:0!important;max-height:none!important}
-.term-live .term-inp{position:absolute;left:0;top:0;height:100%;padding:0;margin:0;border:0;max-width:none;box-sizing:content-box;
+.term-live .term-inp{position:absolute;left:0;top:0;height:100%;opacity:1;padding:0;margin:0;border:0;max-width:none;box-sizing:content-box;
   line-height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));background:transparent;color:#e0e0e0;caret-color:transparent;
   white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;overflow:hidden;resize:none;-webkit-user-select:text;user-select:text}
 .term-ghost-tail{position:absolute;top:0;white-space:pre;pointer-events:none;font-family:'TerminalTMT',monospace;
@@ -36772,8 +36786,28 @@ body.term-standalone .term-ov{display:block!important;position:fixed;inset:0}
    answers grow and shrink together, nothing else on the page moves */
 .term-scroll,.term-out,.term-line,.term-ps,.term-inp,.term-sug-item{font-size:var(--term-fs,13.5px)}
 /* R61 · a prompt deeper than half the row gives the field its own line */
-.term-row.live-wrapped .term-live{flex:0 0 100%;margin-top:1px}
+.term-row.live-wrapped .term-live{flex:0 0 100%;min-width:0;margin-top:1px}
+/* R76 · one line: the prompt is painted at the left, the command starts after it
+   on the same row and wraps by character at the right edge */
+.term-row{position:relative;flex-wrap:nowrap;align-items:flex-start}
+.term-row>.term-ps{position:absolute;left:0;top:0;z-index:2;pointer-events:none;white-space:pre}
+.term-row>.term-live{flex:1 1 100%;width:100%;max-width:100%;min-width:0;left:0}
+.term-live>.term-inp{text-indent:var(--ps-indent,0px)}
 .term-row.live-wrapped .term-ps{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0;flex:0 1 auto}
+/* R75 · a long command continues on the row below, and that row belongs to the
+   field alone: when the prompt chip sits in the same flex row, a `100%` basis
+   starts after the prompt (171px on a phone) and the text leaves the screen.
+   The widget is taken out of the flow for that case and only the field is
+   measured against the row. */
+.term-row.live-wrapped{flex-wrap:wrap}
+.term-row.live-wrapped .term-live{margin:0;padding:0}
+.term-row.live-wrapped .term-ps{flex:0 0 auto}
+/* R76 · the phone draws the same single line as the desktop: the prompt is the
+   painted strip at the left, the field covers the row and indents its first line
+   by the strip's width. Nothing is pushed to a second block any more. */
+:root .term-row>.term-ps{position:absolute!important;left:0!important;top:0!important}
+:root .term-row>.term-live{flex:1 1 100%!important;width:100%!important;max-width:100%!important;min-width:0!important}
+:root .term-live>.term-inp{width:100%!important;max-width:none!important}
 /* R58 · the console leading is ONE number now (--term-lh): the printed line, the
    prompt row, the caret, the logo spacing and the scroll walk all read it, so a
    font zoom moves the whole grid together. 16.81px -> 16.07px: a slight tighten,
@@ -41773,7 +41807,7 @@ input.inp,select.inp{height:32px}
                   <span class="lg-name"><?=htmlspecialchars(FM_PRODUCT_NAME)?></span><span class="lg-sep"> · </span><span class="lg-key">version</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_VERSION)?></span><span class="lg-sep"> · </span><span class="lg-key">build</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_RELEASE)?></span><span class="lg-sep"> · </span><span class="lg-key">since</span> <span class="lg-val"><?=htmlspecialchars(FM_PRODUCT_DATE)?></span><span class="lg-sep"> · </span><span class="lg-key"><?=htmlspecialchars(FM_PRODUCT_SYSTEM)?></span>
                   <span class="lg-sub"><span class="lg-key">cwd</span> <span class="lg-val" id="termWorkingDir"><?=htmlspecialchars($termTreeDir)?></span><span class="lg-sep"> · </span><span class="lg-key">host</span> <span class="lg-val"><?=htmlspecialchars($termHostLabel)?></span><span class="lg-sep"> · </span><span class="lg-key">user</span> <span class="lg-val"><?=htmlspecialchars($termUserLabel)?></span><span class="lg-sep"> · </span><span class="lg-key">link</span> <span class="lg-val" id="termConnBadge">ready</span></span>
                 </div>
-              <template id="termPromptTemplate"><div class="term-row" data-tab="__UID__"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><span class="term-live" id="termLive__UID__"><textarea class="term-inp" id="termInp__UID__" rows="1" wrap="soft" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"></textarea><span class="term-ghost term-ghost-tail" id="termGhost__UID__" aria-hidden="true"></span><span class="term-int-caret" id="termCaret__UID__" aria-hidden="true"></span></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
+              <template id="termPromptTemplate"><div class="term-row" data-tab="__UID__"><span class="term-ps"><span class="term-prompt-str"><?=htmlspecialchars($termUserLabel)?></span><span class="term-at">@</span><span class="term-host"><?=htmlspecialchars($termHostLabel)?></span><span class="term-dollar">:</span><span class="term-cwd"><?=htmlspecialchars($fm->getTerminalPromptPath())?></span><span class="term-dollar">$&#160;</span></span><span class="term-live" id="termLive__UID__"><span class="term-paint" id="termPaint__UID__" aria-hidden="true"></span><textarea class="term-inp" id="termInp__UID__" rows="1" wrap="soft" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Command"></textarea><span class="term-ghost term-ghost-tail" id="termGhost__UID__" aria-hidden="true"></span><span class="term-int-caret" id="termCaret__UID__" aria-hidden="true"></span></span></div><div class="term-suggest" id="termSug__UID__" style="display:none;bottom:100%;left:2px"></div></template>
             </div>
           </div>
         </div>
@@ -52371,6 +52405,9 @@ function termFieldLines(i){
   i.style.height=prev;
   return Math.max(1,Math.round(h/lh));
 }
+function lqPaint(live){
+  try{return live?live.querySelector('.term-paint'):null;}catch(err){return null;}
+}
 function adjustTermInputWidth(el){
   const i=el||termInput();
   if(!i)return;
@@ -52387,29 +52424,57 @@ function adjustTermInputWidth(el){
   const room=termRowRoom(i);
   const ps=row?row.querySelector('.term-ps'):null;
   const psW=ps?ps.getBoundingClientRect().width:0;
-  const rowW=row?row.clientWidth:room;
-  if(row)row.classList.toggle('live-wrapped',psW>Math.max(80,rowW*0.5));
-  const avail=row&&row.classList.contains('live-wrapped')?Math.max(160,rowW-2):room;
+  const rowW=row?row.clientWidth:Math.max(160,innerWidth-240);
+  /* R76 · there is no "shall it go to the next line" any more, because a shell
+     never asks that question. The field is always the full width of the row and
+     the prompt is painted over its first 171px; the command starts after it by
+     `text-indent` and continues at column 0 when it reaches the right edge. */
+  if(row)row.classList.remove('live-wrapped');
+  const indent=Math.max(0,Math.round(psW/gp)*gp);
+  if(row)row.style.setProperty('--ps-indent',indent+'px');
+  const avail=Math.max(160,rowW-(live?2:0));
   const want=Math.max(i.value.length,1)*gp;
   /* R67 · the box is a whole number of glyphs wide, and it never offers fewer
      glyphs than the command needs while the row can still take them: a box that
      is half a glyph too narrow wraps the last character onto a second line, and
      then no x can describe where the reader is. */
-  const availGlyphs=Math.max(1,Math.floor((avail-(live?2:0))/gp));
-  const roomGlyphs=Math.max(1,Math.floor(room/gp));
+  const availGlyphs=Math.max(1,Math.floor(avail/gp));
   const need=Math.max(i.value.length+1,1);
-  const glyphs=Math.max(Math.min(need,availGlyphs),Math.min(availGlyphs,Math.floor(availGlyphs/3)));
+  /* the box is the row, always: unwrapped text stays on one line until it meets
+     the right edge, then it breaks by character like a shell's, and the height
+     below grows with it */
+  const glyphs=Math.min(Math.max(need,availGlyphs),availGlyphs);
   const fw=Math.round(glyphs*gp);
-  if(live){live.style.width=(fw+2)+'px';live.style.maxWidth='100%';}
-  i.style.maxWidth=Math.round(Math.min(availGlyphs,roomGlyphs)*gp)+'px';
+  if(live){live.style.width='100%';live.style.maxWidth='100%';}
+  i.style.maxWidth='none';
   i.style.width=fw+'px';
   i.dataset.full=String(want);
+  /* the completion tail is painted by the same grid as the field: it starts where
+     the text ends, and the indent of the first line is not part of that grid */
+  if(g&&g.classList.contains('on')){g.style.textIndent='0px';}
   /* the box the typing happens in is as tall as the text inside it */
   if(live){
     const lh=parseFloat(getComputedStyle(i).lineHeight)||(termFontPx()*1.19)||16;
-    /* the box grows with the command up to eight lines; past that it scrolls
-       inside itself, so one enormous paste cannot push the prompt off screen */
-    const lines=Math.min(termFieldLines(i),8);
+    /* R76 · the box is exactly as tall as the painted command: no second opinion
+       from the field, whose own wrapping is not what the reader sees */
+    const paint=lqPaint(live);
+    if(paint){
+      const ph=Math.max(lh,Math.round(paint.getBoundingClientRect().height));
+      live.style.height=ph+'px';
+      i.style.height=ph+'px';
+      i.style.overflowY='hidden';
+      if(row)row.style.alignItems='flex-start';
+      termGhostPlace(i,gp);
+      return;
+    }
+    /* R76 · the height is counted on the field's own character grid - the same
+       arithmetic the caret walks - so the box is always exactly as tall as the
+       rows the text occupies. Measuring scrollHeight here read the PREVIOUS
+       height and cut the last row of a long command off the screen. */
+    const perRowH=Math.max(1,Math.floor((rowW-indent)/gp));
+    const gridRows=1+Math.max(0,Math.ceil((Math.max(i.value.length,1)-perRowH)/perRowH));
+    const measured=Math.max(1,Math.round((i.scrollHeight||lh)/lh));
+    const lines=Math.min(Math.max(gridRows,measured),8);
     const h=lines*lh;
     live.style.height=h+'px';
     i.style.height=h+'px';
@@ -54299,6 +54364,7 @@ function termBindTab(tab){
   /* a fresh row has no inline width yet: the field and its caret are laid out
      the moment the prompt exists, so the caret is on screen from the first frame */
   adjustTermInputWidth(inp);
+  if(typeof termPaintBind==='function')termPaintBind(inp);
   termCaretSync(inp);
   inp.addEventListener('blur',()=>setTimeout(termHideGhost,120));
   inp.addEventListener('focus',()=>{if(!tab.active)termTabSelect(tab.id);});
@@ -54355,6 +54421,86 @@ function termCaretMetrics(){
   root.style.setProperty('--caret-fbasc',fbA.toFixed(2)+'px');
   root.style.setProperty('--caret-fbdesc',fbD.toFixed(2)+'px');
 }
+/* R76 · a mirror of the field, used only to ask the browser where a character
+   lands. Same font, same width, same indent, invisible; nothing is drawn. */
+function termCaretMirror(inp){
+  if(!inp)return null;
+  const parent=inp.parentElement||document.body;
+  const m=document.createElement('div');
+  m.setAttribute('aria-hidden','true');
+  m.style.cssText='position:absolute;left:0;top:0;visibility:hidden;pointer-events:none;z-index:-1;'
+    +'margin:0;padding:0;border:0;box-sizing:border-box;overflow:visible';
+  parent.appendChild(m);
+  const cs=getComputedStyle(inp);
+  ['fontFamily','fontSize','fontWeight','fontStyle','fontVariant','letterSpacing','wordSpacing',
+   'lineHeight','whiteSpace','overflowWrap','wordBreak','textIndent','fontFeatureSettings',
+   'fontStretch','textTransform','tabSize'].forEach(k=>{try{m.style[k]=cs[k];}catch(e){}});
+  m.style.width=Math.max(1,Math.round(inp.getBoundingClientRect().width))+'px';
+  return m;
+}
+function termCaretPoint(inp,pos){
+  /* returns {x, y} of the caret inside the field, measured, not counted */
+  const m=termCaretMirror(inp);
+  if(!m)return null;
+  const v=String(inp.value||'');
+  m.textContent='';
+  m.appendChild(document.createTextNode(v.slice(0,Math.max(0,pos))));
+  const mark=document.createElement('span');
+  mark.textContent='\u200b';
+  m.appendChild(mark);
+  const mr=m.getBoundingClientRect(), kr=mark.getBoundingClientRect();
+  const out=(!mr||!kr)?null:{x:Math.round(kr.left-mr.left), y:Math.round(kr.top-mr.top)};
+  m.remove();
+  return out;
+}
+/* ══ R76 · the line as it is typed ═══════════════════════════════════════════
+   A textarea cannot show a command the way a shell does, so it no longer tries:
+   the characters are painted into `.term-paint`, which wraps by character at the
+   right edge and continues at column 0 - one line, one flow, nothing clipped. The
+   textarea stays under it as the thing that receives keys; it is written to on
+   every change and never read for layout.
+   The block the reader calls "the caret" is the terminal's own cursor, so it
+   always points at the gap between the painted characters. */
+function termPaintEl(inp){
+  return inp?inp.closest('.term-live')?.querySelector('.term-paint')||null:null;
+}
+function termPaintRender(inp){
+  const p=termPaintEl(inp);
+  if(!p)return;
+  const v=String(inp.value||'');
+  const last=(v.slice(-1)==='\n');
+  try{
+    const probe=document.querySelector('.term-line')||document.querySelector('.term-out');
+    let col=probe?getComputedStyle(probe).color:'';
+    if(!col||col==='rgba(0, 0, 0, 0)')col=getComputedStyle(document.documentElement).getPropertyValue('--t1')||'#e0e0e0';
+    if(p.dataset.ink!==col){p.style.color=col;p.dataset.ink=col;}
+  }catch(err){}
+  let selA=null,selB=null;
+  try{ if(document.activeElement===inp){selA=inp.selectionStart;selB=inp.selectionEnd;} }catch(err){}
+  if(!v.length){
+    p.innerHTML='<span class="tp-ch"> </span>';
+    return;
+  }
+  const parts=[];
+  for(let k=0;k<v.length;k++){
+    const ch=v.charAt(k);
+    let cls='tp-ch';
+    if(selA!=null&&selB!=null&&selB>selA&&k>=selA&&k<selB)cls+=' tp-sel';
+    parts.push('<span class="'+cls+'">'+(ch==='\n'?'\n':(ch===' '?'&#160;':esc(ch)))+'</span>');
+  }
+  if(last)parts.push('<span class="tp-ch"> </span>');
+  p.innerHTML=parts.join('');
+}
+/* the field takes the keys; the paint shows them */
+function termPaintBind(inp){
+  if(!inp||inp.__paintBound)return;
+  inp.__paintBound=true;
+  inp.classList.add('mp-hidden');
+  const upd=()=>{termPaintRender(inp);if(typeof termCaretSync==='function')termCaretSync(inp);};
+  ['input','keyup','click','select','selectstart','mouseup','focus','blur'].forEach(ev=>inp.addEventListener(ev,upd));
+  document.addEventListener('selectionchange',()=>{if(document.activeElement===inp)upd();});
+  termPaintRender(inp);
+}
 function termCaretSync(el){
   const inp=el||termInput(),c=termCaretEl(inp);
   if(!inp||!c)return;
@@ -54363,15 +54509,46 @@ function termCaretSync(el){
   let pos=0;
   try{pos=(inp.selectionStart==null?inp.value.length:inp.selectionStart)||0;}catch(err){pos=inp.value.length;}
   const fw=parseFloat(inp.style.width)||0;
-  /* R67 · a wrapped command paints its own text on several rows; a single block
-     caret cannot follow it, and it used to stand far to the right of the last
-     word on the first row. The field keeps its own blinking illusion instead. */
+  /* R76 · one line that wraps by character: the block caret follows the command
+     onto the next row the way a shell's cursor does, instead of disappearing. The
+     arithmetic is the field's own grid: the first row carries the prompt's indent,
+     every later row starts at column 0. */
   const lh=parseFloat(getComputedStyle(inp).lineHeight)||16;
-  if((inp.scrollHeight||0)>lh*1.5){c.classList.remove('on','blink');c.style.left='0px';return;}
-  const x=Math.max(pos,0)*gp;
-  /* scrollLeft keeps the tail of a long command in step with the field */
-  const edge=Math.max(fw-gp,0);
-  c.style.left=(fw>0?Math.min(x,edge)+ (inp.scrollLeft||0):x)+'px';
+  const rowW=Math.max(1,Math.round(fw||inp.clientWidth||1));
+  const indent=parseFloat(getComputedStyle(inp).textIndent)||0;
+  /* R76 · the caret is read from the painted characters themselves: the gap
+     before the character at the cursor is where a terminal puts its block, on
+     whatever row the browser really broke the text */
+  const paint=termPaintEl(inp);
+  let row=0,rowTop=null,x=0;
+  const els=paint?paint.children:null;
+  const at=Math.max(0,Math.min(pos,els?els.length-1:0));
+  if(els&&els.length){
+    const box=paint.getBoundingClientRect();
+    const ref=(pos<els.length?els[at]:els[els.length-1]).getBoundingClientRect();
+    const prev=pos>0&&els[pos-1]?els[pos-1].getBoundingClientRect():null;
+    if(pos>=els.length&&els[els.length-1].textContent==='\n'){
+      /* the line ends in a newline: the cursor goes to the row below */
+      rowTop=Math.round(ref.bottom-box.top);
+      x=0;
+    }else if(pos<els.length){
+      const fr=els[pos].getBoundingClientRect();
+      const fcs=getComputedStyle(els[pos]);
+      row=Math.round((fr.top-box.top)/lh);
+      /* the box is placed against the row the browser really broke the
+         character onto, so it lands on the same pixels as the ink beside it */
+      rowTop=Math.round(fr.top-box.top+((parseFloat(fcs.lineHeight)||lh)-lh)/2);
+      x=Math.round(fr.left-box.left);
+    }else{
+      const rcs=getComputedStyle(els[els.length-1]);
+      row=Math.round((ref.top-box.top)/lh);
+      rowTop=Math.round(ref.top-box.top+((parseFloat(rcs.lineHeight)||lh)-lh)/2);
+      x=Math.round(ref.right-box.left);
+    }
+  }else{
+    x=parseFloat(getComputedStyle(inp).textIndent)||0;
+  }
+  c.style.left=Math.round(x)+'px';
   /* R69 · the block sits on the letters, not near them: its top is the ink top
      of a capital, computed from the field's own font metrics (half-leading,
      font ascent, cap height) and its height is exactly that cap height. The
@@ -54393,7 +54570,13 @@ function termCaretSync(el){
     const ir=inp.getBoundingClientRect();
     const half=(lh-(fbA+fbD))/2;
     c.style.height=ink.toFixed(2)+'px';
-    c.style.top=(ir.top-base.top+half+(fbA-inkAsc)-1).toFixed(2)+'px';
+    if(rowTop!=null){
+      /* R76 · measured: the block's foot lands on the baseline of the row the
+         painted character sits on, so it never drifts lower on row 2 and 3 */
+      c.style.top=(ir.top-base.top+rowTop+half+((fbA-inkAsc)-1)).toFixed(2)+'px';
+    }else{
+      c.style.top=(ir.top-base.top+row*lh+half+(fbA-inkAsc)-1).toFixed(2)+'px';
+    }
     c.style.transform='none';
   })();
   c.classList.add('on');
