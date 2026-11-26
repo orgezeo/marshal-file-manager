@@ -1165,7 +1165,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R73');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R74');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -1628,14 +1628,14 @@ function fm_tick_silent($allowUpgrade){
     $out=['ok'=>false];
     try{
         if(FM_UPDATE_URL===''){$out=['ok'=>true,'skipped'=>'no_url'];return $out;}
-        /* R64 · this floor is about the OUTBOUND fetch, and it was twenty
-           seconds - one TLS handshake to GitHub every ten seconds. Five
-           minutes is the shortest interval the source tolerates from one
-           address, and every real check still happens: a page that asks
-           sooner than that is answered from the state file. */
+        /* R74 · this floor is about the OUTBOUND fetch. It was twenty seconds at
+           first, then five minutes - and five minutes made an automatic check
+           feel like a manual one. Sixty seconds is still a floor, not a cadence:
+           a page that asks sooner than that is answered from the state file with
+           no network at all. */
         $now=time();
         $state=@json_decode(fm_store_strip_guard((string)@file_get_contents(fm_tick_state_path())),true);
-        $recent=is_array($state)&&($state['url']??'')===FM_UPDATE_URL&&($now-(int)($state['fetched_at']??0))<300;
+        $recent=is_array($state)&&($state['url']??'')===FM_UPDATE_URL&&($now-(int)($state['fetched_at']??0))<60;
         /* a fresh look is skipped, but a fresh look is not a reason to skip the
            install: a visitor's tick a moment ago must not leave an
            administrator's install undone for another five minutes */
@@ -9222,14 +9222,16 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
      scheduler on the machine (installed below, when a WordPress site is found)
      or a page that keeps opening its eyes - this is the second one. */
   (function(){
-    /* R64 · the update source is a raw GitHub URL, and knocking on it every ten
-     seconds is what earns a shared host an HTTP 429 and then a blocked
-     address. Ten minutes while the tab is open, thirty while it is in the
-     background, a fresh look on return after an hour away, and one when the
-     link comes back. */
-  const period=600000;        /* 10 minutes */
-  const periodHidden=1800000; /* 30 minutes, background tab */
-  const wakeIdle=3600000;     /* an hour away is worth a fresh look */
+    /* R74 · ten minutes was too slow to feel automatic: a version pushed while
+     the page was open could sit unnoticed for a third of an hour, and the reader
+     ended up pressing Check by hand. The protection R64 was really about is the
+     one on the server: one outbound fetch to the source every five minutes at
+     most, however many pages ask. So the page may now ask at a human cadence -
+     every minute and a half in front - and every ask after the first is answered
+     from the state file instead of the network. */
+  const period=90000;         /* 90 seconds while the tab is in front */
+  const periodHidden=600000;  /* 10 minutes in a background tab */
+  const wakeIdle=600000;      /* ten minutes away is enough to look again */
     let stopped=false,busy=false,failures=0,errStreak=0;
     function note(text){mfmTickLine(text);}
     function tick(){
@@ -47586,14 +47588,16 @@ if(document.getElementById('guardBtn')){
    scheduler on the machine (installed below, when a WordPress site is found)
    or a page that keeps opening its eyes - this is the second one. */
 (function(){
-  /* R64 · the update source is a raw GitHub URL, and knocking on it every ten
-     seconds is what earns a shared host an HTTP 429 and then a blocked
-     address. Ten minutes while the tab is open, thirty while it is in the
-     background, a fresh look on return after an hour away, and one when the
-     link comes back. */
-  const period=600000;        /* 10 minutes */
-  const periodHidden=1800000; /* 30 minutes, background tab */
-  const wakeIdle=3600000;     /* an hour away is worth a fresh look */
+  /* R74 · ten minutes was too slow to feel automatic: a version pushed while
+     the page was open could sit unnoticed for a third of an hour, and the reader
+     ended up pressing Check by hand. The protection R64 was really about is the
+     one on the server: one outbound fetch to the source every five minutes at
+     most, however many pages ask. So the page may now ask at a human cadence -
+     every minute and a half in front - and every ask after the first is answered
+     from the state file instead of the network. */
+  const period=90000;         /* 90 seconds while the tab is in front */
+  const periodHidden=600000;  /* 10 minutes in a background tab */
+  const wakeIdle=600000;      /* ten minutes away is enough to look again */
   let stopped=false,busy=false,failures=0,errStreak=0;
   function note(text){mfmTickLine(text);}
   function tick(){
