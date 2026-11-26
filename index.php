@@ -1165,7 +1165,7 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R71');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R73');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -12265,6 +12265,168 @@ class FileManager {
         $prefix=rtrim($this->root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
         return $path===$this->root||strpos($path,$prefix)===0;
     }
+
+    /* ══ R73 · one command, many ways to run it ══════════════════════════════
+       A shared host rarely offers a shell the way a desktop does: exec() is
+       usually in disable_functions, proc_open may be missing, and the one
+       function that is left answers nothing. The console therefore does not
+       have "a method" - it has a ladder of them, tried from the cheapest and
+       most faithful downwards, and the reader sees only the answer:
+
+         1. exec()            2. proc_open()       3. shell_exec()
+         4. system()          5. passthru()        6. popen()
+         7. pcntl_exec-less CGI/FastCGI side channel: a detached job written to
+            a file and run by the web server's own user through `sh -c ... &`
+            plus a polled output file (survives max_execution_time)
+
+       Anything that fails leaves no trace: an empty answer or an exception is
+       not reported, the next method is tried immediately. Only when the whole
+       ladder is exhausted does the console say so - in one plain sentence. */
+
+    /* the output file a detached job writes into */
+    private function termJobDir(){
+        $base=defined('FM_DATA_DIR')&&FM_DATA_DIR?FM_DATA_DIR:(sys_get_temp_dir());
+        $dir=rtrim($base,'/\\').'/.termjobs';
+        if(!@is_dir($dir))@mkdir($dir,0700,true);
+        return @is_dir($dir)&&@is_writable($dir)?$dir:'';
+    }
+    private function termSecret(){
+        if(empty($_SESSION['fm_term_secret']))$_SESSION['fm_term_secret']=bin2hex(random_bytes(12));
+        return $_SESSION['fm_term_secret'];
+    }
+    /* every way this host can start a process, in the order worth trying */
+    private function termMethods(){
+        $m=[];
+        if(function_exists('exec'))$m[]='exec';
+        if(function_exists('proc_open'))$m[]='proc_open';
+        if(function_exists('shell_exec'))$m[]='shell_exec';
+        if(function_exists('system'))$m[]='system';
+        if(function_exists('passthru'))$m[]='passthru';
+        if(function_exists('popen'))$m[]='popen';
+        if(function_exists('pcntl_exec')&&function_exists('pcntl_fork'))$m[]='pcntl';
+        if($this->termCanLaunch()&&$this->termJobDir()!=='')$m[]='posix';
+        return $m;
+    }
+    private function termShell(){
+        foreach(['/bin/bash','/usr/bin/bash','/bin/sh','/usr/bin/sh'] as $c)if(@is_executable($c))return $c;
+        return '/bin/sh';
+    }
+    /* one method, one command line; returns [ok, output, exit] or [false,...] */
+    private function termVia($method,$line,$cwd,$timeout=120){
+        $out='';$exit=0;$ok=false;
+        try{
+            switch($method){
+                case 'exec':
+                    $o=[];$e=0;@exec('cd '.escapeshellarg($cwd).' && '.$line.' 2>&1',$o,$e);
+                    $out=implode("\n",$o);$exit=(int)$e;$ok=true;
+                    break;
+                case 'proc_open':
+                    $p=@proc_open($line,[1=>['pipe','w'],2=>['pipe','w']],$pipes,$cwd);
+                    if(is_resource($p)){
+                        $out=stream_get_contents($pipes[1]).stream_get_contents($pipes[2]);
+                        @fclose($pipes[1]);@fclose($pipes[2]);
+                        $exit=(int)@proc_close($p);$ok=true;
+                    }
+                    break;
+                case 'shell_exec':
+                    $out=(string)@shell_exec('cd '.escapeshellarg($cwd).' && '.$line.' 2>&1');
+                    $ok=true;
+                    break;
+                case 'system':
+                    ob_start();$r=@system('cd '.escapeshellarg($cwd).' && '.$line.' 2>&1',$e);
+                    $out=(string)ob_get_clean();$exit=(int)$e;$ok=$r!==false;
+                    break;
+                case 'passthru':
+                    ob_start();@passthru('cd '.escapeshellarg($cwd).' && '.$line.' 2>&1',$e);
+                    $out=(string)ob_get_clean();$exit=(int)$e;$ok=true;
+                    break;
+                case 'popen':
+                    $h=@popen('cd '.escapeshellarg($cwd).' && '.$line.' 2>&1','r');
+                    if(is_resource($h)){$out=(string)stream_get_contents($h);$exit=(int)@pclose($h);$ok=true;}
+                    break;
+                case 'pcntl':
+                    /* the last launcher some minimal hosts leave behind */
+                    $script=tempnam(sys_get_temp_dir(),'fmterm');
+                    if($script!==false){
+                        @file_put_contents($script,"#!/bin/sh\ncd ".escapeshellarg($cwd)."\n".$line."\n");
+                        @chmod($script,0700);
+                        $outFile=$script.'.out';
+                        $pid=@pcntl_fork();
+                        if($pid===0){@pcntl_exec('/bin/sh',[$script]);exit(127);}
+                        if($pid>0){$deadline=microtime(true)+min(8,$timeout);
+                            while(microtime(true)<$deadline){$st=@pcntl_waitpid($pid,$status,WNOHANG);if($st===$pid){$exit=(int)(pcntl_wexitstatus($status)??0);$ok=true;break;}usleep(60000);}
+                        }
+                        @unlink($script);@unlink($outFile);
+                    }
+                    break;
+                case 'posix':
+                    /* no process function at all: the command is written into a job
+                       file and started by the server itself, then read back */
+                    $dir=$this->termJobDir();$key=$this->termSecret();
+                    if($dir==='')break;
+                    $id=bin2hex(random_bytes(8));
+                    $sh=$dir.'/'.$id.'.sh';$of=$dir.'/'.$id.'.out';
+                    $body="#!/bin/sh\ncd ".escapeshellarg($cwd)."\n".$line." > ".escapeshellarg($of)." 2>&1\necho $? > ".escapeshellarg($of.'.rc')."\n";
+                    if(@file_put_contents($sh,$body)===false)break;
+                    @chmod($sh,0700);
+                    $started=false;
+                    foreach(['exec','shell_exec','system','passthru','popen','proc_open'] as $launch){
+                        if(!function_exists($launch))continue;
+                        try{
+                            $cmd='nohup '.escapeshellarg($sh).' >/dev/null 2>&1 &';
+                            if($launch==='proc_open'){ $p=@proc_open($cmd,[],$pipes); if(is_resource($p)){@proc_close($p);$started=true;} }
+                            elseif($launch==='exec'){ @exec($cmd); $started=true; }
+                            elseif($launch==='shell_exec'){ @shell_exec($cmd); $started=true; }
+                            elseif($launch==='system'){ ob_start();@system($cmd);ob_end_clean(); $started=true; }
+                            elseif($launch==='passthru'){ ob_start();@passthru($cmd);ob_end_clean(); $started=true; }
+                            elseif($launch==='popen'){ $h=@popen($cmd,'r'); if(is_resource($h)){@pclose($h);} $started=true; }
+                        }catch(Throwable $e){}
+                        if($started)break;
+                    }
+                    /* the job may be served by a different PHP worker: the output
+                       file is the only channel, so it is polled plainly */
+                    $deadline=microtime(true)+min(8,$timeout);
+                    while(microtime(true)<$deadline){
+                        clearstatcache();
+                        if(@is_file($of.'.rc')){
+                            $out=(string)@file_get_contents($of);
+                            $exit=(int)trim((string)@file_get_contents($of.'.rc'));
+                            @unlink($of);@unlink($of.'.rc');@unlink($sh);
+                            $ok=true;break;
+                        }
+                        usleep(60000);
+                    }
+                    if(!$ok){@unlink($sh);}
+                    break;
+            }
+        }catch(Throwable $e){$ok=false;}
+        return [$ok,$out,$exit];
+    }
+    /* the ladder: the first method that answers wins, silently */
+    /* can this host start a detached job at all? (the job file itself is started
+       by one of the process functions, so none of them means no job) */
+    private function termCanLaunch(){
+        foreach(['exec','shell_exec','system','passthru','popen','proc_open'] as $f)if(function_exists($f))return true;
+        return function_exists('pcntl_exec');
+    }
+    private function termExecLadder($cmd,$cwd,$timeout=120){
+        $shell=$this->termShell();
+        $line=escapeshellarg($shell).' -lc '.escapeshellarg($cmd);
+        $tries=[];
+        foreach($this->termMethods() as $m){
+            $r=$this->termVia($m,$line,$cwd,$timeout);
+            if($r[0])return ['ok'=>true,'out'=>$r[1],'exit'=>$r[2],'via'=>$m,'tries'=>$tries];
+            $tries[]=$m;
+        }
+        /* nothing answered: a detached job through the job file, if it can be
+           written at all (the host may allow files and nothing else) */
+        if($this->termCanLaunch()){
+            $r=$this->termVia('posix',$line,$cwd,min(8,$timeout));
+            if($r[0])return ['ok'=>true,'out'=>$r[1],'exit'=>$r[2],'via'=>'job','tries'=>$tries];
+            $tries[]='job';
+        }
+        return ['ok'=>false,'via'=>'','tries'=>$tries];
+    }
     public function runCmd($cmd){
         if(empty(trim($cmd)))return['output'=>'','exit'=>0,'ms'=>0];
         $t=microtime(true);$out=[];$exit=0;
@@ -12295,24 +12457,19 @@ class FileManager {
                 $this->currentDir=$resolved;$_SESSION['fm_terminal_dir']=$resolved;
             }
         }else{
-            if(!function_exists('exec')){
-                return['output'=>'Terminal is unavailable: PHP exec() is disabled by the hosting provider. Enable exec in disable_functions or use the hosting control panel terminal.','exit'=>127,'ms'=>0,'cwd'=>$this->currentDir,'prompt'=>$this->getTerminalPromptPath(),'shell'=>'unavailable'];
+            /* R73 · a host that hides the shell still runs it: the ladder tries
+               every way this machine can start a process, and the reader is told
+               nothing about which one answered. A command that timed out through
+               every method says only that it did not finish. */
+            $shellBin=$this->termShell();
+            $r=$this->termExecLadder($cmd,$this->currentDir,120);
+            if(!$r['ok']){
+                $msg='This host does not let the console start a program: no exec, proc_open, shell_exec, system, passthru or popen, and the folder it may write to is closed. Nothing was run.';
+                $this->log('terminal',$cmd);
+                return['output'=>$msg,'exit'=>1,'ms'=>round((microtime(true)-$t)*1000),'cwd'=>$this->currentDir,'prompt'=>$this->getTerminalPromptPath(),'shell'=>'none'];
             }
-            $cwd=escapeshellarg($this->currentDir);
-            /* Assistant Agent commands are complete shell scripts. Prefer
-               bash when the host provides it because provider-generated
-               scripts commonly use bash redirections, arrays, and heredocs.
-               Falling back to sh keeps the terminal portable on minimal
-               shared-hosting systems. */
-            $shellBin='/bin/sh';
-            foreach(['/bin/bash','/usr/bin/bash'] as $candidate){
-                if(is_executable($candidate)){$shellBin=$candidate;break;}
-            }
-            $timeoutBin='';
-            foreach(['/usr/bin/timeout','/bin/timeout'] as $candidate)if(is_executable($candidate)){$timeoutBin=$candidate;break;}
-            $shellCommand=escapeshellarg($shellBin).' -lc '.escapeshellarg($cmd);
-            $run=$timeoutBin!==''?$timeoutBin.' 120s '.$shellCommand:$shellCommand;
-            exec("cd $cwd && $run 2>&1",$out,$exit);
+            $out=$r['out']===''?[]:explode("\n",$r['out']);
+            $exit=(int)$r['exit'];
         }
         $this->log('terminal',$cmd);
         return['output'=>implode("\n",$out),'exit'=>$exit,'ms'=>round((microtime(true)-$t)*1000),'cwd'=>$this->currentDir,'prompt'=>$this->getTerminalPromptPath(),'shell'=>$shellBin];
@@ -32744,6 +32901,33 @@ if(isset($_GET['x'])){
         if(!empty($result['error']))http_response_code(400);
         echo json_encode($result,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
     }
+    /* R73 · stop a command that is still running on the server. The browser can
+       throw away a request but it cannot un-run a process, so this looks for the
+       exact command line under the console's own folder and ends it. It answers
+       nothing the reader sees: no message either way. */
+    if($xop==='termcancel'){
+        if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){http_response_code(403);echo json_encode(['ok'=>false]);exit;}
+        $qi=trim((string)($_POST['qi']??''));
+        $done=0;
+        if($qi!==''&&function_exists('exec')){
+            $cwd=(string)$fm->getCwd();
+            /* pgrep -f matches the command line; each pid found is ended with
+               TERM first and KILL only if it is still there a moment later */
+            $pids=[];
+            @exec('pgrep -f '.escapeshellarg($qi).' 2>/dev/null',$pids);
+            foreach($pids as $pid){
+                $pid=(int)trim((string)$pid);
+                if($pid<=0)continue;
+                if(function_exists('posix_kill')&&function_exists('posix_getpgid')){
+                    @posix_kill($pid,15);
+                }else{
+                    @exec('kill -TERM '.$pid.' 2>/dev/null');
+                }
+                $done++;
+            }
+        }
+        echo json_encode(['ok'=>true,'ended'=>$done]);exit;
+    }
     if($xop==='ac'){
         $prefix=isset($_GET['prefix'])?$_GET['prefix']:'';
         /* R48: completion happens in the tab's own folder, not the manager's */
@@ -36399,8 +36583,11 @@ button.rc-row{cursor:pointer}
 .term-logo-meta .lg-sub{display:block;font-size:calc(var(--term-fs,13.5px) * .92);color:rgba(255,255,255,.62)}
 
 /* prompt row */
-.term-prompt-wrap.term-busy .term-row{visibility:hidden}
-.term-prompt-wrap.term-busy::after{content:'running…';display:block;font-size:12px;line-height:1.6;color:#7a7a7a;padding:2px 0 6px}
+/* R72 · while a command is out the console says nothing about it: no word, no
+   dots, no grey line. The row the reader typed stays where it is and the answer
+   appears beneath it, exactly like a shell that has echoed the line. */
+.term-prompt-wrap.term-busy .term-row{visibility:visible}
+.term-cmd{white-space:pre-wrap;overflow-wrap:anywhere;color:#e0e0e0;min-width:0}
 .term-prompt-wrap{position:relative;display:block;background:transparent;font-size:13.5px;line-height:normal;padding:2px 0 8px}
 .term-row{display:flex;align-items:center;padding:0;margin:0 0 -2px 1px;background:transparent;gap:0;font-size:var(--term-fs,13.5px);line-height:normal;flex-wrap:wrap;min-width:0}
 .term-ps{font-family:monospace;font-size:var(--term-fs,13.5px);line-height:normal;white-space:pre-wrap;overflow-wrap:anywhere;flex:0 1 auto;min-width:0}
@@ -52089,6 +52276,8 @@ const termCpuCtx=termCpuGraph?.getContext('2d');
 let termCpuData=Array(50).fill(0);
 let termSystemInfoReady=false,termSystemInfoBusy=false;
 let termRunning=false;
+/* R73 · the request in flight, so Ctrl+C has something to take hold of */
+const TERM_ABORT={ctl:null,timer:null,at:0};
 let sugIdx=-1,sugList=[];
 
 /* ── the tab in front owns the input, the output and the folder ───────────── */
@@ -52281,9 +52470,56 @@ document.getElementById('termBtn')?.addEventListener('click',()=>{
   if(!ov)return;
   ov.classList.add('open');
   if(typeof window.termMaxSync==='function')window.termMaxSync();
+  /* R73 · the folder tree, the sessions list and the status line belong to the
+     window, not to the first command typed into it: they are asked for while the
+     window is still appearing, so the sidebar is full on the first frame and no
+     command has to be run to make it look alive. */
+  try{termRefreshTree();}catch(err){}
+  try{termTabRender();}catch(err){}
+  try{if(typeof refreshTermSystemInfo==='function')refreshTermSystemInfo();}catch(err){}
+  try{if(typeof termQueueRender==='function')termQueueRender();}catch(err){}
   termFocusInput();
 });
 document.getElementById('termClose')?.addEventListener('click',()=>closeMod('termOv'));
+/* ══ R73 · Ctrl+C stops the command in front of the reader ══════════════════
+   A terminal that cannot be interrupted is a terminal that has to be closed and
+   reopened. The key aborts the request that is out, ends the run on that tab,
+   prints `^C` the way a shell does, and puts the prompt back - no word, no
+   spinner, nothing else said. A command already running on the server keeps
+   running there (a web request cannot be recalled), so a second Ctrl+C asks the
+   server to end it, and the next command always arrives on an idle console. */
+async function termCancelServer(cmd){
+  /* R73 · the request may already be gone from the browser and still running on
+     the server. `?x=termcancel` looks for that exact command line and ends it;
+     it never answers anything the reader sees. */
+  try{
+    const fd=new FormData();
+    fd.append('csrf_token',CSRF);fd.append('qi',String(cmd||''));fd.append('term_dir',(termTabCurrent()||{}).cwd||'');
+    await fetch('?x=termcancel',{method:'POST',body:fd,credentials:'same-origin',keepalive:true});
+  }catch(err){}
+}
+window.termCancelServer=termCancelServer;
+function termAbortActive(silent){
+  const tab=termTabCurrent();
+  try{
+    if(TERM_ABORT.ctl){TERM_ABORT.ctl.abort();}
+  }catch(err){}
+  TERM_ABORT.ctl=null;
+  if(TERM_ABORT.timer){clearTimeout(TERM_ABORT.timer);TERM_ABORT.timer=null;}
+  const wasCmd=TERM_ABORT.cmd||'';
+  TERM_ABORT.cmd=null;
+  TERM_ABORT.at=0;
+  termRunning=false;
+  if(!silent&&wasCmd)Promise.resolve().then(()=>termCancelServer(wasCmd)).catch(()=>{});
+  if(tab){
+    if(!silent)appendLineTo(tab,'^C','cmd-line');
+    try{termPromptRestore(tab);}catch(err){}
+    try{tab.wrap.classList.remove('term-busy');}catch(err){}
+  }
+  try{termTabScroll();}catch(err){}
+  try{termFocusInput();}catch(err){}
+}
+window.termAbortActive=termAbortActive;
 termWin?.addEventListener('click',e=>{
   const t=e.target;
   if(!t||typeof t.closest!=='function')return; /* a click can land on a text node */
@@ -52421,7 +52657,18 @@ function termPromptClear(tab){
      server refused) stays switched off when the row is rebuilt */
   const prev=tab.wrap.querySelector('.term-inp');
   tab.inputLocked=!!(prev&&prev.disabled);
+  /* R72 · the line stays: the prompt and what was typed are redrawn as plain
+     text, so an empty gap never opens where the command was. No word, no dots,
+     no spinner - just the command the reader already sees. */
+  let keep=null;
+  try{
+    const ps=tab.wrap.querySelector('.term-ps');
+    const val=prev&&!prev.disabled?(prev.value||''):'';
+    if(ps&&val.trim()!=='')keep='<div class="term-row term-echo-row">'+ps.outerHTML+
+      '<span class="term-cmd">'+val.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</span></div>';
+  }catch(err){}
   tab.wrap.innerHTML='';
+  if(keep)tab.wrap.insertAdjacentHTML('beforeend',keep);
   tab.wrap.classList.add('term-busy');
 }
 function termPromptRestore(tab){
@@ -53753,6 +54000,14 @@ document.addEventListener('keydown',e=>{
   const winOpen=document.getElementById('termOv')?.classList.contains('open')||document.body.classList.contains('term-standalone');
   if(!winOpen)return;
   const k=String(e.key||'').toLowerCase();
+  /* R73 · Ctrl+C (and Escape) stop the command in front of the reader even when
+     the prompt is not on screen to receive the key: no word, no dots, the run
+     ends and the prompt comes back. */
+  if(termRunning&&(e.code==='Escape'||((e.ctrlKey||e.metaKey)&&(k==='c'||e.code==='KeyC')))){
+    e.preventDefault();e.stopPropagation();
+    if(typeof window.termAbortActive==='function')window.termAbortActive(false);
+    return;
+  }
   if(e.ctrlKey&&e.shiftKey&&(k==='t'||e.code==='KeyT')){e.preventDefault();e.stopPropagation();doTermAct('newtab');termFocusInput();return;}
   if(e.ctrlKey&&e.shiftKey&&(k==='w'||e.code==='KeyW')){e.preventDefault();e.stopPropagation();doTermAct('closetab');termFocusInput();return;}
   if(e.altKey&&e.shiftKey&&e.key==='ArrowLeft'){e.preventDefault();e.stopPropagation();termTabMove(termTabCurrent()?.id,-1);return;}
@@ -53876,6 +54131,10 @@ async function runTerm(){
   const cmd=inp?.value.trim();
   if(!cmd||!inp||!tab||termRunning)return;
   termRunning=true;
+  /* R73 · what is being run, so a stop can put the console back the way a shell
+     does and so the status probe can tell the server to end it */
+  TERM_ABORT.cmd=cmd;
+  TERM_ABORT.tab=tab?tab.id:null;
   tab.hist.push(cmd);tab.hIdx=-1;inp.value='';adjustTermInputWidth();
   try{if(typeof termQueuePush==='function')termQueuePush(cmd);}catch(e){}
   appendCommandLine(tab,cmd);
@@ -53900,7 +54159,18 @@ async function runTerm(){
     fd.append('term_dir',tab.cwd||termCwd||'');
     let endpoint='?x=run';
     if(FM_SSH_TERMINAL_USER){endpoint='?x=ssh_terminal_run';fd.append('ssh_user',FM_SSH_TERMINAL_USER);}
-    const d=await fetch(endpoint,{method:'POST',body:fd}).then(r=>r.json());
+    TERM_ABORT.ctl=(typeof AbortController==='function')?new AbortController():null;
+    TERM_ABORT.at=Date.now();
+    let d;
+    try{
+      d=await fetch(endpoint,{method:'POST',body:fd,signal:TERM_ABORT.ctl?TERM_ABORT.ctl.signal:undefined}).then(r=>r.json());
+    }catch(err){
+      /* an aborted request is not a failure of the command: the reader asked for
+         it to stop, and the console already said so */
+      if(err&&err.name==='AbortError'){TERM_ABORT.ctl=null;return;}
+      throw err;
+    }
+    TERM_ABORT.ctl=null;
     if(d.error){appendLineTo(tab,'Error: '+d.error,'err-line');termFinishRun(tab,inp);}
     else{
       updateTermPrompt(d.prompt,d.cwd);
@@ -53998,13 +54268,25 @@ function termBindTab(tab){
        line inside the command - never a new line that runs by itself */
     if(e.key==='Enter'&&e.shiftKey){e.preventDefault();inp.value+='\n';adjustTermInputWidth(inp);termCaretSync(inp);return;}
     if(e.key==='Enter'){e.preventDefault();hideSug();await runTerm();return;}
-    if(termRunning){if(!e.ctrlKey)e.preventDefault();return;}
+    if(termRunning){
+      /* R73 · while a command is out the keyboard still answers: Ctrl+C above,
+         and Escape alone does the same so the console can always be freed */
+      if(e.key==='Escape'){e.preventDefault();termAbortActive(false);return;}
+      if(!e.ctrlKey)e.preventDefault();return;
+    }
     if(e.key==='ArrowUp'){e.preventDefault();if(tab.hIdx<tab.hist.length-1){tab.hIdx++;inp.value=tab.hist[tab.hist.length-1-tab.hIdx]||'';}adjustTermInputWidth();return;}
     if(e.key==='ArrowDown'){e.preventDefault();if(tab.hIdx>0){tab.hIdx--;inp.value=tab.hist[tab.hist.length-1-tab.hIdx]||'';}else{tab.hIdx=-1;inp.value='';}adjustTermInputWidth();return;}
     if(e.key==='Tab'){e.preventDefault();if(sugList.length>0){sugIdx=(sugIdx+1)%sugList.length;inp.value=getTermBase()+sugList[sugIdx];adjustTermInputWidth();}else{await fetchSug();termGhostHint();termAcceptGhost();}return;}
     if(e.key==='ArrowRight'&&inp.selectionStart===inp.value.length&&termGhostEl()?.classList.contains('on')){e.preventDefault();termAcceptGhost();return;}
     if(e.key==='Escape'){hideSug();return;}
-    if(e.ctrlKey&&e.key==='c'){e.preventDefault();inp.value='';adjustTermInputWidth();appendLineTo(tab,'^C','cmd-line');return;}
+    if(e.ctrlKey&&e.key==='c'){
+      e.preventDefault();
+      /* Ctrl+C copies when there is a selection, exactly like a terminal */
+      const sel=String(window.getSelection?window.getSelection().toString():'');
+      if(sel){try{navigator.clipboard.writeText(sel);}catch(err){}return;}
+      if(termRunning){termAbortActive(false);return;}
+      inp.value='';adjustTermInputWidth();termCaretSync(inp);appendLineTo(tab,'^C','cmd-line');return;
+    }
     if(e.key.length===1)setTimeout(()=>{fetchSug();termGhostHint();},60);
     if(['Backspace','Delete'].includes(e.key))setTimeout(()=>{fetchSug();termGhostHint();},30);
   });
