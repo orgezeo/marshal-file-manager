@@ -546,6 +546,194 @@ function fm_theme_packs(){return [
     'kali'  =>['name'=>'Kali Linux','author'=>'mfm'],
     'kalil' =>['name'=>'Kali Linux Light','author'=>'mfm']];}
 function fm_theme_allowed($t){return in_array($t,['light','dark','win11d','kalil'],true)||isset(fm_theme_packs()[$t]);}
+/* ══════════════════════════════════════════════════════════════════════════
+   R79 · ICON PACKS (Windows 11 files/folders, MobaXterm terminal glyphs)
+   ──────────────────────────────────────────────────────────────────────────
+   Two archives are the source of truth for the icons drawn in the file list and
+   in the console window. Each pack is unpacked once into its own folder beside
+   this file (`w11i/` and `term/`), the archive is then deleted, and every icon
+   the page wants is read from that folder. If something removes the folder, the
+   first icon the page asks for brings it back: the zip is downloaded again, the
+   pack is restored, the zip is deleted again. Restores are spaced: never more
+   often than once every 30 seconds, however often the icons disappear.
+   The browser keeps its own copy of the icons it has already seen (localStorage),
+   so the moment a pack is being restored nobody waits for a download. */
+
+if(!defined('FM_ICON_ZIP_W11I')) define('FM_ICON_ZIP_W11I','https://github.com/orgezeo/marshal-file-manager/raw/refs/heads/main/icons/w11i/w11i.zip');
+if(!defined('FM_ICON_ZIP_TERM')) define('FM_ICON_ZIP_TERM','https://github.com/orgezeo/marshal-file-manager/raw/refs/heads/main/icons/term/term.zip');
+
+/* one download, the same way the terminal font is fetched */
+function fm_http_get($url,$timeout=25){
+    if(function_exists('curl_init')){
+        $ch=curl_init($url);
+        curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_MAXREDIRS=>4,
+            CURLOPT_CONNECTTIMEOUT=>8,CURLOPT_TIMEOUT=>$timeout,CURLOPT_SSL_VERIFYPEER=>true,
+            CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,CURLOPT_USERAGENT=>'MarshalFM-Icons/1.0']);
+        $data=curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
+        return ($code>=200&&$code<400&&is_string($data))?$data:false;
+    }
+    $ctx=stream_context_create(['http'=>['timeout'=>$timeout,'header'=>"User-Agent: MarshalFM-Icons/1.0\r\n"],
+        'https'=>['timeout'=>$timeout]]);
+    $data=@file_get_contents($url,false,$ctx);
+    return is_string($data)?$data:false;
+}
+/* a tiny zip reader: entries, their names and their bytes. Compressed (deflate)
+   and stored entries are both handled, which is what both packs use. */
+function fm_zip_entries($raw){
+    $out=[];
+    if(!is_string($raw)||strlen($raw)<22||substr($raw,0,2)!=='PK')return $out;
+    $len=strlen($raw);$pos=0;
+    while($pos<$len-4){
+        $sig=substr($raw,$pos,4);
+        if($sig==="PK\x03\x04"){
+            $h=unpack('vver/vflags/vmethod/vmtime/vmdate/Vcrc/Vcsize/Vsize/vnlen/vxlen',$raw,$pos+4);
+            if(!$h)break;
+            $name=substr($raw,$pos+30,$h['nlen']);
+            $start=$pos+30+$h['nlen']+$h['xlen'];
+            $csize=$h['csize'];$size=$h['size'];
+            if($h['flags']&0x08){
+                /* sizes in a data descriptor: walk to the next signature */
+                $next=strpos($raw,"PK\x03\x04",$start);
+                $next2=strpos($raw,"PK\x01\x02",$start);
+                $end=$next===false?$len:min($next,$next2===false?$len:$next2);
+                $csize=$end-$start;
+            }
+            $data=substr($raw,$start,$csize);
+            if($h['method']===8)$data=@gzinflate($data);
+            elseif($h['method']!==0)$data=false;
+            if(is_string($data)&&$data!==''){
+                $name=str_replace('\\','/',trim($name,'/'));
+                if($name!==''&&substr($name,-1)!=='/')$out[$name]=$data;
+            }
+            $pos=$start+max(0,$csize)+($h['flags']&0x08?16:0);
+            continue;
+        }
+        $pos++;
+    }
+    return $out;
+}
+/* the state file of a pack lives beside it: last restore time and last attempt */
+function fm_icon_state_path($pack){return __DIR__.'/.'.preg_replace('/[^a-z0-9_]/i','',$pack).'_icons.json';}
+function fm_icon_state($pack){
+    $f=fm_icon_state_path($pack);
+    $j=@is_file($f)?json_decode((string)@file_get_contents($f),true):null;
+    return is_array($j)?$j:[];
+}
+function fm_icon_state_put($pack,$state){
+    $f=fm_icon_state_path($pack);
+    @file_put_contents($f,json_encode($state),LOCK_EX);
+}
+/* where a pack lives and which entries it must keep */
+function fm_icon_pack($pack){
+    if($pack==='term'){
+        return ['url'=>FM_ICON_ZIP_TERM,'dir'=>__DIR__.'/term',
+            'keep'=>function($name){
+                /* only the glyph folders this console uses: 16/22/32/48 px */
+                return (bool)preg_match('#^(FLICO16|FLICO22|FLICO32|FLICO48)/#i',$name);
+            }];
+    }
+    return ['url'=>FM_ICON_ZIP_W11I,'dir'=>__DIR__.'/w11i',
+        'keep'=>function($name){
+            /* the icon set of the archive, without its own readme/gallery noise */
+            return (bool)preg_match('#\.(ico|png)$#i',$name);
+        }];
+}
+/* unpack one pack. Returns the number of files written (0 = nothing could be done) */
+function fm_icons_unpack($pack,$raw){
+    $cfg=fm_icon_pack($pack);
+    $dir=$cfg['dir'];$keep=$cfg['keep'];
+    $entries=fm_zip_entries($raw);
+    if(!$entries)return 0;
+    if(!is_dir($dir)&&!@mkdir($dir,0755,true)&&!is_dir($dir))return 0;
+    /* the archive keeps its own top folder (windows11iconsV1/), the install does
+       not: the glyphs live where the map says they live */
+    $common=null;
+    foreach(array_keys($entries) as $name){
+        $top=strtok($name,'/');
+        if($common===null)$common=$top;
+        elseif($common!==$top){$common='';break;}
+    }
+    $common=($common&&strpos($common,'.')===false)?$common.'/':'';
+    @file_put_contents($dir.'/.pack',(string)$common,LOCK_EX);
+    $written=0;
+    foreach($entries as $name=>$data){
+        if($common!==''&&strpos($name,$common)===0)$name=substr($name,strlen($common));
+        if(!$keep($name))continue;
+        $target=$dir.'/'.$name;
+        $sub=dirname($target);
+        if(!is_dir($sub)&&!@mkdir($sub,0755,true)&&!is_dir($sub))continue;
+        if(@file_put_contents($target,$data,LOCK_EX)!==false)$written++;
+    }
+    return $written;
+}
+/* download + unpack + delete the zip. Never sooner than 30 s after the last try. */
+function fm_icons_restore($pack,$force=false){
+    $state=fm_icon_state($pack);$now=time();
+    $last=(int)($state['attempt']??0);
+    if(!$force&&$now-$last<30)return false;
+    $state['attempt']=$now;fm_icon_state_put($pack,$state);
+    $cfg=fm_icon_pack($pack);
+    $raw=fm_http_get($cfg['url'],40);
+    if($raw===false||strlen($raw)<1024)return false;
+    /* the archive is written beside the pack and removed the moment it is read:
+       the folder is the install, the zip is only the delivery */
+    $tmp=sys_get_temp_dir().'/fm-'.preg_replace('/[^a-z0-9_]/i','',$pack).'-'.getmypid().'.zip';
+    @file_put_contents($tmp,$raw,LOCK_EX);
+    $n=fm_icons_unpack($pack,$raw);
+    @unlink($tmp);
+    if($n>0){
+        $state['restored']=$now;$state['files']=$n;fm_icon_state_put($pack,$state);
+        return true;
+    }
+    return false;
+}
+/* the pack as the browser needs it: pack => [relative path => url] */
+function fm_icons_manifest($pack){
+    $cfg=fm_icon_pack($pack);$dir=$cfg['dir'];
+    $out=[];
+    if(!is_dir($dir))return $out;
+    $skip=['.git','.trash'];
+    $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir,FilesystemIterator::SKIP_DOTS));
+    foreach($it as $file){
+        if(!$file->isFile())continue;
+        $rel=str_replace('\\','/',substr($file->getPathname(),strlen($dir)+1));
+        if(!preg_match('#\.(ico|png)$#i',$rel))continue;
+        if($file->getSize()>400000)continue;
+        $out[$rel]='?x=iconfile&pack='.urlencode($pack).'&f='.rawurlencode($rel);
+        if(count($out)>=900)break;
+    }
+    return $out;
+}
+/* serve one file from a pack, with a long cache: these never change */
+function fm_icons_serve($pack,$rel){
+    $cfg=fm_icon_pack($pack);
+    $rel=str_replace('\\','/',(string)$rel);
+    $rel=preg_replace('#\.\.+#','',$rel);
+    if(!preg_match('#^[A-Za-z0-9_\-./]+$#',$rel)||strpos($rel,'/')===false&&false)return false;
+    $path=$cfg['dir'].'/'.$rel;
+    $real=@realpath($path);$base=@realpath($cfg['dir']);
+    if($real===false||$base===false||strpos($real,$base)!==0||!is_file($real))return false;
+    $ext=strtolower(pathinfo($real,PATHINFO_EXTENSION));
+    $mime=$ext==='png'?'image/png':($ext==='ico'?'image/x-icon':'application/octet-stream');
+    if(!headers_sent()){
+        header('Content-Type: '.$mime);
+        header('Cache-Control: public, max-age=31536000, immutable');
+        header('Content-Length: '.filesize($real));
+    }
+    @readfile($real);
+    return true;
+}
+/* what the file list and the console need to draw themselves */
+function fm_icons_boot(){
+    $ready=[];
+    foreach(['w11i','term'] as $pack){
+        $cfg=fm_icon_pack($pack);
+        $has=is_dir($cfg['dir'])&&count((array)@scandir($cfg['dir']))>2;
+        if(!$has)$has=fm_icons_restore($pack);
+        $ready[$pack]=$has;
+    }
+    return $ready;
+}
 function fm_theme_active($t){global $currentTheme;return isset($currentTheme)&&$currentTheme===(string)$t;}
 /* R59 · a fresh install opens in the Windows 11 Dark pack. This is only the
    DEFAULT: nothing is deleted, every pack stays, and one pick in MFM Theme
@@ -1165,7 +1353,14 @@ if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.github
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
 if(!defined('FM_PRODUCT_VERSION'))  define('FM_PRODUCT_VERSION','4.0');
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R76');
+/* R79 · the two icon packs are installed on the first visit and repaired on the
+   first visit after they go missing; nothing waits for them, because the browser
+   keeps the icons it has already seen */
+if(!defined('FM_ICONS_BOOTED')){
+    define('FM_ICONS_BOOTED',1);
+    try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php')fm_icons_boot();}catch(Throwable $e){}
+}
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R79');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -32882,6 +33077,34 @@ if(isset($_GET['x'])){
         fm_agent_save($history,$threadId);
         echo json_encode(['ok'=>true,'thread_id'=>$threadId,'reply'=>$step['reply'],'segments'=>$step['segments'],'status'=>$step['status']??'Thinking...','title'=>fm_agent_normalize_title($agentConfig['title']??'')?:'New conversation','threads'=>fm_agent_threads_list(),'pending'=>!empty($step['pending']),'action_pending'=>!empty($step['action_pending']),'cwd'=>$fm->getCwd()],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);exit;
     }
+    /* R79 · the icon packs. The page asks for the table of what is installed and
+       for single files; if a file is missing it asks for a restore, which is
+       rate-limited on the server so a script emptying the folder cannot make the
+       page hammer GitHub. */
+    if($xop==='icons'){
+        if(!isset($_SESSION['csrf_token'])||($_GET['t']??'')!==$_SESSION['csrf_token']){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
+        $pack=(($_GET['pack']??'')==='term')?'term':'w11i';
+        $want=$_GET['want']??'';
+        $cfg=fm_icon_pack($pack);
+        $has=is_dir($cfg['dir'])&&count((array)@scandir($cfg['dir']))>2;
+        if(!$has&&$want==='restore')$has=fm_icons_restore($pack);
+        elseif(!$has){/* a page that needs the pack brings it back on first sight */$has=fm_icons_restore($pack);}
+        $files=$has?fm_icons_manifest($pack):[];
+        $state=fm_icon_state($pack);
+        echo json_encode(['ok'=>(bool)$has,'pack'=>$pack,'files'=>$files,
+            'state'=>['attempt'=>(int)($state['attempt']??0),'restored'=>(int)($state['restored']??0)],
+            'now'=>time()],JSON_UNESCAPED_SLASHES);exit;
+    }
+    if($xop==='iconfile'){
+        $pack=(($_GET['pack']??'')==='term')?'term':'w11i';
+        $rel=(string)($_GET['f']??'');
+        $cfg=fm_icon_pack($pack);
+        if(!is_dir($cfg['dir']))fm_icons_restore($pack);
+        if(fm_icons_serve($pack,$rel))exit;
+        /* gone: bring the pack back once, then try the same file again */
+        if(fm_icons_restore($pack)&&fm_icons_serve($pack,$rel))exit;
+        http_response_code(404);exit;
+    }
     if($xop==='run'){
         if($fm->isRO()){echo json_encode(['error'=>'Read-only.']);exit;}
         if(!isset($_POST['csrf_token'])||$_POST['csrf_token']!==$_SESSION['csrf_token']){echo json_encode(['error'=>'Security error.']);exit;}
@@ -34566,6 +34789,131 @@ function svgFileWindows10($t='file'){
         .'<path d="M2.05 13.2h15.15v3.8c0 .97-.78 1.75-1.75 1.75H3.8c-.97 0-1.75-.78-1.75-1.75z" fill="'.$v[1].'" stroke="'.$v[2].'" stroke-width=".75" stroke-linejoin="round"/>'
         .$badge.'</svg>';
 }
+/* ── R79 · which glyph for which file ─────────────────────────────────────
+   The Windows 11 pack is a library of .ico files named after what they show, so
+   the file list asks for one by name. A type decides first; a few extensions
+   are sharper than their type (a .ttf is a font, not "some file", an .iso is a
+   disc) and win over it. Anything unknown gets the pack's own generic sheet. */
+function fm_icon_map(){
+    return [
+        'folder'    =>'folders/folder.ico',
+        'folderzip' =>'folders/zip.ico',
+        'folderuser'=>'folders/user.ico',
+        'foldernet' =>'folders/network.ico',
+        'folderpic' =>'folders/pictures.ico',
+        'foldermus' =>'folders/music.ico',
+        'foldervid' =>'folders/videos.ico',
+        'folderdoc' =>'folders/documents.ico',
+        'folderdown'=>'folders/downloads.ico',
+        'folderdesk'=>'folders/desktop.ico',
+        'folderfav' =>'folders/favorites.ico',
+        'folderfont'=>'folders/fonts.ico',
+        'foldergame'=>'folders/games.ico',
+        'folderlink'=>'folders/links.ico',
+        'image'     =>'files/image.ico',
+        'video'     =>'files/video.ico',
+        'audio'     =>'files/audio.ico',
+        'archive'   =>'folders/zip.ico',
+        'pdf'       =>'files/document.ico',
+        'word'      =>'files/office/worddocument.ico',
+        'excel'     =>'files/office/excelsheet.ico',
+        'powerpoint'=>'files/office/powerpointpresent.ico',
+        'code'      =>'applications/office/code.ico',
+        'data'      =>'files/disc.ico',
+        'text'      =>'files/text.ico',
+        'config'    =>'files/configuration.ico',
+        'markdown'  =>'files/text2.ico',
+        'font'      =>'files/font.ico',
+        'exec'      =>'files/executable.ico',
+        'disc'      =>'devices/drives/cdrom.ico',
+        'registry'  =>'other/custom/fileregistry.ico',
+        'file'      =>'files/document.ico'
+    ];
+}
+/* a folder is not just a folder: the ones a person recognises by name wear their
+   own tab, the way Explorer draws them */
+function fm_icon_folder_rel($name){
+    $m=fm_icon_map();
+    $n=strtolower((string)$name);
+    $special=[
+        'documents'=>'folderdoc','document'=>'folderdoc','docs'=>'folderdoc',
+        'downloads'=>'folderdown','download'=>'folderdown',
+        'pictures'=>'folderpic','photos'=>'folderpic','images'=>'folderpic',
+        'music'=>'foldermus','audio'=>'foldermus',
+        'videos'=>'foldervid','video'=>'foldervid','movies'=>'foldervid',
+        'desktop'=>'folderdesk',
+        'favorites'=>'folderfav','favourites'=>'folderfav',
+        'fonts'=>'folderfont','font'=>'folderfont',
+        'games'=>'foldergame',
+        'links'=>'folderlink',
+        'users'=>'folderuser','user'=>'folderuser','home'=>'folderuser','profiles'=>'folderuser'
+    ];
+    if(isset($special[$n]))return $m[$special[$n]];
+    return $m['folder'];
+}
+/* the extension beats the type only where the type is too blunt to be useful */
+function fm_icon_file_rel($name,$type='file'){
+    $m=fm_icon_map();
+    $ext=strtolower(pathinfo((string)$name,PATHINFO_EXTENSION));
+    $byExt=[
+        'ttf'=>'font','otf'=>'font','woff'=>'font','woff2'=>'font','eot'=>'font','fnt'=>'font',
+        'iso'=>'disc','img'=>'disc','dmg'=>'disc','vhd'=>'disc','vdi'=>'disc','vmdk'=>'disc','bin'=>'disc',
+        'reg'=>'registry','inf'=>'registry','ini'=>'config','conf'=>'config','cfg'=>'config','yaml'=>'config','yml'=>'config','toml'=>'config','env'=>'config','htaccess'=>'config',
+        'zip'=>'archive','rar'=>'archive','7z'=>'archive','gz'=>'archive','bz2'=>'archive','xz'=>'archive','tar'=>'archive','tgz'=>'archive','zst'=>'archive',
+        'png'=>'image','jpg'=>'image','jpeg'=>'image','gif'=>'image','webp'=>'image','bmp'=>'image','svg'=>'image','ico'=>'image','tif'=>'image','tiff'=>'image','avif'=>'image','heic'=>'image',
+        'mp4'=>'video','mkv'=>'video','avi'=>'video','mov'=>'video','webm'=>'video','flv'=>'video','wmv'=>'video','m4v'=>'video','mpg'=>'video','mpeg'=>'video',
+        'mp3'=>'audio','wav'=>'audio','flac'=>'audio','ogg'=>'audio','opus'=>'audio','m4a'=>'audio','aac'=>'audio','wma'=>'audio','aiff'=>'audio',
+        'pdf'=>'pdf',
+        'doc'=>'word','docx'=>'word','odt'=>'word','rtf'=>'word','pages'=>'word',
+        'xls'=>'excel','xlsx'=>'excel','ods'=>'excel','csv'=>'excel','numbers'=>'excel',
+        'ppt'=>'powerpoint','pptx'=>'powerpoint','odp'=>'powerpoint','key'=>'powerpoint',
+        'php'=>'code','js'=>'code','mjs'=>'code','ts'=>'code','jsx'=>'code','tsx'=>'code','css'=>'code','scss'=>'code','less'=>'code','html'=>'code','htm'=>'code','xml'=>'code','json'=>'code','py'=>'code','rb'=>'code','go'=>'code','rs'=>'code','c'=>'code','h'=>'code','cpp'=>'code','hpp'=>'code','cs'=>'code','java'=>'code','kt'=>'code','swift'=>'code','sh'=>'code','bash'=>'code','zsh'=>'code','fish'=>'code','ps1'=>'code','bat'=>'code','cmd'=>'code','sql'=>'code','vue'=>'code','svelte'=>'code','lua'=>'code','pl'=>'code','r'=>'code','dart'=>'code','scala'=>'code','clj'=>'code','ex'=>'code','exs'=>'code','erl'=>'code','hs'=>'code','zig'=>'code','asm'=>'code','s'=>'code','v'=>'code','gitignore'=>'code','dockerfile'=>'code','md'=>'markdown','markdown'=>'markdown','mdx'=>'markdown',
+        'txt'=>'text','log'=>'text','text'=>'text','nfo'=>'text','readme'=>'text','license'=>'text',
+        'exe'=>'exec','msi'=>'exec','deb'=>'exec','rpm'=>'exec','appimage'=>'exec','apk'=>'exec','dll'=>'exec','so'=>'exec','app'=>'exec','run'=>'exec',
+        'db'=>'data','sqlite'=>'data','sqlite3'=>'data','mdb'=>'data','parquet'=>'data','dbf'=>'data'
+    ];
+    /* the name itself can be the extension (Dockerfile, .htaccess, README) */
+    $low=strtolower((string)$name);
+    $bare=ltrim($low,'.');
+    if(isset($byExt[$bare]))return $m[$byExt[$bare]];
+    if($ext!==''&&isset($byExt[$ext]))return $m[$byExt[$ext]];
+    $type=($type==='folder')?'folder':(string)$type;
+    if(isset($m[$type]))return $m[$type];
+    return $m['file'];
+}
+/* one <img> for a pack glyph. The svg that used to draw it stays in the markup
+   as the fallback, so a page whose pack cannot be fetched still draws an icon. */
+/* a glyph asked for by name is found wherever the pack put it: the archives move
+   their folders between releases, and a missing path would leave a blank cell */
+function fm_icon_resolve($pack,$rel){
+    if($rel==='')return '';
+    $cfg=fm_icon_pack($pack);
+    $dir=$cfg['dir'];
+    if(@is_file($dir.'/'.$rel))return $rel;
+    $base=basename($rel);
+    static $cache=[];
+    $key=$pack.'|'.$base;
+    if(isset($cache[$key]))return $cache[$key];
+    $hits=[];
+    if(is_dir($dir)){
+        $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir,FilesystemIterator::SKIP_DOTS));
+        foreach($it as $f){
+            if($f->isFile()&&$f->getFilename()===$base){$hits[]=str_replace('\\','/',substr($f->getPathname(),strlen($dir)+1));if(count($hits)>=1)break;}
+        }
+    }
+    $cache[$key]=$hits?$hits[0]:'';
+    return $cache[$key];
+}
+function fm_icon_img($pack,$rel,$cls='ibi'){
+    $rel=fm_icon_resolve($pack,$rel);
+    if($rel==='')return '';
+    $src='?x=iconfile&pack='.urlencode($pack).'&f='.rawurlencode($rel);
+    return '<img class="'.$cls.'" src="'.$src.'" alt="" loading="lazy" decoding="async" '
+        .'data-ico="'.he($rel).'" data-pack="'.he($pack).'">';
+}
+/* only the Windows 11 packs are re-dressed in the new glyphs; every other theme
+   keeps the icons it already has (its own pack will come later) */
+function fm_icons_w11_active(){return fm_theme_active('win11')||fm_theme_active('win11d');}
 function svgFolderRendered(){
     if(fm_theme_active('win11'))return svgFolderWindows11();
     if(fm_theme_active('win11d'))return svgFolderWindows11(false,true);
@@ -36359,6 +36707,36 @@ button.rc-row{cursor:pointer}
 .term-body{flex:1;display:flex;min-height:0;min-width:0;position:relative}
 
 /* left icon rail */
+/* ── R79 · picture slots ───────────────────────────────────────────────────
+   The file list and the grid draw the pack's glyph (a real .ico rendered by the
+   browser) and keep the old svg underneath as a fallback: the bitmap is laid over
+   it, and the drawing is only visible if the picture never arrives. The console's
+   tiles work the same way - the MobaXterm bitmap sits on its drawing. */
+.ib .ibi,.gi-ic .ibi{position:relative;z-index:1;width:100%;height:100%;object-fit:contain;display:block}
+.ib svg.ti,.gi-ic svg.ti{position:absolute;z-index:0}
+.ib,.gi-ic{position:relative}
+.ib .ibi+svg.ti,.gi-ic .ibi+svg.ti{display:none!important}
+/* R79 · a pack glyph is a picture of a folder or a sheet, not a badge: the tinted
+   square behind it is dropped, and so is the zoom that made it look boxed */
+:root[data-theme="win11"] .ib,:root[data-theme="win11d"] .ib,
+:root[data-theme="win11"] .gi-ic,:root[data-theme="win11d"] .gi-ic{background:none!important;border-radius:0}
+:root[data-theme="win11"] .ft tbody tr:hover .ib,:root[data-theme="win11d"] .ft tbody tr:hover .ib{transform:none}
+:root[data-theme="win11"] .ib .ibi,:root[data-theme="win11d"] .ib .ibi{width:100%;height:100%;max-width:100%;max-height:100%}
+:root[data-theme="win11"] .gi-ic .ibi,:root[data-theme="win11d"] .gi-ic .ibi{width:100%;height:100%}
+.ft tbody tr:hover .ib .ibi{transform:none}
+/* the console's own glyph slots */
+.tgl{display:grid;place-items:center;width:26px;height:26px;margin:0 auto;position:relative}
+.tgl .tgl-img{width:22px;height:22px;display:block;image-rendering:auto;pointer-events:none}
+.term-tile>.tgl+.tgl-svg,.term-tile>svg{transition:opacity .12s}
+.term-tile.tgl-replaced>svg,.term-tile .tgl-on~svg{opacity:0}
+.term-rail-btn .tgl-rail{width:18px;height:18px;margin:0 0 5px}
+.term-rail-btn .tgl-rail .tgl-img{width:16px;height:16px}
+.term-rail-btn.tgl-replaced>svg,.term-rail-btn:has(.tgl-on)>svg{opacity:0}
+/* the tree */
+.term-tree-ico{position:relative;display:grid;place-items:center;width:16px;height:16px;flex:0 0 16px}
+.term-tree-ico svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.term-tree-ico .tgi{width:16px;height:16px;display:block;object-fit:contain}
+.term-tree-ico .tgi-svg{display:contents}
 .term-rail{width:34px;min-width:34px;background:#131313;border-right:1px solid #303030;display:flex;flex-direction:column;align-items:center;padding:2px 0 4px;gap:1px;flex-shrink:0;overflow-y:auto;overflow-x:hidden}
 .term-rail-fold{width:34px;height:20px;display:grid;place-items:center;border:0;border-bottom:1px solid #2a2a2a;background:transparent;color:#7fbfe0;cursor:pointer;padding:0;flex-shrink:0}
 .term-rail-fold svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s}
@@ -36508,9 +36886,9 @@ button.rc-row{cursor:pointer}
 .term-line.info-line{color:#8fd3e0;font-style:normal}
 .term-line.success-line{color:#35d07f}
 .term-prompt-str{color:#7ee0a8}
-.term-at{color:#8a8a8a}
-.term-prompt-wrap .term-at{color:#8a8a8a}
-.term-line .tk-at,.term-line .term-at{color:#8a8a8a}
+.term-at{color:#ffffff}
+.term-prompt-wrap .term-at{color:#ffffff}
+.term-line .tk-at,.term-line .term-at{color:#ffffff}
 .term-host{color:#e8c078}
 .term-path{color:#35a0f0}
 .term-cwd{color:#6fc0f8}
@@ -36525,7 +36903,7 @@ button.rc-row{cursor:pointer}
 .term-line .tk-op{color:#e08080}
 .term-line .tk-num{color:#c8a0e0}.term-line .tk-prompt{white-space:pre}
 .term-line .tk-user{color:#35d07f}
-.term-line .tk-at{color:#8a8a8a}
+.term-line .tk-at{color:#ffffff}
 .term-line .tk-host{color:#e0b060}
 .term-line .tk-cwd{color:#35a0f0}
 .term-line .tk-dollar{color:#c8c8c8}
@@ -36548,7 +36926,7 @@ button.rc-row{cursor:pointer}
 /* R61 · one colour for the @, live and printed: the live prompt used #8a8a8a
    and a stray `.term-at{color:#d4d454}` painted the echoed line yellow, so the
    same prompt changed colour on Enter. The token belongs to this theme. */
-.term-at{color:#8a8a8a}
+.term-at{color:#ffffff}
 .term-path{color:#26c6da}
 .term-dollar{color:#d0d0d0}
 
@@ -36629,6 +37007,7 @@ button.rc-row{cursor:pointer}
 .term-live .term-inp.term-inp{background:transparent!important;border:0!important;box-shadow:none!important;border-radius:0!important;
   padding:0!important;margin:0!important;outline:none!important;appearance:none;-webkit-appearance:none;min-height:0!important;max-height:none!important}
 .term-live .term-inp{position:absolute;left:0;top:0;height:100%;opacity:1;padding:0;margin:0;border:0;max-width:none;box-sizing:content-box;
+  font-size:var(--term-fs,13.5px)!important;font-family:'TerminalTMT',monospace!important;
   line-height:calc(var(--term-fs,13.5px) * var(--term-lh,1.19));background:transparent;color:#e0e0e0;caret-color:transparent;
   white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;overflow:hidden;resize:none;-webkit-user-select:text;user-select:text}
 .term-ghost-tail{position:absolute;top:0;white-space:pre;pointer-events:none;font-family:'TerminalTMT',monospace;
@@ -40997,7 +41376,7 @@ input.inp,select.inp{height:32px}
             <td class="cc"><input type="checkbox" class="rck item-ck" value="<?=he($f['name'])?>"></td>
             <td><div class="nc" onclick="location.href='?dir=<?=urlencode($fm->getCwd().'/'.$f['name'])?>'"
               data-ctx-name="<?=he($f['name'])?>" data-ctx-isdir="1" data-ctx-perm="<?=he($perms)?>">
-               <div class="ib" style="background:rgba(133,137,140,.1)"><?=svgFolderRendered()?></div>
+               <div class="ib" style="background:rgba(133,137,140,.1)"><?php if(fm_icons_w11_active()):?><?=fm_icon_img('w11i',fm_icon_folder_rel($f['name']))?><?php endif;?><?=svgFolderRendered()?></div>
               <div class="nm"><?php if(isset($tags[$f['name']])):?><span class="tag-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:<?=he($tags[$f['name']]['color'])?>;flex-shrink:0" title="<?=he($tags[$f['name']]['label'])?>"></span><?php endif;?><span class="nt"><?=htmlspecialchars($f['name'])?></span><?php if(!empty($tags[$f['name']]['label'])):?><span class="eb" style="background:<?=he($tags[$f['name']]['color'])?>22;color:<?=he($tags[$f['name']]['color'])?>"><?=he($tags[$f['name']]['label'])?></span><?php endif;?><span class="eb">DIR</span></div>
             </div></td>
             <td class="col-perms col-perms-td"><span class="mono"><?=he($perms)?></span></td>
@@ -41037,8 +41416,9 @@ input.inp,select.inp{height:32px}
             <td><div class="nc" <?php if($prev):?>data-preview="<?=he($rawUrl)?>" data-type="<?=$type?>" data-fname="<?=he($f['name'])?>"<?php endif;?> <?php if($type==='audio'):?>data-art="<?=he($audioArt)?>" data-art-default="<?=he($audioDefaultArt)?>" data-art-fallback="<?=he($audioSidecar)?>" data-lyrics="<?=he($audioLyrics)?>" data-audio-size="<?=max(0,(int)$f['size'])?>" data-audio-mtime="<?=max(0,(int)$f['mtime'])?>"<?php endif;?>
               data-ctx-name="<?=he($f['name'])?>" data-ctx-isdir="0" data-ctx-type="<?=$type?>" data-ctx-raw="<?=he($rawUrl)?>" data-ctx-perm="<?=he($perms)?>">
               <div class="ib <?=$type==='audio'?'fm-audio-file-icon':''?>" style="background:<?=$color?>18">
-                <?php if($type==='audio'):?><img class="fm-track-art" src="<?=he($audioArt)?>" <?php if($audioSidecar):?>data-fallback="<?=he($audioSidecar)?>"<?php endif;?> alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=''}else{this.style.display='none';var s=this.parentNode&&this.parentNode.querySelector('svg.ti');if(s)s.style.display='block'}" onload="var s=this.parentNode&&this.parentNode.querySelector('svg.ti');if(s)s.style.display='none'"><?php endif;?>
-                <?php if($type==='image'):?><img src="<?=$rawUrl?>" onload="var s=this.parentNode&&this.parentNode.querySelector('svg.ti');if(s)s.style.display='none'" style="width:34px;height:34px;border-radius:9px;object-fit:cover" loading="lazy" onerror="this.style.display='none';var s=this.parentNode&&this.parentNode.querySelector('svg.ti');if(s)s.style.display='block'"><?php endif;?>
+                <?php if($type==='audio'):?><img class="fm-track-art" src="<?=he($audioArt)?>" <?php if($audioSidecar):?>data-fallback="<?=he($audioSidecar)?>"<?php endif;?> alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=''}else{this.style.display='none';var s=this.parentNode&&this.parentNode.querySelector('svg.ti');if(s)s.style.display='block'}" onload="var p=this.parentNode;if(p){var s=p.querySelector('svg.ti');if(s)s.style.display='none';var g=p.querySelector('.ibi');if(g)g.style.display='none';}"><?php endif;?>
+                <?php if($type==='image'):?><img src="<?=$rawUrl?>" onload="var p=this.parentNode;if(p){var s=p.querySelector('svg.ti');if(s)s.style.display='none';var g=p.querySelector('.ibi');if(g)g.style.display='none';}" style="width:34px;height:34px;border-radius:9px;object-fit:cover" loading="lazy" onerror="this.style.display='none';var s=this.parentNode&&this.parentNode.querySelector('svg.ti');if(s)s.style.display='block'"><?php endif;?>
+                <?php if(fm_icons_w11_active()):?><?=fm_icon_img('w11i',fm_icon_file_rel($f['name'],$type))?><?php endif;?>
                 <?=svgFileRendered($type)?>
               </div>
               <div class="nm"><?php if(isset($tags[$f['name']])):?><span class="tag-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:<?=he($tags[$f['name']]['color'])?>;flex-shrink:0" title="<?=he($tags[$f['name']]['label'])?>"></span><?php endif;?><span class="nt"><?=htmlspecialchars($f['name'])?></span><?php if(!empty($tags[$f['name']]['label'])):?><span class="eb" style="background:<?=he($tags[$f['name']]['color'])?>22;color:<?=he($tags[$f['name']]['color'])?>"><?=he($tags[$f['name']]['label'])?></span><?php endif;?><?php if($ext):?><span class="eb"><?=strtoupper($ext)?></span><?php endif;?></div>
@@ -41108,7 +41488,7 @@ input.inp,select.inp{height:32px}
             if(!$isDir&&$type==='image')$thumb='<img src="'.he($rawUrl).'" class="gi-th" loading="lazy" onerror="this.style.display=\'none\';var s=this.parentNode&&this.parentNode.querySelector(\'svg.ti\');if(s)s.style.display=\'block\'" onload=\'var s=this.parentNode&&this.parentNode.querySelector("svg.ti");if(s)s.style.display="none"\'>';
             elseif(!$isDir&&$type==='audio')$thumb='<img src="'.he($audioArt).'" class="gi-th fm-track-art" '.($audioSidecar?'data-fallback="'.he($audioSidecar).'" ':'').'alt="" loading="lazy" onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback=\'\'}else{this.style.display=\'none\';var s=this.parentNode&&this.parentNode.querySelector(\'svg.ti\');if(s)s.style.display=\'block\'}" onload=\'var s=this.parentNode&&this.parentNode.querySelector("svg.ti");if(s)s.style.display="none"\'>';
             echo $thumb;
-            ?><?php if($isDir):?><?=svgFolderRendered()?><?php else:?><?=svgFileRendered($type)?><?php endif;?>
+            ?><?php if($isDir):?><?php if(fm_icons_w11_active()):?><?=fm_icon_img('w11i',fm_icon_folder_rel($item['name']))?><?php endif;?><?=svgFolderRendered()?><?php else:?><?php if(fm_icons_w11_active()):?><?=fm_icon_img('w11i',fm_icon_file_rel($item['name'],$type))?><?php endif;?><?=svgFileRendered($type)?><?php endif;?>
           </div>
           <div class="gi-n"><?=htmlspecialchars($item['name'])?></div>
           <div class="gi-m"><?=$isDir?'DIR':fmtSz($item['size'])?></div>
@@ -41654,34 +42034,34 @@ input.inp,select.inp{height:32px}
 
     <!-- icon toolbar: icons only, tooltips carry the names -->
     <div class="term-toolbar" role="toolbar" aria-label="Terminal actions">
-      <button type="button" class="term-tile" data-term-act="newtab" title="New tab · Ctrl+Shift+T" aria-label="New tab"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/></svg>
+      <button type="button" class="term-tile" data-term-act="newtab" title="New tab · Ctrl+Shift+T" aria-label="New tab"><span class="tgl" data-tgl="newtab"></span><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/></svg>
       <span class="term-tile-cap">New</span></button>
-      <button type="button" class="term-tile" data-term-act="closetab" title="Close this tab · Ctrl+Shift+W" aria-label="Close tab"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/><path d="M9.5 8.5l4 3-4 3"/></svg>
+      <button type="button" class="term-tile" data-term-act="closetab" title="Close this tab · Ctrl+Shift+W" aria-label="Close tab"><span class="tgl" data-tgl="closetab"></span><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/><path d="M9.5 8.5l4 3-4 3"/></svg>
       <span class="term-tile-cap">Close</span></button>
       <span class="term-tile-sep"></span>
-      <button type="button" class="term-tile" data-term-act="clear" title="Clear the screen" aria-label="Clear the screen"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
+      <button type="button" class="term-tile" data-term-act="clear" title="Clear the screen" aria-label="Clear the screen"><span class="tgl" data-tgl="clear"></span><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
       <span class="term-tile-cap">Clear</span></button>
-      <button type="button" class="term-tile" data-term-act="paste" title="Paste into the prompt" aria-label="Paste"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z"/></svg>
+      <button type="button" class="term-tile" data-term-act="paste" title="Paste into the prompt" aria-label="Paste"><span class="tgl" data-tgl="paste"></span><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z"/></svg>
       <span class="term-tile-cap">Paste</span></button>
-      <button type="button" class="term-tile" data-term-act="bottom" title="Scroll to the bottom" aria-label="Scroll to the bottom"><svg viewBox="0 0 24 24"><path d="M12 4v12M7 12l5 5 5-5M4 20h16"/></svg>
+      <button type="button" class="term-tile" data-term-act="bottom" title="Scroll to the bottom" aria-label="Scroll to the bottom"><span class="tgl" data-tgl="bottom"></span><svg viewBox="0 0 24 24"><path d="M12 4v12M7 12l5 5 5-5M4 20h16"/></svg>
       <span class="term-tile-cap">Bottom</span></button>
       <span class="term-tile-sep"></span>
-      <button type="button" class="term-tile" data-term-act="up" title="cd .. · go to the parent folder" aria-label="Parent folder"><svg viewBox="0 0 24 24"><path d="M12 20V5M6 11l6-6 6 6"/></svg>
+      <button type="button" class="term-tile" data-term-act="up" title="cd .. · go to the parent folder" aria-label="Parent folder"><span class="tgl" data-tgl="up"></span><svg viewBox="0 0 24 24"><path d="M12 20V5M6 11l6-6 6 6"/></svg>
       <span class="term-tile-cap">Up</span></button>
-      <button type="button" class="term-tile" data-term-act="cwd" title="pwd · print the working directory" aria-label="Working directory"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 12v4M10 14h4"/></svg>
+      <button type="button" class="term-tile" data-term-act="cwd" title="pwd · print the working directory" aria-label="Working directory"><span class="tgl" data-tgl="cwd"></span><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 12v4M10 14h4"/></svg>
       <span class="term-tile-cap">Pwd</span></button>
-      <button type="button" class="term-tile" data-term-act="help" title="ls -la · list this folder in detail" aria-label="List in detail"><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      <button type="button" class="term-tile" data-term-act="help" title="ls -la · list this folder in detail" aria-label="List in detail"><span class="tgl" data-tgl="help"></span><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
       <span class="term-tile-cap">List</span></button>
-      <button type="button" class="term-tile" data-term-act="refresh" title="Refresh the tree and the status bar" aria-label="Refresh"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-2.4 5.7"/><path d="M20 5v5h-5"/></svg>
+      <button type="button" class="term-tile" data-term-act="refresh" title="Refresh the tree and the status bar" aria-label="Refresh"><span class="tgl" data-tgl="refresh"></span><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-2.4 5.7"/><path d="M20 5v5h-5"/></svg>
       <span class="term-tile-cap">Refresh</span></button>
       <span class="term-tile-sep"></span>
       <button type="button" class="term-tile term-tile-go" id="termGo" data-term-act="openhere" title="Open the selected folder in the file manager" aria-label="Open the selected folder in the file manager"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 13h6M15 10l3 3-3 3"/></svg>
       <span class="term-tile-cap">Open</span></button>
-      <button type="button" class="term-tile" data-term-act="menu" title="The console menu: tabs, view, shortcuts and help" aria-label="Menus"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      <button type="button" class="term-tile" data-term-act="menu" title="The console menu: tabs, view, shortcuts and help" aria-label="Menus"><span class="tgl" data-tgl="menu"></span><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
       <span class="term-tile-cap">Menu</span></button>
-      <button type="button" class="term-tile" data-term-act="keep" title="Keep the command in this prompt as a saved command" aria-label="Save this command"><svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/></svg>
+      <button type="button" class="term-tile" data-term-act="keep" title="Keep the command in this prompt as a saved command" aria-label="Save this command"><span class="tgl" data-tgl="keep"></span><svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/></svg>
       <span class="term-tile-cap">Save</span></button>
-      <button type="button" class="term-tile" data-term-act="panel" title="Show or hide the session sidebar" aria-label="Toggle sidebar"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M9 4v16"/></svg>
+      <button type="button" class="term-tile" data-term-act="panel" title="Show or hide the session sidebar" aria-label="Toggle sidebar"><span class="tgl" data-tgl="panel"></span><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M9 4v16"/></svg>
       <span class="term-tile-cap">Sidebar</span></button>
     </div>
 
@@ -41689,17 +42069,17 @@ input.inp,select.inp{height:32px}
       <!-- left icon rail -->
       <div class="term-rail" id="termRail" role="toolbar" aria-label="Terminal panels">
         <button type="button" class="term-rail-fold" id="termRailFold" title="Hide or show the sidebar" aria-label="Toggle sidebar"><svg viewBox="0 0 12 12"><path d="M8 2L4 6l4 4"/></svg></button>
-        <button type="button" class="term-rail-btn on" data-term-rail="sessions" title="Sessions"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M3 12h18M9 20h6"/></svg><span>Sessions</span></button>
-        <button type="button" class="term-rail-btn" data-term-rail="tools" title="Tools"><svg viewBox="0 0 24 24"><path d="M14.5 4.5a4 4 0 105.2 5.2L21 8.4 15.6 3z"/><path d="M13 6L3.6 15.4a2 2 0 102.9 2.9L16 8.8"/></svg><span>Tools</span></button>
-        <button type="button" class="term-rail-btn" data-term-rail="macros" title="Macros"><svg viewBox="0 0 24 24"><path d="M7 4h10l3 3v13H4V4z"/><path d="M8 11h8M8 15h5"/></svg><span>Macros</span></button>
-        <button type="button" class="term-rail-btn" data-term-rail="sftp" title="Sftp"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M8 15l3-3 2 2 3-3"/></svg><span>Sftp</span></button>
-        <button type="button" class="term-rail-btn" data-term-rail="log" title="Log"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>Log</span></button>
+        <button type="button" class="term-rail-btn on" data-term-rail="sessions" title="Sessions"><span class="tgl tgl-rail" data-tglrail="sessions"></span><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M3 12h18M9 20h6"/></svg><span>Sessions</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="tools" title="Tools"><span class="tgl tgl-rail" data-tglrail="tools"></span><svg viewBox="0 0 24 24"><path d="M14.5 4.5a4 4 0 105.2 5.2L21 8.4 15.6 3z"/><path d="M13 6L3.6 15.4a2 2 0 102.9 2.9L16 8.8"/></svg><span>Tools</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="macros" title="Macros"><span class="tgl tgl-rail" data-tglrail="macros"></span><svg viewBox="0 0 24 24"><path d="M7 4h10l3 3v13H4V4z"/><path d="M8 11h8M8 15h5"/></svg><span>Macros</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="sftp" title="Sftp"><span class="tgl tgl-rail" data-tglrail="sftp"></span><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M8 15l3-3 2 2 3-3"/></svg><span>Sftp</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="log" title="Log"><span class="tgl tgl-rail" data-tglrail="log"></span><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>Log</span></button>
         <!-- R59 · three more panels, each a real tool: the places a shell keeps
              being opened in, the queue of what has been run in this window, and the
              screen's own output controls (word wrap, bells, the text size). -->
-        <button type="button" class="term-rail-btn" data-term-rail="places" title="Places"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M3 11h18"/></svg><span>Places</span></button>
-        <button type="button" class="term-rail-btn" data-term-rail="queue" title="Queue"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/><path d="M17 15l3 2-3 2z"/></svg><span>Queue</span></button>
-        <button type="button" class="term-rail-btn" data-term-rail="display" title="Display"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M8 9h8M8 13h5M9 20h6"/></svg><span>View</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="places" title="Places"><span class="tgl tgl-rail" data-tglrail="places"></span><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M3 11h18"/></svg><span>Places</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="queue" title="Queue"><span class="tgl tgl-rail" data-tglrail="queue"></span><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/><path d="M17 15l3 2-3 2z"/></svg><span>Queue</span></button>
+        <button type="button" class="term-rail-btn" data-term-rail="display" title="Display"><span class="tgl tgl-rail" data-tglrail="display"></span><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M8 9h8M8 13h5M9 20h6"/></svg><span>View</span></button>
         <div class="term-rail-spacer"></div>
       </div>
 
@@ -52371,7 +52751,18 @@ function termGhostPlace(inp,gp){
   const g=inp?inp.closest('.term-live')?.querySelector('.term-ghost-tail'):null;
   if(!g||!g.classList.contains('on'))return;
   const step=gp||termMonoPx()||8.13;
-  const at=Math.max(inp.value.length,0)*step;
+  /* R78 · the tail starts on the block: the caret's own measured cell is used, so
+     a change of text size can never leave the suggestion behind the cursor */
+  let at=null;
+  try{
+    const c=inp?inp.closest('.term-live')?.querySelector('.term-int-caret'):null;
+    const live=inp?inp.closest('.term-live'):null;
+    if(c&&live){
+      const cr=c.getBoundingClientRect(),lr=live.getBoundingClientRect();
+      if(cr.width>0&&lr.width>0&&cr.left>=lr.left-1)at=Math.round(cr.left-lr.left);
+    }
+  }catch(err){}
+  if(at==null||!isFinite(at))at=Math.round(Math.max(inp.value.length,0)*step);
   const cap=termRowRoom(inp);
   /* R61 · a field that wrapped paints its own text; a tail drawn on the old
      one-line grid would land on the wrong glyph, so it is not drawn at all */
@@ -53201,6 +53592,214 @@ var TERM_FILE_RULES = [
   { re: /\.(sh|bash|zsh|py|rb|pl|go|rs|java|c|cpp|h)$/i, stroke: '#8fd3e0', body: '<path d="M5 3h9l5 5v13H5z"/><path d="M14 3v5h5"/><path d="M9.5 12l2 2-2 2M13 16h2.5"/>' },
   { re: /\.(md|txt|log|rst|text)$/i, stroke: '#b0b0b0', body: '<path d="M5 3h9l5 5v13H5z"/><path d="M14 3v5h5"/><path d="M8 12h8M8 15h8M8 18h5"/>' }
 ];
+/* ══════════════════════════════════════════════════════════════════════════
+   R79 · ICONS IN THE BROWSER
+   ──────────────────────────────────────────────────────────────────────────
+   The two packs are unpacked on the server and served from it. This side keeps a
+   copy of every icon it has already drawn (localStorage, 4 KB budget per icon),
+   so a page whose folder was emptied still draws the whole list from its own
+   cache while the pack is being put back. A missing icon is repaired twice: the
+   server is asked for that exact file, and if that does not answer, the pack is
+   rebuilt (the server rate-limits restores to one every 30 seconds).
+   The terminal glyphs are the MobaXterm ones: the number in each name is the
+   slot the program itself uses for that button (0 new, 1 close, 13 paste, ...). */
+const FM_ICONS={
+  packs:{w11i:{files:null,at:0,asking:0},term:{files:null,at:0,asking:0}},
+  key:pack=>'mfm-ico-'+pack+'-v1',
+  store:null,
+  /* one read of the whole mirror, one write when something new arrived */
+  load(pack){
+    if(this.store&&this.store[pack])return this.store[pack];
+    let m={};
+    try{const raw=localStorage.getItem(this.key(pack));if(raw){const j=JSON.parse(raw);if(j&&typeof j==='object')m=j;}}catch(e){}
+    this.store=this.store||{};this.store[pack]=m;return m;
+  },
+  save(pack){
+    const m=this.load(pack);
+    try{
+      /* the mirror is a courtesy, not an archive: keep it under a couple of
+         megabytes, oldest first */
+      const keys=Object.keys(m);
+      let bytes=0;keys.forEach(k=>{bytes+=m[k]?m[k].length:0;});
+      if(bytes>2000000){
+        keys.slice(0,Math.max(1,Math.floor(keys.length*0.25))).forEach(k=>{delete m[k];});
+      }
+      localStorage.setItem(this.key(pack),JSON.stringify(m));
+    }catch(e){}
+  },
+  put(pack,rel,dataUrl){
+    const m=this.load(pack);
+    if(m[rel])return;
+    m[rel]=dataUrl;this.save(pack);
+  },
+  /* the table the server has: {rel:url} */
+  async table(pack){
+    const p=this.packs[pack];
+    if(p.files&&Date.now()-p.at<60000)return p.files;
+    if(p.asking)return p.files||{};
+    p.asking=1;
+    try{
+      const r=await fetch('?x=icons&pack='+pack+'&t='+encodeURIComponent(typeof CSRF!=='undefined'?CSRF:'&want=restore'),{cache:'no-store',credentials:'same-origin'}).then(x=>x.json());
+      if(r&&r.files){p.files=r.files;p.at=Date.now();}
+    }catch(e){}
+    p.asking=0;
+    return p.files||{};
+  },
+  /* a data url for one icon, from the mirror when it is there */
+  url(pack,rel){
+    const m=this.load(pack);
+    if(m[rel])return m[rel];
+    return '?x=iconfile&pack='+encodeURIComponent(pack)+'&f='+encodeURIComponent(rel);
+  },
+  /* every <img class="ibi"> that could not be fetched: ask the server for that
+     file once, then rebuild the pack, then ask again. Never more than twice per
+     picture, and never a visible warning. */
+  heal(img){
+    if(!img||img.dataset.heal==='2')return;
+    const n=Number(img.dataset.heal||0)+1;
+    img.dataset.heal=String(n);
+    const pack=img.dataset.pack||'w11i',rel=img.dataset.ico||'';
+    if(!rel)return;
+    const bust='?x=iconfile&pack='+encodeURIComponent(pack)+'&f='+encodeURIComponent(rel)+'&r='+Date.now();
+    if(n===1){img.src=bust;this.packs[pack].files=null;return;}
+    /* the file is still not there: rebuild the pack, then draw it again */
+    fetch('?x=icons&pack='+pack+'&want=restore&t='+encodeURIComponent(typeof CSRF!=='undefined'?CSRF:''),{cache:'no-store',credentials:'same-origin'})
+      .then(r=>r.json()).then(()=>{this.packs[pack].files=null;img.src=bust;}).catch(()=>{});
+  },
+  /* the mirror is filled in the background, a few icons at a time, so the very
+     next visit has every picture without asking the server */
+  mirror(pack,rels){
+    const m=this.load(pack);
+    const want=(rels||[]).filter(r=>r&&!m[r]);
+    if(!want.length)return;
+    let i=0;
+    const step=()=>{
+      if(i>=want.length)return;
+      const rel=want[i++];
+      fetch('?x=iconfile&pack='+encodeURIComponent(pack)+'&f='+encodeURIComponent(rel),{credentials:'same-origin'})
+        .then(r=>r.ok?r.blob():null)
+        .then(b=>{
+          if(!b)return;
+          const fr=new FileReader();
+          fr.onload=()=>{this.put(pack,rel,String(fr.result));};
+          fr.readAsDataURL(b);
+        }).catch(()=>{}).then(()=>setTimeout(step,12));
+    };
+    step();
+  }
+};
+window.FM_ICONS=FM_ICONS;
+/* the pictures already in the page wear their mirror copy at once, so a reload
+   never flashes an empty cell while the pack answers */
+(function(){
+  const paint=()=>{
+    document.querySelectorAll('img.ibi').forEach(img=>{
+      const pack=img.dataset.pack||'w11i',rel=img.dataset.ico||'';
+      if(!rel)return;
+      const m=FM_ICONS.load(pack);
+      if(m[rel]&&img.src!==m[rel]){img.src=m[rel];return;}
+      if(!img.dataset.wired){
+        img.dataset.wired='1';
+        img.addEventListener('error',()=>FM_ICONS.heal(img));
+      }
+    });
+  };
+  paint();
+  document.addEventListener('DOMContentLoaded',paint);
+  /* after the page settles, the icons that were drawn are copied into the mirror */
+  setTimeout(()=>{
+    paint();
+    const byPack={};
+    document.querySelectorAll('img.ibi').forEach(img=>{
+      const pack=img.dataset.pack||'w11i',rel=img.dataset.ico||'';
+      if(!rel)return;(byPack[pack]=byPack[pack]||[]).push(rel);
+    });
+    Object.keys(byPack).forEach(p=>FM_ICONS.mirror(p,byPack[p]));
+  },900);
+  window.FM_ICON_PAINT=paint;
+})();
+/* ══ the console's own glyphs ═══════════════════════════════════════════════
+   Every tile and every row of the left tree wears the MobaXterm bitmap. The
+   number is the program's own slot, so the icons sit where MobaXterm puts them. */
+const TERM_GLYPH={
+  font:'22', /* the folder the pack keeps these in: FLICO22 */
+  act:{newtab:0,closetab:1,clear:10,paste:13,bottom:231,up:256,cwd:250,help:101,refresh:240,
+       openhere:292,menu:54,keep:259,panel:272},
+  rail:{sessions:142,tools:53,macros:243,sftp:224,log:101,places:250,queue:268,view:287},
+  tree:{folder:31,file:289,zip:45,image:39,audio:47,video:38,code:128,text:289,pdf:65,exec:56,config:53,db:67},
+  url(n){return '?x=iconfile&pack=term&f='+encodeURIComponent('FLICO'+this.font+'/'+n+'.png');},
+  img(n,cls,size){
+    if(n===undefined||n===null)return '';
+    const s=size?' width="'+size+'" height="'+size+'"':'';
+    return '<img class="'+(cls||'tgi')+'" src="'+this.url(n)+'"'+s+' alt="" decoding="async" data-pack="term" data-ico="FLICO'+this.font+'/'+n+'.png">';
+  }
+};
+window.TERM_GLYPH=TERM_GLYPH;
+/* the tree's file glyph, chosen by the name the way the console does */
+/* R79 · the console's pictures: each tile and each rail button asks the pack for
+   its glyph. The line drawing stays underneath as the fallback and is hidden the
+   moment the bitmap arrives, so a pack that cannot be fetched leaves the window
+   exactly as it was. The glyphs look the same in every theme - they are images. */
+(function(){
+  const paint=()=>{
+    if(typeof TERM_GLYPH==='undefined')return;
+    document.querySelectorAll('[data-tgl]').forEach(slot=>{
+      if(slot.dataset.done)return;
+      const n=TERM_GLYPH.act[slot.dataset.tgl];
+      if(n===undefined)return;
+      slot.dataset.done='1';
+      slot.innerHTML=TERM_GLYPH.img(n,'tgl-img');
+      const im=slot.firstChild;
+      if(im&&im.tagName==='IMG'){
+        im.addEventListener('load',()=>{slot.classList.add('tgl-on');},{once:true});
+        im.addEventListener('error',()=>{
+          if(typeof FM_ICONS!=='undefined')FM_ICONS.heal(im);
+          slot.classList.remove('tgl-on');
+        });
+      }
+    });
+    document.querySelectorAll('[data-tglrail]').forEach(slot=>{
+      if(slot.dataset.done)return;
+      const n=TERM_GLYPH.rail[slot.dataset.tglrail];
+      if(n===undefined)return;
+      slot.dataset.done='1';
+      slot.innerHTML=TERM_GLYPH.img(n,'tgl-img tgl-rail-img');
+      const im=slot.firstChild;
+      if(im&&im.tagName==='IMG'){
+        im.addEventListener('load',()=>{slot.classList.add('tgl-on');},{once:true});
+        im.addEventListener('error',()=>{if(typeof FM_ICONS!=='undefined')FM_ICONS.heal(im);slot.classList.remove('tgl-on');});
+      }
+    });
+    /* the tree the console draws after a cd is repainted as well */
+    document.querySelectorAll('.term-tree-row .tgi').forEach(im=>{
+      if(im.dataset.wired)return;
+      im.dataset.wired='1';
+      im.addEventListener('load',()=>{const sv=im.parentElement&&im.parentElement.querySelector('.tgi-svg');if(sv)sv.style.display='none';},{once:true});
+      im.addEventListener('error',()=>{if(typeof FM_ICONS!=='undefined')FM_ICONS.heal(im);const sv=im.parentElement&&im.parentElement.querySelector('.tgi-svg');if(sv)sv.style.display='';});
+      if(im.complete&&im.naturalWidth)im.dispatchEvent(new Event('load'));
+    });
+    const m=document.querySelectorAll('.term-tree-row .tgi');
+    if(m.length&&typeof FM_ICONS!=='undefined')FM_ICONS.mirror('term',[...m].map(i=>i.dataset.ico).filter(Boolean));
+  };
+  paint();
+  document.addEventListener('DOMContentLoaded',paint);
+  setTimeout(paint,700);setTimeout(paint,1800);
+  window.FM_TERM_GLYPH_PAINT=paint;
+})();
+function termGlyphFor(name,isDir){
+  if(typeof TERM_GLYPH==='undefined')return '';
+  const t=TERM_GLYPH.tree;
+  if(isDir)return t.folder;
+  const n=String(name||'').toLowerCase();
+  const rules=[[/\.(zip|tar|gz|tgz|bz2|xz|rar|7z)$/,'zip'],[/\.(png|jpe?g|gif|webp|bmp|ico|avif|tiff?|svg)$/,'image'],
+    [/\.(mp3|wav|ogg|flac|m4a|aac|opus)$/,'audio'],[/\.(mp4|mkv|mov|avi|webm|flv|m4v)$/,'video'],
+    [/\.(sh|bash|zsh|py|rb|pl|go|rs|java|c|cpp|h|php|js|ts|css|html?|json|xml|yml|yaml)$/,'code'],
+    [/\.(pdf)$/,'pdf'],[/\.(exe|msi|deb|rpm|appimage|bin|so|dll)$/,'exec'],
+    [/\.(ini|conf|cfg|env|reg|htaccess)$/,'config'],[/\.(sql|db|sqlite\d?|mdb)$/,'db'],
+    [/\.(md|txt|log|rst|text|nfo)$/,'text']];
+  for(const [re,k] of rules){if(re.test(n))return t[k];}
+  return t.file;
+}
 function termFileIcon(name){
   var n = String(name || '');
   for (var i = 0; i < TERM_FILE_RULES.length; i++) {
@@ -53295,7 +53894,9 @@ async function termRefreshTree(){
     }
     box.innerHTML=d.items.length?d.items.map(it=>{
       const name=esc(it.name),isDir=Number(it.dir)===1;
-      const ico=isDir?'<svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg>':termFileIcon(it.name);
+      /* R79 · the tree wears the console's own bitmaps (MobaXterm's), not drawings */
+      const g=termGlyphFor(it.name,isDir);
+      const ico=(typeof TERM_GLYPH!=='undefined')?TERM_GLYPH.img(g,'tgi')+'<span class="tgi-svg">'+(isDir?'<svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg>':termFileIcon(it.name))+'</span>':(isDir?'<svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg>':termFileIcon(it.name));
       return '<div class="term-tree-row '+(isDir?'folder':'file')+'" style="padding-left:46px" data-term-path="'+name.replace(/"/g,'&quot;')+'" data-term-dir="'+(isDir?'1':'0')+'" title="'+name.replace(/"/g,'&quot;')+'">'
         +'<span class="term-tree-tw"></span><span class="term-tree-ico">'+ico+'</span>'
         +'<span class="term-tree-name">'+name+'</span></div>';
@@ -53641,7 +54242,18 @@ document.getElementById('termWinMin')?.addEventListener('click',termHideConsole)
     /* R58 · the caret and the typed field are measured in pixels off the console
        face, so a zoom has to re-measure them: without this the caret kept its old
        distance and drifted away from the cursor as soon as the text grew. */
-    try{const inp=termInput();if(inp){adjustTermInputWidth(inp);termCaretSync(inp);}}catch(err){}
+    try{
+      const inp=termInput();
+      if(inp){
+        adjustTermInputWidth(inp);
+        termCaretSync(inp);
+        /* R78 · the suggestion follows the cursor through a zoom, in the same frame */
+        if(typeof termGhostPlace==='function')termGhostPlace(inp);
+        termCaretMetrics();
+        termCaretSync(inp);
+        if(typeof termGhostPlace==='function')termGhostPlace(inp);
+      }
+    }catch(err){}
     return v;
   }
   function termStepFont(delta){
@@ -54281,6 +54893,9 @@ function termDrainResult(tab,lines,exit){
   tab.out.appendChild(frag);
   tab.lines+=lines.length;
   TERM_SCROLL.follow=follow;
+  /* R78 · the answer is on the page in one go: the view drops to the last row at
+     once, and the glide below is only the catch-up for a long answer */
+  if(follow&&tab===termTabCurrent())termScrollToBottom();
   if(!follow){termFinishRun(tab);return;}
   /* then the view walks down to it in steps - a few lines per frame, never a
      page, and it stops the moment the reader scrolls away */
@@ -54300,12 +54915,45 @@ function termScrollWalk(tab,count){
   clearInterval(TERM_DRAIN.timer);
   const box=termScrollBox();
   if(!box)return;
+  /* R77 · the whole answer is already on the page; this is only the travel. It
+     runs as one quick glide (a quarter of a second, fourteen stops) so a hundred
+     lines arrive together instead of one per beat - and it still stops dead if
+     the reader takes the scrollback into their own hands. */
+  const glide=()=>{
+    const row=termRowPx();
+    /* R77 · the reader's own hand stops the travel; its own moves never do */
+    let touched=false;
+    const stop=()=>{touched=true;};
+    ['wheel','touchstart','pointerdown','mousedown'].forEach(ev=>box.addEventListener(ev,stop,{once:true,passive:true}));
+    window.addEventListener('keydown',stop,{once:true});
+    const first=box.querySelector('.term-line');
+    let frames=0;
+    const tick=()=>{
+      if(touched||tab!==termTabCurrent()){TERM_SCROLL.follow=false;return;}
+      const bottom=box.scrollHeight-box.clientHeight;
+      const gap=bottom-box.scrollTop;
+      if(gap<=1||frames>45){termScrollBy(box,box.scrollHeight-box.clientHeight);TERM_SCROLL.follow=true;return;}
+      frames++;
+      /* a third of what is left, at least one whole row: the answer arrives in one
+         continuous move of about a quarter of a second, never a line per beat */
+      const move=Math.max(row,Math.ceil(gap*0.34));
+      const want=Math.min(bottom,box.scrollTop+move);
+      const grid=first?(first.getBoundingClientRect().top-box.getBoundingClientRect().top+box.scrollTop)%row:0;
+      const snapped=Math.min(bottom,grid+Math.round((want-grid)/row)*row);
+      termScrollBy(box,snapped);
+      TERM_SCROLL.follow=true;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  };
   /* the step is a handful of rows per frame, and every stop lands on the row grid
      of the answer itself: the line at the bottom edge is then a whole line instead
      of two halves of two, which is what looked like a line eaten by the status bar */
   const row=termRowPx();
   const first=box.querySelector('.term-line');
   const gridAt=el=>el?(el.getBoundingClientRect().top-box.getBoundingClientRect().top+box.scrollTop)%row:0;
+  glide();
+  return;
   const step=Math.max(1,Math.min(6,Math.ceil((count||1)/60)))*row;
   const place=()=>{
     const bottom=box.scrollHeight-box.clientHeight;
@@ -54359,7 +55007,11 @@ function termBindTab(tab){
     if(e.key.length===1)setTimeout(()=>{fetchSug();termGhostHint();},60);
     if(['Backspace','Delete'].includes(e.key))setTimeout(()=>{fetchSug();termGhostHint();},30);
   });
-  inp.addEventListener('input',()=>{adjustTermInputWidth(inp);termCaretSync(inp);fetchSug();termGhostHint();});
+  inp.addEventListener('input',()=>{
+    adjustTermInputWidth(inp);termCaretSync(inp);fetchSug();termGhostHint();
+    /* R78 · typing is working on the newest line: the console shows it */
+    if(tab.active)termScrollToBottom();
+  });
   ['keyup','click','select','focus'].forEach(ev=>inp.addEventListener(ev,()=>termCaretSync(inp)));
   /* a fresh row has no inline width yet: the field and its caret are laid out
      the moment the prompt exists, so the caret is on screen from the first frame */
@@ -54523,7 +55175,22 @@ function termCaretSync(el){
   let row=0,rowTop=null,x=0;
   const els=paint?paint.children:null;
   const at=Math.max(0,Math.min(pos,els?els.length-1:0));
-  if(els&&els.length){
+  if(!String(inp.value||'').length){
+    /* R77 · nothing typed: the block sits where the command will start, after the
+       prompt. A fresh row has not been measured yet, so the prompt's own right edge
+       is used until the first key sets the indent. */
+    const host=paint||inp;
+    let base=parseFloat(getComputedStyle(host).textIndent)||0;
+    if(!base){
+      const live=inp.closest('.term-live');
+      const ps=live&&live.parentElement?live.parentElement.querySelector('.term-ps'):null;
+      if(ps){
+        const pr=ps.getBoundingClientRect(),hr=host.getBoundingClientRect();
+        if(pr.width>0)base=Math.round(pr.right-hr.left)+1;
+      }
+    }
+    x=base;
+  }else if(els&&els.length){
     const box=paint.getBoundingClientRect();
     const ref=(pos<els.length?els[at]:els[els.length-1]).getBoundingClientRect();
     const prev=pos>0&&els[pos-1]?els[pos-1].getBoundingClientRect():null;
@@ -54546,7 +55213,20 @@ function termCaretSync(el){
       x=Math.round(ref.right-box.left);
     }
   }else{
-    x=parseFloat(getComputedStyle(inp).textIndent)||0;
+    /* R77 · nothing typed yet: the block waits where the command will start, after
+       the prompt. A fresh row has not been measured, so its indent is still 0 -
+       then the prompt's own right edge is the place the command begins. */
+    const host=paint||inp;
+    let base=parseFloat(getComputedStyle(host).textIndent)||0;
+    if(!base){
+      const live=inp.closest('.term-live');
+      const ps=live&&live.parentElement?live.parentElement.querySelector('.term-ps'):null;
+      if(ps){
+        const pr=ps.getBoundingClientRect(),hr=host.getBoundingClientRect();
+        if(pr.width>0)base=Math.round(pr.right-hr.left)+1;
+      }
+    }
+    x=base;
   }
   c.style.left=Math.round(x)+'px';
   /* R69 · the block sits on the letters, not near them: its top is the ink top
@@ -54612,7 +55292,35 @@ function termShowGhost(typed,full){
   /* the first character of the tail is the one under the caret: it is printed
      dark, so the reader reads the completion through the cursor block */
   g.innerHTML='<span class="gt-cur">'+esc(tail.slice(0,1))+'</span>'+esc(tail.slice(1));
-  g.style.left=(Math.max(inp.value.length,0)*gp)+'px';
+  /* R78 · the completion is drawn from the block itself: the cursor is measured
+     first, and the tail starts on the very cell the cursor stands on - at any text
+     size, so Ctrl+Shift+plus/minus never leaves the suggestion behind */
+  g.style.left='0px';
+  try{if(typeof termPaintRender==='function')termPaintRender(inp);}catch(err){}
+  adjustTermInputWidth(inp);
+  termCaretSync(inp);
+  let at=null;
+  try{
+    const c=termCaretEl(inp),live=inp.closest('.term-live');
+    if(c&&live){
+      const cr=c.getBoundingClientRect(),lr=live.getBoundingClientRect();
+      if(cr.width>0&&lr.width>0)at=cr.left-lr.left;
+      else at=parseFloat(c.style.left);
+    }
+  }catch(err){}
+  if(at==null||!isFinite(at)){
+    const paint=termPaintEl(inp);
+    const els=paint?paint.children:null;
+    const n=String(inp.value||'').length;
+    if(els&&els.length){
+      const pr=paint.getBoundingClientRect();
+      const sp=els[Math.max(0,Math.min(n-1,els.length-1))];
+      const sr=sp?sp.getBoundingClientRect():null;
+      if(sr&&pr.width>0)at=(n>=els.length)?(sr.right-pr.left):(sr.left-pr.left);
+    }
+  }
+  if(at==null||!isFinite(at))at=Math.max(inp.value.length,0)*gp;
+  g.style.left=Math.round(at)+'px';
   g.classList.add('on');
   adjustTermInputWidth(inp);
   termCaretSync(inp);
@@ -54669,18 +55377,29 @@ function appendCommandLine(tab,cmd){
      prompt comes back when the answer is finished. */
   const last=tab.out.lastElementChild;
   if(last&&last.classList&&last.classList.contains('cmd-line')&&last.dataset.cmd===cmd)return;
-  /* the prompt markup is read before the row is cleared: it is what the echo wears */
+  /* the prompt is read while it is still on screen: the row is cleared next */
   const pm=termPromptMarkup(tab);
+  /* the prompt markup is read before the row is cleared: it is what the echo wears */
   termPromptClear(tab);
+  const last2=tab.out.lastElementChild;
+  /* the prompt was read before the row was cleared - reading it after the clear
+     left every echoed line wearing the built-in `admin@host` instead of this host */
+  const kept=last2&&last2.classList&&last2.classList.contains('term-echo-row');
   const s=document.createElement('span');
   s.className='term-line cmd-line';
   s.dataset.cmd=cmd;
-  s.innerHTML='<span class="tk-prompt">'+pm+' </span>'+termPaint(cmd);
+  /* the console keeps the typed line while a command is out, so the echo is only
+     the command itself - printing the prompt a second time put the old folder in
+     front of the command on every row after the first one */
+  s.innerHTML=(kept?'':'<span class="tk-prompt">'+pm+'</span> ')+termPaint(cmd);
+  if(kept&&last2)last2.remove();
   const box=termScrollBox();
   const follow=!box||tab!==termTabCurrent()||TERM_SCROLL.follow;
   tab.out.appendChild(s);
   tab.lines++;
-  if(tab.active&&follow)termScrollToBottom();
+  /* R78 · the view goes all the way down when a command is sent: the reader is
+     starting the next line, so the newest row must be the one on screen */
+  if(tab.active){TERM_SCROLL.follow=true;termScrollToBottom();}
 }
 /* a command or a file that is fully written is worth a single keystroke less */
 function termCompleteWord(){
