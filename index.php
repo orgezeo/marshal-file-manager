@@ -1360,7 +1360,7 @@ if(!defined('FM_ICONS_BOOTED')){
     define('FM_ICONS_BOOTED',1);
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php')fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R79');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R80');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -9125,7 +9125,7 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
         <div class="win11-signin-sub"><?=($desktopLoginStep==='password'?'Enter your password':'Enter your user name')?></div>
       </div>
       <a class="logo login-logo-mobile" href="https://t.me/s4base" target="_blank" rel="noopener noreferrer" aria-label="Open MFM Telegram channel">
-        <img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="Marshall FM">
+        <img src="https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/images/icons/mfm.png" alt="Marshall FM">
       </a>
       <?php if(isset($loginError)):?><div class="err"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><?=htmlspecialchars($loginError)?></div><?php elseif(!empty($signedOut)):?><div class="err" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2);color:#fcd34d"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12h6"/></svg>This session was signed out by the administrator. Sign in again to continue.</div><?php elseif(!empty($idleExpired)):?><div class="err" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2);color:#fcd34d"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Session expired due to inactivity.</div><?php endif;?>
       <form method="post" id="loginFormMobile" class="login-form-mobile">
@@ -35073,6 +35073,19 @@ form:has(> .inp) > .btn{height:28px!important;min-height:28px!important;max-heig
  .brand-icon{width:calc(var(--th) - 2px);height:calc(var(--th) - 2px);display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:transform .25s var(--spring)}
 .brand-icon:hover{transform:scale(1.12)}
  .brand-icon img{width:100%;height:100%;object-fit:contain}
+
+/* R79b · the mark lives inside the page: no host can block it and no network
+   hiccup can leave a broken picture in the top bar. Two marks are shipped and
+   the readable one is chosen from the colour actually behind it, so every
+   theme (including the ones still to come) is right without a new rule */
+.brand-icon{position:relative}
+.brand-icon img{position:absolute;inset:0}
+.brand-icon img.bi-b{display:block}
+.brand-icon img.bi-w{display:none}
+.brand-icon[data-on="dark"] img.bi-b{display:block!important}
+.brand-icon[data-on="dark"] img.bi-w{display:none!important}
+.brand-icon[data-on="light"] img.bi-b{display:none!important}
+.brand-icon[data-on="light"] img.bi-w{display:block!important}
 .dv{width:1px;height:18px;background:var(--border);flex-shrink:0}
 .bc{display:flex;align-items:center;flex:1;overflow:hidden;min-width:0}
 .bc-crumb{display:flex;align-items:center;animation:fadeSlide .3s var(--spring) both}
@@ -36686,7 +36699,7 @@ button.rc-row{cursor:pointer}
 /* ── icon toolbar with captions ── */
 .term-toolbar{display:flex;align-items:flex-end;gap:1px;height:52px;min-height:52px;padding:2px 5px 3px;background:#121212;border-bottom:1px solid #2b2b2b;flex-shrink:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
 .term-toolbar::-webkit-scrollbar{height:0;display:none}
-.term-tile{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:2px;min-width:48px;width:auto;height:46px;padding:4px 5px 0;border:1px solid transparent;border-radius:2px;background:transparent;color:#c0c0c0;cursor:pointer;flex-shrink:0}
+.term-tile{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:1px;min-width:48px;width:auto;height:48px;padding:2px 5px 0;border:1px solid transparent;border-radius:2px;background:transparent;color:#c0c0c0;cursor:pointer;flex-shrink:0}
 .term-tile svg{width:18px;height:18px;fill:none;stroke:#8fb8d6;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
 .term-tile-cap{font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:10.5px;line-height:1;color:#b4b4b4;white-space:nowrap;letter-spacing:0}
 .term-tile:hover .term-tile-cap{color:#f0f0f0}
@@ -36728,23 +36741,38 @@ button.rc-row{cursor:pointer}
 .tgl{display:grid;place-items:center;width:26px;height:26px;margin:0 auto;position:relative}
 .tgl .tgl-img{width:22px;height:22px;display:block;image-rendering:auto;pointer-events:none}
 .term-tile>.tgl+.tgl-svg,.term-tile>svg{transition:opacity .12s}
-.term-tile.tgl-replaced>svg,.term-tile .tgl-on~svg{opacity:0}
-.term-rail-btn .tgl-rail{width:18px;height:18px;margin:0 0 5px}
-.term-rail-btn .tgl-rail .tgl-img{width:16px;height:16px}
-.term-rail-btn.tgl-replaced>svg,.term-rail-btn:has(.tgl-on)>svg{opacity:0}
+.term-tile.tgl-replaced>svg,.term-tile .tgl-on~svg{display:none!important}
+.term-rail-btn .tgl-rail{width:20px;height:20px;flex:0 0 20px;margin:0}
+.term-rail-btn .tgl-rail .tgl-img{width:20px;height:20px;object-fit:contain}
+/* R80 · the rail is a column of tools: a picture, then its name, nothing
+   on top of anything else. The caption is clipped by its height, never by
+   the row above it. */
+.term-rail-btn .tgl{width:20px;height:20px;flex:0 0 20px;margin:0}
+.term-rail-btn .tgl .tgl-img{width:20px;height:20px;object-fit:contain;display:block}
+/* the distro penguin beside the host name, a little smaller than the row icon */
+.term-tree-distro{display:grid;place-items:center;width:16px;height:16px;flex:0 0 16px;margin-left:auto;margin-right:2px}
+.term-tree-distro .tgi{width:16px;height:16px;object-fit:contain;display:block}
+/* a tree row keeps its icon box centred when the bitmap is bigger than the box */
+.term-tree-ico{overflow:visible}
+
+.term-rail-btn.tgl-replaced>svg,.term-rail-btn:has(.tgl-on)>svg{display:none!important}
 /* the tree */
 .term-tree-ico{position:relative;display:grid;place-items:center;width:16px;height:16px;flex:0 0 16px}
 .term-tree-ico svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .term-tree-ico .tgi{width:16px;height:16px;display:block;object-fit:contain}
+.term-tree-ico .tgi-svg{display:none}
+.term-tree-ico img.tgi~svg,.term-tree-ico img.tgi~.tgi-svg{display:none}
+.term-tree-ico img.tgi{grid-area:1/1;place-self:center}
+.term-tree-row .term-tree-ico .tgi:not([src])+.tgi-svg{display:contents}
 .term-tree-ico .tgi-svg{display:contents}
 .term-rail{width:34px;min-width:34px;background:#131313;border-right:1px solid #303030;display:flex;flex-direction:column;align-items:center;padding:2px 0 4px;gap:1px;flex-shrink:0;overflow-y:auto;overflow-x:hidden}
 .term-rail-fold{width:34px;height:20px;display:grid;place-items:center;border:0;border-bottom:1px solid #2a2a2a;background:transparent;color:#7fbfe0;cursor:pointer;padding:0;flex-shrink:0}
 .term-rail-fold svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s}
 .term-rail-fold:hover{background:#1f1f1f;color:#cfe9f7}
 .term-rail.folded .term-rail-fold svg{transform:rotate(180deg)}
-.term-rail-btn{width:32px;height:64px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:6px;padding-top:8px;border:0;border-left:0;border-radius:0;background:transparent;color:#9a9a9a;cursor:pointer;flex-shrink:0;position:relative}
+.term-rail-btn{position:relative;width:34px;height:74px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:3px;padding:5px 0 2px;border:0;border-left:0;border-radius:0;background:transparent;color:#9a9a9a;cursor:pointer;flex-shrink:0;position:relative}
 .term-rail-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
-.term-rail-btn span{writing-mode:vertical-rl;font-size:10px;line-height:1;color:inherit;letter-spacing:.2px}
+.term-rail-btn span{writing-mode:vertical-rl;text-orientation:mixed;font-size:10px;line-height:1;color:inherit;letter-spacing:0;max-height:46px;overflow:hidden;white-space:nowrap;flex:0 0 auto}
 .term-rail-btn:hover{background:#1f1f1f;color:#d8d8d8}
 .term-rail-btn.on{background:#1e1e1e;color:#f0f0f0}
 .term-rail-btn.on::before{content:'';position:absolute;left:0;top:6px;bottom:6px;width:2px;background:#e8c33a}
@@ -40946,7 +40974,7 @@ input.inp,select.inp{height:32px}
     <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <a href="?dir=<?=urlencode(__DIR__)?>" class="brand">
-     <div class="brand-icon"><img src="https://github.com/orgezeo/marshal-file-manager/blob/main/images/icons/mfm.png?raw=true" alt="File Manager"></div>
+     <div class="brand-icon"><img class="bi-b" alt="File Manager" src="data:image/png;base64,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"><img class="bi-w" alt="" src="data:image/png;base64,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"></div>
   </a>
   <div class="dv"></div>
   <nav class="bc" aria-label="Breadcrumb">
@@ -41966,6 +41994,18 @@ input.inp,select.inp{height:32px}
   }
   $termRootPath=(string)($fm->getRoot()?:DIRECTORY_SEPARATOR);
   $termHostLabel=gethostname()?:'server';
+  /* R80 · which penguin belongs next to the host: the distro it actually is */
+  $termDistroLabel='Linux';
+  $termDistroKey='linux';
+  if(@is_file('/etc/os-release')){
+    $__os=@file_get_contents('/etc/os-release');
+    if($__os!==false){
+      if(stripos($__os,'kali')!==false){$termDistroLabel='Kali Linux';$termDistroKey='kali';}
+      elseif(stripos($__os,'debian')!==false){$termDistroLabel='Debian';$termDistroKey='linux';}
+      elseif(stripos($__os,'ubuntu')!==false){$termDistroLabel='Ubuntu';$termDistroKey='linux';}
+      elseif(preg_match('/^PRETTY_NAME="?([^"\n]+)/m',$__os,$__m)){$termDistroLabel=trim($__m[1]);}
+    }
+  }
   $termUserLabel=(string)($sshTerminalUser?:($_SESSION['fm_user']??'user'));
   $termDirLabel=basename(rtrim($termTreeDir,'/\\'))?:$termTreeDir;
   /* R48: the same icon family the manager uses, chosen by extension, so the tree
@@ -42055,7 +42095,7 @@ input.inp,select.inp{height:32px}
       <button type="button" class="term-tile" data-term-act="refresh" title="Refresh the tree and the status bar" aria-label="Refresh"><span class="tgl" data-tgl="refresh"></span><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 10-2.4 5.7"/><path d="M20 5v5h-5"/></svg>
       <span class="term-tile-cap">Refresh</span></button>
       <span class="term-tile-sep"></span>
-      <button type="button" class="term-tile term-tile-go" id="termGo" data-term-act="openhere" title="Open the selected folder in the file manager" aria-label="Open the selected folder in the file manager"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 13h6M15 10l3 3-3 3"/></svg>
+      <button type="button" class="term-tile term-tile-go" id="termGo" data-term-act="openhere" title="Open the selected folder in the file manager" aria-label="Open the selected folder in the file manager"><span class="tgl" data-tgl="openhere"></span><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 13h6M15 10l3 3-3 3"/></svg>
       <span class="term-tile-cap">Open</span></button>
       <button type="button" class="term-tile" data-term-act="menu" title="The console menu: tabs, view, shortcuts and help" aria-label="Menus"><span class="tgl" data-tgl="menu"></span><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
       <span class="term-tile-cap">Menu</span></button>
@@ -42092,20 +42132,21 @@ input.inp,select.inp{height:32px}
         <div class="term-tree" id="termTree">
           <div class="term-tree-row on open" data-term-toggle="termTreeSessions" style="padding-left:2px">
             <span class="term-tree-tw"><svg viewBox="0 0 8 12"><path d="M1 1l5 5-5 5"/></svg></span>
-            <span class="term-tree-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="9" r="3.4"/><path d="M5.5 20a6.5 6.5 0 0113 0"/></svg></span>
+            <span class="term-tree-ico" data-tgikind="sessions"><svg viewBox="0 0 24 24"><circle cx="12" cy="9" r="3.4"/><path d="M5.5 20a6.5 6.5 0 0113 0"/></svg></span>
             <span class="term-tree-name">User sessions</span>
           </div>
           <div class="term-tree-children" id="termTreeSessions">
             <div class="term-tree-row server open" data-term-toggle="termTreeHost" style="padding-left:16px">
               <span class="term-tree-tw"><svg viewBox="0 0 8 12"><path d="M1 1l5 5-5 5"/></svg></span>
-              <span class="term-tree-ico"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M8 20h8"/></svg></span>
+              <span class="term-tree-ico" data-tgikind="host"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M8 20h8"/></svg></span>
               <span class="term-tree-name"><?=htmlspecialchars($termHostLabel)?></span>
+              <span class="term-tree-distro" data-tgidistro="<?=htmlspecialchars($termDistroKey)?>" title="<?=htmlspecialchars($termDistroLabel)?>"></span>
               <span class="term-tree-badge">SSH-1</span>
             </div>
             <div class="term-tree-children" id="termTreeHost">
               <div class="term-tree-row hostrow open" data-term-toggle="termTreeCwd" style="padding-left:30px">
                 <span class="term-tree-tw"><svg viewBox="0 0 8 12"><path d="M1 1l5 5-5 5"/></svg></span>
-                <span class="term-tree-ico"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg></span>
+                <span class="term-tree-ico" data-tgikind="cwd"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg></span>
                 <span class="term-tree-name" id="termTreeCwdName" title="<?=htmlspecialchars($termTreeDir)?>"><?=htmlspecialchars($termDirLabel)?></span>
                 <button type="button" class="term-tree-open" id="termTreeCwdOpen" title="Open this folder in the file manager" aria-label="Open this folder"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>
               </div>
@@ -42115,7 +42156,7 @@ input.inp,select.inp{height:32px}
                 <?php else: foreach($termTreeEntries as [$termEntryName,$termEntryIsDir]):?>
                 <div class="term-tree-row <?=$termEntryIsDir?'folder':'file'?>" style="padding-left:46px" data-term-path="<?=htmlspecialchars($termEntryName,ENT_QUOTES)?>" data-term-dir="<?=$termEntryIsDir?'1':'0'?>" title="<?=htmlspecialchars($termEntryName)?>">
                   <span class="term-tree-tw"></span>
-                  <span class="term-tree-ico"><svg viewBox="0 0 24 24"><?php if($termEntryIsDir):?><path d="M3 7h6l2 2h10v10H3z"/><?php else:[$termIcoStroke,$termIcoBody]=$termIconFor($termEntryName);?><g style="stroke:<?=$termIcoStroke?>"><?=$termIcoBody?></g><?php endif;?></svg></span>
+                  <span class="term-tree-ico" data-tginame="<?=htmlspecialchars($termEntryName,ENT_QUOTES)?>" data-tgidir="<?=$termEntryIsDir?'1':'0'?>"><svg viewBox="0 0 24 24"><?php if($termEntryIsDir):?><path d="M3 7h6l2 2h10v10H3z"/><?php else:[$termIcoStroke,$termIcoBody]=$termIconFor($termEntryName);?><g style="stroke:<?=$termIcoStroke?>"><?=$termIcoBody?></g><?php endif;?></svg></span>
                   <span class="term-tree-name"><?=htmlspecialchars($termEntryName)?></span>
                 </div>
                 <?php endforeach; endif;?>
@@ -44536,6 +44577,28 @@ input.inp,select.inp{height:32px}
 <script>
 const CWD  = <?=json_encode($fm->getCwd())?>;
 const FM_MAIN_PATH = <?=json_encode(realpath(__DIR__)?:__DIR__)?>;
+
+/* R79b · pick the mark that is readable on the bar behind it (white on a dark
+   bar, dark on a light one) and repaint on every theme change */
+(function(){
+  const lum=c=>{const m=c.match(/\d+(\.\d+)?/g);if(!m)return 0;
+    const [r,g,b]=m.map(Number).map(v=>{v/=255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4)});
+    return 0.2126*r+0.7152*g+0.0722*b;};
+  const bgOf=el=>{while(el&&el!==document.documentElement){
+      const c=getComputedStyle(el).backgroundColor;
+      if(c&&!/rgba\(0, 0, 0, 0\)|transparent/.test(c))return c;
+      el=el.parentElement;}
+    return getComputedStyle(document.documentElement).backgroundColor||'#000';};
+  const paint=()=>{
+    const box=document.querySelector('.brand-icon');if(!box)return;
+    const bar=document.querySelector('.topbar')||box;
+    box.dataset.on=lum(bgOf(bar))>0.42?'light':'dark';
+  };
+  paint();
+  document.addEventListener('DOMContentLoaded',paint);
+  window.addEventListener('load',paint);
+  new MutationObserver(paint).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme','class']});
+})();
 const CSRF = <?=json_encode($_SESSION['csrf_token'])?>;
 const FM_AUDIO_CACHE_SCOPE = <?=json_encode(hash('sha256',(string)($_SESSION['fm_user']??'')."\0".(string)($_SESSION['fm_root']??'')))?>;
 const FM_UPLOAD_CHUNK_BYTES = <?=fm_upload_chunk_bytes()?>;
@@ -53721,12 +53784,35 @@ window.FM_ICONS=FM_ICONS;
 /* ══ the console's own glyphs ═══════════════════════════════════════════════
    Every tile and every row of the left tree wears the MobaXterm bitmap. The
    number is the program's own slot, so the icons sit where MobaXterm puts them. */
+const TERM_EXT={
+  zip:'archive',rar:'archive','7z':'archive',gz:'archive',tgz:'archive',tar:'archive',bz2:'archive',xz:'archive',zst:'archive',
+  png:'image',jpg:'image',jpeg:'image',gif:'image',webp:'image',bmp:'image',svg:'image',ico:'image',tif:'image',tiff:'image',avif:'image',
+  mp4:'video',mkv:'video',avi:'video',mov:'video',webm:'video',wmv:'video',flv:'video',m4v:'video',mpg:'video',
+  mp3:'audio',wav:'audio',flac:'audio',ogg:'audio',m4a:'audio',aac:'audio',opus:'audio',wma:'audio',
+  pdf:'pdf',ps:'pdf',
+  sh:'exec',bash:'exec',zsh:'exec',fish:'exec',run:'exec',exe:'exec',msi:'exec',deb:'exec',rpm:'exec',appimage:'exec',bin:'exec',dll:'exec',so:'exec',apk:'exec',
+  php:'code',js:'code',mjs:'code',ts:'code',jsx:'code',tsx:'code',css:'code',scss:'code',html:'code',htm:'code',xml:'code',json:'code',
+  py:'code',rb:'code',pl:'code',go:'code',rs:'code',c:'code',h:'code',cpp:'code',hpp:'code',cs:'code',java:'code',kt:'code',swift:'code',lua:'code',sql:'code',
+  ini:'config',conf:'config',cfg:'config',env:'config',toml:'config',yml:'config',yaml:'config',htaccess:'config',reg:'config',inf:'config',
+  db:'db',sqlite:'db',sqlite3:'db',mdb:'db',dbf:'db',
+  csv:'sheet',xls:'sheet',xlsx:'sheet',ods:'sheet',numbers:'sheet',
+  txt:'text',log:'text',md:'text',markdown:'text',nfo:'text',rst:'text',doc:'text',docx:'text',odt:'text',rtf:'text',ppt:'text',pptx:'text',odp:'text'
+};
+
 const TERM_GLYPH={
   font:'22', /* the folder the pack keeps these in: FLICO22 */
-  act:{newtab:0,closetab:1,clear:10,paste:13,bottom:231,up:256,cwd:250,help:101,refresh:240,
-       openhere:292,menu:54,keep:259,panel:272},
-  rail:{sessions:142,tools:53,macros:243,sftp:224,log:101,places:250,queue:268,view:287},
-  tree:{folder:31,file:289,zip:45,image:39,audio:47,video:38,code:128,text:289,pdf:65,exec:56,config:53,db:67},
+  /* toolbar · green +, red −, the × of a tab, the clipboard, and the arrows */
+  act:{newtab:0,closetab:1,clear:10,paste:244,bottom:274,up:256,cwd:250,help:310,
+       refresh:240,openhere:272,menu:310,keep:19,panel:287},
+  /* side rail · a screen for sessions, the toolbox, the notepad for macros, the
+     folder of drops for SFTP, the sheet for the log, the folder of places, the
+     numbered list for the queue, the tray for the display */
+  rail:{sessions:215,tools:53,macros:243,sftp:250,log:285,places:287,queue:268,display:65},
+  /* tree · a host, the penguin of the box it is, the drive of the root folder,
+     and one picture per kind of file */
+  tree:{sessions:142,host:86,kali:93,linux:269,root:224,cwd:32,folder:31,open:32,
+        file:299,zip:282,archive:282,image:39,audio:47,video:38,code:128,text:281,
+        pdf:300,sheet:283,exec:208,config:53,db:343,unknown:299},
   url(n){return '?x=iconfile&pack=term&f='+encodeURIComponent('FLICO'+this.font+'/'+n+'.png');},
   img(n,cls,size){
     if(n===undefined||n===null)return '';
@@ -53774,9 +53860,34 @@ window.TERM_GLYPH=TERM_GLYPH;
     document.querySelectorAll('.term-tree-row .tgi').forEach(im=>{
       if(im.dataset.wired)return;
       im.dataset.wired='1';
-      im.addEventListener('load',()=>{const sv=im.parentElement&&im.parentElement.querySelector('.tgi-svg');if(sv)sv.style.display='none';},{once:true});
+      im.addEventListener('load',()=>{const p=im.parentElement;if(!p)return;
+        p.querySelectorAll('.tgi-svg').forEach(sv=>sv.style.display='none');
+        p.querySelectorAll('svg').forEach(sv=>sv.style.display='none');},{once:true});
       im.addEventListener('error',()=>{if(typeof FM_ICONS!=='undefined')FM_ICONS.heal(im);const sv=im.parentElement&&im.parentElement.querySelector('.tgi-svg');if(sv)sv.style.display='';});
       if(im.complete&&im.naturalWidth)im.dispatchEvent(new Event('load'));
+    });
+    /* the rows MobaXterm draws with a fixed picture: sessions, the host, the
+       distro beside it, and the folder the shell is standing in */
+    document.querySelectorAll('[data-tgikind]').forEach(box=>{
+      if(box.dataset.done)return;
+      const k=box.dataset.tgikind;
+      const n=TERM_GLYPH.tree[k];
+      if(n===undefined)return;
+      box.dataset.done='1';
+      box.insertAdjacentHTML('afterbegin',TERM_GLYPH.img(n,'tgi'));
+    });
+    document.querySelectorAll('[data-tgidistro]').forEach(box=>{
+      if(box.dataset.done)return;
+      const n=TERM_GLYPH.tree[box.dataset.tgidistro]||TERM_GLYPH.tree.linux;
+      box.dataset.done='1';
+      box.innerHTML=TERM_GLYPH.img(n,'tgi tgi-distro');
+    });
+    /* the first paint is server-rendered: the same rules, read off the row */
+    document.querySelectorAll('[data-tginame]').forEach(box=>{
+      if(box.dataset.done)return;
+      const n=termGlyphFor(box.dataset.tginame,box.dataset.tgidir==='1');
+      box.dataset.done='1';
+      box.insertAdjacentHTML('afterbegin',TERM_GLYPH.img(n,'tgi'));
     });
     const m=document.querySelectorAll('.term-tree-row .tgi');
     if(m.length&&typeof FM_ICONS!=='undefined')FM_ICONS.mirror('term',[...m].map(i=>i.dataset.ico).filter(Boolean));
@@ -53786,19 +53897,15 @@ window.TERM_GLYPH=TERM_GLYPH;
   setTimeout(paint,700);setTimeout(paint,1800);
   window.FM_TERM_GLYPH_PAINT=paint;
 })();
-function termGlyphFor(name,isDir){
-  if(typeof TERM_GLYPH==='undefined')return '';
-  const t=TERM_GLYPH.tree;
-  if(isDir)return t.folder;
+/* which picture a name wears: the extension decides, the folder flag wins */
+function termGlyphFor(name,isDir,kind){
+  if(kind&&TERM_GLYPH.tree[kind]!==undefined)return TERM_GLYPH.tree[kind];
+  if(isDir)return TERM_GLYPH.tree.folder;
   const n=String(name||'').toLowerCase();
-  const rules=[[/\.(zip|tar|gz|tgz|bz2|xz|rar|7z)$/,'zip'],[/\.(png|jpe?g|gif|webp|bmp|ico|avif|tiff?|svg)$/,'image'],
-    [/\.(mp3|wav|ogg|flac|m4a|aac|opus)$/,'audio'],[/\.(mp4|mkv|mov|avi|webm|flv|m4v)$/,'video'],
-    [/\.(sh|bash|zsh|py|rb|pl|go|rs|java|c|cpp|h|php|js|ts|css|html?|json|xml|yml|yaml)$/,'code'],
-    [/\.(pdf)$/,'pdf'],[/\.(exe|msi|deb|rpm|appimage|bin|so|dll)$/,'exec'],
-    [/\.(ini|conf|cfg|env|reg|htaccess)$/,'config'],[/\.(sql|db|sqlite\d?|mdb)$/,'db'],
-    [/\.(md|txt|log|rst|text|nfo)$/,'text']];
-  for(const [re,k] of rules){if(re.test(n))return t[k];}
-  return t.file;
+  const dot=n.lastIndexOf('.');
+  const ext=dot>0?n.slice(dot+1):'';
+  const k=TERM_EXT[ext]||TERM_EXT[n.replace(/^\./,'')];
+  return k&&TERM_GLYPH.tree[k]!==undefined?TERM_GLYPH.tree[k]:TERM_GLYPH.tree.file;
 }
 function termFileIcon(name){
   var n = String(name || '');
@@ -53895,7 +54002,7 @@ async function termRefreshTree(){
     box.innerHTML=d.items.length?d.items.map(it=>{
       const name=esc(it.name),isDir=Number(it.dir)===1;
       /* R79 · the tree wears the console's own bitmaps (MobaXterm's), not drawings */
-      const g=termGlyphFor(it.name,isDir);
+      const g=termGlyphFor(it.name,isDir,isDir?null:null);
       const ico=(typeof TERM_GLYPH!=='undefined')?TERM_GLYPH.img(g,'tgi')+'<span class="tgi-svg">'+(isDir?'<svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg>':termFileIcon(it.name))+'</span>':(isDir?'<svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg>':termFileIcon(it.name));
       return '<div class="term-tree-row '+(isDir?'folder':'file')+'" style="padding-left:46px" data-term-path="'+name.replace(/"/g,'&quot;')+'" data-term-dir="'+(isDir?'1':'0')+'" title="'+name.replace(/"/g,'&quot;')+'">'
         +'<span class="term-tree-tw"></span><span class="term-tree-ico">'+ico+'</span>'
