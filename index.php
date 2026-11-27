@@ -1370,10 +1370,41 @@ if(!defined('FM_ICONS_BOOTED')){
     define('FM_ICONS_BOOTED',1);
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php')fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R93');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R94');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
+/* If a host still stops this page on a fatal, the page is closed properly and
+   the clock is started by hand, so a broken screen is never a silent one: the
+   reason is printed in one quiet line and the sign-in form keeps working. */
+if(!defined('FM_FATAL_NET')){
+    define('FM_FATAL_NET',1);
+    register_shutdown_function(function(){
+        $e = error_get_last();
+        if(!$e)return;
+        if(!in_array($e['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR, E_RECOVERABLE_ERROR], true))return;
+        if(!headers_sent())return;              /* nothing was drawn: the host's own page is clearer */
+        while(ob_get_level() > 0)@ob_end_flush();
+        $where = htmlspecialchars(basename((string)$e['file']) . ':' . (string)$e['line'], ENT_QUOTES);
+        /* one line only: the rest of a stack trace belongs in the log, not on
+           the sign-in screen; the path is dropped because the position above
+           already names it */
+        $whyRaw = strtok((string)$e['message'], "\n");
+        $whyRaw = preg_replace('/ in \/(?:[^\s\/]+\/)*[^\s\/]+:\d+$/', '', (string)$whyRaw);
+        $why   = htmlspecialchars((string)$whyRaw, ENT_QUOTES);
+        echo '<script>(function(){var c=document.getElementById("loginClock"),d=document.getElementById("loginDate");'
+            .'if(!c&&!d)return;function b(v,w){v=String(v);while(v.length<w)v="0"+v;return v;}'
+            .'function t(){var n=new Date(),h=n.getHours(),m=n.getMinutes(),z=function(x){return b(x,2);};'
+            .'if(c)c.textContent=z(h)+":"+z(m)+" "+((h<12)?"AM":"PM");'
+            .'if(d)d.textContent=n.toLocaleDateString(undefined,{month:"long",day:"numeric",year:"numeric"});}'
+            .'t();setInterval(t,10000);})();</script>';
+        echo '<div style="position:fixed;left:50%;bottom:16px;transform:translateX(-50%);max-width:min(720px,92vw);'
+            .'padding:9px 13px;border-radius:10px;background:rgba(30,32,38,.96);color:#ffb4b4;'
+            .'font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid rgba(255,120,120,.35);z-index:99999">'
+            .'This page stopped while it was being built - ' . $where . ' - ' . $why . '</div>';
+        echo '</body></html>';
+    });
+}
 
 /* Prefer the database the project already uses. Replit and most modern PHP
    deployments expose it as DATABASE_URL; the old fmguardian@127.0.0.1:3307
@@ -9554,6 +9585,8 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
     event.preventDefault();form.dataset.submitting='1';shell.classList.add('is-leaving');
     window.setTimeout(function(){HTMLFormElement.prototype.submit.call(form);},240);
   });
+})();
+</script>
 </body></html>
 <?php exit; }
 
@@ -36835,6 +36868,26 @@ function fm_icon_img($pack,$rel,$cls='ibi'){
 /* only the Windows 11 packs are re-dressed in the new glyphs; every other theme
    keeps the icons it already has (its own pack will come later) */
 function fm_icons_w11_active(){return fm_theme_active('win11')||fm_theme_active('win11d');}
+/* ── R94 · nothing on this page may depend on an extension the host may not have
+   A crumb is shortened by characters, not by bytes, and the shortening must not
+   need an extension: on a host without mbstring the old call aborted the page
+   half-built, which is how the sign-in screen lost its clock and its form
+   stopped answering. mb_* is used when it exists, plain byte work otherwise. */
+function fm_shorten($s, $len = 18, $ellipsis = "\xE2\x80\xA6"){
+    $s = (string)$s;
+    $len = (int)$len;
+    if($len <= 0)return '';
+    if(function_exists('mb_strlen') && function_exists('mb_substr')){
+        if(mb_strlen($s, 'UTF-8') <= $len)return $s;
+        return mb_substr($s, 0, max(0, $len - 1), 'UTF-8') . $ellipsis;
+    }
+    if(strlen($s) <= $len)return $s;
+    $cut = substr($s, 0, max(0, $len - 1));
+    /* cut only on a character boundary: never leave half of a multi-byte letter */
+    while($cut !== '' && (ord(substr($cut, -1)) & 0xC0) === 0x80)$cut = substr($cut, 0, -1);
+    if($cut !== '' && (ord(substr($cut, -1)) & 0x80) !== 0)$cut = substr($cut, 0, -1);
+    return $cut . $ellipsis;
+}
 /* R93 · why a pack cannot be drawn, in one word, for the page to say out loud.
    It is the honest answer to "the icons went back to the old set": the folder
    is either there, or the archive was never fetched, or it was fetched and had
@@ -42925,7 +42978,7 @@ input.inp,select.inp{height:32px}
     <?php $bcs=$fm->breadcrumbs();$last=count($bcs)-1;foreach($bcs as $i=>$b):?>
     <div class="bc-crumb">
       <?php if($i>0):?><span class="bc-sep">/</span><?php endif;?>
-      <a href="?dir=<?=urlencode($b['path'])?>" class="<?=$i===$last?'last':''?>"><?=htmlspecialchars(mb_strimwidth($b['label'],0,18,'…'))?></a>
+      <a href="?dir=<?=urlencode($b['path'])?>" class="<?=$i===$last?'last':''?>"><?=htmlspecialchars(fm_shorten($b['label'],18))?></a>
     </div>
     <?php endforeach;?>
   </nav>
