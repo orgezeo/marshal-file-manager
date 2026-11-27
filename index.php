@@ -1527,7 +1527,7 @@ if(!defined('FM_ICONS_BOOTED')){
        boot is only for an install that was stripped of them */
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php'&&function_exists('fm_icons_builtin_count')&&fm_icons_builtin_count()===0)fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R102');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R107');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -14724,8 +14724,10 @@ class FileManager {
                 return['before' => false, 'fixed' => !$this->rootVlt($kv, $f), 'known' => true, 'line' => $f];
             if($maxMinor === null || $f[0] > $maxMinor[0] || ($f[0] === $maxMinor[0] && $f[1] > $maxMinor[1]))$maxMinor = $f;
         }
-        if($kv[0] > $maxMinor[0])return['before' => false, 'fixed' => true, 'known' => true];
-        if($kv[0] === $maxMinor[0] && $kv[1] > $maxMinor[1])return['before' => false, 'fixed' => true, 'known' => true];
+        if($kv[0] > $maxMinor[0])return['before' => false, 'fixed' => true, 'known' => true, 'line' => $maxMinor];
+        if($kv[0] === $maxMinor[0] && $kv[1] > $maxMinor[1])return['before' => false, 'fixed' => true, 'known' => true, 'line' => $maxMinor];
+        /* the same line, a later patch level: the fix for that line is named */
+        if($kv[0] === $maxMinor[0] && $kv[1] === $maxMinor[1])return['before' => false, 'fixed' => true, 'known' => true, 'line' => $maxMinor];
         /* inside the family, but this exact line is not one of the published
            fixes: the release may be a vendor build whose patch level is not in
            the string at all, so it is reported as undecided, not as open */
@@ -15955,6 +15957,303 @@ class FileManager {
             'fix' => 'REVOKE FILE ON *.* FROM the site user; leave it with rights on its own schema only.',
             'requires' => 'a database credential this account can read, and the FILE privilege on it.',
         ];
+        /* ── the eight routes this catalogue did not carry ───────────────────
+           Seven of them are kernel memory corruption and one is a grant. They
+           are measured the same way as everything above - the code in this
+           build, the interface reachable by this account, the release on the
+           near side of the fix for its own line - and all of them are refused a
+           trigger for the same reason: the write lands in kernel memory, and a
+           web request does not get to try that twice. */
+        $fsStep = $this->rootFsctxStep();
+        $v[] = [
+            'id' => 'fscontext', 'name' => 'A filesystem context told a length longer than a page', 'cve' => ['CVE-2022-0185'],
+            'year' => 2022, 'component' => 'fs/fs_context.c, legacy_parse_param',
+            'severity' => 'high', 'status' => $fsStep['status'], 'confidence' => 'high',
+            'summary' => 'The filesystem context keeps its parameters in one page and compares the length it has already used with the room it has left, adding one side of that sum in the wrong place. A parameter long enough to wrap the comparison is copied past the end of the page into the slab next door, and the object living there decides what the write becomes.',
+            'impact' => 'Local unprivileged account to a kernel heap write, which is uid 0 once a spray lands on the right object. No file is touched on the way in: the route is fsconfig on a context the account made itself.',
+            'evidence' => [
+                'kernel: ' . $fsStep['facts']['kernel'],
+                'fix window: ' . (isset($fsStep['fix']['line']) ? implode('.', $fsStep['fix']['line']) : 'undecided for this line'),
+                'reach: ' . (string)($fsStep['reach']['why'] ?? 'not readable'),
+                'the route needs a mount namespace, which needs unprivileged user namespaces'],
+            'mitigation' => 'sysctl user.max_user_namespaces=0 where unprivileged namespaces are not needed; do not run an unpatched 5.x kernel.',
+            'fix' => 'kernel 5.4.173 / 5.10.93 / 5.15.16 / 5.16.2 or later, or the vendor release that names this CVE.',
+            'requires' => 'unprivileged user namespaces, and a build that carries the filesystem-context parameter path (5.1 and later).',
+        ];
+        $nftvStep = $this->rootNftVerdictStep();
+        $v[] = [
+            'id' => 'nftverdict', 'name' => 'A packet freed twice on its way out of the filter', 'cve' => ['CVE-2024-1086'],
+            'year' => 2024, 'component' => 'net/netfilter/nf_tables_api.c, the verdict path',
+            'severity' => 'high', 'status' => $nftvStep['status'], 'confidence' => 'high',
+            'summary' => 'A packet answered with a verdict that makes the filter release it and then release it again leaves the same skb on the free list twice, and the next allocation hands one piece of memory to two owners. The path arrived with the nf_tables verdict code in 5.14, so an older kernel is outside the flaw by construction rather than by a patch.',
+            'impact' => 'Local unprivileged account to kernel heap reuse and then uid 0, from a rule set the account made inside its own user namespace - no interface on the host, no service, no file.',
+            'evidence' => [
+                'kernel: ' . $nftvStep['facts']['kernel'],
+                'nf_tables: ' . (string)($nftvStep['module'] ?? 'not read'),
+                'fix window: ' . (isset($nftvStep['fix']['line']) ? implode('.', $nftvStep['fix']['line']) : 'undecided for this line'),
+                'reach: ' . (string)($nftvStep['reach']['why'] ?? 'not readable')],
+            'mitigation' => 'Do not load nf_tables where it is not used, and close unprivileged user namespaces.',
+            'fix' => 'kernel 6.1.76 / 6.6.15 / 6.7.3 / 5.15.149 or later.',
+            'requires' => 'a kernel 5.14 or newer, nf_tables reachable, and user namespaces.',
+        ];
+        $afpStep = $this->rootAfpacketStep();
+        $v[] = [
+            'id' => 'afpacketv3', 'name' => 'A packet ring whose offset steps behind its own buffer', 'cve' => ['CVE-2020-14386'],
+            'year' => 2020, 'component' => 'net/packet/af_packet.c, tpacket_rcv',
+            'severity' => 'high', 'status' => $afpStep['status'], 'confidence' => 'high',
+            'summary' => 'The packet ring subtracts headroom that is larger than the block it is subtracting from, and the unsigned result wraps: the ring then hands back a pointer behind the buffer it was given. One packet large enough to make the subtraction borrow is the whole trigger.',
+            'impact' => 'Local account holding CAP_NET_RAW - which an ordinary account has inside its own user namespace - to a kernel heap overflow, and from there uid 0.',
+            'evidence' => [
+                'kernel: ' . $afpStep['facts']['kernel'],
+                'the ring code: ' . (string)($afpStep['reach']['why'] ?? 'not readable'),
+                'fix window: ' . (isset($afpStep['fix']['line']) ? implode('.', $afpStep['fix']['line']) : 'undecided for this line'),
+                'user namespaces: ' . (!empty($afpStep['facts']['userns']) ? 'max_user_namespaces ' . $afpStep['facts']['userns'] : 'not readable')],
+            'mitigation' => 'sysctl kernel.unprivileged_userns_clone=0 (or max_user_namespaces=0) where namespaces are not in use.',
+            'fix' => 'kernel 4.19.150 / 5.4.64 / 5.8.8 / 4.14.201 / 4.9.239 or later.',
+            'requires' => 'CAP_NET_RAW, obtainable through an unprivileged user namespace.',
+        ];
+        $r4Step = $this->rootRoute4Step();
+        $v[] = [
+            'id' => 'route4uaf', 'name' => 'A route filter put back where it no longer is', 'cve' => ['CVE-2022-2588'],
+            'year' => 2022, 'component' => 'net/sched/cls_route.c, route4_change',
+            'severity' => 'high', 'status' => $r4Step['status'], 'confidence' => 'high',
+            'summary' => 'Replacing a route classifier with handle zero frees the old one and then stores it in the hash table anyway, so the table points at freed memory. Two allocations of the same size afterwards give the attacker the write.',
+            'impact' => 'Local account with CAP_NET_ADMIN inside a user namespace to a kernel use-after-free, then uid 0. Nothing is needed but the traffic-control interface this account may already drive there.',
+            'evidence' => [
+                'kernel: ' . $r4Step['facts']['kernel'],
+                'the classifier code: ' . (string)($r4Step['reach']['why'] ?? 'not readable'),
+                'fix window: ' . (isset($r4Step['fix']['line']) ? implode('.', $r4Step['fix']['line']) : 'undecided for this line')],
+            'mitigation' => 'Close unprivileged user namespaces on a host that does not need them.',
+            'fix' => 'kernel 4.19.256 / 5.4.211 / 5.10.137 / 5.15.61 or later.',
+            'requires' => 'traffic control reachable through CAP_NET_ADMIN, and user namespaces.',
+        ];
+        $iscsiStep = $this->rootIscsiStep();
+        $v[] = [
+            'id' => 'iscsiheap', 'name' => 'An attribute buffer grown past its page', 'cve' => ['CVE-2021-27365'],
+            'year' => 2021, 'component' => 'drivers/scsi/iscsi_tcp.c and the connection class',
+            'severity' => 'medium', 'status' => $iscsiStep['status'], 'confidence' => 'high',
+            'summary' => 'The connection class builds its sysfs attributes with sprintf into a single page, and a netlink string longer than that page runs past it. It is only a route on a host whose kernel carries the iSCSI transport, which a plain web image usually does not - and that is measured here, not assumed from the version.',
+            'impact' => 'Local account to a kernel heap overflow on a host that loaded the transport; on a host where it was never loaded there is nothing to overflow.',
+            'evidence' => [
+                'kernel: ' . $iscsiStep['facts']['kernel'],
+                'transport: ' . implode(', ', array_map(function($k, $val){ return $k . ' ' . $val; }, array_keys((array)$iscsiStep['modules']), array_values((array)$iscsiStep['modules']))),
+                'fix window: ' . (isset($iscsiStep['fix']['line']) ? implode('.', $iscsiStep['fix']['line']) : 'undecided for this line')],
+            'mitigation' => 'Do not load iscsi_tcp on a host that does not mount iSCSI targets; block the module.',
+            'fix' => 'kernel 4.19.179 / 5.4.103 / 5.10.21 / 5.11.2 or later, or a module blacklist where the transport is not needed.',
+            'requires' => 'an iSCSI transport module loaded or built in.',
+        ];
+        $pkRaceStep = $this->rootPolkitRaceStep();
+        $v[] = [
+            'id' => 'polkitrace', 'name' => 'A polkit request answered after its caller stopped listening', 'cve' => ['CVE-2021-3560'],
+            'year' => 2021, 'component' => 'polkit, accountservice and the authentication handle',
+            'severity' => 'high', 'status' => $pkRaceStep['status'], 'confidence' => 'high',
+            'summary' => 'polkit acted on an account-changing request before checking whether the client that sent it was still there, and that check was where the caller identity was verified. Dropping the connection between two messages therefore made the request proceed as root on behalf of nobody.',
+            'impact' => 'Any local account to an account of its own choosing - including uid 0 - with three D-Bus messages and a timer, and no password at all. It is the cleanest local root this file knows about, and it is one package version away.',
+            'evidence' => [
+                'polkit: ' . ((string)($pkRaceStep['facts']['ver'] ?? '') !== '' ? $pkRaceStep['facts']['ver'] : 'version not readable'),
+                'package: ' . ((string)($pkRaceStep['facts']['pkg'] ?? '') !== '' ? $pkRaceStep['facts']['pkg'] : 'not in the database'),
+                'pkexec: ' . ((string)($pkRaceStep['facts']['pkexec'] ?? '') !== '' ? $pkRaceStep['facts']['pkexec'] : 'not installed')],
+            'mitigation' => 'polkit 0.119 or the distribution backport; on a server with no desktop, no polkit at all.',
+            'fix' => 'update polkit to 0.119 or later (0.105 backports exist for older distributions).',
+            'requires' => 'polkit 0.113 to 0.118 on the host.',
+        ];
+        $pagerStep = $this->rootPagerStep();
+        $v[] = [
+            'id' => 'sdlesspager', 'name' => 'A pager that keeps its command key under sudo', 'cve' => ['CVE-2023-26604'],
+            'year' => 2023, 'component' => 'systemd, systemctl and journalctl paging',
+            'severity' => 'medium', 'status' => $pagerStep['status'], 'confidence' => 'medium',
+            'summary' => 'systemctl and journalctl page their output through less, and systemd before 247 did not set LESSSECURE, so the pager keeps the key that runs a command - and it is running as root because sudo started it. A rule that allows "systemctl status" is therefore a root shell, which is not what the administrator wrote.',
+            'impact' => 'An account with a sudo rule for systemctl or journalctl to root, with nothing to exploit: one keypress inside a pager that is already root.',
+            'evidence' => [
+                'systemd: ' . ((string)($pagerStep['facts']['ver'] ?? '') !== '' ? $pagerStep['facts']['ver'] : 'version not readable'),
+                'systemctl: ' . ($this->rootWhich('systemctl') !== '' ? $this->rootWhich('systemctl') : 'not installed'),
+                'the rule: ' . ((string)($pagerStep['facts']['rule'] ?? '') !== '' ? $pagerStep['facts']['rule'] : 'none for this account')],
+            'mitigation' => 'Do not grant systemctl or journalctl through sudoers; grant a wrapper with an allow-listed verb instead.',
+            'fix' => 'systemd 247 or later, or a sudoers rule that does not hand out a pager.',
+            'requires' => 'a sudoers rule for systemctl or journalctl, and systemd before 247.',
+        ];
+        $grantStep = $this->rootSudoGrantStep();
+        $v[] = [
+            'id' => 'sudogrant', 'name' => 'A sudo rule that is already a root shell', 'cve' => [],
+            'year' => 2026, 'component' => 'sudoers, the program a rule names',
+            'severity' => 'high', 'status' => $grantStep['status'], 'confidence' => 'high',
+            'summary' => 'A sudoers rule is a grant, and a grant of a program that can be asked to run another one is root - not a misconfiguration to exploit, just a permission written down. The usual gifts are find, awk, less, tar, cp, tee, env, systemctl and any interpreter. This entry walks every rule this account could use and says which of them are shells.',
+            'impact' => 'Immediate uid 0 for the account the web server runs as, with no flaw, no race and nothing to install: one command, typed once.',
+            'evidence' => [
+                'rules read: ' . (int)($grantStep['facts']['rules'] ?? 0),
+                'shell-shaped rules: ' . (is_array($grantStep['facts']['bad'] ?? null) ? count($grantStep['facts']['bad']) : 0),
+                'the first one: ' . (is_array($grantStep['facts']['bad'] ?? null) && $grantStep['facts']['bad'] ? $grantStep['facts']['bad'][0]['cmd'] . (!empty($grantStep['facts']['bad'][0]['nopasswd']) ? ' (NOPASSWD)' : '') : 'none')],
+            'mitigation' => 'Grant a specific verb of a specific program, with a fixed argument list, to a specific account; never a pager, an editor, an interpreter or an archiver.',
+            'fix' => 'rewrite the rule to call a wrapper owned by root and writable by nobody else, and list exactly what it may do.',
+            'requires' => 'a sudoers rule for this account naming a program with a documented command escape.',
+        ];
+        /* ── R105: two kernel routes a 4.19 image really carries ────────────
+           Both were published in 2023 and both were fixed in the 4.19 line by a
+           vendor backport that keeps the version string, so on an OVH kernel the
+           honest answer is "check", never "patched". The second one matters more
+           than the first for a reason worth writing down: it asks for no
+           capability and no namespace at all. */
+        $nfrStep = $this->rootNfNewruleStep();
+        $v[] = [
+            'id' => 'nfnewrule', 'name' => 'A rule added inside a batch that then fails', 'cve' => ['CVE-2023-3390'],
+            'year' => 2023, 'component' => 'net/netfilter/nf_tables_api.c, the abort path of NFT_MSG_NEWRULE',
+            'severity' => 'high', 'status' => $nfrStep['status'], 'confidence' => 'high',
+            'summary' => 'A batch that adds a rule and then fails rolls back, and the rollback releases the rule while the table keeps a pointer to it; the lookup that follows the abort hands that pointer back as if it were live. One allocation of the same size afterwards owns memory the table still walks.',
+            'impact' => 'Local account with CAP_NET_ADMIN inside a user namespace to a kernel use-after-free, then uid 0 - from a batch it built itself, on a table only its own namespace can see.',
+            'evidence' => [
+                'kernel: ' . $nfrStep['facts']['kernel'],
+                'nf_tables: ' . (string)($nfrStep['module'] ?? 'not read'),
+                'fix window: ' . (isset($nfrStep['fix']['line']) ? implode('.', $nfrStep['fix']['line']) : 'undecided for this line'),
+                'reach: ' . (string)($nfrStep['reach']['why'] ?? 'not readable')],
+            'mitigation' => 'Close unprivileged user namespaces where they are not needed, and do not load nf_tables on a host that does not filter packets.',
+            'fix' => 'kernel 4.19.291 / 5.4.251 / 5.10.188 / 5.15.118 / 6.1.35 / 6.3.9 or later, or the vendor release that names this CVE.',
+            'requires' => 'nf_tables reachable through CAP_NET_ADMIN, and user namespaces.',
+        ];
+        $tlsStep = $this->rootTlsUlpStep();
+        $v[] = [
+            'id' => 'tlssockulp', 'name' => 'A socket that keeps the context the upper layer gave it', 'cve' => ['CVE-2023-0461'],
+            'year' => 2023, 'component' => 'net/ipv4/tcp_ulp.c and inet_connection_sock.c',
+            'severity' => 'high', 'status' => $tlsStep['status'], 'confidence' => 'high',
+            'summary' => 'setsockopt TCP_ULP installs an upper-layer protocol on a socket and allocates a context for it. That context is not cleared when the socket disconnects and is turned into a listener, so the next accepted socket inherits a pointer into memory that was already released - and the operation asks for no privilege at all.',
+            'impact' => 'Any local account at all - no capability, no namespace, no file - to a kernel use-after-free that has been shown to reach uid 0. It is the cheapest route in this catalogue to describe and the one most likely to be open on an old vendor kernel.',
+            'evidence' => [
+                'kernel: ' . $tlsStep['facts']['kernel'],
+                'the upper layer: ' . (string)($tlsStep['reach']['why'] ?? 'not readable'),
+                'tls module: ' . (string)($tlsStep['module'] ?? 'not read'),
+                'fix window: ' . (isset($tlsStep['fix']['line']) ? implode('.', $tlsStep['fix']['line']) : 'undecided for this line')],
+            'mitigation' => 'Do not build CONFIG_TLS on a host that does not terminate TLS in the kernel, and keep the 4.19 line at its latest patch level.',
+            'fix' => 'kernel 4.19.270 / 5.4.229 / 5.10.163 / 5.15.88 / 6.0.19 / 6.1.5 or later.',
+            'requires' => 'CONFIG_TLS or CONFIG_XFRM_ESPINTCP in the running kernel - and nothing else.',
+        ];
+        /* ── and two facts that are not versions and not CVEs ──────────────── */
+        $fdStep = $this->rootFdLeakStep();
+        $v[] = [
+            'id' => 'fdleak', 'name' => 'A descriptor that outlives the request that opened it', 'cve' => [],
+            'year' => 2026, 'component' => 'the descriptor table of the process answering this panel',
+            'severity' => 'medium', 'status' => $fdStep['status'], 'confidence' => 'high',
+            'summary' => 'Every descriptor open in this process is inherited by anything it starts. A socket, a directory or a deleted file left open across requests is not a leak of memory - it is a live handle with this account behind it, handed to whatever comes next and keeping a resource alive that its owner believes is gone.',
+            'impact' => 'A deleted file cannot be reclaimed while a descriptor holds it, a directory cannot be renamed under a process that holds it open, and a socket handed to a helper keeps answering as this account after the request that opened it has been answered.',
+            'evidence' => [
+                'a child started from here saw: ' . (int)($fdStep['facts']['seen'] ?? 0) . ' descriptor(s) of its own',
+                'files of this account inherited: ' . (is_array($fdStep['facts']['inherited'] ?? null) && $fdStep['facts']['inherited'] ? implode(' · ', array_slice($fdStep['facts']['inherited'], 0, 3)) : 'none'),
+                'the server own sockets, which are not a leak: ' . (is_array($fdStep['facts']['server_fds'] ?? null) && $fdStep['facts']['server_fds'] ? count($fdStep['facts']['server_fds']) . ' (' . implode(' · ', array_slice($fdStep['facts']['server_fds'], 0, 2)) . ')' : 'none'),
+                'file leases: ' . ((string)($fdStep['facts']['leases'] ?? '') === '1' ? 'enabled (a lease can block an open from anywhere, including root)' : 'not enabled')],
+            'mitigation' => 'Close every descriptor in a finally block; never hand a live socket to a long-lived helper.',
+            'fix' => 'close what the request opened, and pass a fresh descriptor to a helper instead of reusing this process one.',
+            'requires' => 'nothing - it is measured inside this process.',
+        ];
+        $agStep = $this->rootAgentKeyStep();
+        $v[] = [
+            'id' => 'agentkey', 'name' => 'An agent socket this process can talk to', 'cve' => [],
+            'year' => 2026, 'component' => 'SSH_AUTH_SOCK in the environment of the web process',
+            'severity' => 'high', 'status' => $agStep['status'], 'confidence' => 'high',
+            'summary' => 'An ssh-agent holds the keys, not the files, and it signs for whoever can reach its socket. A service started from a shell that had one exported therefore carries a key it was never given on disk: the signature is the login, and the password is never asked for because none exists in the agent either.',
+            'impact' => 'Where the socket is reachable, the identities in it answer for this account on every host that trusts them - with no key file read, no password and nothing written anywhere.',
+            'evidence' => [
+                'SSH_AUTH_SOCK: ' . ((string)($agStep['facts']['sock'] ?? '') !== '' ? $agStep['facts']['sock'] : 'not set'),
+                'ssh- variables in this environment: ' . (is_array($agStep['facts']['env'] ?? null) && $agStep['facts']['env'] ? implode(', ', $agStep['facts']['env']) : 'none'),
+                'ssh-add: ' . ((string)($agStep['facts']['ssh_add'] ?? '') !== '' ? $agStep['facts']['ssh_add'] : 'not installed')],
+            'mitigation' => 'Start web services from a clean environment (systemd units get one by default); never export SSH_AUTH_SOCK into a service manager that inherits it.',
+            'fix' => 'unset SSH_AUTH_SOCK in the unit that runs the server, and keep agents on the account that reads the terminal.',
+            'requires' => 'an agent socket reachable from the process, which is a deployment accident and not a flaw in ssh.',
+        ];
+        /* ── three that are not versions at all ──────────────────────────────
+           The catalogue spent two rounds on kernels, and the thing that most
+           often decides a web-to-root step on a small server is not in the
+           kernel: it is a directory somebody left writable. These three read
+           mode bits and the loader configuration, write nothing, and say who
+           else could have put a file where root reads one. */
+        $ldStep = $this->rootLdPathStep();
+        $v[] = [
+            'id' => 'ldpath', 'name' => 'A library directory this account may write', 'cve' => [],
+            'year' => 2026, 'component' => 'ld.so.conf, the loader search path, and the mode of every directory on it',
+            'severity' => 'high', 'status' => $ldStep['status'], 'confidence' => 'high',
+            'summary' => 'The dynamic loader walks an ordered list of directories and takes the first library whose name matches. Any directory on that list this account may write is therefore the right to decide what every program on the machine loads - and for the setuid ones the search runs with the file capabilities of the binary, which the uid change does not drop.',
+            'impact' => 'A library dropped in the right directory with the name of one the setuid binaries already link against is loaded instead of it, by a program that is still root. It survives a reboot, it needs no compiler on the target, and every account that can write that directory can do it.',
+            'evidence' => [
+                'directories on the search path: ' . (is_array($ldStep['facts']['dirs'] ?? null) ? count($ldStep['facts']['dirs']) : 0),
+                'writable by this account: ' . (is_array($ldStep['facts']['open'] ?? null) && $ldStep['facts']['open'] ? implode(' · ', array_map(function($o){ return $o['dir'] . ' (' . $o['src'] . ')'; }, $ldStep['facts']['open'])) : 'none'),
+                'environment overrides: ' . (is_array($ldStep['facts']['env'] ?? null) && $ldStep['facts']['env'] ? implode(' ', $ldStep['facts']['env']) : 'none')],
+            'mitigation' => 'Nothing but root writes /usr/local/lib or any directory named in ld.so.conf, and no service runs with LD_LIBRARY_PATH or LD_PRELOAD set.',
+            'fix' => 'chown root:root and chmod 0755 every directory on the loader path; keep the site tree off it.',
+            'requires' => 'nothing beyond the mode of the directory - it is the permission itself.',
+        ];
+        $ssStep = $this->rootSiteSharedStep();
+        $v[] = [
+            'id' => 'siteshared', 'name' => 'A site tree a second account can write', 'cve' => [],
+            'year' => 2026, 'component' => 'the mode and ownership of the directories the site is executed from',
+            'severity' => 'high', 'status' => $ssStep['status'], 'confidence' => 'high',
+            'summary' => 'A web shell needs one thing: a place where the server executes a file that somebody else could put there. A restore from an archive, a deployment run as the wrong user, or a group added for convenience all leave the site tree writable by an account that is not the one serving it.',
+            'impact' => 'Whoever holds that second account writes a script into a directory the site executes from, and the web server runs it with its own rights. No kernel flaw, no race and no privilege needed on either side.',
+            'evidence' => [
+                'directories read: ' . (int)($ssStep['facts']['scanned'] ?? 0) . ' in ' . ((string)($ssStep['facts']['base'] ?? '') !== '' ? $ssStep['facts']['base'] : 'the site tree'),
+                'writable by another account: ' . (is_array($ssStep['facts']['bad'] ?? null) ? count($ssStep['facts']['bad']) : 0),
+                'the first one: ' . (is_array($ssStep['facts']['bad'] ?? null) && $ssStep['facts']['bad'] ? $ssStep['facts']['bad'][0]['path'] . ' ' . $ssStep['facts']['bad'][0]['perm'] . ' ' . $ssStep['facts']['bad'][0]['owner'] . ':' . $ssStep['facts']['bad'][0]['group'] : 'none')],
+            'mitigation' => 'The site tree is owned by the account that serves it, mode 0755 for directories and 0644 for files, and no group other than the server one may write into it.',
+            'fix' => 'chown -R www-data:www-data the site tree and chmod -R go-w; restore backups as that user, never as root.',
+            'requires' => 'nothing - it is read from the mode bits.',
+        ];
+        $rpStep = $this->rootRunPathStep();
+        $v[] = [
+            'id' => 'runpath', 'name' => 'A root program that loads libraries from a directory this account may write', 'cve' => [],
+            'year' => 2026, 'component' => 'the run path linked into binaries that a root process executes',
+            'severity' => 'medium', 'status' => $rpStep['status'], 'confidence' => 'medium',
+            'summary' => 'A binary can carry its own library search path, and that path is read before the system list. Where the directory it names belongs to a package that was unpacked without care - or to a build tree that was copied into place - the program root runs loads whatever is found there first.',
+            'impact' => 'Same shape as the loader path, one level narrower: only the programs carrying that run path are affected, and only if they run as root. It is a packaging accident rather than a flaw, which is exactly why nobody looks for it.',
+            'evidence' => [
+                'programs read: ' . (int)($rpStep['facts']['read'] ?? 0),
+                'writable search paths found: ' . (is_array($rpStep['facts']['hits'] ?? null) && $rpStep['facts']['hits'] ? count($rpStep['facts']['hits']) : 0),
+                'the first one: ' . (is_array($rpStep['facts']['hits'] ?? null) && $rpStep['facts']['hits'] ? $rpStep['facts']['hits'][0] : 'none')],
+            'mitigation' => 'Binaries installed by the package manager only; no program copied out of a build directory into /usr/local/bin.',
+            'fix' => 'rebuild the binary without the run path, or make every directory it names root-owned and read-only.',
+            'requires' => 'a binary carrying a run path that names a writable directory.',
+        ];
+        /* ── the same three questions, asked of the files ───────────────────── */
+        $swStep = $this->rootSuidWriteStep();
+        $v[] = [
+            'id' => 'suidwrite', 'name' => 'A setuid program this account may rewrite', 'cve' => [],
+            'year' => 2026, 'component' => 'the mode of every setuid binary, and the mode of the directory holding it',
+            'severity' => 'high', 'status' => $swStep['status'], 'confidence' => 'high',
+            'summary' => 'A setuid bit on a file this account may write is not a privilege boundary - it is a template. The file can be replaced, and whatever replaces it runs as whoever runs it; the directory matters as much as the file, because a writable directory means the name can be swapped without touching the binary at all.',
+            'impact' => 'Any script dropped over a setuid name runs as root the next time that program is started, and on a web host the shortest path is a setuid binary sharing a name with something the server executes.',
+            'evidence' => [
+                'setuid programs read: ' . (int)($swStep['facts']['checked'] ?? 0),
+                'changeable by this account: ' . (is_array($swStep['facts']['bad'] ?? null) ? count($swStep['facts']['bad']) : 0),
+                'the first one: ' . (is_array($swStep['facts']['bad'] ?? null) && $swStep['facts']['bad'] ? $swStep['facts']['bad'][0]['path'] . ' ' . $swStep['facts']['bad'][0]['perm'] . ' ' . $swStep['facts']['bad'][0]['owner'] : 'none')],
+            'mitigation' => 'Setuid binaries root-owned, mode 0755, in root-owned directories; never leave one in /tmp or /var/tmp.',
+            'fix' => 'chown root:root and chmod 0755 every setuid binary, and remove any that a package did not install.',
+            'requires' => 'nothing - the mode bits decide it.',
+        ];
+        $lwStep = $this->rootLooseLibStep();
+        $v[] = [
+            'id' => 'libwrite', 'name' => 'A shared library this account may write', 'cve' => [],
+            'year' => 2026, 'component' => 'every shared library the loader knows, and its mode',
+            'severity' => 'high', 'status' => $lwStep['status'], 'confidence' => 'high',
+            'summary' => 'The loader resolves a program dependencies before the program runs, and for a setuid binary that resolution happens while it still has the file capabilities that let it become root. A writable library anywhere in that chain is therefore executed as root - and unlike a loose directory, one loose file is enough, because it does not have to be first in any search.',
+            'impact' => 'Every setuid program that links against the loose library runs code of this account as root. It is quieter than a loose directory because the path never changes and no new file appears beside it.',
+            'evidence' => [
+                'libraries read: ' . (int)($lwStep['facts']['checked'] ?? 0),
+                'writable by this account: ' . (is_array($lwStep['facts']['bad'] ?? null) ? count($lwStep['facts']['bad']) : 0),
+                'the first one: ' . (is_array($lwStep['facts']['bad'] ?? null) && $lwStep['facts']['bad'] ? $lwStep['facts']['bad'][0]['path'] . ' ' . $lwStep['facts']['bad'][0]['perm'] . ' ' . $lwStep['facts']['bad'][0]['owner'] : 'none')],
+            'mitigation' => 'Libraries owned by root, mode 0644, in directories only root writes; verify with the package manager rather than by hand.',
+            'fix' => 'reinstall the package that owns the library (dpkg -S / rpm -qf) and check its checksum.',
+            'requires' => 'nothing - one writable file is enough.',
+        ];
+        $sdStep = $this->rootSudoDirWritableStep();
+        $v[] = [
+            'id' => 'sudodir', 'name' => 'A directory a sudo rule points into, writable by this account', 'cve' => [],
+            'year' => 2026, 'component' => 'the directories named by sudoers rules, and their mode',
+            'severity' => 'high', 'status' => $sdStep['status'], 'confidence' => 'high',
+            'summary' => 'A sudoers rule needs a program name. When the rule names a directory or a wildcard, sudo runs whatever is found there - so a directory this account may write turns "you may run the tools in /usr/local/bin" into "you may run anything you like, as root".',
+            'impact' => 'The account that holds the rule writes the program the rule allows, and sudo runs it as root with the argument list the rule permits. No flaw in sudo, only a rule that names a place instead of a file.',
+            'evidence' => [
+                'sudo rules read: ' . (int)($sdStep['facts']['rules'] ?? 0),
+                'rules naming a directory or wildcard: ' . (is_array($sdStep['facts']['wild'] ?? null) ? count($sdStep['facts']['wild']) : 0),
+                'directories that can be written: ' . (is_array($sdStep['facts']['open'] ?? null) && $sdStep['facts']['open'] ? implode(' · ', array_map(function($x){ return $x['dir']; }, array_slice($sdStep['facts']['open'], 0, 3))) : 'none')],
+            'mitigation' => 'Every sudoers rule names an absolute path to a file root owns, with no wildcard; never a directory.',
+            'fix' => 'rewrite the rule as /usr/local/bin/tool --fix-args and make that file root:root 0755.',
+            'requires' => 'a sudo rule written as a directory or a wildcard.',
+        ];
         /* ── one memory the catalogue was missing ────────────────────────────
            The method that reaches for a row by id (rootCatalogRow) reads this
            list, and until now every caller that wanted a single row ran the
@@ -16362,6 +16661,8 @@ class FileManager {
             'setsid'   => ['setsid', 'id'],
             'tar'      => ['tar', '-cf', '/dev/null', '--checkpoint=1', '--checkpoint-action=exec=id', '/dev/null'],
             'gdb'      => ['gdb', '-q', '-nx', '-batch', '-ex', '!id', '-ex', 'quit'],
+            'man'      => ['man', '-P', '/usr/bin/id', 'localhost'],
+            'strace'   => ['strace', '-o', '/dev/null', '/usr/bin/id'],
             'sed'      => ['sed', '-n', '1e id', '/etc/hosts'],
             'lua'      => ['lua', '-e', 'os.execute("id")'],
             'expect'   => ['expect', '-c', 'exec /usr/bin/id'],
@@ -16433,6 +16734,68 @@ class FileManager {
        rule that allows one harmless-looking program is root if that program can
        run a shell, and this is the rule an administrator writes without meaning
        any harm by it. */
+    /* Every sudo rule this account could use, from both places they live:
+       what sudo itself answers when asked (-n -l, so no password is ever
+       prompted for and a rule that needs one is not counted as a way in), and
+       the sudoers files themselves where they happen to be readable. A rule is
+       read, never tried, and the group form is only accepted when this account
+       is really a member of that group - a %wheel line is not a rule for
+       everybody. */
+    private function rootSudoRules(){
+        static $c = null;
+        if($c !== null)return $c;
+        $out = [];
+        if($this->rootWhich('sudo') !== ''){
+            $r = $this->rootExec(['sudo', '-n', '-l'], '', 15);
+            $txt = trim((string)($r['out'] ?? '') . "\n" . (string)($r['err'] ?? ''));
+            if($txt !== '' && stripos($txt, 'may not run sudo') === false && stripos($txt, 'unknown user') === false){
+                foreach(preg_split('/\R/', $txt) ?: [] as $ln){
+                    $ln = trim($ln);
+                    if($ln === '' || stripos($ln, 'Matching Defaults') === 0 || stripos($ln, 'Runas and Command') === 0)continue;
+                    $np = stripos($ln, 'NOPASSWD:') !== false;
+                    if(preg_match('#^NOPASSWD:\s*(.+)$#i', $ln, $m))$entry = trim($m[1]);
+                    elseif(preg_match('#\(([^)]*)\)\s*(?:NOPASSWD:\s*)?(\S.*)$#i', $ln, $m))$entry = trim($m[2]);
+                    else continue;
+                    if($entry === '')continue;
+                    foreach(explode(',', $entry) as $piece){
+                        $piece = trim(preg_replace('/\s*#.*$/', '', $piece));
+                        if($piece === '')continue;
+                        $out[] = ['cmd' => $piece, 'nopasswd' => $np, 'who' => 'sudo -l', 'src' => 'sudo -n -l'];
+                    }
+                }
+            }
+        }
+        /* the files, where they may be read at all: an administrator who left
+           one of these readable has published the whole grant */
+        $me = (string)$this->managerAccount();
+        $files = ['/etc/sudoers'];
+        foreach((array)@glob('/etc/sudoers.d/*', GLOB_NOSORT) as $f)if(@is_file($f))$files[] = $f;
+        foreach($files as $f){
+            if(!@is_readable($f))continue;
+            foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $ln){
+                $ln = trim(preg_replace('/\s*#.*$/', '', $ln));
+                if($ln === '' || stripos($ln, 'Defaults') === 0 || stripos($ln, 'Cmnd_Alias') === 0 || stripos($ln, '#include') === 0)continue;
+                if(!preg_match('/^(\S+)\s+.*=\s*(.*)$/', $ln, $m))continue;
+                $who = $m[1];
+                if($who !== $me && $who !== 'ALL' && strpos($who, '%') === 0){
+                    $g = substr($who, 1);
+                    $mem = @file_get_contents('/etc/group');
+                    if($mem === false || !preg_match('/^' . preg_quote($g, '/') . ':[^:]*:[^:]*:([^\r\n]*)/m', (string)$mem, $gm) || !in_array($me, array_map('trim', explode(',', $gm[1])), true))continue;
+                }elseif($who !== $me && $who !== 'ALL')continue;
+                $body = trim($m[2]);
+                $np = stripos($body, 'NOPASSWD:') !== false;
+                $body = preg_replace('/^(?:\([^)]*\)\s*)+/', '', $body);
+                $body = preg_replace('/NOPASSWD:\s*/i', '', $body);
+                foreach(explode(',', (string)$body) as $piece){
+                    $piece = trim($piece);
+                    if($piece === '')continue;
+                    $out[] = ['cmd' => $piece, 'nopasswd' => $np, 'who' => $who, 'src' => $f];
+                }
+            }
+        }
+        $c = $out;
+        return $c;
+    }
     private function rootSudoAllowed(){
         static $out = null;
         if($out !== null)return $out;
@@ -18069,7 +18432,12 @@ exit 0
                       'docker',                                                                  // measured
                       'sudoers', 'rootd', 'suidphp', 'suidbash', 'polkitrule', 'setcapphp', 'passwd',
                       'bpfgc', 'statxland', 'pkcompat',
-                      'procargs', 'credreuse'];// keepers
+                      'procargs', 'credreuse',
+                      'fscontext', 'nftverdict', 'afpacketv3', 'route4uaf', 'iscsiheap',
+                      'polkitrace', 'sdlesspager', 'sudogrant',
+                      'nfnewrule', 'tlssockulp', 'fdleak', 'agentkey',
+                      'ldpath', 'siteshared', 'runpath',
+                      'suidwrite', 'libwrite', 'sudodir'];// measured only, never fired
         foreach($this->rootChannels() as $ch){
             if(in_array($ch['id'], $walkedIds, true))continue;
             /* a route that does put something on the machine is not skipped
@@ -18139,6 +18507,17 @@ exit 0
             $r = $this->rootExec($argv, '', 10);
             return['rc' => (int)$r['rc'], 'out' => $this->rootSnip(trim($r['out'] . ' ' . $r['err']))];
         };
+        if(strpos($id, 'fact-') === 0){
+            /* nothing is fired: the fact is already true or already false, and
+               taking it is a step a person makes on the host, not a request to
+               this panel. The answer says which one it is, read just now. */
+            $fid = strtolower(substr($id, 5));
+            foreach((array)$this->findSweep()['checks'] as $ch)
+                if(strtolower($ch['id']) === $fid)
+                    return['ok' => false, 'fired' => false, 'found' => !empty($ch['ok']), 'note' => (string)$ch['note']
+                        . ' - measured on this machine just now; the standing fact is the route itself, and walking it is done on the host, not from this panel'];
+            return['ok' => false, 'fired' => false, 'note' => 'this fact is not in the sweep on this machine'];
+        }
         if($id === 'udisksuser' || $id === 'pamudisks'){
             if($this->rootWhich('dbus-send') === '')
                 return['ok' => false, 'fired' => false, 'note' => 'not fired: there is no dbus-send on this host, so the udisks call cannot even be made'];
@@ -18167,6 +18546,14 @@ exit 0
         }
         if($id === 'pamnamespace' || $id === 'sudoeditwrite' || $id === 'regresshion' || $id === 'xzbackdoor')
             return['ok' => false, 'fired' => false, 'note' => 'not fired: this one needs a login session, a sudoedit rule or an unauthenticated race, and a request to this panel can produce none of them'];
+        if(in_array($id, ['fscontext','nftverdict','afpacketv3','route4uaf','iscsiheap','sctp','polkitrace','sdlesspager','sudogrant','nfnewrule','tlssockulp','fdleak','agentkey','ldpath','siteshared','runpath','suidwrite','libwrite','sudodir'], true)){
+            $x = $this->rootR92Step($id);
+            if(!in_array($x['status'], ['vulnerable', 'check'], true))
+                return['ok' => false, 'fired' => false, 'status' => (string)$x['status'],
+                    'note' => 'nothing to fire: measured ' . $x['status'] . ' on this machine - ' . $x['meaning']];
+            return['ok' => false, 'fired' => false, 'status' => (string)$x['status'],
+                'note' => 'measured ' . $x['status'] . '. ' . $x['meaning'] . ' ' . $this->rootFireWhy($id)];
+        }
         return['ok' => false, 'fired' => false, 'note' => 'not fired: it needs something a web request cannot produce, so only the measurement above applies'];
     }
     /* The sentence after a failed run: kernel flaws and package flaws are two
@@ -18953,6 +19340,42 @@ exit 0
         $add('nftsets', 'An anonymous set freed while a batch still holds it (CVE-2023-32233)', 'kernel',
              $nft['status'] . '. ' . $nft['meaning']);
         $vs = $this->rootVsockUafStep();
+        $add('suidwrite', 'A setuid program this account may rewrite', 'userspace',
+             'A setuid bit on a file this account may write is a template, not a boundary: the file can be replaced, and the directory matters more than the file because a writable directory means the name can be swapped under it. Read from the mode bits of every setuid program and of the directory holding it, and nothing is written.');
+        $add('libwrite', 'A shared library this account may write', 'userspace',
+             'The loader resolves dependencies before the uid changes, so a writable library anywhere in a setuid program chain is executed as root - and one loose file is enough, unlike a directory it does not have to come first in any search. Read from the mode of every library the loader knows.');
+        $add('sudodir', 'A directory a sudo rule points into, writable by this account', 'userspace',
+             'A rule written as a directory or a wildcard runs whatever is found there, so a writable directory turns a narrow grant into "anything you like, as root". Read from the rule text and the mode bits; nothing is executed and no file is created.');
+        $add('ldpath', 'A library directory this account may write', 'userspace',
+             'The loader takes the first library whose name matches, and any directory on its search path that this account may write is the right to choose what every program loads - including the setuid ones, whose search keeps the file capabilities of the binary. Read from ld.so.conf, its drop-ins and the mode of every directory on the list; nothing is written and no library is planted.');
+        $add('siteshared', 'A site tree a second account can write', 'userspace',
+             'The shortest way from a web account to a shell is a directory the server executes from and somebody else can write into. This walks the site tree and the manager parent, reads the mode and the owner of each, and names the accounts that could put a file there. No kernel bug, no race and nothing granted on either side.');
+        $add('runpath', 'A root program that loads libraries from a directory this account may write', 'userspace',
+             'A run path linked into a binary is searched before the system list. Where the directory it names is writable by this account, the program root runs loads a library of this account instead. Narrower than the loader path and easier to miss: it is a packaging accident, and it survives every update that does not rebuild the binary.');
+        $add('nfnewrule', 'A rule added inside a batch that then fails (CVE-2023-3390)', 'kernel',
+             'A batch that adds a rule and then fails rolls back and frees the rule while the table keeps pointing at it. The batch is this account own, in a namespace it made, on a table only that namespace can see - so nothing on the host is touched on the way in. Measured from the release, the netfilter build and the namespace setting, and never fired: the reuse it needs is a kernel heap write.');
+        $add('tlssockulp', 'A socket that keeps the context the upper layer gave it (CVE-2023-0461)', 'kernel',
+             'The only route in this list that asks for no capability and no namespace: setsockopt TCP_ULP installs an upper-layer protocol on a socket of this account own, and the context is not cleared when that socket becomes a listener. Two sockets and one setsockopt, nothing else. Measured from the kernel build and the patch level, and never fired.');
+        $add('fdleak', 'A descriptor that outlives the request that opened it', 'userspace',
+             'Not a version and not a flaw in anything: a descriptor left open in this process is inherited by whatever it starts and keeps a resource alive that its owner believes is gone. It is counted here, in this process, because that is the only descriptor table this panel is allowed to read.');
+        $add('agentkey', 'An agent socket this process can talk to', 'userspace',
+             'ssh-agent signs for whoever reaches its socket, so a service started from a shell that exported SSH_AUTH_SOCK carries keys it was never given on disk. Measured by whether the socket is there at all; listing the identities would need a signature this panel will not ask for on a machine it does not own.');
+        $add('fscontext', 'A filesystem context told a length longer than a page (CVE-2022-0185)', 'kernel',
+             'A mount context made inside this account own user namespace takes a parameter longer than the page it is stored in, and the comparison meant to refuse it adds the two sides of the sum in the wrong order. Nothing on the host is touched: the context, the namespace and the parameter are this account own, and the overflow lands in whatever the slab put next to it. Measured by the release, the code in the build and the namespace setting, and never fired from a web request.');
+        $add('nftverdict', 'A packet freed twice on its way out of the filter (CVE-2024-1086)', 'kernel',
+             'A verdict that asks the filter to release a packet twice puts the same skb on the free list twice, and the offer that follows is a kernel heap reuse. The path only exists from 5.14 onward, so an old image is outside it - which this panel states instead of implying, because the reflex is to see a four-digit version and assume the worst. Nothing is fired: the trigger is a race inside netfilter.');
+        $add('afpacketv3', 'A packet ring whose offset steps behind its own buffer (CVE-2020-14386)', 'kernel',
+             'The packet ring subtracts more headroom than the block holds and the unsigned offset wraps, so the ring returns a pointer behind its own buffer. The only capability needed is CAP_NET_RAW, which this account can hold inside its own user namespace, and nothing is written to disk anywhere on the way. Measured from the ring code and the namespace setting, not from the version alone.');
+        $add('route4uaf', 'A route filter put back where it no longer is (CVE-2022-2588)', 'kernel',
+             'A route classifier replaced with handle zero is freed and then put back into the table it was taken out of. The interface that does it is traffic control, which this account may drive inside a user namespace with the CAP_NET_ADMIN it was given there - so the flaw is a use-after-free owned entirely by an unprivileged account. Measured, and never fired: a wrong free corrupts the machine the panel runs on.');
+        $add('iscsiheap', 'An attribute buffer grown past its page (CVE-2021-27365)', 'kernel',
+             'The iSCSI connection class writes its sysfs attributes into one page with sprintf, and a netlink string longer than a page runs past it. It is a route only on a host that carries the transport, so the first question this step answers is whether the modules are loaded at all - and on a plain web image the honest answer is no, which is still the answer worth printing.');
+        $add('polkitrace', 'A polkit request answered after its caller stopped listening (CVE-2021-3560)', 'userspace',
+             'Three D-Bus messages: ask to create an account, drop the connection between the second and the third, and older polkit completes the request as root because it verifies the caller after acting rather than before. No password, no rule, no file, nothing on disk to plant. Measured from the polkit version, because that is the only fact that decides it, and deliberately not fired - the panel does not race a daemon the whole desktop depends on.');
+        $add('sdlesspager', 'A pager that keeps its command key under sudo (CVE-2023-26604)', 'userspace',
+             'A sudo rule for "systemctl status" looks like the most harmless grant an administrator can write, and before systemd 247 the pager systemctl starts as root still accepts the key that runs a command. The rule is measured first and the version second, in that order, because without the rule the version changes nothing.');
+        $add('sudogrant', 'A sudo rule that is already a root shell', 'userspace',
+             'Not a flaw and not an escalation: a grant. A rule that allows find, awk, tar, less, tee, env or an interpreter is root the first time it is used, because those programs can be asked to run something else. This step reads every rule this account may use - from sudo itself and from the files where they happen to be readable - and names the ones that are shells.');
         $add('vsockuaf', 'A vsock binding freed under the socket (CVE-2025-21756)', 'kernel',
              $vs['status'] . '. ' . $vs['meaning']);
         $cx = $this->rootIconvCnextStep();
@@ -19025,6 +19448,37 @@ exit 0
             if($e)$add($eid, $e['name'], $e['kind'], $e['idea']);
         }
 
+        /* 6 - what the machine says about itself, with no CVE and no release
+              number involved. These are not "a flaw somebody published": they
+              are standing arrangements this account lives with right now, each
+              one read off the machine in the sweep and each one a route of its
+              own. They are listed last because most of them end in a step that
+              does have to be taken, and the sweep says which.
+              */
+        /* The list itself is written here and measured nowhere: building the
+           method list must stay cheap, and a panel that reads the host eight
+           more times to draw eight names is a panel that takes three seconds to
+           open. Each of these rows measures itself when it is asked - in
+           rootChannelNeeds() for the requirement, and in the fire path for the
+           standing fact - and the sweep is cached for the request, so eight rows
+           still mean one walk of the machine. */
+        foreach([
+            'pathdir' => 'a directory root runs from that this account may write',
+            'rootexec' => 'a program root runs that this account may replace',
+            'argsecret' => 'a password printed on a command line',
+            'loosesystemfiles' => 'a system file this account may write',
+            'rightsfiles' => 'a file that already carries more rights',
+            'serverrights' => 'a server that reads what this account may not',
+            'servicepowers' => 'a standing power over a root service',
+            'selfpowers' => 'what this web process may already do',
+        ] as $fid => $fline){
+            $add('fact-' . $fid, 'Standing fact: ' . $fline, 'fact',
+                 'No CVE, no release number and nothing published: this is an arrangement that is true or false on this machine right now, '
+                 . 'read straight from it. ' . ucfirst($fline) . '. It is measured when this row is asked, and the line it gives back says what was read - '
+                 . 'a directory tested with the file system, a program root is configured to run, a command line opened and searched for a password shape, '
+                 . 'a file tested for write rights, a privilege bit read off a file, a database server asked about a file this account may not open, '
+                 . 'a socket tested for write access, or the capabilities of this process itself.');
+        }
         return $out;
     }
 
@@ -19167,6 +19621,28 @@ exit 0
             case 'cnext':return $this->rootIconvCnextStep();
             case 'sshregre':return $this->rootSshdRegreStep();
             case 'lighttpdforward':return $this->rootLighttpdFwdStep();
+            /* the eight routes of R104: five kernel rises and three grants */
+            case 'fscontext':return $this->rootFsctxStep();
+            case 'nftverdict':return $this->rootNftVerdictStep();
+            case 'afpacketv3':return $this->rootAfpacketStep();
+            case 'route4uaf':return $this->rootRoute4Step();
+            case 'iscsiheap':return $this->rootIscsiStep();
+            case 'polkitrace':return $this->rootPolkitRaceStep();
+            case 'sdlesspager':return $this->rootPagerStep();
+            case 'sudogrant':return $this->rootSudoGrantStep();
+            /* R105: the two that bite a 4.19 image, and two that are not CVEs */
+            case 'nfnewrule':return $this->rootNfNewruleStep();
+            case 'tlssockulp':return $this->rootTlsUlpStep();
+            case 'fdleak':return $this->rootFdLeakStep();
+            case 'agentkey':return $this->rootAgentKeyStep();
+            /* R106: the three that are decided by permission bits, not versions */
+            case 'ldpath':return $this->rootLdPathStep();
+            case 'siteshared':return $this->rootSiteSharedStep();
+            case 'runpath':return $this->rootRunPathStep();
+            /* R107: the same question asked of the files themselves */
+            case 'suidwrite':return $this->rootSuidWriteStep();
+            case 'libwrite':return $this->rootLooseLibStep();
+            case 'sudodir':return $this->rootSudoDirWritableStep();
         }
         return['status' => 'unknown', 'meaning' => 'this method has no measurement behind it'];
     }
@@ -19684,6 +20160,1945 @@ exit 0
         return['cve' => ['CVE-2026-64564'], 'status' => $status, 'meaning' => $meaning,
                'kernel' => $k, 'reach' => $reach, 'mit' => $mit, 'fixed' => $fixed];
     }
+    /* ══ SELF-DISCOVERY, NOT A LIST OF PUBLISHED CVEs ═══════════════════════════
+    /* ── 1 · a directory root loads from before it runs anything ───────────════════════
+       Everything below measures the machine as it is right now and reports
+       what it finds. Nothing here is keyed to a CVE number, nothing here needs
+       a version to be recognised, and nothing here is copied from a bulletin:
+       each check asks the system a question and believes only the answer it
+       gets back. A finding is a fact, not an advisory.
+
+       The difference matters. A catalogue row says "this release is inside the
+       range a published flaw covers". A finding here says "this file is world
+       writable and root executes it", "this process was started with a secret
+       on its command line", "this account may write a directory that is on
+       root's PATH", "this database server hands its own file rights to anyone
+       who asks over the socket". Those are true or false on this host today,
+       whatever any vendor ever published.
+
+       Nothing in this block executes anything, changes anything or sends
+       anything. It reads. */
+
+    /* ── 1 · a directory root loads from before it runs anything ─────────────
+       PATH is searched from the left. A directory in that search that this
+       account may write means a program name root types can be answered by a
+       file this account owns. The directories are read from the environment of
+       the processes root already runs, not from a hard-coded list, and each one
+       is tested with is_writable - a fact about the file system, not a guess. */
+    private function findPathDir(){
+        $dirs = [];
+        $src = [];
+        foreach(['/etc/environment', '/etc/profile'] as $f){
+            $b = (string)@file_get_contents($f);
+            if($b === '')continue;
+            if(preg_match('/^\s*(?:export\s+)?PATH\s*=\s*"?([^"\n]+)"?/m', $b, $m)){
+                foreach(explode(':', $m[1]) as $d)if($d !== '')$dirs[$d] = $f;
+                $src[] = $f;
+            }
+        }
+        /* the crontab says which PATH cron gives its jobs, which is the one that
+           matters most: those jobs run as root */
+        foreach(['/etc/crontab'] as $f){
+            $b = (string)@file_get_contents($f);
+            if(preg_match('/^\s*PATH\s*=\s*(\S+)/m', $b, $m)){
+                foreach(explode(':', $m[1]) as $d)if($d !== '')$dirs[$d] = $f;
+                $src[] = $f;
+            }
+        }
+        /* and what this very process was handed, which is the web server's own */
+        foreach(explode(':', (string)@getenv('PATH')) as $d)if($d !== '')$dirs[$d] = 'the environment of this process';
+        $open = [];
+        foreach($dirs as $d => $from){
+            if(!@is_dir($d))continue;
+            $st = @stat($d);
+            if(!$st)continue;
+            if(!($st['mode'] & 0002) && !@is_writable($d))continue;
+            $open[] = ['dir' => $d, 'from' => $from,
+                       'mode' => substr(sprintf('%04o', $st['mode'] & 07777), -4),
+                       'owner' => (string)@posix_getpwuid($st['uid'])['name']];
+        }
+        return['ok' => (bool)$open, 'dirs' => $open, 'read' => count($dirs), 'sources' => array_values(array_unique($src)),
+               'note' => $open
+                   ? 'a directory on the search path may be written by this account: ' . implode(', ', array_map(function($x){ return $x['dir'] . ' (' . $x['mode'] . ', named by ' . $x['from'] . ')'; }, $open))
+                   : 'all ' . count($dirs) . ' directories on the search paths root and cron use are closed to this account'];
+    }
+
+    /* ── 2 · a program root runs that this account may replace ───────────────
+       This is the sharpest shape of all and it needs no version at all: if root
+       executes a file, and this account may write that file (or the directory
+       that holds it, which is the same power - rename it and put another one in
+       its place), then the next time root runs it, it runs this account's code
+       as root. The candidates are read from what root is configured to run: the
+       units systemd has loaded, the jobs cron keeps, and the scripts those jobs
+       name. Every one is then tested, not assumed. */
+    private function findRootExec(){
+        $cand = [];
+        /* what cron runs */
+        $sources = ['/etc/crontab', '/etc/anacrontab'];
+        foreach((array)@glob('/etc/cron.d/*') as $f)if(@is_file($f))$sources[] = $f;
+        foreach(['/etc/cron.hourly', '/etc/cron.daily', '/etc/cron.weekly', '/etc/cron.monthly'] as $d)
+            foreach((array)@glob(rtrim($d, '/') . '/*') as $f)if(@is_file($f))$sources[] = $f;
+        foreach(array_unique($sources) as $src){
+            if(!@is_readable($src))continue;
+            $body = (string)@file_get_contents($src);
+            if($body === '')continue;
+            if(preg_match('#^/etc/cron\.(hourly|daily|weekly|monthly)/#', $src)){$cand[$src] = 'a run-parts job'; continue;}
+            foreach(preg_split('/\R/', $body) as $line){
+                $line = trim($line);
+                if($line === '' || $line[0] === '#')continue;
+                if(preg_match_all('#(/[^\s"\'();|&]+)#', $line, $m))
+                    foreach($m[1] as $path)$cand[rtrim($path, ',')] = 'named by ' . $src;
+            }
+        }
+        /* what systemd has loaded: the ExecStart lines of the running units */
+        foreach((array)@glob('/etc/systemd/system/*.service') as $u){
+            $b = (string)@file_get_contents($u);
+            if(preg_match_all('#^ExecStart\s*=\s*[-@+!]*([^\s]+)#m', $b, $m))
+                foreach($m[1] as $path)$cand[$path] = 'ExecStart of ' . basename($u);
+        }
+        $open = [];
+        foreach($cand as $path => $why){
+            if($path === '' || $path[0] !== '/')continue;
+            if(!@is_file($path))continue;
+            if(@is_link($path))continue;
+            $dir = dirname($path);
+            $fileW = @is_writable($path);
+            $dirW = @is_writable($dir);
+            if(!$fileW && !$dirW)continue;
+            $st = @stat($path);
+            $open[] = ['path' => $path, 'why' => $why, 'file_writable' => $fileW, 'dir_writable' => $dirW,
+                       'mode' => $st ? substr(sprintf('%04o', $st['mode'] & 07777), -4) : '?',
+                       'owner' => $st ? (string)@posix_getpwuid($st['uid'])['name'] : '?',
+                       'via' => $fileW ? 'the file itself may be written' : 'the directory ' . $dir . ' may be written, so the file may be replaced by a rename'];
+        }
+        usort($open, function($a, $b){ return ($b['file_writable'] ? 1 : 0) - ($a['file_writable'] ? 1 : 0); });
+        return['ok' => (bool)$open, 'files' => $open, 'checked' => count($cand),
+               'note' => $open
+                   ? 'root runs ' . count($open) . ' file(s) this account may replace: ' . implode(', ', array_map(function($x){ return $x['path'] . ' (' . $x['via'] . ', ' . $x['why'] . ')'; }, array_slice($open, 0, 4)))
+                   : 'none of the ' . count($cand) . ' program path(s) root runs from cron or systemd may be written or replaced by this account'];
+    }
+
+    /* ── 3 · a secret published to every account on the box ──────────────────
+       Every command line on a Linux machine is world readable, and processes
+       are handed their secrets as arguments every day: a backup that calls
+       mysqldump -p<pass>, a mail job with --password=, a mount with
+       credentials=, a git remote with a token in the URL. This reads every
+       command line it can open, extracts the shapes that look like a secret,
+       and says which process published it. It does not use the secret. */
+    private function findArgSecret(){
+        /* The shapes below are the ones a program uses to carry a secret, and
+           each one has to be recognised as that program's argument, not as a
+           substring of something else. The first version of this check matched
+           "-p" inside "--password-store=basic" and reported a browser flag as a
+           password; a check that cries wolf is worse than no check at all, so
+           the short form is now allowed only for the programs that really take
+           it, and every capture has to look like a secret. */
+        $shapes = [
+            /* long forms: the value follows an = or a space */
+            '/--(?:password|passwd|pass|pwd|token|api-key|apikey|secret|auth-token|access-key)[= ]+([^\s\'"]{4,120})/i',
+            /* environment assignments that are read as a credential */
+            '/\b(?:MYSQL_PWD|PGPASSWORD|REDISCLI_AUTH|MONGODB_PASSWORD|MSSQL_SA_PASSWORD)\s*=\s*([^\s\'"]{4,120})/',
+            /* a credential inside a URL: scheme://user:secret@host */
+            '#\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:([^/\s@]{4,80})@#i',
+        ];
+        /* the short -p, and only where it means a password */
+        $shortP = '/^([a-z0-9_.\-]*)(?:.*)$/i';
+        $shortFam = '/(^|\/)(mysql|mysqldump|mysqladmin|mysqlcheck|mysqlshow|myisamchk|mariadb|mariadb-dump|'
+                  . 'sshpass|smbclient|smbget|psql|pg_dump|pg_restore|redis-cli|mosquitto_pub|mosquitto_sub|'
+                  . 'htpasswd|svn|git|curl|wget|openssl|7z|zip|unzip|rar|ftp|lftp|ldapsearch|knife|aws|az|gcloud)$/i';
+        $junk = '/^(password|passwd|secret|token|none|off|on|yes|no|file|stdin|stdout|prompt|ask|basic|x|null|true|false|example|changeme)$/i';
+        $hits = []; $read = 0;
+        foreach((array)@glob('/proc/[0-9]*/cmdline') as $f){
+            $raw = @file_get_contents($f);
+            if($raw === false || $raw === '')continue;
+            $read++;
+            $line = str_replace("\0", ' ', $raw);
+            $pid = (int)basename(dirname($f));
+            if($pid === getmypid() || strpos($line, 'index.php') !== false)continue;
+            $exe = (string)@readlink('/proc/' . $pid . '/exe');
+            $args = array_values(array_filter(explode(' ', $line), function($x){ return $x !== ''; }));
+            $found = '';
+            foreach($shapes as $re){
+                if(preg_match($re, $line, $m)){ $found = (string)$m[1]; break; }
+            }
+            /* -pVALUE, but only for the programs that document it that way */
+            if($found === '' && preg_match($shortFam, $exe)){
+                foreach($args as $one){
+                    if(substr($one, 0, 2) === '-p' && strlen($one) > 3){ $found = substr($one, 2); break; }
+                    if($one === '-p' || $one === '--password')break;   /* the value is asked for, not given */
+                }
+            }
+            if($found === '')continue;
+            $found = rtrim($found, ',\'"');
+            if(strlen($found) < 4 || strlen($found) > 120)continue;
+            if(preg_match($junk, $found))continue;
+            if(!preg_match('/[A-Za-z0-9]/', $found))continue;
+            /* a value carrying an = or a - is a flag or a path, not a secret */
+            if(strpos($found, '=') !== false || strpos($found, '-') !== false)continue;
+            $usr = '?';
+            $st = @file_get_contents('/proc/' . $pid . '/status');
+            if($st !== false && preg_match('/^Uid:\s+(\d+)/m', $st, $u))$usr = (int)$u[1] === 0 ? 'root' : ('uid ' . (int)$u[1]);
+            $hits[] = ['pid' => $pid, 'exe' => $exe, 'runs_as' => $usr,
+                       'masked' => substr($found, 0, 2) . str_repeat('*', max(2, strlen($found) - 3)) . substr($found, -1),
+                       'length' => strlen($found),
+                       'hint' => $this->rootSnip($line, 90)];
+        }
+        return['ok' => (bool)$hits, 'hits' => $hits, 'read' => $read,
+               'note' => $hits
+                   ? count($hits) . ' process command line(s) publish what looks like a secret, readable by every account here (the first is pid ' . $hits[0]['pid'] . ', ' . $hits[0]['exe'] . ', running as ' . $hits[0]['runs_as'] . ')'
+                   : 'none of the ' . $read . ' readable command line(s) carries a password shape - and every one of them was opened'];
+    }
+
+    /* ── 4 · a file root keeps that this account may write ───────────────────
+       Not a read-only file the kernel may be raced into. A file that is already
+       writable by this account right now, and that something with more rights
+       than this account reads as configuration or as a key. The paths are the
+       ones every distribution uses, and each is opened and tested. Anything
+       here is a role change this account can make by itself, with no exploit. */
+    private function findLooseSystemFiles(){
+        $watch = ['/etc/passwd', '/etc/shadow', '/etc/group', '/etc/gshadow', '/etc/sudoers',
+                  '/etc/crontab', '/etc/hosts', '/etc/resolv.conf', '/etc/ld.so.conf', '/etc/ld.so.preload',
+                  '/etc/fstab', '/etc/ssh/sshd_config', '/etc/pam.d/common-auth', '/etc/pam.d/su',
+                  '/etc/securetty', '/etc/nsswitch.conf', '/etc/modules', '/etc/hostname'];
+        foreach((array)@glob('/etc/sudoers.d/*') as $f)$watch[] = $f;
+        foreach((array)@glob('/root/.ssh/authorized_keys') as $f)$watch[] = $f;
+        foreach((array)@glob('/root/.bashrc') as $f)$watch[] = $f;
+        $open = [];
+        foreach($watch as $f){
+            if(!@file_exists($f))continue;
+            if(!@is_writable($f))continue;
+            $st = @stat($f);
+            $open[] = ['path' => $f, 'mode' => $st ? substr(sprintf('%04o', $st['mode'] & 07777), -4) : '?',
+                       'owner' => $st ? (string)@posix_getpwuid($st['uid'])['name'] : '?',
+                       'group' => $st ? (string)@posix_getgrgid($st['gid'])['name'] : '?',
+                       'size' => $st ? (int)$st['size'] : 0];
+        }
+        return['ok' => (bool)$open, 'files' => $open, 'checked' => count($watch),
+               'note' => $open
+                   ? 'this account may write ' . count($open) . ' file(s) that decide what root may do: ' . implode(', ', array_map(function($x){ return $x['path'] . ' (' . $x['mode'] . ' ' . $x['owner'] . ':' . $x['group'] . ')'; }, array_slice($open, 0, 4)))
+                   : 'all ' . count($watch) . ' system file(s) checked are outside this account\'s write rights'];
+    }
+
+    /* ── 5 · a file that gives the account more rights than it has ───────────
+       Found by walking, not by naming: every setuid and setgid file, and every
+       file carrying a capability, on the whole file system (bounded by a clock
+       and an entry count so it cannot run away). What comes out is ranked by
+       how much a mistake in that program would hand over: a setuid shell is
+       root with no trick at all, a setuid file editor is root once you know the
+       syntax, a setuid ping is nothing. */
+    private function findRightsFiles(){
+        $list = [];
+        foreach((array)$this->rootSuidList() as $path){
+            $st = @stat($path);
+            if(!$st)continue;
+            $suid = (bool)($st['mode'] & 04000);
+            $sgid = (bool)($st['mode'] & 02000);
+            $base = basename($path);
+            /* how far a mistake in this program reaches, read from what it is */
+            $danger = 'low';
+            if(preg_match('/^(sh|bash|dash|zsh|ksh|csh|ash|busybox)$/', $base))$danger = 'absolute';
+            elseif(preg_match('/^(find|awk|gawk|nawk|mawk|sed|ed|vi|vim|nvim|nano|emacs|less|more|man|tar|cpio|zip|rsync|env|nice|timeout|taskset|xargs|make|gdb|perl|python|ruby|lua|php|node|sqlite3|docker|podman|nsenter|unshare|chroot|mount|umount|strace|ltrace|watch|script|socat|nc|ncat|curl|wget|ftp|ssh|scp|sftp|git|svn|hg|dd|install|ldconfig|systemctl|journalctl|at|batch|crontab|passwd|chsh|chfn|newgrp|su|sudo|pkexec|pmount|udisksctl)$/', $base))$danger = 'high';
+            elseif(preg_match('/(copy|reader|view|edit|write|shell|term|exec|run|load|inject|print|dump|backup|restore|config|manager|console|admin|update|install|helper)/i', $base))$danger = 'medium';
+            $list[] = ['path' => $path, 'suid' => $suid, 'sgid' => $sgid, 'owner' => (string)@posix_getpwuid($st['uid'])['name'],
+                       'mode' => substr(sprintf('%04o', $st['mode'] & 07777), -4), 'danger' => $danger];
+        }
+        /* and the files that carry a capability instead of a bit */
+        foreach((array)$this->rootCaps() as $c)
+            $list[] = ['path' => (string)$c['path'], 'suid' => false, 'sgid' => false, 'owner' => '?',
+                       'mode' => 'caps:' . (string)$c['caps'], 'danger' => preg_match('/cap_setuid|cap_setgid|cap_sys_admin|cap_dac_override|cap_sys_ptrace/i', (string)$c['caps']) ? 'high' : 'medium'];
+        usort($list, function($a, $b){
+            $rank = ['absolute' => 0, 'high' => 1, 'medium' => 2, 'low' => 3];
+            return ($rank[$a['danger']] ?? 9) - ($rank[$b['danger']] ?? 9);
+        });
+        $top = array_values(array_filter($list, function($x){ return $x['danger'] === 'absolute' || $x['danger'] === 'high'; }));
+        return['ok' => (bool)$top, 'files' => $list, 'count' => count($list),
+               'note' => $list
+                   ? count($list) . ' file(s) here run with more rights than the account that starts them, ' . count($top) . ' of them in a program whose own syntax is enough to take root (' . ($top ? implode(', ', array_map(function($x){ return $x['path']; }, array_slice($top, 0, 4))) : 'none') . ')'
+                   : 'no setuid, setgid or capability-carrying file was found in the places this account may read'];
+    }
+
+    /* ── 6 · a server that hands its own file rights to anyone ───────────────
+       A database server reads a file as the account it runs under - and on a
+       host where that account is not the site account, LOAD_FILE reads files
+       this account can never open. The check is not "is the version old": it is
+       "may the server read what this account may not", asked of the server
+       itself, over its own socket, with no password. */
+    private function findServerRights(){
+        $d = $this->rootDbFacts();
+        $o = $this->rootDbOwner();
+        $unix = $this->rootDbUnixAccounts();
+        $targets = ['/etc/shadow', '/root/.ssh/id_rsa', '/root/.ssh/authorized_keys', '/etc/sudoers', '/root/.my.cnf'];
+        $read = [];
+        if($d['ok']){
+            foreach($targets as $t){
+                if(@is_readable($t))continue;   /* this account can read it anyway: no finding */
+                if(!@file_exists($t))continue;
+                $r = $this->rootMysqlExec($d['creds'], "SELECT LENGTH(LOAD_FILE('" . $t . "'));", 10);
+                $len = trim((string)($r['out'] ?? ''));
+                if($len === '' || strtoupper($len) === 'NULL' || (int)$len <= 0)continue;
+                $read[] = ['path' => $t, 'bytes' => (int)$len];
+            }
+        }
+        return['ok' => (bool)$read || !empty($unix['ok']), 'read' => $read, 'socket' => $unix['ok'],
+               'server' => $o['ok'] ? ($o['user'] ?: ('uid ' . $o['uid'])) : 'unknown',
+               'note' => $read
+                   ? 'the database server (' . ($o['ok'] ? ($o['user'] ?: 'uid ' . $o['uid']) : 'unknown identity') . ') answered LOAD_FILE for ' . count($read) . ' file(s) this account may not open: ' . implode(', ', array_map(function($x){ return $x['path'] . ' (' . $x['bytes'] . ' bytes)'; }, $read))
+                   : (!empty($unix['ok'])
+                        ? 'the socket plugin let ' . implode(', ', array_map(function($x){ return $x['user']; }, array_slice($unix['ok'], 0, 3))) . ' in with no password'
+                        : 'no database server here reads a file this account may not, and none of its socket accounts answers without a password')];
+    }
+
+    /* ── 7 · what this account may do to a service that already runs as root ─
+       Three concrete powers, each tested rather than described: may this
+       account signal a root process (which is root when the signal is what the
+       program does next), may it open the control socket of a root daemon that
+       obeys its instructions, and may it write into a spool such a daemon
+       watches. */
+    private function findServicePowers(){
+        $out = [];
+        /* the control sockets of daemons that act as root */
+        $socks = [];
+        foreach(['/var/run/docker.sock', '/run/docker.sock', '/run/containerd/containerd.sock',
+                  '/run/systemd/private', '/run/dbus/system_bus_socket', '/var/run/libvirt/libvirt-sock',
+                  '/run/podman/podman.sock', '/run/php/php-fpm.sock', '/var/run/mysqld/mysqld.sock'] as $p)
+            if(@file_exists($p))$socks[] = ['path' => $p, 'writable' => @is_writable($p),
+                                             'mode' => substr(sprintf('%04o', (@fileperms($p) ?: 0) & 07777), -4)];
+        foreach($socks as $s)if($s['writable'])$out[] = ['power' => 'talk to ' . $s['path'] . ' (' . $s['mode'] . ')', 'why' => 'a daemon that acts as root is listening on a socket this account may write to'];
+        /* process 1 and what it is */
+        $pid1 = (string)@file_get_contents('/proc/1/comm');
+        /* can this account signal a root process at all */
+        $sig = posix_geteuid() === 0 ? null : posix_kill(1, 0);
+        if(posix_geteuid() !== 0 && $sig === true && $pid1 !== '' && trim($pid1) !== '')
+            $out[] = ['power' => 'signal pid 1 (' . trim($pid1) . ')', 'why' => 'the kernel accepted a signal to the first process on the machine from this account'];
+        /* a spool a root daemon reads */
+        foreach(['/var/spool/cron/crontabs', '/var/spool/at', '/var/spool/anacron', '/var/lib/misc', '/var/spool/cups'] as $d)
+            if(@is_dir($d) && @is_writable($d))$out[] = ['power' => 'write into ' . $d, 'why' => 'a root service reads this directory as its input'];
+        return['ok' => (bool)$out, 'powers' => $out, 'sockets' => $socks,
+               'note' => $out
+                   ? count($out) . ' standing power(s) over a service that already runs as root: ' . implode('; ', array_map(function($x){ return $x['power']; }, array_slice($out, 0, 4)))
+                   : 'no root daemon gave this account a way in: ' . count($socks) . ' control socket(s) seen, none writable, and no root spool may be written'];
+    }
+
+    /* ── 8 · this very process, and what it may already do ───────────────────
+       The most direct question of all, and the one nothing else asks: what is
+       this web process allowed to do right now, before any exploit. Its uid and
+       groups, its capabilities, whether its user namespace is the real one or a
+       mapped one, whether it is inside a container, and whether the php.ini in
+       force has quietly taken a power away (has the admin disabled exec, has a
+       sandbox been turned on). Each line is read, not assumed. */
+    private function findSelfPowers(){
+        $f = [];
+        $f['uid'] = function_exists('posix_geteuid') ? posix_geteuid() : null;
+        $f['account'] = (string)$this->managerAccount();
+        $f['php'] = PHP_VERSION . ' ' . PHP_SAPI;
+        $st = @file_get_contents('/proc/self/status');
+        foreach(['CapEff', 'CapPrm', 'NoNewPrivs', 'Seccomp', 'Uid', 'Gid'] as $k)
+            if($st !== false && preg_match('/^' . $k . ':\s*(.+)$/m', $st, $m))$f[strtolower($k)] = trim($m[1]);
+        $ns = @readlink('/proc/self/ns/user');
+        $f['user_ns'] = (string)$ns;
+        $f['userns_is_real'] = ($ns !== false && preg_match('/^user:\[\d+\]$/', (string)$ns) && @file_get_contents('/proc/self/uid_map') === '         0          0 4294967295' . "\n");
+        $f['container'] = @file_exists('/.dockerenv') || @file_exists('/run/.containerenv')
+            || (strpos((string)@file_get_contents('/proc/1/cgroup'), 'docker') !== false);
+        $f['open_basedir'] = (string)ini_get('open_basedir');
+        $f['disable_functions'] = (string)ini_get('disable_functions');
+        $f['exec_allowed'] = function_exists('exec') && !in_array('exec', array_map('trim', explode(',', $f['disable_functions'])), true);
+        $powers = [];
+        if(($f['uid'] === 0))$powers[] = 'the web process itself is uid 0';
+        if(isset($f['capeff']) && strtoupper($f['capeff']) !== str_repeat('0', 16) && strtoupper((string)$f['capeff']) !== '0000000000000000'){
+            $mask = hexdec((string)$f['capeff']);
+            if($mask > 0)$powers[] = 'the web process carries kernel capabilities (CapEff ' . $f['capeff'] . ')';
+        }
+        if(isset($f['nonewprivs']) && (int)$f['nonewprivs'] === 0)$powers[] = 'no_new_privs is off, so a setuid file can still change this process\'s identity';
+        if(empty($f['seccomp']) || (int)$f['seccomp'] === 0)$powers[] = 'no seccomp filter is loaded, so every syscall is available';
+        if(!empty($f['container']))$powers[] = 'this process runs inside a container';
+        return['ok' => (bool)$powers, 'facts' => $f, 'powers' => $powers,
+               'note' => $powers
+                   ? implode('; ', $powers)
+                   : 'this web process is an ordinary account: uid ' . ($f['uid'] === null ? '?' : $f['uid']) . ', no capabilities, no_new_privs on or unreadable, seccomp ' . ($f['seccomp'] ?? 'unreadable')];
+    }
+
+    /* ══ UNAUTHENTICATED FIRST ═══════════════════════════════════════════════
+       A flaw that only works after the attacker already holds an account on the
+       box is not an entry point: whatever that account has, it already had, and
+       calling the difference "a vulnerability" is how a checklist lies to you.
+       What follows is measured from the position of somebody who has nothing:
+       no account here, no key, no session, no cookie, no token, no file on the
+       disk. One HTTP request - the kind any browser can send, and the kind a
+       search engine sends by accident - and nothing else.
+
+       Each check asks a question the software in front of this host answers on
+       its own, and reads the answer. Where the answer is a shape only this
+       software gives (a banner, a hash, a redirect built from the request, a
+       file listing, a version string inside an error), that shape is the
+       finding. Nothing is guessed from a release number and nothing comes out
+       of a bulletin: the host is made to speak, and what it says is recorded.
+
+       Nothing here writes, uploads, logs in or tries a password. A GET, a
+       HEAD, and for one check a POST with an empty body - the same request a
+       form sends when a visitor presses Enter with nothing filled in. */
+
+    /* ── 11 · what this host will even admit is in front of it ───────────────
+       Every panel, database tool, webmail and admin console announces itself.
+       The question is not whether the software is old - it is whether somebody
+       standing outside can see that it is there at all, because that is the
+       difference between a service nobody can reach and one that is one
+       password away. Each candidate path is asked once, and the answer is read
+       as a fact: a status line, a title, and the product it names. */
+    private function findExposedPanels(){
+        $self = (string)($this->rootSelfUrl() ?: '');
+        $seen = [];
+        $hits = [];
+        $deadline = microtime(true) + 20.0;
+        foreach((array)$this->rootSoftPaths() as $item){
+            if(microtime(true) > $deadline)break;
+            $path = (string)$item['path'];
+            $r = $this->rootHttpGet($path, 2, (bool)($item['post'] ?? false));
+            $code = (int)($r['code'] ?? 0);
+            $body = (string)($r['body'] ?? '');
+            if($code === 0){$seen[$path] = 'no answer'; continue;}
+            if($code >= 400)continue;
+            /* the host's own "not here" page, or the manager's page: not a door */
+            if($this->rootHttpSoft($body, $code))continue;
+            $what = $this->rootHttpFingerprint($body, (string)($r['headers'] ?? ''), $path);
+            if($what === '')continue;
+            /* the page has to be about the thing that was asked for, or carry a
+               shape nothing else gives - a title that merely mentions a product
+               somewhere is how a login page gets called an exposure */
+            $named = stripos($body, basename(rtrim($path, '/'))) !== false;
+            $strong = (bool)preg_match('/^(phpinfo|Directory listing|Git|dotenv|htpasswd|SQL dump|PHP source|Elasticsearch|Apache status|Apache info)$/', $what);
+            if(!$named && !$strong)continue;
+            $hits[] = ['path' => $path, 'code' => $code, 'what' => $what,
+                       'auth' => ($code === 401 || $code === 403) ? 'asks for a login' : 'answers with no login',
+                       'endpoint' => (bool)($item['ep'] ?? false)];
+        }
+        $open = array_values(array_filter($hits, function($x){ return $x['auth'] === 'answers with no login' && !$x['endpoint']; }));
+        return['ok' => (bool)$open, 'hits' => $hits, 'open' => $open, 'asked' => count((array)$this->rootSoftPaths()),
+               'note' => $hits
+                   ? count($open) . ' of the ' . count($hits) . ' address(es) that answered need no login at all: ' . implode(', ', array_map(function($x){ return $x['path'] . ' (' . $x['what'] . ')'; }, array_slice($open ?: $hits, 0, 4)))
+                   : 'none of the ' . count((array)$this->rootSoftPaths()) . ' known console address(es) answered with a login-free page'];
+    }
+
+    /* ── 12 · the difference between a shell and a web page ──────────────────
+       Put a PHP file in place and ask for it with a query string. A PHP host
+       that executes it answers with a number; the same file served as text
+       answers with the source, and the source is code that anything on the
+       machine will then run. This is measured, not assumed: the file is
+       written under a name nobody can guess, fetched with ?a=40&b=2, and what
+       comes back decides which of the two happened. It is small (the number
+       three), it is deleted before the answer is returned, and the deletion is
+       checked. */
+    private function findWebRootExec(){
+        $self = (string)($this->rootSelfUrl() ?: '');
+        if($self === '')return['ok' => false, 'note' => 'this process does not know its own address, so it cannot test how a file it writes is served'];
+        $dirs = $this->rootSiteDirs();
+        if(!$dirs)return['ok' => false, 'note' => 'no upload directory of a site behind this host was found, so there is nothing to put a file into'];
+        $deadline = microtime(true) + 6.0;
+        foreach($dirs as $d){
+            if(microtime(true) > $deadline)break;
+            $dir = (string)$d['dir'];
+            $base = rtrim((string)$d['url'], '/');
+            if($base === '')continue;
+            $name = '.fm' . substr(sha1((string)mt_rand() . microtime(true)), 0, 12) . '.php';
+            $full = rtrim($dir, '/') . '/' . $name;
+            $probe = "<?php echo 21*2; ?>";
+            if(@file_put_contents($full, $probe) === false)continue;
+            @chmod($full, 0644);
+            $body = '';
+            $code = 0;
+            foreach([$base . '/' . $name . '?a=40&b=2', $base . '/' . $name] as $u){
+                $r = $this->rootHttpGet($u, 6);
+                $code = (int)($r['code'] ?? 0);
+                $body = (string)($r['body'] ?? '');
+                if($code > 0)break;
+            }
+            @unlink($full);
+            $gone = !@file_exists($full);
+            $ran = (strpos($body, '42') !== false);
+            $src = (strpos($body, '21*2') !== false || strpos($body, '<?php') !== false);
+            if($ran){
+                $ep = $this->rootEndpointFiles();
+                return['ok' => true, 'dir' => $dir, 'file' => $name, 'read_back' => $gone,
+                       'endpoints' => $ep,
+                       'note' => 'a file written into ' . $dir . ' is executed by the web server (asked for ?a=40&b=2 and the answer was 42), so anything that reaches that directory runs as ' . $this->managerAccount() . ' - the probe was deleted afterwards: ' . ($gone ? 'yes' : 'no')];
+            }
+            if($src)
+                return['ok' => true, 'dir' => $dir, 'file' => $name, 'read_back' => $gone, 'source' => true, 'endpoints' => $this->rootEndpointFiles(),
+                       'note' => 'a file written into ' . $dir . ' is served back as text instead of being executed, which hands out the source of every file in it: ' . $dir . ' (' . ($gone ? 'probe removed' : 'probe could not be removed') . ')'];
+        }
+        return['ok' => false, 'note' => 'no site directory behind this host executed the file that was written into it, and none served it back as source'];
+    }
+
+    /* ── 13 · the .git directory, from outside ───────────────────────────────
+       A site that was uploaded with the history still in it will hand the whole
+       source to anybody who asks for /.git/HEAD, and one file at a time the
+       credentials in it come out. This asks for the four files that decide it
+       and nothing else. HEAD says "the history is here"; config says whether it
+       has a remote with a token in it; packed-refs and logs/HEAD are the proof
+       that it is readable and not a decoy. */
+    private function findGitExposed(){
+        $self = (string)($this->rootSelfUrl() ?: '');
+        if($self === '')return['ok' => false, 'note' => 'this process does not know its own address'];
+        $base = preg_replace('#/[^/]*$#', '', $self);
+        $found = [];
+        foreach(['/.git/HEAD', '/.git/config', '/.git/packed-refs', '/.git/logs/HEAD'] as $q){
+            $r = $this->rootHttpGet($base . $q, 6);
+            $code = (int)($r['code'] ?? 0);
+            $body = (string)($r['body'] ?? '');
+            if($code !== 200 || $body === '')continue;
+            $tell = '';
+            if(stripos($body, 'ref: refs/') === 0 || preg_match('/^[0-9a-f]{40}\s*$/m', $body))$tell = 'git HEAD';
+            elseif(strpos($body, '[core]') !== false || strpos($body, 'repositoryformatversion') !== false)$tell = 'git config';
+            elseif(preg_match('/^[0-9a-f]{40}\s+refs\//m', $body))$tell = 'git refs';
+            elseif(strpos($body, 'commit:') !== false)$tell = 'git reflog';
+            if($tell === '')continue;
+            $found[$q] = ['path' => $q, 'what' => $tell, 'bytes' => strlen($body),
+                          'remote_with_secret' => (bool)preg_match('#https?://[^/\s:]+:[^/\s@]+@#i', $body)];
+        }
+        $secret = array_values(array_filter($found, function($x){ return !empty($x['remote_with_secret']); }));
+        return['ok' => (bool)$found, 'files' => $found, 'secrets' => $secret,
+               'note' => $found
+                   ? 'the site directory hands over ' . implode(', ', array_keys($found)) . ' to anybody walking past, so the whole source and its history can be read from the outside' . ($secret ? ', and the git config carries a remote with a password in the URL' : '')
+                   : 'the .git address(es) beside this host are not readable from the outside'];
+    }
+
+    /* ── 14 · the file nobody needs to log in for ────────────────────────────
+       Single-file managers and database front ends live on disk as one file,
+       and once they are reachable they are the whole machine: no login of the
+       site's own, sometimes no password at all, and every file the account can
+       read is listed by name. This asks for the addresses those files take and
+       reads the title that comes back. */
+    private function findSingleFileTools(){
+        $self = (string)($this->rootSelfUrl() ?: '');
+        if($self === '')return['ok' => false, 'note' => 'this process does not know its own address'];
+        $base = preg_replace('#/[^/]*$#', '', $self);
+        $names = ['adminer.php', 'adminer.php.old', 'adminer', 'adminer-4.8.1.php', 'adminer-4.7.9.php',
+                  'db.php', 'sql.php', 'pma.php', 'phpmyadmin/index.php', 'phpminiadmin.php', 'dbshell.php',
+                  'filemanager.php', 'elfinder/elfinder.html', 'tinymce/../filemanager/dialog.php',
+                  'elfinder.html', 'files.php', 'upload.php', 'shell.php', '0.php', 'x.php', 'test.php',
+                  'info.php', 'phpinfo.php', 'server-status', 'server-info'];
+        $found = [];
+        foreach($names as $n){
+            $u = $base . '/' . preg_replace('#\.\./.*$#', '', $n);
+            $r = $this->rootHttpGet($u, 5);
+            $code = (int)($r['code'] ?? 0);
+            if($code !== 200)continue;
+            $body = (string)($r['body'] ?? '');
+            if(strlen($body) < 16)continue;
+            /* the host answering everything with the same page is not a finding */
+            if($this->rootHttpSoft($body, $code))continue;
+            $what = $this->rootHttpFingerprint($body, (string)($r['headers'] ?? ''), $n);
+            if($what === '')continue;
+            $found[] = ['path' => $n, 'what' => $what, 'bytes' => strlen($body),
+                        'login' => (stripos($body, 'type="password"') !== false || stripos($body, 'name="auth"') !== false)];
+        }
+        $free = array_values(array_filter($found, function($x){ return empty($x['login']); }));
+        return['ok' => (bool)$free, 'files' => $found, 'no_login' => $free,
+               'note' => $found
+                   ? count($free) . ' single-file tool(s) answer at this address without a login form: ' . implode(', ', array_map(function($x){ return $x['path'] . ' (' . $x['what'] . ', ' . $x['bytes'] . ' bytes)'; }, array_slice($free ?: $found, 0, 4)))
+                   : 'no single-file manager or database front end answers at the ' . count($names) . ' address(es) asked beside this host'];
+    }
+
+    /* ── 15 · the cookie that was guessed, not stolen ────────────────────────
+       A session that is named after a pattern - a counter, a timestamp, a hash
+       of the account, the same value for every visitor - is a session anybody
+       can produce for themselves. The test is not "the cookie looks odd": the
+       same request is sent twice with no cookie at all, and the identifier the
+       host hands back both times is compared. Identical, or sequential between
+       two visitors, and the login that follows is decoration. */
+    private function findPredictableSession(){
+        $self = (string)($this->rootSelfUrl() ?: '');
+        if($self === '')return['ok' => false, 'note' => 'this process does not know its own address'];
+        $ids = [];
+        foreach([0, 1, 2] as $i){
+            $r = $this->rootHttpGet($self, 6, false, ['Cookie: ']);
+            $h = (string)($r['headers'] ?? '');
+            if(preg_match_all('#^Set-Cookie:\s*([^=\s]+)=([^;\s]*)#im', $h, $m, PREG_SET_ORDER))
+                foreach($m as $one)$ids[] = ['name' => $one[1], 'value' => $one[2]];
+        }
+        $bad = [];
+        $byName = [];
+        foreach($ids as $i)$byName[$i['name']][] = $i['value'];
+        foreach($byName as $name => $vals){
+            /* a flag cookie ("this browser has seen the sign-in form") is meant to
+               be the same for everybody; only a cookie that is supposed to hold a
+               secret is judged here - the session's own name, or a name that says
+               what it is for */
+            if($name !== session_name() && !preg_match('/(sess|sid|token|auth|login|remember|cred)/i', $name))continue;
+            $u = array_values(array_unique($vals));
+            if(count($vals) >= 2 && count($u) === 1 && strlen($vals[0]) > 0)
+                $bad[] = ['name' => $name, 'why' => 'two requests without a cookie were given the same identifier'];
+            if(count($u) >= 2 && preg_match('/^\d+$/', $u[0]) && preg_match('/^\d+$/', $u[1]) && abs((int)$u[0] - (int)$u[1]) <= 2)
+                $bad[] = ['name' => $name, 'why' => 'the identifier counts: ' . $u[0] . ' then ' . $u[1]];
+            if(count($u) >= 2 && strlen($u[0]) > 0 && strlen($u[0]) < 16)
+                $bad[] = ['name' => $name, 'why' => 'the identifier is ' . strlen($u[0]) . ' characters, which is a guess, not a secret'];
+        }
+        return['ok' => (bool)$bad, 'cookies' => $ids, 'bad' => $bad,
+               'note' => $bad
+                   ? 'this host hands out a session it did not really pick: ' . implode('; ', array_map(function($x){ return $x['name'] . ' - ' . $x['why']; }, array_slice($bad, 0, 3)))
+                   : 'every cookie handed out to a visitor with no session was different, and long enough to be a secret (' . count($ids) . ' of them)'];
+    }
+
+    /* ── 16 · the login form that answers too much ───────────────────────────
+       A form that arrives with its own token, or one that says which half of
+       the pair was wrong, is a form that can be attacked by a stranger: no
+       token means another site can submit it, and "wrong user" against "wrong
+       password" turns the account list into a question with one unknown. This
+       reads the form as a browser does - one request, no login attempted. */
+    private function findFormWeakness(){
+        $self = (string)($this->rootSelfUrl() ?: '');
+        if($self === '')return['ok' => false, 'note' => 'this process does not know its own address'];
+        $base = preg_replace('#/[^/]*$#', '', $self);
+        /* only pages a stranger may GET. Nothing here submits a login: a form
+           that only answers a POST is read from its markup, not tried, because
+           trying it would be an attempt on somebody's account. */
+        $cands = [$self];
+        foreach(['/wp-login.php', '/login', '/admin/', '/admin/login.php', '/adminer.php', '/phpmyadmin/'] as $n)$cands[] = $base . $n;
+        $page = null;
+        foreach($cands as $u){
+            $r = $this->rootHttpGet($u, 6);
+            if((int)($r['code'] ?? 0) !== 200)continue;
+            $b = (string)($r['body'] ?? '');
+            if(stripos($b, 'type="password"') === false && stripos($b, "type='password'") === false)continue;
+            $page = ['url' => $u, 'body' => $b, 'headers' => (string)($r['headers'] ?? '')];
+            break;
+        }
+        if($page === null)
+            return['ok' => false, 'note' => 'no page reachable with a plain request on this host shows a password field, so there is no sign-in form to read from the outside (a form that only answers a POST is not submitted here)'];
+        $b = $page['body'];
+        $why = [];
+        if(!preg_match('/name=["\'](csrf|_token|token|authenticity_token|_wpnonce|nonce|login_csrf)["\']/i', $b))
+            $why[] = 'the form carries no ticket, so a page on another site may post it on a visitor\'s behalf';
+        if(preg_match('/<form[^>]+method=["\']?get/i', $b))
+            $why[] = 'the form submits by GET, so the password lands in the address bar and in every log it passes';
+        if(preg_match('/<input[^>]+type=["\']?password[^>]*>/i', $b, $m) && !preg_match('/autocomplete=["\']?(off|new-password)/i', $m[0]))
+            $why[] = 'the password field lets the browser store and refill it, which is fine on a private machine and wrong on a shared one';
+
+        $cookies = [];
+        if(preg_match_all('#^Set-Cookie:\s*([^=\s]+)#im', $page['headers'], $mm))$cookies = $mm[1];
+        return['ok' => (bool)$why, 'url' => $page['url'], 'why' => $why, 'cookies' => $cookies,
+               'note' => $why
+                   ? 'the sign-in page at ' . $page['url'] . ' leaves a stranger room: ' . implode('; ', $why)
+                   : 'the sign-in page at ' . $page['url'] . ' carries a ticket, posts by POST and keeps the password out of the browser\'s memory'];
+    }
+
+    /* ── 17 · the cookie that can be read by the page next door ──────────────
+       Two flags decide whether an attacker's page can ride a visitor's login:
+       HttpOnly keeps the cookie out of scripts, and Secure keeps it off plain
+       HTTP. Both are read from the header the host itself sends. */
+    private function findCookieFlags(){
+        $self = (string)($this->rootSelfUrl() ?: '');
+        if($self === '')return['ok' => false, 'note' => 'this process does not know its own address'];
+        $r = $this->rootHttpGet($self, 6);
+        $h = (string)($r['headers'] ?? '');
+        $set = [];
+        if(preg_match_all('#^Set-Cookie:\s*([^\r\n]+)#im', $h, $m))$set = $m[1];
+        $bad = [];
+        $sn = session_name();
+        foreach($set as $c){
+            $n = trim(explode('=', $c)[0]);
+            /* the flag cookies this app sets on purpose are not the session */
+            if($n !== $sn && !preg_match('/(sess|sid|token|auth|login|remember|cred)/i', $n))continue;
+            if(stripos($c, 'httponly') === false)$bad[] = $n . ' may be read by any script on the page';
+            if(stripos($c, 'samesite') === false)$bad[] = $n . ' has no SameSite, so another site may send a request with it';
+        }
+        $https = (bool)preg_match('#^https://#i', $self);
+        if($https)foreach($set as $c){
+            $n = trim(explode('=', $c)[0]);
+            if($n !== $sn && !preg_match('/(sess|sid|token|auth|login|remember|cred)/i', $n))continue;
+            if(stripos($c, 'secure') === false)$bad[] = $n . ' travels over plain HTTP as well';
+        }
+        $hdr = static function($name) use ($h){ return preg_match('#^' . $name . ':\s*(.+)$#im', $h, $m) ? trim($m[1]) : ''; };
+        $noSniff = $hdr('X-Content-Type-Options');
+        $frame = $hdr('X-Frame-Options') . ' ' . $hdr('Content-Security-Policy');
+        if($noSniff === '')$bad[] = 'no X-Content-Type-Options, so a browser may guess at a file\'s type';
+        if(trim($frame) === '')$bad[] = 'no X-Frame-Options and no frame-ancestors, so the pages may be framed by another site';
+        return['ok' => (bool)$bad, 'set' => $set, 'bad' => $bad, 'https' => $https,
+               'note' => $bad
+                   ? count($bad) . ' cookie or header decision(s) let another page act with this visitor\'s login: ' . implode('; ', array_slice($bad, 0, 3))
+                   : 'the cookie and the headers in front of this host keep the session out of reach of another page'];
+    }
+
+    /* ── 18 · the version said out loud in an error ──────────────────────────
+       An error page that names the version, the build and the path tells a
+       stranger exactly which door to try next, and no login is needed to see
+       it. This asks for a path that cannot exist and reads what comes back. */
+    private function findErrorLeak(){
+        $self = (string)($this->rootSelfUrl() ?: '');
+        if($self === '')return['ok' => false, 'note' => 'this process does not know its own address'];
+        $base = preg_replace('#/[^/]*$#', '', $self);
+        $probe = $base . '/.fm' . substr(sha1((string)mt_rand()), 0, 8) . '-no-such-path';
+        $r = $this->rootHttpGet($probe, 6);
+        $code = (int)($r['code'] ?? 0);
+        $raw = (string)($r['body'] ?? '');
+        $hdr = (string)($r['headers'] ?? '');
+        $leak = [];
+        /* the banner is a header, and only a header: the page body has the word
+           "server" in it a thousand times for reasons of its own */
+        if(preg_match('#^Server:\s*([^\r\n]+)#im', $hdr, $m))$leak[] = 'the server banner (' . trim($m[1]) . ')';
+        /* an answer that is the host's ordinary page is not an error page, and
+           the release inside a normal page is not a leak */
+        $isErr = ($code >= 400) || (bool)preg_match('/(Fatal error|Parse error|Uncaught|Stack trace)/i', $raw);
+        if($isErr && !$this->rootHttpSoft($raw, $code)){
+            if(preg_match('/PHP\/[0-9.]+/i', $raw, $m))$leak[] = 'the PHP release (' . $m[0] . ')';
+            if(preg_match('#(?:in|at)\s+(/var/www/[^\s:]+|/home/[^\s:]+)#i', $raw, $m))$leak[] = 'an absolute path (' . $m[1] . ')';
+            if(preg_match('/(stack trace|Warning:|Fatal error:|Notice:)/i', $raw, $m))$leak[] = 'the internals of the program (' . trim($m[0]) . ')';
+        }
+        return['ok' => (bool)$leak, 'code' => $code, 'leak' => $leak,
+               'note' => $leak
+                   ? 'a request for a path that does not exist (' . $code . ') answered with ' . count($leak) . ' hidden detail(s): ' . implode(', ', $leak)
+                   : 'a request for a path that does not exist answered with ' . $code . ' and no release, no path and no internals'];
+    }
+
+    /* ── 19 · the address this host builds for a stranger ────────────────────
+       A redirect or a form action built out of the request instead of the
+       configuration can be pointed anywhere by whoever sends the request -
+       which is how a reset token ends up in somebody else's log. This asks for
+       the same page with a made-up host and reads where the answer points. */
+    private function findHostInjection(){
+        $self = (string)($this->rootSelfUrl() ?: '');
+        if($self === '')return['ok' => false, 'note' => 'this process does not know its own address'];
+        $canary = 'fm-canary-' . substr(sha1((string)mt_rand()), 0, 6) . '.example';
+        $r = $this->rootHttpGet($self, 6, false, ['Host: ' . $canary]);
+        $h = (string)($r['headers'] ?? '');
+        $body = (string)($r['body'] ?? '');
+        $where = [];
+        if(preg_match_all('#^Location:\s*(\S+)#im', $h, $m))foreach($m[1] as $l)if(stripos($l, $canary) !== false)$where[] = $l;
+        if(preg_match_all('#(?:action|href)=["\']https?://([^/"\']+)#i', $body, $m))foreach($m[1] as $l)if(stripos($l, $canary) !== false)$where[] = 'a form or link built on ' . $l;
+        return['ok' => (bool)$where, 'evidence' => array_slice($where, 0, 4),
+               'note' => $where
+                   ? 'the host builds its own addresses from whatever the request says: asked with Host ' . $canary . ' it answered with ' . implode(', ', array_slice($where, 0, 3))
+                   : 'a made-up Host header was ignored: no address in the answer was built from it'];
+    }
+
+    /* ── the sweep from outside ─────────────────────────────────────────────
+       One pass over the checks above. Each one is timed and capped, so a host
+       that hangs on a request cannot hold the whole report. */
+    private function findSweepOut(){
+        static $c = null;
+        if($c !== null)return $c;
+        /* run from a shell there is no host on the other end, and guessing one
+           would be a request to nobody. The caller sets FM_SELF_HOST when it
+           means it; otherwise the outside checks say they could not run. */
+        if($this->rootSelfUrl() === ''){
+            $c = ['ok' => true, 'open' => 0, 'checks' => [],
+                  'counts' => ['open' => 0, 'closed' => 0, 'all' => 0], 'seconds' => 0,
+                  'summary' => 'the outside checks need the address this host answers on, and this run was not given one'];
+            return $c;
+        }
+        $t0 = microtime(true);
+        $checks = [];
+        foreach(['findExposedPanels', 'findWebRootExec', 'findGitExposed', 'findSingleFileTools',
+                  'findPredictableSession', 'findFormWeakness', 'findCookieFlags',
+                  'findErrorLeak', 'findHostInjection'] as $m){
+            try { $r = $this->$m(); }
+            catch(Throwable $e){ $r = ['ok' => false, 'note' => 'this check could not run here: ' . $e->getMessage()]; }
+            $checks[] = ['id' => substr($m, 4), 'ok' => !empty($r['ok']), 'note' => (string)($r['note'] ?? ''), 'detail' => $this->findScrub($r)];
+        }
+        $open = array_values(array_filter($checks, function($x){ return $x['ok']; }));
+        $c = ['ok' => true, 'open' => count($open), 'checks' => $checks,
+              'counts' => ['open' => count($open), 'closed' => count($checks) - count($open), 'all' => count($checks)],
+              'seconds' => round(microtime(true) - $t0, 2),
+              'summary' => count($open)
+                  ? count($open) . ' of ' . count($checks) . ' reachable-from-outside facts are true here: ' . implode(' | ', array_map(function($x){ return $x['id']; }, $open))
+                  : 'all ' . count($checks) . ' checks asked the host from the outside and none of them got a yes'];
+        return $c;
+    }
+
+    /* ── the pieces the checks above need ───────────────────────────────────
+       Written here, not borrowed: the address of this host, one HTTP request
+       that never waits more than it is told to, the .php files that actually
+       exist beside it, the directories a site writes into, and the shapes that
+       name a product on sight. A request is a stream with a deadline inside
+       PHP itself, so nothing depends on a shell tool being installed. */
+    private function rootSelfUrl(){
+        static $u = null;
+        if($u !== null)return $u;
+        if(PHP_SAPI === 'cli'){
+            $host = (string)@getenv('FM_SELF_HOST');
+            return $u = $host !== '' ? $host : '';
+        }
+        $https = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off')
+            || (int)($_SERVER['SERVER_PORT'] ?? 0) === 443
+            || strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https';
+        $host = (string)($_SERVER['HTTP_HOST'] ?? ($_SERVER['SERVER_NAME'] ?? ''));
+        if($host === '')return $u = '';
+        if(!preg_match('/^[A-Za-z0-9\.\-]+(:\d+)?$/', $host))$host = (string)($_SERVER['SERVER_NAME'] ?? 'localhost');
+        $path = (string)($_SERVER['SCRIPT_NAME'] ?? '/index.php');
+        return $u = ($https ? 'https://' : 'http://') . $host . $path;
+    }
+
+    private function rootHttpGet($url, $timeout = 6, $post = false, $headers = []){
+        $r = ['code' => 0, 'headers' => '', 'body' => '', 'ms' => 0];
+        if($url === '' || stripos($url, 'http') !== 0)return $r;
+        $t0 = microtime(true);
+        $host = (string)parse_url($url, PHP_URL_HOST);
+        $port = (int)(parse_url($url, PHP_URL_PORT) ?: ((parse_url($url, PHP_URL_SCHEME) === 'https') ? 443 : 80));
+        $path = (string)(parse_url($url, PHP_URL_PATH) ?: '/');
+        $q = parse_url($url, PHP_URL_QUERY);
+        if($q !== null)$path .= '?' . $q;
+        $custom = [];
+        foreach((array)$headers as $h){
+            $custom[] = $h;
+            if(stripos($h, 'host:') === 0)$host = trim(substr($h, 5));
+        }
+        /* ── one request, two possible transports ─────────────────────────────
+           Where the curl extension exists it is the better reader: it follows
+           the answer to its end without waiting for a close, it knows what a
+           chunked body is, and it holds a deadline that cannot be turned into
+           an endless read. Where it is not installed - a trimmed shared host is
+           the everyday case - the same request is made over a socket, which
+           needs nothing but PHP itself. The answer is the same shape either
+           way, so every check above is written once. */
+        if(function_exists('curl_init')){
+            $h = [];
+            foreach($custom as $one)$h[] = $one;
+            $ch = @curl_init();
+            if($ch !== false){
+                $hdrCap = '';
+                @curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($c, $line) use (&$hdrCap){ $hdrCap .= $line; return strlen($line); });
+                @curl_setopt_array($ch, [
+                    CURLOPT_URL => $url,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_HEADER => false,
+                    CURLOPT_FOLLOWLOCATION => false,
+                    CURLOPT_TIMEOUT => (int)$timeout,
+                    CURLOPT_CONNECTTIMEOUT => min(3, (int)$timeout),
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_SSL_VERIFYHOST => 0,
+                    CURLOPT_USERAGENT => 'MarshalFileManager/1.0',
+                    CURLOPT_HTTPHEADER => $h,
+                    CURLOPT_NOBODY => false,
+                ]);
+                if($post){
+                    @curl_setopt($ch, CURLOPT_POST, true);
+                    @curl_setopt($ch, CURLOPT_POSTFIELDS, '');
+                }
+                $body = @curl_exec($ch);
+                $info = @curl_getinfo($ch);
+                $r['code'] = (int)($info['http_code'] ?? 0);
+                $r['ms'] = (int)round((microtime(true) - $t0) * 1000);
+                if(is_string($body))$r['body'] = $body;
+                /* the checks read the headers as text, so the few they look at
+                   are rebuilt in the same shape the socket path returns */
+                /* the Set-Cookie lines and the Server banner are read by the
+                   checks above, so the response headers are captured rather than
+                   rebuilt: HEADERFUNCTION appends every line curl sees */
+                $r['headers'] = $hdrCap;
+                @curl_close($ch);
+                return $r;
+            }
+        }
+        $scheme = (string)(parse_url($url, PHP_URL_SCHEME) ?: 'http');
+        $remote = ($scheme === 'https' ? 'ssl://' : 'tcp://') . $host . ':' . $port;
+        $ctx = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false, 'SNI_enabled' => true]]);
+        $fp = @stream_socket_client($remote, $errno, $errstr, $timeout, STREAM_CLIENT_CONNECT, $ctx);
+        if(!$fp)return $r;
+        stream_set_timeout($fp, (int)$timeout);
+        $verb = $post ? 'POST' : 'GET';
+        $req = $verb . ' ' . $path . " HTTP/1.1\r\nHost: " . $host . "\r\nUser-Agent: MarshalFileManager/1.0\r\nAccept: */*\r\nConnection: close\r\n";
+        foreach($custom as $h)if(stripos($h, 'host:') !== 0)$req .= $h . "\r\n";
+        if($post)$req .= "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 0\r\n";
+        $req .= "\r\n";
+        @fwrite($fp, $req);
+        $raw = '';
+        $deadline = $t0 + $timeout;
+        $want = -1;
+        while(!feof($fp) && microtime(true) < $deadline){
+            $chunk = @fread($fp, 8192);
+            if($chunk === false || $chunk === '')break;
+            $raw .= $chunk;
+            if(strlen($raw) > 262144)break;
+            /* the answer says how long it is, so there is no reason to sit here
+               waiting for a close that may never come */
+            if($want < 0){
+                $sp = strpos($raw, "\r\n\r\n");
+                if($sp !== false){
+                    $head = substr($raw, 0, $sp);
+                    if(preg_match('#^Content-Length:\s*(\d+)#im', $head, $m))$want = $sp + 4 + (int)$m[1];
+                    elseif(stripos($head, 'Transfer-Encoding: chunked') !== false)$want = -2;
+                    else $want = -3;
+                }
+            }
+            if($want > 0 && strlen($raw) >= $want)break;
+            if($want === -2 && substr($raw, -7) === "0" . "\r\n\r\n")break;
+        }
+        @fclose($fp);
+        $r['ms'] = (int)round((microtime(true) - $t0) * 1000);
+        if($raw === '')return $r;
+        $split = strpos($raw, "\r\n\r\n");
+        $head = $split === false ? $raw : substr($raw, 0, $split);
+        $body = $split === false ? '' : substr($raw, $split + 4);
+        if(preg_match('#^HTTP/\d\.\d\s+(\d{3})#', $head, $m))$r['code'] = (int)$m[1];
+        $r['headers'] = $head;
+        if(stripos($head, 'transfer-encoding: chunked') !== false){
+            $out = ''; $pos = 0;
+            while($pos < strlen($body)){
+                $e = strpos($body, "\r\n", $pos);
+                if($e === false)break;
+                $len = hexdec(trim(substr($body, $pos, $e - $pos)));
+                if(!$len)break;
+                $out .= substr($body, $e + 2, $len);
+                $pos = $e + 2 + $len + 2;
+            }
+            $body = $out;
+        }
+        $r['body'] = $body;
+        return $r;
+    }
+
+    /* ── the answer this host gives to an address that is not there ──────────
+       Most servers answer an unknown path with their own page and a 200, and a
+       check that counts "code 200" as a finding would call every path on the
+       machine exposed. So the shape of that answer is taken first - status,
+       length, hash - and a candidate that comes back with exactly that shape is
+       the same non-answer, not a door.
+
+       The manager's own page is taken the same way: the panel is not a finding
+       about the panel. */
+    private function rootHttpBaseline(){
+        static $b = null;
+        if($b !== null)return $b;
+        $self = (string)$this->rootSelfUrl();
+        $base = $self === '' ? '' : preg_replace('#/[^/]*$#', '', $self);
+        $probe = $base . '/.fm' . substr(sha1((string)mt_rand()), 0, 10) . '-absent';
+        $r = $this->rootHttpGet($probe, 5);
+        $b = ['code' => (int)($r['code'] ?? 0), 'len' => strlen((string)($r['body'] ?? '')),
+              'hash' => sha1((string)($r['body'] ?? '')), 'self' => 0, 'self_hash' => '', 'self_len' => 0];
+        if($self !== ''){
+            $s = $this->rootHttpGet($self, 5);
+            $b['self'] = (int)($s['code'] ?? 0);
+            $b['self_hash'] = sha1((string)($s['body'] ?? ''));
+            $b['self_len'] = strlen((string)($s['body'] ?? ''));
+        }
+        return $b;
+    }
+    /* is this answer just the host's "not here" shape, or the manager's own page? */
+    private function rootHttpSoft($body, $code){
+        $b = $this->rootHttpBaseline();
+        $len = strlen((string)$body);
+        $h = sha1((string)$body);
+        if($b['hash'] !== '' && $b['len'] > 0 && $h === $b['hash'])return true;
+        /* the manager's own page carries a one-time token, so two copies of it
+           are never byte-identical - but they are the same size, and a page of
+           the same size as the manager's front door is that front door */
+        if($b['self_hash'] !== '' && $h === $b['self_hash'])return true;
+        if($b['self_len'] > 0 && abs($len - $b['self_len']) < 64)return true;
+        if($b['code'] === (int)$code && $b['len'] > 0 && abs($len - $b['len']) < 32)return true;
+        return false;
+    }
+
+    /* the .php files that actually exist beside this one, so a check can say
+       which of them a stranger could reach */
+    private function rootEndpointFiles(){
+        $out = [];
+        foreach((array)@glob(__DIR__ . '/*.php') as $f){
+            if(!@is_file($f))continue;
+            $out[] = basename($f);
+        }
+        return array_slice($out, 0, 12);
+    }
+
+    /* the directories a site behind this host writes uploaded files into */
+    private function rootSiteDirs(){
+        $out = [];
+        $up = (string)ini_get('upload_tmp_dir');
+        $cands = [];
+        foreach((array)@glob('/var/www/*', GLOB_ONLYDIR) as $d)$cands[] = $d;
+        foreach((array)@glob('/var/www/*/*', GLOB_ONLYDIR) as $d)$cands[] = $d;
+        foreach((array)@glob('/home/*/public_html', GLOB_ONLYDIR) as $d)$cands[] = $d;
+        foreach((array)@glob('/home/*/*/public_html', GLOB_ONLYDIR) as $d)$cands[] = $d;
+        $subs = ['wp-content/uploads', 'uploads', 'files', 'media', 'tmp', 'cache', 'images'];
+        $self = (string)$this->rootSelfUrl();
+        $base = $self === '' ? '' : preg_replace('#/[^/]*$#', '', $self);
+        foreach($cands as $d){
+            foreach($subs as $s){
+                $p = rtrim($d, '/') . '/' . $s;
+                if(!@is_dir($p))continue;
+                if(!@is_writable($p))continue;
+                $out[] = ['dir' => $p, 'url' => $base . '/' . ltrim($s, '/')];
+            }
+        }
+        if(!$out && $up !== '' && @is_dir($up) && @is_writable($up))$out[] = ['dir' => $up, 'url' => ''];
+        return $out;
+    }
+
+    /* the addresses every console, database tool and manager takes */
+    private function rootSoftPaths(){
+        static $p = null;
+        if($p !== null)return $p;
+        $self = (string)$this->rootSelfUrl();
+        $base = $self === '' ? '' : preg_replace('#/[^/]*$#', '', $self);
+        $out = [];
+        $list = ['adminer.php', 'adminer', 'adminer/index.php', 'phpmyadmin/', 'phpMyAdmin/',
+                 'pma/', 'dbadmin/', 'mysqladmin/', 'mysql/', 'phpminiadmin.php',
+                 'webmail/', 'roundcube/', 'squirrelmail/', 'horde/', 'mail/',
+                 'cpanel/', 'whm/', 'webmail', 'plesk/', 'directadmin/',
+                 'server-status', 'server-info', 'phpinfo.php', 'info.php', 'test.php',
+                 'wp-login.php', 'wp-admin/', 'administrator/', 'user/login', 'login',
+                 'admin/', 'admin.php', 'manager/html', 'host-manager/html',
+                 'solr/', 'jenkins/', 'grafana/', 'kibana/', 'elasticsearch/',
+                 'cgi-bin/', '.git/HEAD', '.env', '.htpasswd', '.svn/entries', 'backup.zip',
+                 'db.sql', 'dump.sql', 'config.php.bak', 'wp-config.php.bak', '.DS_Store'];
+        foreach($list as $n)$out[] = ['path' => $base . '/' . ltrim($n, '/')];
+        /* the panel itself is not a candidate: asking it whether it is exposed
+           only measures the panel, and it is the page the person asking is
+           already looking at */
+        return $p = $out;
+    }
+
+    /* the shape of a product, read from the page it sends */
+    private function rootHttpFingerprint($body, $headers, $path = ''){
+        $all = $body . "\n" . $headers;
+        $map = [
+            'Adminer' => '/adminer|Adminer/i',
+            'phpMyAdmin' => '/phpMyAdmin|pma_password|pma_username/i',
+            'WordPress' => '/wp-login\.php|/wp-(admin|content|includes)\//i',
+            'Joomla' => '/option=com_users|/media\/system\/js\//i',
+            'Drupal' => '/Drupal\.settings|drupalSettings/i',
+            'Apache status' => '/Apache Server Status|server-status/i',
+            'Apache info' => '/Apache Server Information/i',
+            'phpinfo' => '/PHP Version|phpinfo\(\)|Configuration File \(php\.ini\) Path/i',
+            'cPanel' => '/cpanel|WHM Login/i',
+            'Plesk' => '/plesk/i',
+            'Roundcube' => '/roundcube/i',
+            'Jenkins' => '/Jenkins/i',
+            'Grafana' => '/grafana/i',
+            'Kibana' => '/kibana/i',
+            'Elasticsearch' => '/"cluster_name"|"lucene_version"/i',
+            'Directory listing' => '/Index of \/|<title>Index of/i',
+            'Git' => '/^ref: refs\/|\[core\]|repositoryformatversion/i',
+            'dotenv' => '/^[A-Z_]+=.*$/m',
+            'htpasswd' => '/^[A-Za-z0-9._-]+:\$?(apr1|2y|2a|\{SHA\})/m',
+            'SQL dump' => '/(INSERT INTO|CREATE TABLE|-- MySQL dump)/i',
+            'PHP source' => '/<\?php/i',
+            'Debian Apache' => '/Apache\/2\.[0-9.]+ \(Debian\)/i',
+        ];
+        foreach($map as $name => $re)if(preg_match($re, $all))return $name;
+        if(preg_match('/<title>([^<]{3,60})<\/title>/i', $body, $m))return trim($m[1]);
+        return '';
+    }
+    /* ── the whole sweep ────────────────────────────────────────────────────
+       One pass, every check, and a line per check that says what it read even
+       when it found nothing. Nothing is executed, nothing is written, and the
+       answer is the same on a machine with no network at all. */
+    /* ── valid text, whatever the host hands back ────────────────────────────
+       A file name, a process title or a line of output can carry bytes that are
+       not text, and a report that contains one such byte cannot be written as
+       JSON at all: the answer comes back empty and the panel says nothing. So
+       every string in a report is tested before it is returned, and a string
+       that is not valid UTF-8 has its offending bytes replaced - a name with
+       one bad byte still says which file it is. */
+    private function findScrub($v){
+        if(is_string($v)){
+            if($v === '' || preg_match('//u', $v))return $v;
+            return (string)preg_replace('/[\x80-\xFF]/', '?', $v);
+        }
+        if(is_array($v)){
+            $out = [];
+            foreach($v as $k => $one)$out[is_string($k) ? $this->findScrub($k) : $k] = $this->findScrub($one);
+            return $out;
+        }
+        return $v;
+    }
+    private function findSweep(){
+        static $c = null;
+        if($c !== null)return $c;
+        $t0 = microtime(true);
+        $checks = [];
+        foreach(['findPathDir', 'findRootExec', 'findArgSecret', 'findLooseSystemFiles',
+                  'findRightsFiles', 'findServerRights', 'findServicePowers', 'findSelfPowers'] as $m){
+            try { $r = $this->$m(); }
+            catch(Throwable $e){ $r = ['ok' => false, 'note' => 'this check could not run here: ' . $e->getMessage()]; }
+            $checks[] = ['id' => substr($m, 4), 'ok' => !empty($r['ok']), 'note' => (string)($r['note'] ?? ''), 'detail' => $this->findScrub($r)];
+        }
+        $open = array_values(array_filter($checks, function($x){ return $x['ok']; }));
+        $c = ['ok' => true, 'open' => count($open), 'checks' => $checks,
+              'counts' => ['open' => count($open), 'closed' => count($checks) - count($open), 'all' => count($checks)],
+              'seconds' => round(microtime(true) - $t0, 2),
+              'summary' => count($open)
+                  ? count($open) . ' of ' . count($checks) . ' standing facts are true on this machine: ' . implode(' | ', array_map(function($x){ return $x['id']; }, $open))
+                  : 'all ' . count($checks) . ' checks ran and none of them found a standing way from this account to more rights'];
+        return $c;
+    }
+    private function rootPtraceMarker(){}
+    /* ══ THE ROUTES THE CATALOGUE DID NOT CARRY YET ══════════════════════════
+       Every kernel flaw below is judged the same way as the rest of this file:
+       the code has to be in this build (a symbol in the running image, or a
+       module that is on disk), the interface has to reach this account (the
+       configuration option and the sysctl, not a guess), and the release has to
+       be on the near side of the fix for its own line. Where any of the three
+       cannot be read, the line says "undecided" - never "closed".
+       The four routes that are not in the kernel are read from files instead:
+       which package and which version, which sudo rule, which directory.
+       All eight carry a route and all eight are refusals to fire, said out loud:
+       the kernel ones are memory corruption from a web request, and the two
+       credential ones are not privilege escalation at all - they are a secret
+       this account already holds, and pretending otherwise is how a checklist
+       lies. */
+
+    /* ── a setuid program this account may rewrite ──────────────────────────
+       The setuid bit is only half of it: a binary that is setuid AND writable
+       by the account reading it is not a setuid program any more, it is a
+       template. Copying it keeps the mode only when the copy is made by root,
+       so what this really measures is the shorter and quieter form: the file
+       can be REPLACED, and whatever replaces it is run by whoever runs it -
+       including the site itself, which is a shell the moment the name is the
+       one the server executes. Read from the mode bits, written nowhere. */
+    private function rootSuidWriteStep(){
+        $me = (string)$this->managerAccount();
+        $mine = $this->rootMyGroups();
+        $bad = []; $checked = 0;
+        foreach(array_slice((array)$this->rootSuidList(), 0, 200) as $f){
+            if(!@is_file($f))continue;
+            $checked++;
+            $st = @stat($f);
+            if(!is_array($st))continue;
+            $mode = (int)$st['mode'];
+            if(($mode & 04000) !== 04000)continue;   /* a symlink or a rebuilt copy */
+            $perm = $mode & 0777;
+            $owner = $this->rootUserOf((int)$st['uid']);
+            $group = $this->rootGroupOf((int)$st['gid']);
+            $why = [];
+            if(($perm & 0002) === 0002)$why[] = 'any account may write it';
+            if(($perm & 0020) === 0020 && $group !== $me && $this->rootGroupHasOthers($group, $me))$why[] = 'the group ' . $group . ' may write it and has other members';
+            if(($perm & 0200) === 0200 && $owner === $me)$why[] = 'this account owns it';
+            /* the directory decides replacement even when the file itself does
+               not: a writable directory means the entry can be swapped */
+            $dir = dirname($f);
+            $ds = @stat($dir);
+            if(is_array($ds)){
+                $dp = (int)$ds['mode'] & 0777;
+                $dsticky = ((int)$ds['mode'] & 01000) === 01000;
+                if(($dp & 0002) === 0002 && !$dsticky)$why[] = 'its directory ' . $dir . ' is world-writable, so the name can be replaced';
+                elseif(($dp & 0020) === 0020 && !$dsticky && $this->rootGroupHasOthers($this->rootGroupOf((int)$ds['gid']), $me))
+                    $why[] = 'its directory ' . $dir . ' is writable by the group ' . $this->rootGroupOf((int)$ds['gid']) . ', so the name can be replaced';
+            }
+            /* the temporary-directory trap: a setuid copy left in /tmp by an
+               older installer is a file anybody may already have replaced */
+            if(preg_match('#^/tmp/#', $f) || preg_match('#^/var/tmp/#', $f))$why[] = 'it lives in a temporary directory';
+            if($why)$bad[] = ['path' => $f, 'perm' => decoct($perm), 'owner' => $owner, 'why' => $why];
+        }
+        $status = !$checked ? 'check' : ($bad ? 'vulnerable' : 'patched');
+        if(!$checked){
+            $msg = 'no setuid program could be read on this host, so none of them can be cleared';
+        }elseif($bad){
+            $msg = count($bad) . ' of ' . $checked . ' setuid programs can be changed by this account: ' . $bad[0]['path'] . ' is ' . $bad[0]['perm'] . ' owned by ' . $bad[0]['owner'] . ' - ' . implode('; ', $bad[0]['why']) . '. A setuid program that can be rewritten is not a setuid program, it is a template for one';
+        }else{
+            $msg = $checked . ' setuid programs were read and every one of them sits in a directory this account cannot write, with a mode this account cannot change - so the setuid bit on this machine belongs to files root controls end to end';
+        }
+        return['status' => $status, 'cve' => [], 'facts' => ['checked' => $checked, 'bad' => $bad],
+            'meaning' => $msg];
+    }
+
+    /* ── a library the account can write, used by a program that runs as root ─
+       The complement of ldpath and narrower than it: instead of asking which
+       DIRECTORIES on the search path are loose, this asks which LIBRARIES a
+       root program actually loads and whether any of them may be written or
+       replaced here. A single loose library in the chain is enough - it does
+       not have to be in a search directory at all, only in the list the loader
+       resolved. Every mapped file of every setuid binary is read from
+       /proc/<pid>/maps by running each of them exactly as it is (no argument
+       that changes what it does) and reading the map afterwards is avoided:
+       the list comes from the loader's own cache where it can be read, and
+       from the mode bits of the files themselves. */
+    private function rootLooseLibStep(){
+        $cands = [];
+        /* the libraries of the setuid binaries, taken from ld.so.cache where it
+           can be parsed, and from the loader directories otherwise */
+        $cache = @file_get_contents('/etc/ld.so.cache');
+        if($cache !== false && strlen($cache) > 40 && substr($cache, 0, 6) === 'glibc-'){
+            $n = unpack('V', substr($cache, 12, 4));
+            $n = is_array($n) ? (int)$n[1] : 0;
+            if($n > 0 && $n < 20000){
+                $off = 48;
+                for($i = 0; $i < $n && $off + 24 <= strlen($cache); $i++){
+                    $e = substr($cache, $off, 24);
+                    $vals = array_values(unpack('V5', substr($e, 0, 20)));
+                    $strOff = $vals[4] ?? 0;
+                    $off += 24;
+                    if(!$strOff)continue;
+                    /* the strings start after the table, and the key is the
+                       soname: the value is what the loader will load */
+                    $p = strpos($cache, "\0", strlen($cache) - ($n - $i) * 0);
+                    $start = $off;
+                    $end = $start;
+                    while($end < strlen($cache) && $cache[$end] !== "\0")$end++;
+                    $off = $end + 1;
+                    $s = substr($cache, $start, $end - $start);
+                    if($s !== '' && $s[0] === '/')$cands[] = $s;
+                }
+            }
+        }
+        foreach(['/lib/x86_64-linux-gnu', '/usr/lib/x86_64-linux-gnu', '/lib64', '/usr/lib64', '/usr/lib'] as $d)
+            foreach((array)@glob($d . '/lib*.so*', GLOB_NOSORT) as $f)if(@is_file($f) && !@is_link($f))$cands[] = $f;
+        $cands = array_values(array_unique($cands));
+        $bad = []; $checked = 0;
+        foreach(array_slice($cands, 0, 400) as $f){
+            if(!@is_file($f))continue;
+            $checked++;
+            $st = @stat($f);
+            if(!is_array($st))continue;
+            $perm = (int)$st['mode'] & 0777;
+            if(!@is_writable($f))continue;
+            $bad[] = ['path' => $f, 'perm' => decoct($perm), 'owner' => $this->rootUserOf((int)$st['uid']),
+                      'group' => $this->rootGroupOf((int)$st['gid'])];
+        }
+        $status = !$checked ? 'check' : ($bad ? 'vulnerable' : 'patched');
+        if(!$checked){
+            $msg = 'no shared library could be listed here (neither the loader cache nor the library directories could be read), so none of them can be cleared';
+        }elseif($bad){
+            $msg = count($bad) . ' shared librar' . (count($bad) === 1 ? 'y is' : 'ies are') . ' writable by this account (' . implode(' · ', array_map(function($x){ return $x['path'] . ' ' . $x['perm'] . ' ' . $x['owner'] . ':' . $x['group']; }, array_slice($bad, 0, 3))) . '). Any program that links against one of them runs it - and the setuid ones run it as root, because the loader resolves the dependency before the uid changes';
+        }else{
+            $msg = $checked . ' shared libraries were read: not one of them may be written by this account, so no program on this machine can be made to load a library of this account, setuid or not';
+        }
+        return['status' => $status, 'cve' => [], 'facts' => ['checked' => $checked, 'bad' => $bad],
+            'meaning' => $msg];
+    }
+
+    /* ── the fallback a sudo rule that names no program gets ─────────────────
+       A sudoers file needs a binary for every rule. Where the rule is written
+       as a directory or a wildcard - "/usr/local/bin/*", "/opt/tools/" - sudo
+       runs whatever is found there, and if a name the rule allows does not
+       exist yet it is enough for this account to create it. The question is not
+       the rule, it is the directory: who may write into the places the rules
+       point at. Read from the rule text and the mode bits, nothing executed. */
+    private function rootSudoDirWritableStep(){
+        $rules = (array)$this->rootSudoRules();
+        $dirs = []; $wilds = [];
+        foreach($rules as $r){
+            $cmd = trim((string)($r['cmd'] ?? ''));
+            if($cmd === '')continue;
+            $first = (string)preg_split('/\s+/', $cmd)[0];
+            if($first === 'ALL' || $first[0] !== '/')continue;
+            if(substr($first, -1) === '/' || strpos($first, '*') !== false){
+                $wilds[] = $first;
+                $dir = rtrim(substr($first, 0, (int)strpos($first . '*', '*') ?: strlen($first)), '/');
+                if($dir !== '' && @is_dir($dir))$dirs[$dir] = $first;
+            }else{
+                $dir = dirname($first);
+                if(@is_dir($dir))$dirs[$dir] = $first;
+            }
+        }
+        $open = []; $tested = 0;
+        foreach($dirs as $d => $rule){
+            if(!@is_dir($d))continue;
+            $tested++;
+            if(@is_writable($d))$open[] = ['dir' => $d, 'rule' => $rule];
+        }
+        if(empty($wilds) && empty($open))
+            return['status' => 'patched', 'cve' => [], 'facts' => ['rules' => count($rules), 'wild' => $wilds, 'dirs' => array_keys($dirs)],
+                'meaning' => count($rules) . ' sudo rule(s) read: every one of them names a program that already exists in a directory this account cannot write, so no rule here can be pointed at a file this account creates'];
+        if($open)
+            return['status' => 'vulnerable', 'cve' => [], 'facts' => ['rules' => count($rules), 'wild' => $wilds, 'open' => $open, 'tested' => $tested],
+                'meaning' => count($open) . ' directory a sudo rule points into is writable by this account (' . implode(' · ', array_map(function($x){ return $x['dir'] . ' from the rule "' . $x['rule'] . '"'; }, array_slice($open, 0, 3))) . '). The rule allows a name and the name is a file this account may create, so what sudo runs as root is a program of this account'];
+        if($tested > 0)
+            return['status' => 'patched', 'cve' => [], 'facts' => ['rules' => count($rules), 'wild' => $wilds, 'open' => [], 'tested' => $tested, 'dirs' => array_keys($dirs)],
+                'meaning' => count($wilds) . ' sudo rule(s) name a directory or a wildcard (' . implode(', ', array_slice($wilds, 0, 3)) . '), and the ' . $tested . ' director' . ($tested === 1 ? 'y' : 'ies') . ' behind them cannot be written by this account - so the wildcard grants nothing this account could not already do'];
+        return['status' => 'check', 'cve' => [], 'facts' => ['rules' => count($rules), 'wild' => $wilds, 'dirs' => array_keys($dirs)],
+            'meaning' => count($wilds) . ' sudo rule(s) point at a directory or a wildcard (' . implode(', ', array_slice($wilds, 0, 3)) . ') and none of those directories could be read here, so whether this account may create a file the rule would run is undecided'];
+    }
+    /* ── a directory that answers for a shared library before the system one ──
+       The dynamic loader searches an ordered list and takes the first match.
+       Any directory on that list this account may write is not a
+       misconfiguration of the library: it is the right to decide what every
+       program on the machine loads - including the setuid ones, whose searches
+       run with the file capabilities of the binary, and those survive the
+       user change. The list is read from the loader itself (ld.so.conf and its
+       drop-ins, ld.so.cache where it can be parsed) and every entry is tested
+       for writability by this account. Nothing is written and no library is
+       planted: the answer is the list. */
+    /* the run path linked into an ELF binary, read the way the loader reads it:
+       the dynamic section is a table of tag/offset pairs, tag 15 is DT_RPATH and
+       tag 29 is DT_RUNPATH, and the offset points into the string table. Only
+       those two are followed - nothing else in the file is treated as a path. */
+    private function rootElfRunPath($file){
+        $f = @fopen($file, 'rb');
+        if(!$f)return[];
+        $head = (string)@fread($f, 64);
+        if(strlen($head) < 52 || substr($head, 0, 4) !== "\x7fELF"){@fclose($f); return[];}
+        $is64 = ord($head[4]) === 2;
+        $le = ord($head[5]) === 1;
+        /* the three widths the headers use, in the byte order of the file */
+        $u = function($s, $off, $len) use ($le){
+            $b = substr($s, $off, $len);
+            if(strlen($b) !== $len)return 0;
+            $fmt = $le ? ([2 => 'v', 4 => 'V', 8 => 'P'][$len] ?? 'V') : ([2 => 'n', 4 => 'N', 8 => 'J'][$len] ?? 'N');
+            $a = @unpack($fmt, $b);
+            return is_array($a) ? (int)$a[1] : 0;
+        };
+        if($is64){
+            $phoff = $u($head, 32, 8); $phentsize = $u($head, 54, 2); $phnum = $u($head, 56, 2);
+            $dynOff = $dynSize = 0;
+            for($i = 0; $i < $phnum; $i++){
+                @fseek($f, $phoff + $i * $phentsize);
+                $ph = (string)@fread($f, $phentsize);
+                if(strlen($ph) < 56)break;
+                if($u($ph, 0, 4) === 2){$dynOff = $u($ph, 8, 8); $dynSize = $u($ph, 32, 8);}
+            }
+        }else{
+            $phoff = $u($head, 28, 4); $phentsize = $u($head, 42, 2); $phnum = $u($head, 44, 2);
+            $dynOff = $dynSize = 0;
+            for($i = 0; $i < $phnum; $i++){
+                @fseek($f, $phoff + $i * $phentsize);
+                $ph = (string)@fread($f, $phentsize);
+                if(strlen($ph) < 32)break;
+                if($u($ph, 0, 4) === 2){$dynOff = $u($ph, 4, 4); $dynSize = $u($ph, 16, 4);}
+            }
+        }
+        if(!$dynOff || !$dynSize){@fclose($f); return[];}
+        @fseek($f, $dynOff);
+        $dyn = (string)@fread($f, max(8, $dynSize));
+        @fclose($f);
+        $ent = $is64 ? 16 : 8;
+        $strOff = 0; $offsets = [];
+        for($p = 0; $p + $ent <= strlen($dyn); $p += $ent){
+            $tag = $u($dyn, $p, $is64 ? 8 : 4);
+            $val = $u($dyn, $p + ($is64 ? 8 : 4), $is64 ? 8 : 4);
+            if($tag === 0)break;
+            if($tag === 5)$strOff = $val;
+            if($tag === 15 || $tag === 29)$offsets[] = $val;
+        }
+        if(!$offsets || !$strOff)return[];
+        $out = [];
+        $g = @fopen($file, 'rb');
+        if(!$g)return[];
+        foreach($offsets as $o){
+            @fseek($g, $strOff + $o);
+            $s = (string)@fread($g, 512);
+            $s = substr($s, 0, strpos($s . "\0", "\0"));
+            foreach(explode(':', (string)$s) as $d)if($d !== '' && $d[0] === '/')$out[] = rtrim($d, '/');
+        }
+        @fclose($g);
+        return array_values(array_unique($out));
+    }
+    private function rootLdPathStep(){
+        $dirs = [];
+        foreach(['/etc/ld.so.conf'] as $f)if(@is_readable($f))foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $ln){
+            $ln = trim(preg_replace('/#.*$/', '', $ln));
+            if($ln !== '' && $ln[0] === '/')$dirs[$ln] = '/etc/ld.so.conf';
+        }
+        foreach((array)@glob('/etc/ld.so.conf.d/*.conf', GLOB_NOSORT) as $f){
+            if(!@is_readable($f))continue;
+            foreach(preg_split('/\R/', (string)@file_get_contents($f)) ?: [] as $ln){
+                $ln = trim(preg_replace('/#.*$/', '', $ln));
+                if($ln !== '' && $ln[0] === '/')$dirs[$ln] = $f;
+            }
+        }
+        /* the two directories a distribution trusts without asking, plus the
+           environment variables that add to the list for everything started
+           from this process */
+        foreach(['/usr/local/lib', '/usr/local/lib64', '/lib', '/usr/lib'] as $d)if(@is_dir($d) && !isset($dirs[$d]))$dirs[$d] = 'the loader default';
+        $open = [];
+        foreach($dirs as $d => $src){
+            if(!@is_dir($d))continue;
+            if(!@is_writable($d))continue;
+            $open[] = ['dir' => $d, 'src' => $src];
+        }
+        $env = [];
+        foreach(['LD_LIBRARY_PATH', 'LD_PRELOAD'] as $v){
+            $x = (string)@getenv($v);
+            if($x !== '')$env[] = $v . '=' . $x;
+        }
+        $status = $open ? 'vulnerable' : ($dirs ? 'patched' : 'check');
+        if($open){
+            $msg = count($open) . ' directory on the loader search path is writable by this account (' . implode(' · ', array_map(function($o){ return $o['dir'] . ' from ' . $o['src']; }, array_slice($open, 0, 3))) . '). A library dropped there with the name of one the setuid binaries already link against is loaded instead of it, by a program that is still root - the loader runs its search with the file capabilities of the binary, and those are not dropped by the uid change';
+        }elseif(!$dirs){
+            $msg = 'no loader configuration could be read, so nothing can be said about the search path';
+        }else{
+            $msg = 'the loader searches ' . count($dirs) . ' director' . (count($dirs) === 1 ? 'y' : 'ies') . ' (' . implode(', ', array_slice(array_keys($dirs), 0, 5)) . ') and not one of them may be written by this account, so no library of this account is ever the first match' . ($env ? '. It also carries ' . implode(' ', $env) . ', which is a search path of its own for everything started from here' : '');
+        }
+        return['status' => $status, 'cve' => [], 'facts' => ['dirs' => array_keys($dirs), 'open' => $open, 'env' => $env],
+            'meaning' => $msg];
+    }
+
+    /* ── who else may write the tree the site lives in ───────────────────────
+       A web shell does not need a kernel bug: it needs one process that is not
+       www-data and can leave a file where www-data executes one. The first
+       draft of this check was wrong in the usual way - it counted "the parent
+       is owned by root" as a fault and called /tmp a shared site tree, which is
+       the world-writable-with-sticky case that exists on every machine and
+       protects exactly against the thing being claimed. So the test is narrow
+       and it is the real one: a directory is shared when somebody other than
+       this account can WRITE into it, and the sticky bit is honoured, because
+       on a sticky directory a stranger may create a file but may not replace
+       one that is not theirs. Ownership alone convicts nobody. */
+    private function rootSiteSharedStep(){
+        $me = (string)$this->managerAccount();
+        $mine = $this->rootMyGroups();
+        $base = rtrim((string)__DIR__, '/');
+        $rows = []; $scanned = 0;
+        $walk = function($dir, $depth) use (&$walk, &$rows, &$scanned, $me, $mine){
+            if($depth > 2 || $scanned > 400)return;
+            $s = @stat($dir);
+            if(!is_array($s))return;
+            $scanned++;
+            $mode = (int)$s['mode'];
+            $perm = $mode & 0777;
+            $sticky = ($mode & 01000) === 01000;
+            $owner = $this->rootUserOf((int)$s['uid']);
+            $group = $this->rootGroupOf((int)$s['gid']);
+            $why = [];
+            if(($perm & 0002) === 0002 && !$sticky)$why[] = 'any account on the machine may write into it';
+            if(($perm & 0020) === 0020 && $group !== $me && $this->rootGroupHasOthers($group, $me))
+                $why[] = 'the group ' . $group . ' may write into it, and that group has members besides this account';
+            if(($perm & 0002) === 0002 && $sticky)$why[] = 'world-writable but sticky, so a stranger cannot replace a file that is not theirs';
+            if($why)$rows[] = ['path' => $dir, 'perm' => decoct($perm), 'owner' => $owner, 'group' => $group, 'notes' => $why];
+            foreach((array)@scandir($dir) as $c){
+                if($c === '.' || $c === '..')continue;
+                $p2 = $dir . '/' . $c;
+                if(@is_dir($p2) && !@is_link($p2))$walk($p2, $depth + 1);
+            }
+        };
+        if(@is_dir($base))$walk($base, 0);
+        $bad = array_values(array_filter($rows, function($x){
+            foreach($x['notes'] as $n)if(stripos($n, 'sticky') === false)return true;
+            return false;
+        }));
+        $status = !$scanned ? 'check' : ($bad ? 'vulnerable' : 'patched');
+        if(!$scanned){
+            $msg = 'the site directory behind this file could not be read, so nothing can be said about who else may write into it';
+        }elseif($bad){
+            $first = $bad[0];
+            $msg = count($bad) . ' of ' . $scanned . ' director' . ($scanned === 1 ? 'y' : 'ies') . ' in this site tree can be written by somebody other than ' . $me . ': ' . $first['path'] . ' is ' . $first['perm'] . ' ' . $first['owner'] . ':' . $first['group'] . ' - ' . implode(', ', array_filter($first['notes'], function($n){ return stripos($n, 'sticky') === false; })) . '. One file dropped there is one file this web server executes';
+        }else{
+            $msg = $scanned . ' director' . ($scanned === 1 ? 'y' : 'ies') . ' in the site tree were read and not one of them may be written by anybody but ' . $me . ', so no second account on this machine can put a file where this site executes one';
+        }
+        return['status' => $status, 'cve' => [], 'facts' => ['rows' => $rows, 'scanned' => $scanned, 'bad' => $bad, 'base' => $base],
+            'meaning' => $msg];
+    }
+    /* ── a program root runs that loads its own libraries from its own place ──
+       A binary can be linked with a run path baked into it, and that path is
+       searched before the system list - with the same privilege question as
+       above, except that here nothing on the machine has to be misconfigured:
+       only the directory the vendor chose has to be writable. Measured from the
+       programs that matter (the setuid ones already found, plus what
+       /etc/cron.daily and the init system start as root), by running the
+       loader against each of them and reading the search path it reports. */
+    private function rootRunPathStep(){
+        $bins = array_slice((array)$this->rootSuidList(), 0, 40);
+        foreach(['/etc/cron.daily/*', '/etc/cron.hourly/*', '/etc/cron.weekly/*'] as $g)
+            foreach((array)@glob($g, GLOB_NOSORT) as $f)if(@is_file($f) && @is_executable($f))$bins[] = $f;
+        /* what the init system starts as root, read out of the unit files: the
+           binary is the first word of ExecStart and nothing is executed here */
+        foreach((array)@glob('/etc/systemd/system/*.service', GLOB_NOSORT) as $u){
+            $t = (string)@file_get_contents($u);
+            if($t !== '' && preg_match('/^ExecStart\s*=\s*(-?)(\S+)/m', $t, $m) && @is_file($m[2]))$bins[] = $m[2];
+        }
+        $bins = array_values(array_unique($bins));
+        $ldd = $this->rootWhich('ldd');
+        $hits = []; $read = 0;
+        foreach(array_slice($bins, 0, 40) as $b){
+            $base = basename($b);
+            /* every setuid binary the walk found, plus everything a scheduled
+               root process starts: a run path only matters on a program that
+               runs with more rights than this account */
+            if(!@is_file($b))continue;
+            $read++;
+            /* the DT_RUNPATH / DT_RPATH entry is a literal string in the
+               dynamic section, and the dynamic section of an ELF is a table of
+               (tag, offset) pairs - so only the offsets of tags 15 and 29 are
+               followed, and the string they point at is the search path. That
+               keeps a library name or a build path from being mistaken for a
+               run path, which a blind string scan would do. */
+            $paths = $this->rootElfRunPath($b);
+            foreach($paths as $dir){
+                if(@is_dir($dir) && @is_writable($dir))$hits[] = $b . ' carries the run path ' . $dir . ', which this account may write';
+            }
+        }
+        $status = !$read ? 'check' : ($hits ? 'vulnerable' : 'patched');
+        if(!$read){
+            $msg = 'no program a root process runs could be read here, so an embedded search path cannot be ruled out - ' . ($ldd !== '' ? 'ldd is present at ' . $ldd : 'and ldd is not installed either');
+        }elseif($hits){
+            $msg = count($hits) . ' program(s) carry a library search path this account may write: ' . implode(' · ', array_slice($hits, 0, 2)) . '. The path is baked into the binary, so it is searched before the system list, and the program runs as root';
+        }else{
+            $msg = $read . ' program(s) that a root process runs were read, and not one of them carries a search path this account may write - so the library a setuid program loads is the one its packaging installed';
+        }
+        return['status' => $status, 'cve' => [], 'facts' => ['read' => $read, 'hits' => $hits],
+            'meaning' => $msg];
+    }
+    /* ── CVE-2023-3390, a rule added inside a batch that fails later ─────────
+       The trans machinery takes a reference when a rule is added and gives it
+       back on the abort path, but the table it was added to is looked up again
+       after the abort, and that second lookup hands back the pointer that was
+       already released. Needs CAP_NET_ADMIN, which an ordinary account has
+       inside its own user namespace - so the route is the sysctl and the
+       netfilter build, not a package version. */
+    private function rootNfNewruleStep(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2023-3390'], 'facts' => $k,
+            'meaning' => 'the kernel release could not be read'];
+        $fix = $this->rootKernelSeries($v, [3,16,0], [[4,14,322],[4,19,291],[5,4,251],[5,10,188],[5,15,118],[6,1,35],[6,3,9]]);
+        $reach = $this->rootKernelReach(['NF_TABLES', 'USER_NS'], ['nf_tables_newrule']);
+        $userns = $this->rootUserNamespaces();
+        $mod = $this->rootModuleState('nf_tables');
+        $status = $fix['before'] ? 'absent'
+            : ($fix['fixed'] ? 'patched'
+            : ($reach['ok'] === false ? 'absent'
+            : (!$userns['works'] ? 'mitigated'
+            : ($reach['ok'] === null || !$fix['known'] ? 'check' : 'vulnerable'))));
+        if($fix['before']){
+            $msg = 'this kernel predates 3.16, where the transaction the dangling pointer lives in was written';
+        }elseif($fix['fixed']){
+            $msg = 'this kernel is at or past the fix for its line (4.19.291 / 5.4.251 / 5.10.188 / 5.15.118 / 6.1.35 / 6.3.9), so the abort path gives the reference back before the table is read again';
+        }elseif($reach['ok'] === false){
+            $msg = 'the code is not in this build: ' . $reach['why'];
+        }elseif(!$userns['works']){
+            $msg = 'the flaw is in the window and nf_tables is ' . $mod . ', but CAP_NET_ADMIN can only be had inside a user namespace here, and unprivileged namespaces are closed';
+        }else{
+            $msg = 'inside the window, nf_tables is ' . $mod . ', user namespaces are open, and ' . $reach['why'] . ' - a batch that adds a rule and then fails leaves the table pointing at a released rule, so one more allocation of the same size is the write. Not fired: the freed object is kernel memory and a wrong reuse panics the machine this panel is answering from';
+        }
+        return['status' => $status, 'cve' => ['CVE-2023-3390'], 'facts' => $k, 'reach' => $reach, 'fix' => $fix, 'module' => $mod,
+            'meaning' => $msg];
+    }
+
+    /* ── CVE-2023-0461, a socket that keeps the context a ULP gave it ────────
+       setsockopt(TCP_ULP) is not a privileged call: any account may attach the
+       TLS upper-layer protocol to its own socket, and the context it allocates
+       is not cleared when that socket disconnects and is reused as a listener -
+       the next accepted socket inherits a pointer into freed memory. This is the
+       only route in this catalogue that needs neither a namespace nor a
+       capability: a socket, a setsockopt, and a second socket. It was fixed in
+       4.19.270 / 5.4.229 / 5.10.163 / 5.15.88 / 6.1.5, which makes a 4.19 OVH
+       image the exact kind of host to ask about. */
+    private function rootTlsUlpStep(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2023-0461'], 'facts' => $k,
+            'meaning' => 'the kernel release could not be read'];
+        $fix = $this->rootKernelSeries($v, [4,13,0], [[4,14,303],[4,19,270],[5,4,229],[5,10,163],[5,15,88],[6,0,19],[6,1,5]]);
+        /* the flaw needs an upper-layer protocol registered on a TCP socket:
+           either the kernel TLS module, or ESP-in-TCP when xfrm is built */
+        $tls = $this->rootKernelReach(['TLS'], ['tls_init']);
+        $esp = $this->rootKernelReach(['XFRM_ESPINTCP'], ['espintcp_init']);
+        $reach = ($tls['ok'] === true || $esp['ok'] === true)
+            ? ['ok' => true, 'why' => trim(($tls['ok'] === true ? 'CONFIG_TLS is on (' . $tls['why'] . ')' : '') . ' ' . ($esp['ok'] === true ? 'CONFIG_XFRM_ESPINTCP is on (' . $esp['why'] . ')' : ''))]
+            : (($tls['ok'] === null && $esp['ok'] === null) ? ['ok' => null, 'why' => 'neither kernel TLS nor ESP-in-TCP could be read from this build']
+            : ['ok' => false, 'why' => 'no upper-layer protocol is in this build: ' . $tls['why'] . ' / ' . $esp['why']]);
+        $mod = $this->rootModuleState('tls');
+        $status = $fix['before'] ? 'absent'
+            : ($fix['fixed'] ? 'patched'
+            : ($reach['ok'] === false ? 'absent'
+            : ($reach['ok'] === null || !$fix['known'] ? 'check' : 'vulnerable')));
+        if($fix['before']){
+            $msg = 'this kernel predates 4.13, where the TCP upper-layer protocol hook was added, so the socket cannot carry a TLS context at all';
+        }elseif($fix['fixed']){
+            $msg = 'this kernel is at or past the fix for its line (4.19.270 / 5.4.229 / 5.10.163 / 5.15.88 / 6.1.5), so the context is dropped when the socket stops being a connection';
+        }elseif($reach['ok'] === false){
+            $msg = 'the kernel is inside the window, but ' . $reach['why'] . ', so there is no upper-layer protocol to install on a socket here';
+        }else{
+            $msg = 'inside the window and ' . $reach['why'] . ': this account may install the TLS upper-layer protocol on a socket of its own (setsockopt TCP_ULP asks nothing of nobody), disconnect it, and listen on it - the accepted socket then carries a pointer into freed memory. Nothing is granted and no file is written anywhere on the way. Not fired: the reuse it needs is a kernel heap write, and this panel does not aim one at the machine it is running in';
+        }
+        return['status' => $status, 'cve' => ['CVE-2023-0461'], 'facts' => $k, 'reach' => $reach, 'fix' => $fix, 'module' => $mod,
+            'meaning' => $msg];
+    }
+
+    /* the name behind a uid/gid, straight out of the account database, with the
+       number kept when the name is not there */
+    private function rootUserOf($uid){
+        static $c = [];
+        if(isset($c['u' . $uid]))return $c['u' . $uid];
+        $n = '';
+        foreach((array)@file('/etc/passwd', FILE_IGNORE_NEW_LINES) as $ln){
+            $p = explode(':', (string)$ln);
+            if(count($p) > 3 && (int)$p[2] === (int)$uid){$n = $p[0]; break;}
+        }
+        return $c['u' . $uid] = ($n !== '' ? $n : ('uid ' . (int)$uid));
+    }
+    private function rootGroupOf($gid){
+        static $c = [];
+        if(isset($c['g' . $gid]))return $c['g' . $gid];
+        $n = '';
+        foreach((array)@file('/etc/group', FILE_IGNORE_NEW_LINES) as $ln){
+            $p = explode(':', (string)$ln);
+            if(count($p) > 2 && (int)$p[2] === (int)$gid){$n = $p[0]; break;}
+        }
+        return $c['g' . $gid] = ($n !== '' ? $n : ('gid ' . (int)$gid));
+    }
+    /* does a group have members besides this account? a group of one is not a
+       second account, and convicting it would be the same false positive the
+       rest of this file spends its time avoiding */
+    private function rootGroupHasOthers($group, $me){
+        foreach((array)@file('/etc/group', FILE_IGNORE_NEW_LINES) as $ln){
+            $p = explode(':', (string)$ln);
+            if(count($p) < 4 || $p[0] !== $group)continue;
+            foreach(array_map('trim', explode(',', (string)$p[3])) as $m)
+                if($m !== '' && $m !== $me)return true;
+            return false;
+        }
+        return false;
+    }
+    private function rootMyGroups(){
+        static $g = null;
+        if($g !== null)return $g;
+        $g = [];
+        if(function_exists('posix_getgroups') && function_exists('posix_getgrgid')){
+            foreach((array)@posix_getgroups() as $gid){
+                $a = @posix_getgrgid((int)$gid);
+                if(is_array($a) && !empty($a['name']))$g[] = (string)$a['name'];
+            }
+        }
+        $me = (string)$this->managerAccount();
+        foreach((array)@file('/etc/group', FILE_IGNORE_NEW_LINES) as $ln){
+            $p = explode(':', (string)$ln);
+            if(count($p) > 3 && in_array($me, array_map('trim', explode(',', (string)$p[3])), true))$g[] = (string)$p[0];
+        }
+        return $g = array_values(array_unique($g));
+    }
+
+    /* ── what a helper actually inherits ─────────────────────────────────────
+       Two earlier versions of this check were wrong, and both were wrong in the
+       same direction - they convicted normal traffic:
+         · counting every socket in the process called the connection this
+           request arrived on a leak;
+         · comparing "same descriptor number, same path" between two requests
+           cannot tell a file that was reopened from one that was never closed.
+       So the check stopped looking at this process and started looking at what
+       it hands on, which is the thing that matters and the thing that can be
+       seen: a child is started, the child lists its own descriptor table, and
+       whatever is in there beyond the three standard ones and the pipes of the
+       exec itself is inherited from here by definition. No inference, no
+       timing, nothing to argue with. It is only ever a real statement about a
+       child this panel itself starts - and the panel does not leave its own
+       sockets in that table, which is the answer it reports. */
+    private function rootFdLeakStep(){
+        $php = $this->rootPhpBin();
+        $inherited = []; $seen = []; $note = ''; $ran = false;
+        $probe = 'foreach((array)@scandir("/proc/self/fd") as $f){if(!ctype_digit((string)$f))continue;'
+               . '$t=@readlink("/proc/self/fd/".$f);if($t===false)continue;echo $f,"\t",$t,"\n";}';
+        if($php !== ''){
+            $r = $this->rootExec([$php, '-r', $probe], '', 8);
+            $raw = trim((string)($r['out'] ?? '') . "\n" . (string)($r['err'] ?? ''));
+            if($raw !== '' && strpos($raw, 'PHP ' ) !== 0){
+                $ran = true;
+                foreach(preg_split('/\R/', $raw) ?: [] as $ln){
+                    if(!preg_match('/^(\d+)\t(.+)$/', trim($ln), $m))continue;
+                    $fd = (int)$m[1]; $t = $m[2];
+                    $seen[] = 'fd ' . $fd . ' -> ' . $t;
+                    if($fd <= 2)continue;
+                    /* the pipes proc_open makes for the exec, and an interpreter
+                       reading its own script, belong to the child, not to us */
+                    if(strpos($t, 'pipe:[') === 0)continue;
+                    if(strpos($t, 'anon_inode:') === 0)continue;
+                    if(substr($t, -10) === ' (deleted)'){$inherited[] = 'fd ' . $fd . ' -> ' . $t . ' (unlinked, so it cannot be freed)'; continue;}
+                    $inherited[] = 'fd ' . $fd . ' -> ' . $t;
+                }
+            }else{
+                $note = 'the probe interpreter answered nothing (' . $this->rootSnip($raw, 90) . ')';
+            }
+        }else{
+            $note = 'no PHP binary could be found to start as the probe';
+        }
+        /* three outcomes, not two: a child that inherits a FILE of this
+           account's is the flaw, a child that inherits the server's own sockets
+           is the server's design and is reported as what it is - on a
+           one-process server those descriptors are the request itself, on a
+           multi-process one they are the listener, and neither is a leak this
+           account caused. Convicting the second as if it were the first is the
+           mistake this check already made twice. */
+        $files = []; $socks = [];
+        foreach($inherited as $line){
+            if(strpos($line, 'socket:[') !== false || strpos($line, '/sys/fs/cgroup') !== false || strpos($line, 'anon_inode') !== false)$socks[] = $line;
+            else $files[] = $line;
+        }
+        $status = (!$ran || count($seen) === 0) ? 'check'
+            : (count($files) ? 'vulnerable' : (count($socks) ? 'check' : 'patched'));
+        if(!$ran || count($seen) === 0){
+            $msg = 'nothing readable came back from the child that was started, so what a helper inherits here is undecided: ' . ($note !== '' ? $note : 'the probe ran and listed none of its own descriptors');
+        }elseif(count($files)){
+            $msg = 'a child started by this process inherits ' . count($files) . ' file descriptor(s) of this account (' . implode(' · ', array_slice($files, 0, 3)) . '). Anything opened here and not closed is handed to every helper it starts, and a file that was unlinked while still open is not freed until the last holder goes';
+        }elseif(count($socks)){
+            $msg = 'a child inherits ' . count($socks) . ' socket/groups descriptor(s) and no file (' . implode(' · ', array_slice($socks, 0, 2)) . '). Those belong to the server, not to this account: on a single-process server they are the request being answered, and on a multi-process one they are the listener it was born with - worth knowing, and not a leak this panel can fix or convict';
+        }else{
+            $msg = 'a child was started and read its own table: ' . count($seen) . ' descriptor(s), the three standard ones and the pipe of the exec, nothing else. So nothing this account opens is being handed on, and there is no descriptor here that outlives the request that made it';
+        }
+        return['status' => $status, 'cve' => [],
+            'facts' => ['inherited' => $files, 'server_fds' => $socks, 'seen' => count($seen), 'ran' => $ran,
+                        'leases' => trim((string)@file_get_contents('/proc/sys/fs/leases-enable'))],
+            'meaning' => $msg];
+    }
+    /* ── the agent socket this account can already talk to ───────────────────
+       SSH_AUTH_SOCK is a file descriptor somebody else owns, published in the
+       environment. Where the web process has one, the identities in that agent
+       answer for this account without a password and without the key ever being
+       read: the agent signs, and the signature is the login. It is not a flaw in
+       ssh - it is a descriptor given to the wrong process, and the measurement is
+       whether it is reachable at all. */
+    private function rootAgentKeyStep(){
+        $sock = (string)@getenv('SSH_AUTH_SOCK');
+        $reach = $sock !== '' && (strpos($sock, '/') === 0) && (@file_exists($sock) || @file_exists(dirname($sock)));
+        $env = [];
+        foreach((array)@file('/proc/self/environ', FILE_IGNORE_NEW_LINES) as $kv){
+            if(strpos((string)$kv, 'SSH_') === 0)$env[] = strtok((string)$kv, '=');
+        }
+        $cli = $this->rootWhich('ssh-add');
+        if(!$reach)
+            return['status' => 'absent', 'cve' => [], 'facts' => ['sock' => $sock, 'env' => $env, 'ssh_add' => $cli],
+                'meaning' => 'no agent socket is reachable from this process (' . ($sock === '' ? 'SSH_AUTH_SOCK is not set at all, which is the normal state of a web server' : 'it is set to ' . $sock . ', and nothing is there') . '), so the identities of a person are not being offered to a request'];
+        return['status' => 'vulnerable', 'cve' => [],
+            'facts' => ['sock' => $sock, 'env' => $env, 'ssh_add' => $cli, 'readable' => @is_readable($sock)],
+            'meaning' => 'this process carries SSH_AUTH_SOCK=' . $sock . ', so the agent behind that socket answers for whoever owns this process: every key it holds signs on demand, and the login that follows is that person, with no password and no key file ever read here. Not fired: listing the identities would take a signature this panel will not ask for on a machine it does not own - the reachable socket is the whole finding, and the fix is to start the service with an environment that does not carry it'];
+    }
+    /* ── CVE-2022-0185, the filesystem context and a length that wraps ───────
+       legacy_parse_param() copies a parameter into a 4096-byte buffer and
+       compares the wrong quantity, so a parameter longer than a page overflows
+       into the slab next door. Reachable only where a mount namespace can be
+       made, which is why the check is two facts and not one: the code is in the
+       image (fsopen or legacy_parse_param) and user namespaces are open. The
+       window is 5.1 to the fixes below; a 4.19 kernel never carried the code. */
+    private function rootFsctxStep(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2022-0185'], 'facts' => $k,
+            'meaning' => 'the kernel release could not be read'];
+        $fix = $this->rootKernelSeries($v, [5,1,0], [[5,4,173],[5,10,93],[5,15,16],[5,16,2]]);
+        $reach = $this->rootKernelReach(['USER_NS'], ['legacy_parse_param', 'fsconfig']);
+        $userns = $this->rootUserNamespaces();
+        $status = $fix['before'] ? 'absent'
+            : ($fix['fixed'] ? 'patched'
+            : (!$userns['works'] ? 'mitigated'
+            : ($reach['ok'] === false ? 'absent' : ($reach['ok'] === null || !$fix['known'] ? 'check' : 'vulnerable'))));
+        if($fix['before']){
+            $msg = 'this kernel ' . $k['kernel'] . ' predates 5.1, where the filesystem-context parameter path was added, so the overflow is not in this build';
+        }elseif($fix['fixed']){
+            $msg = 'this kernel is at or past the fixed release for its line (5.4.173 / 5.10.93 / 5.15.16 / 5.16.2), so the wrapped length is checked';
+        }elseif(!$userns['works']){
+            $msg = 'the code is present and the kernel is inside the window, but unprivileged user namespaces are closed, and the mount namespace is the only way in';
+        }else{
+            $msg = 'inside the window, user namespaces are open, and ' . $reach['why'] . ' - this is a heap overflow reached through fsconfig, so the trigger builds a mount context and sprays the slab, and it is never fired from a web request';
+        }
+        return['status' => $status, 'cve' => ['CVE-2022-0185'], 'facts' => $k, 'reach' => $reach, 'fix' => $fix,
+            'meaning' => $msg];
+    }
+
+    /* ── CVE-2024-1086, nf_tables verdict and the double free ────────────────
+       A packet that the filter is asked to drop twice frees the same skb twice.
+       The flaw arrived with the nf_tables verdict path in 5.14, so a 4.19 image
+       is outside it by construction - which is a fact worth printing, because
+       the reflex is to look at the version and assume bad news. */
+    private function rootNftVerdictStep(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        $mod = $this->rootModuleState('nf_tables');
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2024-1086'], 'facts' => $k,
+            'meaning' => 'the kernel release could not be read'];
+        $fix = $this->rootKernelSeries($v, [5,14,0], [[5,15,149],[6,1,76],[6,6,15],[6,7,3]]);
+        $reach = $this->rootKernelReach(['NF_TABLES', 'USER_NS'], ['nf_hook_slow']);
+        $userns = $this->rootUserNamespaces();
+        $status = $fix['before'] ? 'absent'
+            : ($fix['fixed'] ? 'patched'
+            : ($mod === 'not loaded' && $reach['ok'] === false ? 'mitigated'
+            : (!$userns['works'] ? 'mitigated'
+            : ($reach['ok'] === false ? 'absent' : ($reach['ok'] === null || !$fix['known'] ? 'check' : 'vulnerable')))));
+        if($fix['before']){
+            $msg = 'this kernel ' . $k['kernel'] . ' predates 5.14, where the verdict path that double-frees the packet was added - the flaw is not in this build (nf_tables is ' . $mod . ')';
+        }elseif($fix['fixed']){
+            $msg = 'this kernel is at or past the fix for its line (5.15.149 / 6.1.76 / 6.6.15 / 6.7.3)';
+        }else{
+            $msg = 'inside 5.14 to 6.7, nf_tables is ' . $mod . ', user namespaces are ' . ($userns['works'] ? 'open' : 'closed') . ', and ' . $reach['why'] . ' - the trigger is a netfilter verdict race that ends in a freed skb, so it is measured and never fired here';
+        }
+        return['status' => $status, 'cve' => ['CVE-2024-1086'], 'facts' => $k, 'reach' => $reach, 'fix' => $fix, 'module' => $mod,
+            'meaning' => $msg];
+    }
+
+    /* ── CVE-2020-14386, the packet ring and a length that overflows ─────────
+       tpacket_rcv() subtracts more headroom than the block holds and wraps the
+       offset, so the ring hands back a pointer behind its own buffer. The route
+       needs CAP_NET_RAW, which an ordinary account only has inside a user
+       namespace (where it is allowed) - so reachability is the sysctl, and the
+       code is AF_PACKET itself. */
+    private function rootAfpacketStep(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2020-14386'], 'facts' => $k,
+            'meaning' => 'the kernel release could not be read'];
+        $fix = $this->rootKernelSeries($v, [2,6,0], [[4,9,239],[4,14,201],[4,19,150],[5,4,64],[5,8,8]]);
+        $reach = $this->rootKernelReach(['PACKET', 'USER_NS'], ['packet_set_ring', 'tpacket_rcv']);
+        $userns = $this->rootUserNamespaces();
+        $status = $fix['before'] ? 'absent'
+            : ($fix['fixed'] ? 'patched'
+            : (!$userns['works'] ? 'mitigated'
+            : ($reach['ok'] === false ? 'absent' : ($reach['ok'] === null || !$fix['known'] ? 'check' : 'vulnerable'))));
+        if($fix['before']){
+            $msg = 'the ring code on this kernel is older than the offset arithmetic the flaw lives in, so there is nothing to wrap';
+        }elseif($fix['fixed']){
+            $msg = 'this kernel is at or past the fix for its line (4.19.150 / 5.4.64 / 5.8.8 / 4.14.201 / 4.9.239)';
+        }else{
+            $msg = 'this kernel is inside the window and ' . $reach['why'] . '. The route needs CAP_NET_RAW, and an ordinary account only holds it inside a user namespace, which is ' . ($userns['works'] ? 'open here - so the capability is one unshare away' : 'closed here - so the capability cannot be obtained') . '. Not fired: the write lands in the packet ring, and a wrong length is a corrupt machine';
+        }
+        return['status' => $status, 'cve' => ['CVE-2020-14386'], 'facts' => $k, 'reach' => $reach, 'fix' => $fix,
+            'meaning' => $msg];
+    }
+
+    /* ── CVE-2022-2588, the route filter freed twice ─────────────────────────
+       route4_change() frees the old filter and then puts it back in the hash
+       table when its handle is zero. Needs CAP_NET_ADMIN, so again the user
+       namespace decides whether an ordinary account can drive it at all. The
+       same code has an uncleared rcu field, which is why the fix is two
+       releases wide in the 5.x lines. */
+    private function rootRoute4Step(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2022-2588'], 'facts' => $k,
+            'meaning' => 'the kernel release could not be read'];
+        $fix = $this->rootKernelSeries($v, [4,10,0], [[4,9,326],[4,14,291],[4,19,256],[5,4,211],[5,10,137],[5,15,61],[5,18,18],[5,19,2]]);
+        $reach = $this->rootKernelReach(['NET_CLS_ROUTE4', 'NET_SCHED', 'USER_NS'], ['route4_change']);
+        $userns = $this->rootUserNamespaces();
+        $status = $fix['before'] ? 'absent'
+            : ($fix['fixed'] ? 'patched'
+            : ($reach['ok'] === false ? 'absent'
+            : (!$userns['works'] ? 'mitigated'
+            : ($reach['ok'] === null || !$fix['known'] ? 'check' : 'vulnerable'))));
+        if($fix['before']){
+            $msg = 'the route classifier on this kernel predates the code that mishandles a zero handle';
+        }elseif($fix['fixed']){
+            $msg = 'this kernel is at or past the fix for its line (4.19.256 / 5.4.211 / 5.10.137 / 5.15.61)';
+        }else{
+            $msg = 'inside the window, ' . $reach['why'] . ', and user namespaces are ' . ($userns['works'] ? 'open - so CAP_NET_ADMIN is one unshare away' : 'closed - so the traffic-control interface cannot be driven by this account') . '. Not fired: it is a use-after-free in the kernel heap';
+        }
+        return['status' => $status, 'cve' => ['CVE-2022-2588'], 'facts' => $k, 'reach' => $reach, 'fix' => $fix,
+            'meaning' => $msg];
+    }
+
+    /* ── CVE-2021-27365, iSCSI attributes written past their page ────────────
+       The iSCSI connection class exposes sysfs attributes built with sprintf()
+       into a page, and a netlink-supplied string longer than the page runs past
+       it. Needs the iSCSI modules loaded - which on a stock VPS image they are
+       not, and that is the measurement, not an assumption about the version. */
+    private function rootIscsiStep(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2021-27365'], 'facts' => $k,
+            'meaning' => 'the kernel release could not be read'];
+        $mods = [];
+        foreach(['iscsi_tcp', 'libiscsi', 'scsi_transport_iscsi', 'ib_iser'] as $m)$mods[$m] = $this->rootModuleState($m);
+        $here = in_array('loaded', $mods, true) || in_array('builtin', $mods, true);
+        $fix = $this->rootKernelSeries($v, [2,6,0], [[4,14,219],[4,19,179],[5,4,103],[5,10,21],[5,11,2]]);
+        $status = !$here ? 'absent'
+            : ($fix['fixed'] ? 'patched' : ($fix['known'] ? 'vulnerable' : 'check'));
+        $seen = [];
+        foreach($mods as $m => $st)$seen[] = $m . ' ' . $st;
+        if(!$here){
+            $msg = 'no iSCSI transport module is loaded or built into this kernel, so the sysfs attribute code the overflow lives in is not running here (' . implode(', ', $seen) . ')';
+        }elseif($fix['fixed']){
+            $msg = 'the transport is here, and this kernel is at or past the fix for its line (4.19.179 / 5.4.103 / 5.10.21 / 5.11.2)';
+        }else{
+            $msg = 'the transport is here and the kernel is inside the window: an account that may speak netlink to the iSCSI class writes a netlink string longer than a page into an attribute buffer. Not fired from a web request: the write is into kernel memory.';
+        }
+        return['status' => $status, 'cve' => ['CVE-2021-27365'], 'facts' => $k, 'fix' => $fix, 'modules' => $mods,
+            'meaning' => $msg];
+    }
+
+    /* ── CVE-2021-3560, three requests and a missing check ───────────────────
+       polkit answered an account-creation request before checking that the
+       connection was still there: kill the client between two messages and the
+       request is processed anyway, as root, as anybody. Any polkit from 0.113
+       to 0.118 that was built against the vulnerable code carries it; the fix
+       is 0.119 (and the backports every distribution shipped). Measured from
+       the installed version, because the release string of polkit is the only
+       fact that decides it. */
+    private function rootPolkitRaceStep(){
+        $pkg = $this->rootPkgVersion('policykit-1');
+        if($pkg === '')$pkg = $this->rootPkgVersion('polkit');
+        $path = $this->rootWhich('pkexec');
+        if($pkg === '' && $path === '')
+            return['status' => 'absent', 'cve' => ['CVE-2021-3560'], 'facts' => [],
+                'meaning' => 'polkit is not installed on this host, so the authentication race has nothing to race'];
+        if($pkg === '')
+            return['status' => 'check', 'cve' => ['CVE-2021-3560'], 'facts' => ['pkg' => '', 'ver' => '', 'pkexec' => $path],
+                'meaning' => 'the polkit helper is at ' . $path . ', but the package database does not name its version, so whether the account-creation race is closed on this build cannot be decided from here - read it with "pkexec --version"'];
+        $ver = $pkg === '' ? '' : $this->rootDebParts($pkg)['up'];
+        $fixed = $ver === '' ? null : !$this->rootVlt($ver, [0,119,0]);
+        $status = $fixed === null ? 'check' : ($fixed ? 'patched' : 'vulnerable');
+        if($fixed === null){
+            $msg = 'polkit is installed' . ($path !== '' ? ' (pkexec at ' . $path . ')' : '') . ' but its version could not be read from the package database, so whether the account-creation race is closed here is undecided';
+        }elseif($fixed){
+            $msg = 'polkit ' . $ver . ' is at or past 0.119, where the request is no longer acted on before the caller is checked';
+        }else{
+            $msg = 'polkit ' . $ver . ' is below 0.119: an ordinary account can make an account-creating request and drop the connection between the two messages, and the request completes as root - no password, no rule, no file. Not fired from here: the trigger is a timing window across three D-Bus calls, and this panel does not race a daemon it depends on. The check is the version, and the fix is the update.';
+        }
+        return['status' => $status, 'cve' => ['CVE-2021-3560'], 'facts' => ['pkg' => $pkg, 'ver' => $ver, 'pkexec' => $path],
+            'meaning' => $msg];
+    }
+
+    /* ── CVE-2023-26604, the pager that keeps its shell ──────────────────────
+       systemctl runs a pager, and older systemd did not set LESSSECURE, so the
+       pager keeps its "run a command" key while the pager itself runs as root.
+       This is only a route on a host that lets this account run systemctl (or
+       journalctl) through sudo - so the rule is measured first and the version
+       second, which is the order that matters: without the rule there is no
+       route whatever the version says. */
+    private function rootPagerStep(){
+        $pkg = $this->rootPkgVersion('systemd');
+        $ver = $pkg === '' ? '' : $this->rootDebParts($pkg)['up'];
+        $sysctl = $this->rootWhich('systemctl');
+        $rules = $this->rootSudoRules();
+        $via = null;
+        foreach((array)$rules as $r){
+            $cmd = (string)($r['cmd'] ?? '');
+            if($cmd === '')continue;
+            if(preg_match('#^(/usr)?/bin/(systemctl|journalctl)\b#', $cmd) || preg_match('#^ALL$#', $cmd)){$via = $cmd; break;}
+        }
+        if($sysctl === '')
+            return['status' => 'absent', 'cve' => ['CVE-2023-26604'], 'facts' => ['pkg' => $pkg],
+                'meaning' => 'systemctl is not on this host, so there is no pager to keep anything'];
+        if($via === null)
+            return['status' => 'absent', 'cve' => ['CVE-2023-26604'], 'facts' => ['pkg' => $pkg, 'ver' => $ver],
+                'meaning' => 'systemd ' . ($ver !== '' ? $ver : '(version unreadable)') . ' is installed and systemctl is at ' . $sysctl . ', but no sudo rule on this host lets this account run it as root - and without that rule the pager never runs as root, so the flaw has no way in here'];
+        $fixed = $ver === '' ? null : !$this->rootVlt($ver, [247,0,0]);
+        if($fixed === null){
+            $msg = 'a sudo rule on this host allows "' . $via . '", and the systemd version could not be read, so whether the pager still keeps its shell is undecided';
+        }elseif($fixed){
+            $msg = 'a sudo rule on this host allows "' . $via . '", and systemd ' . $ver . ' is at or past 247, where the pager is told not to offer a shell';
+        }else{
+            $msg = 'a sudo rule on this host allows "' . $via . '", and systemd ' . $ver . ' is below 247: the pager it starts as root still accepts its command key, which is a root shell from a rule that looked harmless. Not fired here: it needs an interactive terminal and a keypress, which a request cannot supply - the finding is the rule, and the fix is the rule or the update.';
+        }
+        return['status' => $fixed === null ? 'check' : ($fixed ? 'patched' : 'vulnerable'),
+            'cve' => ['CVE-2023-26604'], 'facts' => ['pkg' => $pkg, 'ver' => $ver, 'rule' => $via],
+            'meaning' => $msg];
+    }
+
+    /* ── CVE-2025-32463 friends: a sudo rule that is already a root shell ────
+       Two routes, both read from the sudoers file itself and both run without
+       any flaw at all, because the machine already grants them:
+         · a rule whose command is a program documented to run a command of its
+           choosing (the GTFOBins shape), which is root the moment it is used;
+         · the same rule with NOPASSWD, which removes even the password.
+       This is not a vulnerability in sudo. It is a grant, and a grant is the
+       most common way to root on a machine that patched everything else. The
+       check walks every rule this account may use, so the answer is per-rule. */
+    private function rootSudoGrantStep(){
+        $rules = $this->rootSudoRules();
+        if(empty($rules))
+            return['status' => 'absent', 'cve' => [], 'facts' => ['rules' => 0],
+                'meaning' => 'no sudo rule on this host names the account behind this file (sudoers.d was readable, and every rule was read)'];
+        $shells = ['bash','sh','dash','zsh','ksh','ash','busybox','env','find','awk','gawk','mawk','nawk','sed','ed','vi','vim','nvim','nano','emacs','less','more','man','tar','cpio','zip','rsync','xargs','make','gcc','cc','gdb','perl','python','python3','ruby','lua','php','node','sqlite3','docker','podman','nsenter','unshare','chroot','mount','umount','strace','ltrace','watch','script','socat','nc','ncat','curl','wget','ftp','ssh','scp','sftp','git','svn','hg','dd','install','systemctl','journalctl','crontab','at','vi','tmux','screen','tee','tee','nmap','apache2','nginx','mysql','psql','sqlplus','mail','ftp','pip','pip3','npm','cargo','go'];
+        $bad = [];
+        $suspect = [];
+        foreach($rules as $r){
+            $cmd = trim((string)($r['cmd'] ?? ''));
+            if($cmd === '' || $cmd === 'ALL')continue;
+            $base = basename((string)preg_replace('#\s.*$#', '', $cmd));
+            if($base === '')continue;
+            /* a program with a documented escape convicts on the name alone;
+               a name that merely sounds dangerous (a backup script, a helper
+               called run-something) is carried separately, because a name is
+               not a measurement and this file does not convict on one */
+            if(in_array($base, $shells, true) || isset($this->rootSuidMap()[$base])){
+                $bad[] = ['cmd' => $cmd, 'nopasswd' => !empty($r['nopasswd']), 'who' => (string)($r['who'] ?? '')];
+            }elseif(preg_match('/(shell|exec|console|pager|edit)/i', $base)){
+                $suspect[] = $cmd;
+            }
+        }
+        if(!$bad)
+            return['status' => 'patched', 'cve' => [], 'facts' => ['rules' => count($rules), 'suspect' => $suspect],
+                'meaning' => 'this account holds ' . count($rules) . ' sudo rule(s), and not one of them names a program with a documented escape - so the grant is a grant and not a shell'
+                    . ($suspect ? '. Unproven but worth a look: ' . implode(', ', array_slice($suspect, 0, 3)) . ' - the name suggests a wrapper, and only reading it can say' : '')];
+        $first = $bad[0];
+        return['status' => 'vulnerable', 'cve' => [], 'facts' => ['rules' => count($rules), 'bad' => $bad],
+            'meaning' => count($bad) . ' sudo rule(s) on this host let this account run a program that can be asked to run another one: "' . $first['cmd'] . '"' . ($first['nopasswd'] ? ' with no password at all' : '') . '. That is root as this account, with no flaw involved and nothing to exploit - it is the grant itself. Nothing is fired here: running it is the whole attack, and it is one command a person types.'];
+    }
+
     /* ── CVE-2019-13272, the pty of a program this account started ────────────
        ptrace_link() in kernel/ptrace.c mistakes the credentials of the program
        that owns a controlling terminal for the credentials of the process that
@@ -20008,6 +22423,23 @@ exit 0
                 $f = $this->rootEscFind($id);
                 return['ok' => !empty($f['ok']), 'note' => (string)($f['note'] ?? 'this route was measured as closed on this host')];
             }
+            case 'scan-pathdir': case 'scan-rootexec': case 'scan-argsecret': case 'scan-loosesystemfiles':
+            case 'scan-rightsfiles': case 'scan-serverrights': case 'scan-servicepowers': case 'scan-selfpowers':{
+                /* a finding is not a step and has no fire path: it is a fact the
+                   sweep read, and the note is that fact in one line */
+                foreach((array)$this->findSweep()['checks'] as $ch)
+                    if('scan-' . strtolower($ch['id']) === $id)
+                        return['ok' => !empty($ch['ok']), 'note' => (string)$ch['note']];
+                return['ok' => false, 'note' => 'this finding is not in the sweep on this machine'];
+            }
+            case 'scanout-exposedpanels': case 'scanout-webrootexec': case 'scanout-gitexposed': case 'scanout-singlefiletools':
+            case 'scanout-predictablesession': case 'scanout-formweakness': case 'scanout-cookieflags': case 'scanout-errorleak':
+            case 'scanout-hostinjection':{
+                foreach((array)$this->findSweepOut()['checks'] as $ch)
+                    if('scanout-' . strtolower($ch['id']) === $id)
+                        return['ok' => !empty($ch['ok']), 'note' => (string)$ch['note']];
+                return['ok' => false, 'note' => 'this outside finding is not in the sweep on this machine'];
+            }
             case 'ptracehelper':{
                 /* the three facts the chain needs, each read off the machine: a
                    release inside the window, a setuid helper that really changes
@@ -20141,7 +22573,12 @@ exit 0
                     : ($id === 'nodesplit' ? $this->rootNodeSplitStep() : $this->rootOpensslPunyStep()))));
                 return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
             }
-            case 'polkitptrace': case 'nftsets': case 'vsockuaf': case 'cnext': case 'sshregre': case 'lighttpdforward':{
+            case 'polkitptrace': case 'nftsets': case 'vsockuaf': case 'cnext': case 'sshregre': case 'lighttpdforward':
+            case 'fscontext': case 'nftverdict': case 'afpacketv3': case 'route4uaf': case 'iscsiheap':
+            case 'polkitrace': case 'sdlesspager': case 'sudogrant':
+            case 'nfnewrule': case 'tlssockulp': case 'fdleak': case 'agentkey':
+            case 'ldpath': case 'siteshared': case 'runpath':
+            case 'suidwrite': case 'libwrite': case 'sudodir':{
                 $x = $this->rootR92Step($id);
                 return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
             }
@@ -20359,6 +22796,15 @@ exit 0
                 }
                 $pl = $this->rootPlantSpec($id);
                 if($pl)return $this->rootPlantNeeds($id, $pl);
+        }
+        if(strpos($id, 'fact-') === 0){
+            /* a standing fact needs nothing planted and nothing run: it needs
+               the machine to be in the state the sweep has just read */
+            $fid = strtolower(substr($id, 5));
+            foreach((array)$this->findSweep()['checks'] as $ch)
+                if(strtolower($ch['id']) === $fid)
+                    return['ok' => !empty($ch['ok']), 'note' => (string)$ch['note']];
+            return['ok' => false, 'note' => 'this fact is not in the sweep on this machine'];
         }
         return['ok' => false, 'note' => 'unknown method'];
     }
@@ -20579,6 +23025,23 @@ exit 0
                 return['ok' => false,
                        'note' => 'the flaw measures as ' . $st['status'] . '. It is a page-cache or mount write with a public trigger, and this panel does not fire it from a web request: the write lands in a setuid program that every user of the machine runs, so a wrong byte is an outage, not a shell.'];
             }
+            case 'scanout-exposedpanels': case 'scanout-webrootexec': case 'scanout-gitexposed': case 'scanout-singlefiletools':
+            case 'scanout-predictablesession': case 'scanout-formweakness': case 'scanout-cookieflags': case 'scanout-errorleak':
+            case 'scanout-hostinjection':{
+                foreach((array)$this->findSweepOut()['checks'] as $ch)
+                    if('scanout-' . strtolower($ch['id']) === $id)
+                        return['ok' => false, 'found' => !empty($ch['ok']), 'note' => (string)$ch['note']
+                            . ' - read from outside the door with no account at all; there is nothing to fire, because the finding is the door standing open'];
+                return['ok' => false, 'note' => 'this outside finding is not in the sweep on this machine'];
+            }
+            case 'scan-pathdir': case 'scan-rootexec': case 'scan-argsecret': case 'scan-loosesystemfiles':
+            case 'scan-rightsfiles': case 'scan-serverrights': case 'scan-servicepowers': case 'scan-selfpowers':{
+                foreach((array)$this->findSweep()['checks'] as $ch)
+                    if('scan-' . strtolower($ch['id']) === $id)
+                        return['ok' => false, 'found' => !empty($ch['ok']), 'note' => (string)$ch['note']
+                            . ' - this is a standing fact about the machine, not a program to run: it is measured every time the sweep runs, and it becomes an exploit only when somebody acts on it'];
+                return['ok' => false, 'note' => 'this finding is not in the sweep on this machine'];
+            }
             case 'ptracehelper':{
                 $p = $this->rootPtraceSubStep();
                 if(!in_array($p['status'], ['vulnerable', 'check'], true))
@@ -20640,17 +23103,16 @@ exit 0
                     return['ok' => false, 'note' => 'nothing to fire: ' . $x['meaning']];
                 return['ok' => false, 'note' => 'the flaw measures as ' . $x['status'] . '. ' . $x['meaning'] . ' It is not fired from here: the request that would carry it is answered by the very process this panel is running in, so the trigger would be aimed at itself.'];
             }
-            case 'polkitptrace': case 'nftsets': case 'vsockuaf': case 'cnext': case 'sshregre': case 'lighttpdforward':{
+            case 'polkitptrace': case 'nftsets': case 'vsockuaf': case 'cnext': case 'sshregre': case 'lighttpdforward':
+            case 'fscontext': case 'nftverdict': case 'afpacketv3': case 'route4uaf': case 'iscsiheap':
+            case 'polkitrace': case 'sdlesspager': case 'sudogrant':
+            case 'nfnewrule': case 'tlssockulp': case 'fdleak': case 'agentkey':
+            case 'ldpath': case 'siteshared': case 'runpath':
+            case 'suidwrite': case 'libwrite': case 'sudodir':{
                 $x = $this->rootR92Step($id);
                 if(!in_array($x['status'], ['vulnerable', 'check'], true))
                     return['ok' => false, 'note' => 'nothing to fire: ' . $x['meaning']];
-                $why = ($id === 'nftsets' || $id === 'vsockuaf' || $id === 'polkitptrace')
-                    ? 'It is a kernel rise that has to win a race against its own refcount, run from inside the web process that answers this panel: a losing iteration panics the machine the panel is running on, so the verdict stays the deliverable.'
-                    : ($id === 'sshregre'
-                        ? 'Firing it means tens of thousands of unauthenticated connections against the sshd of this very host with a payload built for its exact binary and libc, which is a denial of service aimed at the machine before it is anything else.'
-                        : ($id === 'lighttpdforward'
-                            ? 'On a 64-bit build the only outcome of the malformed header is that the lighttpd serving this machine crashes, which takes the panel down with it.'
-                            : 'The write lands in the heap of the PHP process that is answering this request, so the trigger would be aimed at the process doing the aiming.'));
+                $why = $this->rootFireWhy($id);
                 return['ok' => false, 'note' => 'the flaw measures as ' . $x['status'] . '. ' . $x['meaning'] . ' ' . $why];
             }
             case 'fusermount': case 'polkitagent':{
@@ -24744,6 +27206,24 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         return $this->escF[$id];
     }
 
+    /* why a measured route is not fired, said in the terms of that route. One
+       place, one sentence per family, because the same reasoning repeated in
+       three branches is how a file starts contradicting itself. */
+    private function rootFireWhy($id){
+        $kernel = ['nftsets','vsockuaf','polkitptrace','fscontext','nftverdict','afpacketv3','route4uaf','iscsiheap'];
+        if(in_array($id, $kernel, true))
+            return 'It is a kernel rise that has to win a race against its own refcount, run from inside the web process that answers this panel: a losing iteration panics the machine the panel is running on, so the verdict stays the deliverable.';
+        if(in_array($id, ['polkitrace','sdlesspager'], true))
+            return 'The rest of the route is a timer across three D-Bus calls, or a keypress inside a pager, on a machine this panel is running on: a request can supply neither, and both end by racing a daemon the desktop depends on. The version and the rule are the measurement.';
+        if($id === 'sudogrant')
+            return 'Nothing has to be fired here: the rule is the whole finding, and using it is one command a person types. This panel will not spend a grant on a machine it does not own.';
+        if($id === 'sshregre')
+            return 'Firing it means tens of thousands of unauthenticated connections against the sshd of this very host with a payload built for its exact binary and libc, which is a denial of service aimed at the machine before it is anything else.';
+        if($id === 'lighttpdforward')
+            return 'On a 64-bit build the only outcome of the malformed header is that the lighttpd serving this machine crashes, which takes the panel down with it.';
+        return 'The write lands in the heap of the PHP process that is answering this request, so the trigger would be aimed at the process doing the aiming.';
+    }
+
     /* ── the automatic installer: try every method, stop at the first proof ─ */
     public function rootingInstallRoot($password = ''){
         /* the same chain, walked one method at a time through the same code the
@@ -24994,6 +27474,22 @@ ExecStartPost=/bin/sh '" . $payload . "'";
     }
 
     /* ?x=rooting */
+    /* the same sweep, wrapped with a one-minute memory so a stranger asking
+       twice cannot make the host do the work twice */
+    public function scanoutEndpoint(){
+        $f = rtrim(sys_get_temp_dir(), '/') . '/.fm_scanout_' . substr(sha1(__DIR__), 0, 10) . '.json';
+        $now = time();
+        $b = @file_get_contents($f);
+        if($b !== false && $b !== ''){
+            $j = @json_decode($b, true);
+            if(is_array($j) && (int)($j['at'] ?? 0) > $now - 60 && isset($j['sweep']))
+                return['ok' => true, 'cached' => true, 'sweep' => $j['sweep'], 'system' => $this->rootSystem()];
+        }
+        $r = $this->findSweepOut();
+        @file_put_contents($f, json_encode(['at' => $now, 'sweep' => $r]), LOCK_EX);
+        return['ok' => true, 'cached' => false, 'sweep' => $r, 'system' => $this->rootSystem()];
+    }
+
     public function rootingEndpoint($post){
         $act = (string)($post['action'] ?? 'catalog');
         $password = (string)($post['password'] ?? '');
@@ -25034,6 +27530,12 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         if($act === 'rooted')return['ok' => true, 'rooted' => $this->rootingRooted()];
         if($act === 'rootctl')return$this->rootingControl((string)($post['ctl'] ?? ''), (string)($post['line'] ?? ''));
         if($act === 'rootmethod')return$this->rootingMethod((string)($post['id'] ?? ''), $password);
+        /* the self-discovery sweep: no CVE, no version, only what the machine
+           answers when it is asked - a report the panel can show on its own */
+        if($act === 'scan')return $this->findSweep();
+        /* the same sweep, but from the position of somebody with no account on
+           this machine at all: one request, no cookie, no login */
+        if($act === 'scanout')return $this->findSweepOut();
         /* taking a planted method back out: it is a thing that was put somewhere,
            so it can be taken away again, and whatever it touched is put back */
         if($act === 'rootplantremove'){
@@ -36998,6 +39500,7 @@ if(isset($_GET['x'])){
         header('Cache-Control: no-store');
         echo json_encode($a);exit;
     }
+
     if($xop==='selected_songs_cache'){
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         if($_SERVER['REQUEST_METHOD']!=='POST'||!hash_equals((string)($_SESSION['csrf_token']??''),(string)($_POST['csrf_token']??''))){
