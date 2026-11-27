@@ -674,7 +674,14 @@ function fm_icons_restore($pack,$force=false){
     $state['attempt']=$now;fm_icon_state_put($pack,$state);
     $cfg=fm_icon_pack($pack);
     $raw=fm_http_get($cfg['url'],40);
-    if($raw===false||strlen($raw)<1024)return false;
+    if($raw===false||strlen($raw)<1024){
+        /* the archive never arrived. The state file remembers why, so the panel
+           can say "the download failed" instead of leaving an empty folder that
+           looks like a design choice. */
+        $state['error']='the archive could not be downloaded from ' . $cfg['url'];
+        fm_icon_state_put($pack,$state);
+        return false;
+    }
     /* the archive is written beside the pack and removed the moment it is read:
        the folder is the install, the zip is only the delivery */
     $tmp=sys_get_temp_dir().'/fm-'.preg_replace('/[^a-z0-9_]/i','',$pack).'-'.getmypid().'.zip';
@@ -682,9 +689,12 @@ function fm_icons_restore($pack,$force=false){
     $n=fm_icons_unpack($pack,$raw);
     @unlink($tmp);
     if($n>0){
+        unset($state['error']);
         $state['restored']=$now;$state['files']=$n;fm_icon_state_put($pack,$state);
         return true;
     }
+    $state['error']='the archive was downloaded but held no file this map can use';
+    fm_icon_state_put($pack,$state);
     return false;
 }
 /* the pack as the browser needs it: pack => [relative path => url] */
@@ -1360,7 +1370,7 @@ if(!defined('FM_ICONS_BOOTED')){
     define('FM_ICONS_BOOTED',1);
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php')fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R92');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R93');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -9544,8 +9554,6 @@ label{display:block;font-size:11px;font-weight:700;color:#707477;text-transform:
     event.preventDefault();form.dataset.submitting='1';shell.classList.add('is-leaving');
     window.setTimeout(function(){HTMLFormElement.prototype.submit.call(form);},240);
   });
-})();
-</script>
 </body></html>
 <?php exit; }
 
@@ -34987,13 +34995,20 @@ if(isset($_GET['x'])){
        for single files; if a file is missing it asks for a restore, which is
        rate-limited on the server so a script emptying the folder cannot make the
        page hammer GitHub. */
+    if($xop==='iconstate'){
+        $out=[];foreach(['w11i','term'] as $pk)$out[$pk]=fm_icons_status($pk);
+        $st=[];foreach(['w11i','term'] as $pk){$s2=fm_icon_state($pk);$st[$pk]=['attempt'=>(int)($s2['attempt']??0),'restored'=>(int)($s2['restored']??0),'files'=>(int)($s2['files']??0),'error'=>(string)($s2['error']??'')];}
+        echo json_encode(['ok'=>true,'packs'=>$out,'state'=>$st,'now'=>time()],JSON_UNESCAPED_SLASHES);exit;
+    }
     if($xop==='icons'){
         if(!isset($_SESSION['csrf_token'])||($_GET['t']??'')!==$_SESSION['csrf_token']){http_response_code(403);echo json_encode(['error'=>'Security error.']);exit;}
         $pack=(($_GET['pack']??'')==='term')?'term':'w11i';
         $want=$_GET['want']??'';
         $cfg=fm_icon_pack($pack);
         $has=is_dir($cfg['dir'])&&count((array)@scandir($cfg['dir']))>2;
-        if(!$has&&$want==='restore')$has=fm_icons_restore($pack);
+        /* an explicit press is a person asking once, not a script hammering: it
+           is allowed past the 30 s window that protects the archive host */
+        if($want==='restore')$has=fm_icons_restore($pack,true);
         elseif(!$has){/* a page that needs the pack brings it back on first sight */$has=fm_icons_restore($pack);}
         $files=$has?fm_icons_manifest($pack):[];
         $state=fm_icon_state($pack);
@@ -36820,6 +36835,28 @@ function fm_icon_img($pack,$rel,$cls='ibi'){
 /* only the Windows 11 packs are re-dressed in the new glyphs; every other theme
    keeps the icons it already has (its own pack will come later) */
 function fm_icons_w11_active(){return fm_theme_active('win11')||fm_theme_active('win11d');}
+/* R93 · why a pack cannot be drawn, in one word, for the page to say out loud.
+   It is the honest answer to "the icons went back to the old set": the folder
+   is either there, or the archive was never fetched, or it was fetched and had
+   nothing this map could use. Nothing here is guessed - each line is a fact of
+   the filesystem. */
+function fm_icons_status($pack){
+    $cfg=fm_icon_pack($pack);
+    $dir=$cfg['dir'];
+    $state=fm_icon_state($pack);
+    if(!is_dir($dir))return['state'=>'missing','files'=>0,'dir'=>$dir,'attempt'=>(int)($state['attempt']??0)];
+    /* counted the same way the manifest counts them: every .ico/.png under the
+       folder, however deep, capped so a huge pack cannot stall a page load */
+    $n=0;
+    try{
+        $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir,FilesystemIterator::SKIP_DOTS));
+        foreach($it as $f){
+            if($f->isFile() && preg_match('#\.(ico|png)$#i',$f->getFilename())){$n++; if($n>=4000)break;}
+        }
+    }catch(Throwable $e){$n=0;}
+    if($n<=2)return['state'=>'empty','files'=>$n,'dir'=>$dir,'attempt'=>(int)($state['attempt']??0)];
+    return['state'=>'ready','files'=>$n,'dir'=>$dir,'restored'=>(int)($state['restored']??0)];
+}
 function svgFolderRendered(){
     if(fm_theme_active('win11'))return svgFolderWindows11();
     if(fm_theme_active('win11d'))return svgFolderWindows11(false,true);
@@ -63746,6 +63783,106 @@ if(btn)btn.addEventListener('click',boot);
     if(y!==null){sessionStorage.removeItem('fmThemeScroll');const v=parseInt(y,10);
       if(!isNaN(v))requestAnimationFrame(()=>{const c=document.querySelector('.content');if(c)c.scrollTop=v;});}
   }catch(e){}
+})();
+</script>
+<style>
+/* R93 · the icon-pack notice. Quiet, bottom-left, and only there when the
+   pack the theme asks for cannot be drawn - the reason is a sentence, not a
+   guess, and one press asks the server to fetch the archive again. */
+#fmIcoNote{position:fixed;left:16px;bottom:16px;z-index:99998;max-width:min(420px,calc(100vw - 32px));display:none;
+  border-radius:12px;padding:11px 13px;font:12px/1.5 system-ui,'Segoe UI',sans-serif;
+  background:linear-gradient(180deg,rgba(32,34,40,.97),rgba(22,24,29,.97));color:#e6e9ee;
+  border:1px solid rgba(255,255,255,.12);box-shadow:0 18px 50px rgba(0,0,0,.45)}
+#fmIcoNote.on{display:block}
+#fmIcoNote b{color:#fff;font-weight:700}
+#fmIcoNote .fmIcoWhy{color:#a9b3c1;display:block;margin-top:3px}
+#fmIcoNote button{margin-top:9px;padding:6px 11px;border-radius:8px;cursor:pointer;font:600 11.5px system-ui,sans-serif;
+  color:#0d1117;background:#8ab4ff;border:0}
+#fmIcoNote button:disabled{opacity:.6;cursor:default}
+#fmIcoNote .fmIcoX{position:absolute;top:6px;right:8px;background:none;border:0;color:#8b95a5;font-size:15px;line-height:1;padding:2px;margin:0;cursor:pointer}
+</style>
+<?php
+/* the server already knows whether the pack this theme needs can be drawn at
+   all, so the notice is armed here - with the reason in its own words - rather
+   than waiting for a broken <img> that the page never even writes. */
+$fmIcoNoteNeed=false;$fmIcoNoteWhy='';
+if(fm_icons_w11_active()){
+    $fmIcoSt=fm_icons_status('w11i');
+    if(($fmIcoSt['state']??'missing')!=='ready'){
+        $fmIcoNoteNeed=true;
+        $fmIcoState=fm_icon_state('w11i');
+        $fmIcoNoteWhy=(string)($fmIcoState['error']??'');
+        if($fmIcoNoteWhy==='')$fmIcoNoteWhy=(($fmIcoSt['state']??'')==='empty')
+            ? 'The folder is there but holds no icon file, which is what a failed download leaves behind.'
+            : 'The folder it unpacks into is not on this server at all, and it has not been fetched since it went missing.';
+    }
+}
+?>
+<div id="fmIcoNote" role="status" aria-live="polite" data-need="<?=$fmIcoNoteNeed?'1':'0'?>" data-why="<?=htmlspecialchars($fmIcoNoteWhy,ENT_QUOTES)?>">
+  <button type="button" class="fmIcoX" id="fmIcoNoteX" title="Hide this notice" aria-label="Hide this notice">&times;</button>
+  <b id="fmIcoNoteT">The Windows 11 icon pack is not on the server.</b>
+  <span class="fmIcoWhy" id="fmIcoNoteW"></span>
+  <button type="button" id="fmIcoNoteB">Fetch the pack again</button>
+</div>
+<script>
+/* one check, on the pages that can actually draw icons, and only when the theme
+   is one of the two that use the pack: nothing is said on the themes that never
+   had these glyphs, and nothing is said twice in the same tab */
+(function(){
+  var note=document.getElementById('fmIcoNote');
+  if(!note)return;
+  var SEEN='mfm-ico-note-at';
+  function hide(){note.classList.remove('on');}
+  document.getElementById('fmIcoNoteX')?.addEventListener('click',hide);
+  var need=note.getAttribute('data-need')==='1';
+  var imgs=document.querySelectorAll('img.ibi');
+  /* two ways the notice can be owed: the server already knows the pack is not
+     there, or the theme is drawing the pack and a file came back unreadable */
+  if(!need&&!imgs.length)return;
+  var broken=0;
+  function tally(){
+    broken=0;
+    document.querySelectorAll('img.ibi').forEach(function(i){ if(i.complete&&i.naturalWidth===0)broken++; });
+    return broken;
+  }
+  window.setTimeout(function(){
+    if(!need&&tally()===0)return;
+    try{ var at=+(localStorage.getItem(SEEN)||0); if(Date.now()-at<600000)return; }catch(e){}
+    fetch('?x=iconstate',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(j){
+      var p=(j&&j.packs&&j.packs.w11i)||{}, st=(j&&j.state&&j.state.w11i)||{};
+      var state=p.state||'missing';
+      var why = note.getAttribute('data-why')||'';
+      if(!why)why = st.error ? st.error
+        : state==='missing' ? 'The folder it unpacks into is not on this server at all.'
+        : state==='empty' ? 'The folder is there but holds no icon file, which is what a failed download leaves behind.'
+        : 'The folder holds the pack, so the file itself was refused by the server when the list asked for it.';
+      document.getElementById('fmIcoNoteW').textContent=why;
+      document.getElementById('fmIcoNoteT').textContent = state==='ready'
+        ? 'The Windows 11 icon pack is on the server but not being served.'
+        : 'The Windows 11 icon pack is not on the server.';
+      note.classList.add('on');
+      try{ localStorage.setItem(SEEN,String(Date.now())); }catch(e){}
+    }).catch(function(){});
+  },2500);
+  document.getElementById('fmIcoNoteB')?.addEventListener('click',function(e){
+    var b=e.currentTarget; b.disabled=true; b.textContent='Fetching…';
+    fetch('?x=icons&pack=w11i&want=restore&t='+encodeURIComponent(typeof CSRF!=='undefined'?CSRF:''),{cache:'no-store',credentials:'same-origin'})
+      .then(function(r){return r.json();})
+      .then(function(j){
+        if(j&&j.ok){ b.textContent='Fetched - reloading…'; setTimeout(function(){location.reload();},600); }
+        else{
+          b.disabled=false; b.textContent='Try again';
+          /* the reason the server already wrote down is better than a guess */
+          fetch('?x=iconstate',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(k){
+            var e=k&&k.state&&k.state.w11i&&k.state.w11i.error;
+            document.getElementById('fmIcoNoteW').textContent=e||((j&&j.error)?j.error:'The server could not fetch the archive. Check that this host may reach GitHub, then press again.');
+          }).catch(function(){
+            document.getElementById('fmIcoNoteW').textContent=(j&&j.error)?j.error:'The server could not fetch the archive. Check that this host may reach GitHub, then press again.';
+          });
+        }
+      })
+      .catch(function(){ b.disabled=false; b.textContent='Try again'; });
+  });
 })();
 </script>
 </body>
