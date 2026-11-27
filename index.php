@@ -1360,7 +1360,7 @@ if(!defined('FM_ICONS_BOOTED')){
     define('FM_ICONS_BOOTED',1);
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php')fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R91');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R92');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -16087,9 +16087,9 @@ ExecStart=/bin/sh " . $ws['payload'] . "
         $r = $this->rootExec([$cc, '-o', $base . '/pwn', $base . '/launch.c'], '', 60);
         if($r['rc'] !== 0 || !@is_file($base . '/pwn'))return['ok' => false, 'note' => 'the launcher would not build'];
         $this->rootExec([$base . '/pwn'], '', 25);
-        for($i = 0; $i < 5; $i++){
+        for($i = 0; $i < 20; $i++){
             if($this->rootPlantProofOk('pwnkit') || $this->rootHelperInstalled())break;
-            sleep(1);
+            usleep(250000);
         }
         $won = $this->rootPlantProofOk('pwnkit') || $this->rootHelperInstalled();
         return['ok' => true, 'fired' => true,
@@ -16133,9 +16133,9 @@ hosts: files
         if($password !== '' && !$this->rootPlantProofOk('chwoot') && !$this->rootHelperInstalled())
             $this->rootExec(['sudo', '-S', '-k', '-p', '', '-R', $base, '/usr/bin/id'], $password . "
 ", 25);
-        for($i = 0; $i < 5; $i++){
+        for($i = 0; $i < 20; $i++){
             if($this->rootPlantProofOk('chwoot') || $this->rootHelperInstalled())break;
-            sleep(1);
+            usleep(250000);
         }
         $won = $this->rootPlantProofOk('chwoot') || $this->rootHelperInstalled();
         return['ok' => true, 'fired' => true,
@@ -16178,9 +16178,9 @@ exit 0
         $this->rootExec(['pkcon', '-y', 'install-local', $deb], '', 90);
         if(!$this->rootPlantProofOk('pack2theroot') && !$this->rootHelperInstalled())
             $this->rootExec(['pkcon', '-y', '--allow-untrusted', 'install-local', $deb], '', 90);
-        for($i = 0; $i < 8; $i++){
+        for($i = 0; $i < 32; $i++){
             if($this->rootPlantProofOk('pack2theroot') || $this->rootHelperInstalled())break;
-            sleep(1);
+            usleep(250000);
         }
         $won = $this->rootPlantProofOk('pack2theroot') || $this->rootHelperInstalled();
         return['ok' => true, 'fired' => true,
@@ -17638,6 +17638,27 @@ exit 0
         $pk = $this->rootPkInstall();
         $add('pkinstall', 'The package daemon with no password in front of it', 'session',
              $pk['ok'] ? $pk['note'] . '. A local package is installed by that daemon as root, and its maintainer script runs with those rights - a deb built by this tool is all it takes.' : $pk['note']);
+        /* 2e-ter - six more, added in R92: four carry the affected window the
+           project itself published, one is a boundary between two programs, one
+           is read from the daemon that answers on port 22 */
+        $pp = $this->rootPolkitPtraceStep();
+        $add('polkitptrace', 'The credentials PTRACE_TRACEME records (CVE-2019-13272)', 'kernel',
+             $pp['status'] . '. ' . $pp['meaning']);
+        $nft = $this->rootNftSetsStep();
+        $add('nftsets', 'An anonymous set freed while a batch still holds it (CVE-2023-32233)', 'kernel',
+             $nft['status'] . '. ' . $nft['meaning']);
+        $vs = $this->rootVsockUafStep();
+        $add('vsockuaf', 'A vsock binding freed under the socket (CVE-2025-21756)', 'kernel',
+             $vs['status'] . '. ' . $vs['meaning']);
+        $cx = $this->rootIconvCnextStep();
+        $add('cnext', 'Three bytes past the iconv buffer (CVE-2024-2961)', 'pkg',
+             $cx['status'] . '. ' . $cx['meaning']);
+        $rg = $this->rootSshdRegreStep();
+        $add('sshregre', 'The signal handler of the ssh daemon (CVE-2024-6387)', 'session',
+             $rg['status'] . '. ' . $rg['meaning']);
+        $lf = $this->rootLighttpdFwdStep();
+        $add('lighttpdforward', 'A Forwarded header written past the stack (CVE-2022-22707)', 'pkg',
+             $lf['status'] . '. ' . $lf['meaning']);
         /* 2f - services that answer on a socket and run as root: nothing is
            installed, the access is already open, and each is asked in its own
            protocol before anything is claimed */
@@ -17789,6 +17810,195 @@ exit 0
         return['status' => $in ? 'vulnerable' : 'patched', 'version' => $raw, 'cve' => ['CVE-2022-3602'],
                'meaning' => $in ? 'OpenSSL ' . $raw . ' is inside 3.0.0 to 3.0.6: a crafted X.509 name overflows four bytes on the stack when a certificate is checked, which is what a server does with every client certificate it is offered'
                    : 'OpenSSL ' . $raw . ' is outside 3.0.0 to 3.0.6, where the punycode overflow was fixed in 3.0.7'];
+    }
+    /* ── six more, added in R92 ─────────────────────────────────────────────
+       Four are kernel or library flaws whose affected window is written down
+       by the project that fixed them, one is a privilege boundary between two
+       programs rather than inside one, and one is the sshd race that is read
+       from the daemon's own banner. Every one of them names this host's value,
+       the range, and the release that closed it - and none of them is fired
+       from a web request. */
+    private function rootKernelModules(){
+        static $c = null;
+        if($c !== null)return $c;
+        $mods = [];
+        foreach((array)@glob('/sys/module/*', GLOB_ONLYDIR) as $d){
+            $n = basename($d);
+            $ref = @file_get_contents($d . '/refcnt');
+            $mods[str_replace('-', '_', $n)] = ['ref' => trim((string)$ref), 'builtin' => ($ref === false)];
+        }
+        $c = ['mods' => $mods,
+              'builtin' => (bool)@is_file('/proc/config.gz') ? 'gz' : '',
+              'nft' => (int)@is_file('/proc/net/netfilter/nfnetlink_queue') + (int)@is_dir('/sys/module/nf_tables'),
+              'vsock' => (int)@is_file('/proc/net/vsock') + (int)@is_dir('/sys/module/vsock'),
+              'userns' => trim((string)@file_get_contents('/proc/sys/user/max_user_namespaces'))];
+        return $c;
+    }
+    /* one module, asked three ways: loaded now, compiled in but not loaded, or
+       not in this build at all */
+    private function rootModuleState($mod){
+        $k = $this->rootKernelModules();
+        $m = str_replace('-', '_', (string)$mod);
+        if(isset($k['mods'][$m]))return $k['mods'][$m]['builtin'] ? 'builtin' : ('loaded (refcnt ' . $k['mods'][$m]['ref'] . ')');
+        return 'not loaded';
+    }
+    /* CVE-2019-13272 — a parent that drops privileges and execs is reachable
+       through PTRACE_TRACEME until 5.1.17; the fix is in every stable line */
+    private function rootR92Step($id){
+        switch($id){
+            case 'polkitptrace':return $this->rootPolkitPtraceStep();
+            case 'nftsets':return $this->rootNftSetsStep();
+            case 'vsockuaf':return $this->rootVsockUafStep();
+            case 'cnext':return $this->rootIconvCnextStep();
+            case 'sshregre':return $this->rootSshdRegreStep();
+            case 'lighttpdforward':return $this->rootLighttpdFwdStep();
+        }
+        return['status' => 'unknown', 'meaning' => 'this method has no measurement behind it'];
+    }
+    private function rootPolkitPtraceStep(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        $pk = $this->rootWhich('pkexec');
+        $state = $this->rootModuleState('ptrace');
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2019-13272'], 'facts' => $k, 'exec' => $pk,
+            'meaning' => 'the kernel release could not be read'];
+        if($pk === ''){
+            $os = $this->rootOs();
+            $polkit = $this->rootPkgFacts('policykit-1');
+            return['status' => 'absent', 'cve' => ['CVE-2019-13272'], 'facts' => $k, 'exec' => $pk,
+                'meaning' => 'no pkexec is installed here, so the helper this flaw walks through is not on the machine at all (ptrace is ' . $state . ' and ' . ($polkit['raw'] ?: 'policykit-1 is not in the package database') . ')'];
+        }
+        $fixed = $this->rootKernelFixed($v, [[4,4,185],[4,9,185],[4,14,133],[4,19,58],[5,1,17]]);
+        return['status' => $fixed ? 'patched' : 'vulnerable', 'cve' => ['CVE-2019-13272'], 'facts' => $k, 'exec' => $pk,
+               'meaning' => $fixed
+                   ? 'this kernel is at or past the fix line for its series (4.4.185, 4.9.185, 4.14.133, 4.19.58, 5.1.17), so the ptrace credential handover is closed - pkexec is at ' . $pk . ' but the kernel it runs on has the fix'
+                   : 'this kernel is before the fix line for its series (4.4.185, 4.9.185, 4.14.133, 4.19.58, 5.1.17): PTRACE_TRACEME on a helper that drops privileges and then execs records the wrong credentials, and pkexec at ' . $pk . ' is exactly that pattern'];
+    }
+    /* CVE-2023-32233 — nf_tables anonymous-set use-after-free, fixed 6.3.2 and in
+       every stable line; the reach is a user namespace that can hold CAP_NET_ADMIN */
+    private function rootNftSetsStep(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        $km = $this->rootKernelModules();
+        $mod = $this->rootModuleState('nf_tables');
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2023-32233'], 'facts' => $km,
+            'meaning' => 'the kernel release could not be read'];
+        if(!$this->rootVlt([5,1,0], $v) || !$this->rootVlt($v, [6,4,0])){
+            /* 5.1 is the first release that carried the batched-set code; 6.4 is
+               the first line that was born with the fix already in it */
+            return['status' => 'absent', 'cve' => ['CVE-2023-32233'], 'facts' => $km, 'module' => $mod,
+                'meaning' => 'this kernel ' . $k['kernel'] . ' is outside 5.1 to 6.3, the window where the anonymous-set code existed, so the flaw is not in this build (nf_tables is ' . $mod . ')'];
+        }
+        $fixed = $this->rootKernelFixed($v, [[4,14,315],[4,19,283],[5,4,243],[5,10,180],[5,15,111],[6,1,28],[6,2,15],[6,3,2]]);
+        if($mod === 'not loaded'){
+            return['status' => 'mitigated', 'cve' => ['CVE-2023-32233'], 'facts' => $km, 'module' => $mod,
+                'meaning' => 'this kernel ' . $k['kernel'] . ' is ' . ($fixed ? 'past the fix for its series (6.1.28 on this line)' : 'inside the affected range, which ends at 6.3.2') . ', and nf_tables is not loaded: the code the flaw lives in is not present, so nothing is reachable until something loads it' . (($km['userns'] !== '' && (int)$km['userns'] === 0) ? '. user namespaces are switched off as well, so no unprivileged account could load it' : '. user namespaces are open (max_user_namespaces ' . $km['userns'] . '), so this is one module load away from being reachable')];
+        }
+        return['status' => $fixed ? 'patched' : 'vulnerable', 'cve' => ['CVE-2023-32233'], 'facts' => $km, 'module' => $mod,
+               'meaning' => $fixed
+                   ? 'this kernel is at or past the fix for its series (6.1.28, 6.2.15, 6.3.2), and nf_tables is ' . $mod . ': the anonymous-set free is closed'
+                   : 'this kernel is inside 5.1 to 6.3.1 and nf_tables is ' . $mod . ': a batch request that makes an anonymous set and then releases it leaves the kernel holding freed memory, which an account with CAP_NET_ADMIN in its own user namespace turns into a write'];
+    }
+    /* CVE-2025-21756 — the vsock binding is freed while the socket still points
+       at it, from 5.5 until 6.1.131 / 6.6.79 / 6.12.16 / 6.13.4 */
+    private function rootVsockUafStep(){
+        $k = $this->rootKernelPrims();
+        $v = $k['v'];
+        $km = $this->rootKernelModules();
+        $mod = $this->rootModuleState('vsock');
+        if($v === null)return['status' => 'unknown', 'cve' => ['CVE-2025-21756'], 'facts' => $km,
+            'meaning' => 'the kernel release could not be read'];
+        if($this->rootVlt($v, [5,5,0])){
+            return['status' => 'absent', 'cve' => ['CVE-2025-21756'], 'facts' => $km, 'module' => $mod,
+                'meaning' => 'this kernel ' . $k['kernel'] . ' predates 5.5, where the vsock binding code that carries the flaw arrived'];
+        }
+        $fixed = $this->rootKernelFixed($v, [[5,10,235],[5,15,179],[6,1,131],[6,6,79],[6,12,16],[6,13,4]]);
+        $us = $km['userns'];
+        $userns = ($us === '') ? 'user namespaces could not be read' : ((int)$us === 0 ? 'user namespaces are off' : 'user namespaces are open (max_user_namespaces ' . $us . ')');
+        if($mod === 'not loaded'){
+            return['status' => 'mitigated', 'cve' => ['CVE-2025-21756'], 'facts' => $km, 'module' => $mod,
+                'meaning' => 'vsock is not loaded on this host, so the socket family the flaw lives in is not registered; the release is ' . $k['kernel'] . ' and ' . $userns . '. Attaching a vsock transport (vmw_vsock_virtio_transport, hyperv, loopback) is what would make it reachable'];
+        }
+        return['status' => $fixed ? 'patched' : 'vulnerable', 'cve' => ['CVE-2025-21756'], 'facts' => $km, 'module' => $mod,
+               'meaning' => $fixed
+                   ? 'vsock is ' . $mod . ', and this kernel is at or past the fix for its series (6.1.131, 6.6.79, 6.12.16, 6.13.4): the binding is kept until the socket dies'
+                   : 'vsock is ' . $mod . ' and this kernel is inside 5.5 up to the fix line (6.1.131 / 6.6.79 / 6.12.16 / 6.13.4): a bind after a transport reassignment drops the reference count and frees a binding the socket still uses, and ' . $userns];
+    }
+    /* CVE-2024-2961 — glibc up to 2.39 writes past the output buffer on
+       ISO-2022-CN-EXT; the fix is 2.40 and was backported into 2.31/2.36/2.37 */
+    private function rootGlibcVer(){
+        static $c = null;
+        if($c !== null)return $c;
+        $pkg = $this->rootPkgFacts('libc6');
+        $raw = $pkg['up'];
+        $how = 'package database (libc6 ' . ($pkg['raw'] ?: 'not listed') . ')';
+        if($raw === ''){
+            foreach((array)@glob('/lib/*/libc.so.6') as $so){
+                $out = (string)@shell_exec('strings -a ' . escapeshellarg($so) . ' 2>/dev/null | grep -m1 -E "^GNU C Library.*release version [0-9]"');
+                if(preg_match('/release version ([0-9]+\.[0-9]+)/', $out, $m)){$raw = $m[1];$how = 'the libc.so.6 build string at ' . $so;break;}
+            }
+        }
+        if($raw === '' && defined('GNU_LIBC_VERSION')){$raw = (string)GNU_LIBC_VERSION;$how = 'the constant this build declares';}
+        $c = ['raw' => $raw, 'up' => $raw, 'how' => $how, 'rev' => $pkg['rev'], 'pkg' => $pkg['raw']];
+        return $c;
+    }
+    private function rootIconvCnextStep(){
+        $g = $this->rootGlibcVer();
+        if($g['raw'] === '')return['status' => 'unknown', 'cve' => ['CVE-2024-2961'], 'facts' => $g,
+            'meaning' => 'the glibc release could not be read - it is neither in the package database nor in the libc.so.6 build string, and this PHP build carries no GNU_LIBC_VERSION constant'];
+        $v = $this->rootVnum($g['raw']);
+        $can = @iconv('UTF-8', 'ISO-2022-CN-EXT', 'abc') !== false;
+        $reach = $can ? 'iconv in this PHP build can reach ISO-2022-CN-EXT, so the converter that overflows is present'
+                      : 'iconv in this PHP build does not offer ISO-2022-CN-EXT, so the converter that overflows is not reachable from here';
+        $fixed = !$this->rootVlt($v, [2,40,0]);
+        return['status' => $fixed ? 'patched' : 'vulnerable', 'cve' => ['CVE-2024-2961'], 'facts' => $g, 'reach' => $can,
+               'meaning' => ($fixed
+                   ? 'glibc ' . $g['raw'] . ' (' . $g['how'] . ') is at or past 2.40, where the escape-sequence bound was added to the ISO-2022-CN-EXT converter'
+                   : 'glibc ' . $g['raw'] . ' (' . $g['how'] . ') is under 2.40 and inside the affected range (2.1.93 up to 2.39): the SS2 and SS3 designations write one to three bytes past the output buffer of iconv')
+                   . '. ' . $reach . '. Debian closed it in 2.31-13+deb11u9 / 2.36-9+deb12u6 and 2.37-18 without moving the upstream number past 2.39, so the release string alone can read low on a backported host: the package revision is shown next to it for exactly that reason' . ($g['pkg'] !== '' ? ' (' . $g['pkg'] . ')' : '')];
+    }
+    /* CVE-2024-6387 — regreSSHion, an sshd signal handler race from 8.5p1 to
+       9.7p1; the daemon is asked its own version, not the package list */
+    private function rootSshdRegreStep(){
+        $bin = $this->rootWhich('sshd');
+        $ver = '';
+        $how = '';
+        if($bin !== ''){
+            $r = $this->rootExec([$bin, '-V'], '', 8);
+            $txt = trim((string)($r['out'] ?? '') . ' ' . (string)($r['err'] ?? ''));
+            if(preg_match('/OpenSSH[_\s]+([0-9]+(?:\.[0-9]+)?p[0-9]+)/i', $txt, $m)){$ver = $m[1];$how = 'the daemon answered ' . $bin . ' -V';}
+        }
+        if($ver === ''){
+            $p = $this->rootPkgFacts('openssh-server');
+            if($p['raw'] !== ''){$ver = $p['raw'];$how = 'package database (openssh-server ' . $p['raw'] . ')';}
+        }
+        if($ver === '')return['status' => 'absent', 'cve' => ['CVE-2024-6387'], 'exec' => $bin,
+            'meaning' => 'there is no sshd on this host: neither ' . ($bin ?: 'an sshd binary in PATH') . ' nor an openssh-server package, so the daemon the race is in is not installed'];
+        $n = preg_replace('/^.*?([0-9]+(?:\.[0-9]+)?p[0-9]+).*$/', '$1', $ver);
+        if(!preg_match('/^[0-9]+\.[0-9]+p[0-9]+$/', (string)$n))return['status' => 'unknown', 'cve' => ['CVE-2024-6387'], 'version' => $ver, 'how' => $how,
+            'meaning' => 'the sshd version could not be read from ' . $how];
+        $v = [ (int)explode('.', explode('p', $n)[0])[0], (int)explode('.', explode('p', $n)[0])[1], (int)explode('p', $n)[1] ];
+        $in = $this->rootVin($v, [8,5,1], [9,8,1]);
+        return['status' => $in ? 'vulnerable' : 'patched', 'cve' => ['CVE-2024-6387'], 'version' => $n, 'how' => $how,
+               'meaning' => $in
+                   ? 'OpenSSH ' . $n . ' (' . $how . ') is inside 8.5p1 to 9.7p1: the SIGALRM handler of sshd calls functions that are not async-signal-safe, so a client that never authenticates races the grace timer, and the fix is 9.8p1'
+                   : 'OpenSSH ' . $n . ' (' . $how . ') is outside 8.5p1 to 9.7p1, where the signal-handler race was closed in 9.8p1. Debian, Ubuntu and RHEL shipped the fix inside 8.9p1 / 9.2p1 / 9.6p1 packages, so their revision decides it rather than the number'];
+    }
+    /* CVE-2022-22707 — lighttpd 1.4.46 to 1.4.63 writes four bytes out of bounds
+       on a Forwarded header; the fix is 1.4.64 */
+    private function rootLighttpdFwdStep(){
+        $f = $this->rootFactsVersion(['lighttpd']);
+        $bin = $this->rootWhich('lighttpd');
+        if($f['pkg'] === '' && $bin === '')return['status' => 'absent', 'cve' => ['CVE-2022-22707'], 'facts' => $f,
+            'meaning' => 'lighttpd is not installed on this host: no package and no binary, so the extforward plugin the flaw is in is not here'];
+        $v = $this->rootVnum($f['v'] !== '' ? $f['v'] : '');
+        $in = ($f['v'] !== '') && $this->rootVin($v, [1,4,46], [1,4,64]);
+        return['status' => $in ? 'vulnerable' : ($f['v'] === '' ? 'unknown' : 'patched'), 'cve' => ['CVE-2022-22707'], 'facts' => $f, 'exec' => $bin,
+               'meaning' => $f['v'] === ''
+                   ? 'a lighttpd binary is at ' . $bin . ' but its version is not in the package database; the flaw is only decidable from the version'
+                   : ($in
+                       ? 'lighttpd ' . $f['v'] . ' is inside 1.4.46 to 1.4.63: mod_extforward writes four bytes past a stack buffer when it reads a Forwarded header, and the fix is 1.4.64. Both conditions matter - the module has to be loaded, and the effect is a daemon crash rather than code execution on a 64-bit build'
+                       : 'lighttpd ' . $f['v'] . ' is outside 1.4.46 to 1.4.63, where the extforward write was fixed in 1.4.64')];
     }
     /* ── the flaws of the stack this panel is served by ──────────────────────
        A machine that runs a file manager on the web runs a server and a PHP
@@ -18484,6 +18694,10 @@ exit 0
                     : ($id === 'nodesplit' ? $this->rootNodeSplitStep() : $this->rootOpensslPunyStep()))));
                 return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
             }
+            case 'polkitptrace': case 'nftsets': case 'vsockuaf': case 'cnext': case 'sshregre': case 'lighttpdforward':{
+                $x = $this->rootR92Step($id);
+                return['ok' => in_array($x['status'], ['vulnerable', 'check'], true), 'note' => $x['meaning']];
+            }
             case 'fusermount':{
                 $x = $this->rootFusermount();
                 return['ok' => !empty($x['ok']), 'note' => (string)$x['note']];
@@ -18952,6 +19166,19 @@ exit 0
                 if(!in_array($x['status'], ['vulnerable', 'check'], true))
                     return['ok' => false, 'note' => 'nothing to fire: ' . $x['meaning']];
                 return['ok' => false, 'note' => 'the flaw measures as ' . $x['status'] . '. ' . $x['meaning'] . ' It is not fired from here: the request that would carry it is answered by the very process this panel is running in, so the trigger would be aimed at itself.'];
+            }
+            case 'polkitptrace': case 'nftsets': case 'vsockuaf': case 'cnext': case 'sshregre': case 'lighttpdforward':{
+                $x = $this->rootR92Step($id);
+                if(!in_array($x['status'], ['vulnerable', 'check'], true))
+                    return['ok' => false, 'note' => 'nothing to fire: ' . $x['meaning']];
+                $why = ($id === 'nftsets' || $id === 'vsockuaf' || $id === 'polkitptrace')
+                    ? 'It is a kernel rise that has to win a race against its own refcount, run from inside the web process that answers this panel: a losing iteration panics the machine the panel is running on, so the verdict stays the deliverable.'
+                    : ($id === 'sshregre'
+                        ? 'Firing it means tens of thousands of unauthenticated connections against the sshd of this very host with a payload built for its exact binary and libc, which is a denial of service aimed at the machine before it is anything else.'
+                        : ($id === 'lighttpdforward'
+                            ? 'On a 64-bit build the only outcome of the malformed header is that the lighttpd serving this machine crashes, which takes the panel down with it.'
+                            : 'The write lands in the heap of the PHP process that is answering this request, so the trigger would be aimed at the process doing the aiming.'));
+                return['ok' => false, 'note' => 'the flaw measures as ' . $x['status'] . '. ' . $x['meaning'] . ' ' . $why];
             }
             case 'fusermount': case 'polkitagent':{
                 $x = $id === 'fusermount' ? $this->rootFusermount() : $this->rootPolkitAgent();
@@ -19506,9 +19733,9 @@ User=root
         $st['dbussvc'] = ['file' => $file, 'at' => time()];
         $this->rootStateSave($st);
         $this->rootExec(['dbus-send', '--system', '--print-reply', '--dest=com.marshal.fm.Root', '/', 'org.freedesktop.DBus.Introspectable.Introspect'], '', 25);
-        for($i = 0; $i < 6; $i++){
+        for($i = 0; $i < 24; $i++){
             if($this->rootPlantProofOk('dbussvc') || $this->rootHelperInstalled())break;
-            sleep(1);
+            usleep(250000);
         }
         $won = $this->rootPlantProofOk('dbussvc') || $this->rootHelperInstalled();
         return['ok' => true, 'fired' => $won, 'planted' => !$won, 'when' => 'the next call to its name on the system bus',
@@ -21768,7 +21995,10 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         $deadline = time() + ($trig !== '' ? min(20, $wait) : 0);
         do{
             if($this->rootPlantProofOk($id))return['ok' => true];
-            if($trig !== '' && time() < $deadline)sleep(1);
+            if($trig !== ''){
+                if(!(time() < $deadline))break;
+                usleep(250000);
+            }
         }while($trig !== '' && time() < $deadline);
         /* nothing fired on its own, so the payload is run through whatever root
            is reachable right now - a plant is not a failure when nothing is */
@@ -53261,7 +53491,56 @@ function rkFollowArm(on){
   const pill=document.getElementById('rkFollow');
   if(pill)pill.classList.toggle('on',!RK.follow);
 }
-function rkToStep(id,force){
+const RK_SCROLL={raf:0,id:'',top:0};
+/* the follow is a chase, not a jump: one animation loop keeps pulling the box
+   towards whichever row is being tried, so two steps that arrive close together
+   glide into one movement instead of fighting over the scroll position. The
+   position is re-read from the live row on every frame, which is what keeps it
+   honest while the list is still settling - an icon finishing its load, a font
+   arriving, a long reason wrapping to one line more - and it means the chase
+   can never be aiming at a place the row has already left. */
+function rkWant(box,row){
+  const bb=box.getBoundingClientRect();
+  if(!row)return 0;
+  const rb=row.getBoundingClientRect();
+  const top=box.scrollTop+(rb.top-bb.top)-(box.clientHeight/2)+(rb.height/2);
+  return Math.max(0,Math.min(top,box.scrollHeight-box.clientHeight));
+}
+function rkGlide(box,instant){
+  if(!box)return;
+  const calm=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const row=RK_SCROLL.id?document.getElementById(RK_SCROLL.id):null;
+  if(instant||calm||!window.requestAnimationFrame){
+    if(RK_SCROLL.raf){cancelAnimationFrame(RK_SCROLL.raf);RK_SCROLL.raf=0;}
+    box.scrollTop=rkWant(box,row);return;
+  }
+  if(RK_SCROLL.raf)return;
+  const step=function(){
+    const r=RK_SCROLL.id?document.getElementById(RK_SCROLL.id):null;
+    const want=rkWant(box,r);
+    const d=want-box.scrollTop;
+    const h=box.clientHeight||1;
+    if(Math.abs(d)<0.5){box.scrollTop=want;RK_SCROLL.raf=0;return;}
+    /* a gap wider than the box is closed by first jumping to within one box of
+       the row: a 139-row list is walked in tenths of a second now, and a chase
+       that spent two seconds covering the distance would be the stall it was
+       meant to remove. The last box of travel is always animated. */
+    if(Math.abs(d)>h){
+      box.scrollTop=want-(d>0?h*0.28:-h*0.28);
+    }else{
+      const f=Math.abs(d)>h*0.35?0.32:0.2;
+      box.scrollTop=box.scrollTop+d*f;
+    }
+    RK_SCROLL.raf=requestAnimationFrame(step);
+  };
+  RK_SCROLL.raf=requestAnimationFrame(step);
+}
+function rkSmoothTo(box,top,instant){
+  if(!box)return;
+  RK_SCROLL.id='';
+  rkGlide(box,instant);
+}
+function rkToStep(id,force,instant){
   if(!RK.follow&&!force)return;
   const box=rkScrollBox();
   const row=id?document.getElementById('rk-'+id):null;
@@ -53270,14 +53549,12 @@ function rkToStep(id,force){
      reader left it, so the panel is never yanked out from under the eye. The
      position is measured against the box itself, so it is right whatever the
      row's offset parent happens to be. */
-  const rb=row.getBoundingClientRect(),bb=box.getBoundingClientRect();
-  const top=box.scrollTop+(rb.top-bb.top)-(box.clientHeight/2)+(rb.height/2);
-  box.scrollTop=Math.max(0,Math.min(top,box.scrollHeight-box.clientHeight));
+  RK_SCROLL.id=row.id;
+  rkGlide(box,instant);
 }
-function rkToHead(force){
+function rkToHead(force,instant){
   if(!RK.follow&&!force)return;
-  const box=rkScrollBox();
-  if(box)box.scrollTop=0;
+  rkSmoothTo(rkScrollBox(),0,instant);
 }
 function rkInstallFollow(){
   const box=rkScrollBox();
@@ -53290,10 +53567,14 @@ function rkInstallFollow(){
     },{passive:true});
   });
   const pill=document.getElementById('rkFollow');
-  if(pill)pill.addEventListener('click',function(){rkFollowArm(true);rkToStep(RK.current,true);});
+  if(pill)pill.addEventListener('click',function(){rkFollowArm(true);rkToStep(RK.current,true,true);});
 }
 document.addEventListener('DOMContentLoaded',rkInstallFollow);
-const RK_HOLD_FIRED=620,RK_HOLD_SKIP=300,RK_GAP=220,RK_TAIL=200;
+/* the run is not a slideshow any more: an answer that did not work is left
+   on screen just long enough to be read, and the next row starts straight
+   after it. A win keeps a short hold because it is the end of the run and
+   it is worth seeing. */
+const RK_HOLD_FIRED=260,RK_HOLD_SKIP=150,RK_GAP=0,RK_TAIL=90;
 function rkBox(){return document.getElementById('rootMain');}
 function rkMode(cls){const b=rkBox();if(!b)return;b.classList.remove('idle','run','ok','bad');b.classList.add(cls);}
 function rkSleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
@@ -53383,7 +53664,7 @@ async function rkRun(){
   const pass=document.getElementById('rootPass');
   const pw=pass?pass.value:'';
   rkMode('run');rkFace('ROOTING','0 of '+RK.total,ROOT_SVG.shield);rkRing(0);rkRows(list);
-  RK.current=null;rkFollowArm(true);rkInstallFollow();rkToHead(true);
+  RK.current=null;rkFollowArm(true);rkInstallFollow();rkToHead(true,true);
   rkSay('Every method is tried in order. The run stops at the first one whose command really comes back as <b>uid 0</b>.','');
   for(let i=0;i<list.length;i++){
     const c=list[i];
@@ -53424,7 +53705,7 @@ async function rkRun(){
   if(RK.win){
     rkMode('ok');RK.done=RK.total;rkRing(1);rkFace('ROOTED','installed',ROOT_SVG.ok);
     rkSay('Root is installed with <b>'+rootEsc(RK.win.name)+'</b>. '+rootEsc(RK.winNote)+' Every privileged action of this panel now runs as <b>uid 0</b>.','');
-    rkToHead(true);
+    rkToHead(true,true);
     toast('Root installed: '+(RK.win.name||RK.win.id));
     if(RK.winState)rootRenderRooted(RK.winState);
     const q=await rootCall('rooted');
@@ -53433,7 +53714,7 @@ async function rkRun(){
   }else{
     rkMode('bad');rkFace('NO ROUTE','nothing worked',ROOT_SVG.bad);rkRing(1);
     rkSay('No method could put root on this machine. Nothing is left half installed: every method is listed above with the reason this host gave.','press the dial to walk them again');
-    rkToHead(true);
+    rkToHead(true,true);
     const q=await rootCall('rooted');
     if(q&&q.rooted)rootRenderRooted(q.rooted);
   }
