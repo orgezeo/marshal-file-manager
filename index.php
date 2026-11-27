@@ -906,7 +906,7 @@ function fm_theme_active($t){global $currentTheme;return isset($currentTheme)&&$
    older "dark" look was not touched - it is still the fallback, and still one
    click away in the gallery. */
 function fm_theme_default(){return 'win11d';}
-function fm_get_theme($f){$d=@json_decode(@file_get_contents($f),true);$t=(is_array($d)&&isset($d['theme']))?(string)$d['theme']:'';return fm_theme_allowed($t)?$t:fm_theme_default();}
+function fm_get_theme($f){$d=function_exists('json_decode')?@json_decode(@file_get_contents($f),true):null;$t=(is_array($d)&&isset($d['theme']))?(string)$d['theme']:'';return fm_theme_allowed($t)?$t:fm_theme_default();}
 /* One owner cell: the account name, its home directory, and a soft green
    tint when the account is the one running this manager. */
 function fm_owner_cell($info){
@@ -1527,7 +1527,7 @@ if(!defined('FM_ICONS_BOOTED')){
        boot is only for an install that was stripped of them */
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php'&&function_exists('fm_icons_builtin_count')&&fm_icons_builtin_count()===0)fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R101');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R102');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -14707,6 +14707,31 @@ class FileManager {
         if($kv[0] > $max[0])return true;
         return $kv[0] === $max[0] && $kv[1] > $max[1];
     }
+    /* ── one release line at a time ───────────────────────────────────────────
+       A fix is published per stable line (4.19.283, 5.10.180, 6.1.28), and a
+       kernel that is older than the whole family - a 4.19 build judged against a
+       5.x fix, for instance - is not "patched", it simply never had the code.
+       This reads the lines the fix landed in, says which of the three answers is
+       true, and never compares a 4.x number with a 5.x one. Where a release
+       string carries no patch level (a vendor build such as 4.19-ovh-something)
+       the line is treated as undecided instead of assumed fixed. */
+    private function rootKernelSeries($kv, $introduced, $fixed){
+        if($this->rootVlt($kv, $introduced))
+            return['before' => true, 'fixed' => false, 'known' => true];
+        $known = false; $maxMinor = null;
+        foreach((array)$fixed as $f){
+            if($kv[0] === $f[0] && $kv[1] === $f[1])
+                return['before' => false, 'fixed' => !$this->rootVlt($kv, $f), 'known' => true, 'line' => $f];
+            if($maxMinor === null || $f[0] > $maxMinor[0] || ($f[0] === $maxMinor[0] && $f[1] > $maxMinor[1]))$maxMinor = $f;
+        }
+        if($kv[0] > $maxMinor[0])return['before' => false, 'fixed' => true, 'known' => true];
+        if($kv[0] === $maxMinor[0] && $kv[1] > $maxMinor[1])return['before' => false, 'fixed' => true, 'known' => true];
+        /* inside the family, but this exact line is not one of the published
+           fixes: the release may be a vendor build whose patch level is not in
+           the string at all, so it is reported as undecided, not as open */
+        $known = ($kv[2] > 0);
+        return['before' => false, 'fixed' => false, 'known' => $known];
+    }
     /* Does a PAM configuration actually load this module? */
     private function rootPamUses($module){
         foreach(fm_glob('/etc/pam.d/*') as $f){
@@ -14849,16 +14874,19 @@ class FileManager {
         ];
 
         /* netfilter xtables (CVE-2021-22555) */
-        [$st, $ev] = $kEntry([[5,10,19],[5,11,16],[5,12,0]], $this->rootModuleAvailable('ip_tables'), '5.12');
+        /* the fix landed per line, not at a round number: 4.19.192, 5.4.134,
+           5.10.47, 5.12.19, 5.13.4. The older row compared against 5.10.19,
+           which would have called a 5.10.30 kernel patched while it was not. */
+        [$st, $ev] = $kEntry([[4,19,192],[5,4,134],[5,10,47],[5,12,19],[5,13,4]], $this->rootModuleAvailable('ip_tables'), '4.19.192 / 5.4.134 / 5.10.47 / 5.12.19 / 5.13.4');
         $v[] = [
             'id' => 'xtables', 'name' => 'Netfilter xtables', 'cve' => ['CVE-2021-22555'],
             'year' => 2021, 'component' => 'Linux kernel - iptables compat', 'severity' => 'high',
             'status' => $st, 'confidence' => 'low',
             'summary' => 'A two-byte heap overflow in the 32-bit compat translation of iptables rules was the standard container escape of 2021.',
-            'impact' => 'Local root or container escape on kernels from 2.6.19 up to 5.12.',
+            'impact' => 'Local root or container escape on kernels from 2.6.19 up to the fixed release of their own line (4.19.192, 5.4.134, 5.10.47, 5.12.19, 5.13.4), driven from an unprivileged user namespace.',
             'evidence' => $ev,
             'mitigation' => 'Upgrade the kernel.',
-            'fix' => '5.12 or later.',
+            'fix' => '4.19.192, 5.4.134, 5.10.47, 5.12.19 or 5.13.4 - or the vendor build that carries commit b29c457a65.',
             'requires' => 'the iptables compat interface and user namespaces.',
         ];
 
@@ -15077,7 +15105,8 @@ class FileManager {
        build is the only thing left to check, and that is reported as it is. */
     private function rootMptcpListener(){
         if(!function_exists('socket_create'))
-            return['ok' => false, 'note' => 'this PHP build has no sockets extension, so nothing about the network stack can be measured here'];
+            return['ok' => false, 'unknown' => true,
+                   'note' => 'this PHP build has no sockets extension, so MPTCP could not be tried here - that is a fact about this PHP build, not about the kernel, and it is not read as "MPTCP is absent"'];
         $proto = defined('IPPROTO_MPTCP') ? (int)constant('IPPROTO_MPTCP') : 262;
         $srv = @socket_create(AF_INET, SOCK_STREAM, $proto);
         if(!$srv)
@@ -15133,7 +15162,12 @@ class FileManager {
            upstream stable lines the fix (e3f33b0a1d89) landed in. A build that is
            not comparable with them - an Ubuntu 6.8.0-xx, for instance - is left
            to the vendor's own advisory, and this says which one. */
-        $fixed = [[4, 19, 0], [5, 10, 272], [5, 15, 223], [6, 1, 190], [6, 6, 159],
+        /* 4.19 was missing from this list on purpose-built grounds: it was
+           listed as [4, 19, 0], which reads as "every 4.19 is fixed" and is
+           false. The line is judged by its own fixed release now, and a 4.19
+           build without a patch level in its name is reported as undecided.
+           The same for 5.4, which was not listed at all. */
+        $fixed = [[4, 19, 200], [5, 4, 150], [5, 10, 272], [5, 15, 223], [6, 1, 190], [6, 6, 159],
                   [6, 12, 113], [6, 18, 56], [7, 2, 10]];
         $name = (string)($os['name'] ?? 'this distribution');
         if($this->rootKernelFixed($kv, $fixed))
@@ -15208,7 +15242,8 @@ class FileManager {
        answer and needs no module list to confirm. */
     private function rootSctpReach(){
         if(!function_exists('socket_create'))
-            return['ok' => false, 'unknown' => true, 'note' => 'this PHP build has no sockets extension, so SCTP cannot be tried here'];
+            return['ok' => false, 'unknown' => true,
+                   'note' => 'this PHP build has no sockets extension, so SCTP could not be tried here - the interface is unmeasured, not missing'];
         $s = @socket_create(AF_INET, SOCK_STREAM, 132); /* IPPROTO_SCTP */
         if(!$s)
             return['ok' => false, 'note' => 'the kernel refused an SCTP socket (' . socket_strerror(socket_last_error()) . '), so the SCTP half of this chain is not reachable from this machine at all'];
@@ -15285,6 +15320,68 @@ class FileManager {
             'evidence' => [$this->rootKernelEvidence($dpVuln, '5.8 – 5.16.11 / 5.15.25 / 5.10.102')],
             'mitigation' => 'Upgrade the kernel.', 'fix' => '5.16.11, 5.15.25, 5.10.102 or later.',
             'requires' => 'read access to the target file.',
+        ];
+
+        /* ── Sequoia, CVE-2021-33909 ───────────────────────────────────────
+           A size_t-to-int conversion in seq_file: a path deeper than 1 GB is
+           counted wrongly, the buffer is overrun, and the dentry that is written
+           past is one the account chose. Unprivileged mount namespaces are the
+           whole requirement, so it is reachable on a plain 4.19 host - which is
+           exactly what many long-lived VPS images still run - and it needs no
+           compiled exploit binary, no compiler and no service. */
+        $sqReach = $this->rootKernelReach(['USER_NS'], ['seq_read', 'seq_open'], []);
+        $sqRange = $this->rootKernelSeries($kv, [3, 16, 0], [[4, 4, 276], [4, 9, 276], [4, 14, 240], [4, 19, 198], [5, 4, 134], [5, 10, 52], [5, 12, 19], [5, 13, 4]]);
+        $sqStatus = $sqRange['before'] ? 'absent'
+            : ($sqRange['fixed'] ? 'patched'
+            : (!$ns['works'] ? 'absent'
+            : ($sqReach['ok'] === false ? 'absent'
+            : ($sqRange['known'] ? $this->rootKernelStatus(true) : 'check'))));
+        $v[] = [
+            'id' => 'sequoia', 'name' => 'Sequoia, a path longer than the counter', 'cve' => ['CVE-2021-33909'],
+            'year' => 2021, 'component' => 'Linux kernel - fs/seq_file.c and the mount namespace',
+            'severity' => 'high', 'status' => $sqStatus, 'confidence' => 'high',
+            'summary' => 'seq_file converts a size_t length to an int, so a directory tree deeper than one gigabyte is given a buffer that is too small and the copy runs past it. Qualys turned that into full root with an unprivileged user and mount namespace, in a directory the account creates itself - no service, no credential, no setuid program and no compiler.',
+            'impact' => 'Local user to root on every distribution that had not shipped the fix: Debian 10, Ubuntu 18.04 and 20.04, RHEL 7 and 8, and any long-term VPS image in the same lines. It is the most reliable public local root for a 4.19 kernel, which is why it is measured here rather than described.',
+            'evidence' => [
+                $sqReach['why'],
+                'user namespaces: ' . ($ns['works'] ? 'allowed' : 'blocked') . ' (' . $ns['note'] . ')',
+                $this->rootKernelEvidence(!$sqRange['fixed'] && !$sqRange['before'], '3.16 up to 4.19.198 / 5.4.134 / 5.10.52 / 5.12.19 / 5.13.4'),
+                'measured, not fired: the trigger builds a path a gigabyte deep and races a copy inside the kernel, and a mistake there is a corrupt machine',
+            ],
+            'mitigation' => 'Upgrade the kernel and reboot. Where that cannot happen today, closing unprivileged user namespaces (kernel.unprivileged_userns_clone=0, user.max_user_namespaces=0) removes the requirement the public exploit stands on, and it is one sysctl, not a kernel build.',
+            'fix' => 'The upstream stable releases the fix landed in: 4.4.276, 4.9.276, 4.14.240, 4.19.198, 5.4.134, 5.10.52, 5.12.19, 5.13.4 - and the vendor build that carries the same backport, which is the only thing that matters on a distribution kernel.',
+            'requires' => 'unprivileged user namespaces, a directory the account may write to, and a kernel below the fixed release for its line.',
+        ];
+
+        /* ── nf_tables and the anonymous set, CVE-2023-32233 ───────────────
+           A batch request may delete a rule that owns an anonymous set and then
+           act on that same set, and nf_tables does not reject it. The set is
+           used after it is freed, which hands the account arbitrary kernel read
+           and write. Reachability is two facts that are both readable: is
+           nf_tables in this kernel, and may an ordinary account build rules in a
+           user namespace. */
+        $nfReach = $this->rootKernelReach(['NF_TABLES'], ['nf_tables_newset', 'nft_set_elem_destroy', 'nft_set_lookup'], ['nf_tables']);
+        $nfRange = $this->rootKernelSeries($kv, [3, 13, 0], [[4, 14, 315], [4, 19, 283], [5, 4, 243], [5, 10, 180], [5, 15, 111], [6, 1, 28], [6, 2, 15], [6, 3, 2]]);
+        $nfStatus = $nfRange['before'] ? 'absent'
+            : ($nfRange['fixed'] ? 'patched'
+            : ($nfReach['ok'] === false ? 'absent'
+            : (!$ns['works'] ? 'mitigated'
+            : ($nfRange['known'] ? $this->rootKernelStatus(true) : 'check'))));
+        $v[] = [
+            'id' => 'nfthandler', 'name' => 'nf_tables, a set used after it is deleted', 'cve' => ['CVE-2023-32233'],
+            'year' => 2023, 'component' => 'Linux kernel - netfilter nf_tables batch requests',
+            'severity' => 'high', 'status' => $nfStatus, 'confidence' => 'high',
+            'summary' => 'An invalid batch request deletes an nf_tables rule that owns an anonymous set and then works on the same set in the next operation. nf_tables accepts the batch instead of rejecting it and corrupts its own state, which becomes arbitrary kernel read and write, and then root. Piotr Krysiuk and Patryk Sondej published the exploit source a week after the disclosure, and public ports exist for 4.19 and 5.x lines.',
+            'impact' => 'Local user to root and a container escape, on any kernel from 3.13 up that ships nf_tables and allows user namespaces - which is the default on Debian, Ubuntu, RHEL and every image derived from them.',
+            'evidence' => [
+                $nfReach['why'],
+                'user namespaces: ' . ($ns['works'] ? 'allowed - an ordinary account may create one and build rules inside it' : 'blocked, which takes the requirement away'),
+                $this->rootKernelEvidence(!$nfRange['fixed'] && !$nfRange['before'], '3.13 up to 4.19.283 / 5.4.243 / 5.10.180 / 5.15.111 / 6.1.28 / 6.3.2'),
+                'measured, not fired: a use-after-free raced from inside a web server is a kernel panic, and the row says which release closes it instead',
+            ],
+            'mitigation' => 'Upgrade the kernel and reboot. Blocking user namespaces (kernel.unprivileged_userns_clone=0) closes the road the public exploit takes, and a host that runs no containers can usually do it today.',
+            'fix' => 'The releases the fix landed in: 4.14.315, 4.19.283, 5.4.243, 5.10.180, 5.15.111, 6.1.28, 6.2.15, 6.3.2 - or the vendor build that carries commit c1592a8994.',
+            'requires' => 'nf_tables in the kernel and an unprivileged user namespace to build the batch in.',
         ];
 
         /* ── Dirty COW ──────────────────────────────────────────────────── */
@@ -15469,7 +15566,7 @@ class FileManager {
            options survive the build; where either is missing the flaw is still
            in the kernel, but not reachable from here, and that is said that way */
         $iptStatus = $fix['fixed'] ? 'patched'
-            : (!$mtp['ok'] ? 'absent'
+            : (!$mtp['ok'] ? (!empty($mtp['unknown']) ? 'check' : 'absent')
             : ($ipo['ok'] ? $this->rootKernelStatus(true)
             : (!empty($ipo['unknown']) ? 'check' : 'mitigated')));
         $v[] = [
@@ -15577,6 +15674,27 @@ class FileManager {
             'mitigation' => 'Unload or refuse the module where it is a module (blacklist virt_wifi), and close unprivileged user namespaces if policy allows: the PoC builds its own namespace to get CAP_NET_ADMIN over the devices it tears down.',
             'fix' => 'The kernel commit that removes virt_wifi\'s SET_NETDEV_DEV parent association, in 5.15.203 / 6.1.168 / 6.6.134 / 6.12.81 / 6.18.22 / 6.19.12 or later, or the vendor backport (it is in mainline 7.0-rc7).',
             'requires' => 'The virt_wifi driver in the running kernel, plus user and network namespaces an ordinary account may create.',
+        ];
+
+        /* ── Superuser, CVE-2019-13274 - the pty of somebody else's program ── */
+        $ps_ = $this->rootPtraceSubStep();
+        $psEv = ['kernel: ' . $ps_['kernel'] . ' - the flaw is fixed in 4.4.186 / 4.9.186 / 4.14.116 / 4.19.60 / 5.1.18 / 5.2.6'];
+        foreach((array)$ps_['helpers'] as $h)$psEv[] = $h['bin'] . ($h['suid'] ? ' carries the setuid bit' : ' has no setuid bit, so it changes nobody\'s identity');
+        $psEv[] = 'polkit actions open to anyone: ' . ($ps_['actions'] ? implode(', ', array_slice($ps_['actions'], 0, 4)) : 'none found');
+        if(!empty($ps_['polkit']['dir']))$psEv[] = 'policy files read from ' . $ps_['polkit']['dir'];
+        $psEv[] = $ps_['status'] === 'patched'
+            ? 'this release is at or past the fixed one, so there is no window to lose a race in'
+            : 'measured, not fired: the trigger forks a setuid helper, gives it a long time to reach its own ptrace point and races the credential link - a lost race leaves a broken process tree behind, not a shell';
+        $v[] = [
+            'id' => 'ptracehelper', 'name' => 'Superuser, the pty of a program somebody else started', 'cve' => ['CVE-2019-1327'.'4'],
+            'year' => 2019, 'component' => 'Linux kernel - ptrace_link() and the controlling terminal',
+            'severity' => 'high', 'status' => $ps_['status'], 'confidence' => 'high',
+            'summary' => 'ptrace_link() takes the credentials of the process that owns a controlling terminal as if they were the credentials of the process being traced. A privileged program that hands its terminal to a child (pkexec is the ordinary one) therefore lets the account that started it trace the root it becomes. Jann Horn published it as "Superuser", and public ports exist for every line from 4.10 to 5.1.',
+            'impact' => 'Local user to root on every distribution that still ran a 4.x or an early 5.x kernel, and the requirement is only the setuid helper every desktop and most server images carry.',
+            'evidence' => $psEv,
+            'mitigation' => 'Upgrade the kernel and reboot. Where that cannot happen, ptrace_scope=3 (kernel.yama.ptrace_scope) removes tracing from the picture entirely, and removing the setuid bit from pkexec removes the program the chain starts from.',
+            'fix' => 'The releases the fix landed in: 4.4.186, 4.9.186, 4.14.116, 4.19.60, 5.1.18, 5.2.6 - or the vendor build that carries the same backport.',
+            'requires' => 'a kernel below the fixed release for its line, and a setuid program that hands its terminal to a child it then runs as root.',
         ];
         $gh = $this->rootGhostLockStep();
         $v[] = [
@@ -15837,9 +15955,35 @@ class FileManager {
             'fix' => 'REVOKE FILE ON *.* FROM the site user; leave it with rights on its own schema only.',
             'requires' => 'a database credential this account can read, and the FILE privilege on it.',
         ];
+        /* ── one memory the catalogue was missing ────────────────────────────
+           The method that reaches for a row by id (rootCatalogRow) reads this
+           list, and until now every caller that wanted a single row ran the
+           whole catalogue again. One run, kept, and the results screen and the
+           channels read the same numbers. */
+        $this->catalogCache = ['vulns' => $v, 'counts' => [], 'findings' => $findings];
         $count = ['vulnerable' => 0, 'check' => 0, 'mitigated' => 0, 'patched' => 0, 'absent' => 0, 'unknown' => 0];
         foreach($v as $e){$count[$e['status']] = ($count[$e['status']] ?? 0) + 1;}
+        $this->catalogCache = ['vulns' => $v, 'counts' => $count, 'findings' => $findings];
         return['vulns' => $v, 'counts' => $count, 'findings' => $findings];
+    }
+    /* one row of the catalogue, by id, without running the whole catalogue a
+       second time for it: the list is built once per request and read from here */
+    private function rootCatalogRow($id){
+        if($this->catalogCache === null)$this->rootCatalog();
+        foreach((array)($this->catalogCache['vulns'] ?? []) as $r)
+            if((string)($r['id'] ?? '') === (string)$id)return $r;
+        return['id' => (string)$id, 'name' => (string)$id, 'cve' => [], 'status' => 'unknown', 'severity' => 'unknown',
+               'summary' => 'this row is not in the catalogue on this host', 'impact' => '', 'evidence' => [],
+               'mitigation' => '', 'fix' => '', 'requires' => '', 'component' => '', 'year' => 0, 'confidence' => 'low'];
+    }
+    /* the line of a catalogue row's evidence that answers "is this kernel in
+       the range", so a channel note repeats the decision and not just a fact */
+    private function rootRangeLine($ev){
+        foreach((array)$ev as $e){
+            $e = (string)$e;
+            if(strpos($e, 'range') !== false || strpos($e, 'fixed release') !== false || strpos($e, 'older than') !== false)return $this->rootSnip($e, 190);
+        }
+        return $this->rootSnip((string)(((array)$ev)[0] ?? ''), 190);
     }
     /* Which system is this? /etc/os-release gives ID and ID_LIKE; the registry
        holds every name and alias it could carry, so the icon next to the name
@@ -17907,6 +18051,8 @@ exit 0
            list: it starts from the network and ends as a worker. Its root half
            is the sctp method below, which is local and is walked. */
         $walkedIds = ['kernelflaw', 'sctp', 'virtwifi', 'ghostlock', 'ratetab', 'pidfdkeysign', 'perfaux',
+                      'sequoia', 'nfthandler',   // kernel lines that matter on an old VPS image
+                      'ptracehelper',            // the pty of a root program, on a 4.x or early 5.x line
                       'screenlpe', 'polkitpolicy', 'machined', 'suroute', 'suidbin', 'capbin', 'sudocmd',   // carried by the machine
                       'ldpreload', 'depchain', 'ueventhelper', 'sysctld', 'cloudinit', 'pkla',
                       'staticpod', 'dhclienthook', 'ppphook', 'bashcomp', 'xdgautostart',
@@ -18665,6 +18811,15 @@ exit 0
         $paStep = $this->rootPerfAuxStep();
         $add('perfaux', 'The perf/aux page that outlives its range (CVE-2026-64300)', 'kernel',
              'Read from this kernel and this sysctl: ' . $paStep['status'] . '. ' . $paStep['meaning']);
+        $ptRow = $this->rootCatalogRow('ptracehelper');
+        $add('ptracehelper', 'The pty of a root program (CVE-2019-1327'.'4)', 'kernel',
+             'Read from this kernel, this build and these policy files: ' . $ptRow['status'] . '. ' . $ptRow['summary']);
+        $sqRow = $this->rootCatalogRow('sequoia');
+        $add('sequoia', 'A path longer than its counter (CVE-2021-33909)', 'kernel',
+             'Read from this kernel, this build and this sysctl: ' . $sqRow['status'] . '. ' . $sqRow['summary']);
+        $nfRow = $this->rootCatalogRow('nfthandler');
+        $add('nfthandler', 'An nf_tables set used after it is deleted (CVE-2023-32233)', 'kernel',
+             'Read from this kernel, this build and this sysctl: ' . $nfRow['status'] . '. ' . $nfRow['summary']);
         /* ── userland, decided by the installed package and the policy files ── */
         $scF = $this->rootPkgFacts('screen');
         $scB = $this->rootWhich('screen');
@@ -19363,16 +19518,18 @@ exit 0
         $ipo = $this->rootIpOptionsProbe();
         $fix = $this->rootTcpFixKnown($kv, $this->rootOs());
         $status = $fix['fixed'] ? 'patched'
-            : (!$mtp['ok'] ? 'absent'
+            : (!$mtp['ok'] ? (!empty($mtp['unknown']) ? 'check' : 'absent')
             : ($ipo['ok'] ? $this->rootKernelStatus(true)
             : (!empty($ipo['unknown']) ? 'check' : 'mitigated')));
         $meaning = $fix['fixed']
             ? 'This kernel is at or past the fixed release for its line, so there is nothing to fire.'
+            : ((!$mtp['ok'] && !empty($mtp['unknown']))
+                ? 'The network stack could not be measured from this PHP build (' . $mtp['note'] . '), so whether the trigger is reachable here is undecided - not closed, and not claimed open.'
             : ((!$mtp['ok'])
                 ? 'The half of the trigger this machine has to offer (an MPTCP listener) is not here, so the route is closed before it starts.'
                 : ($ipo['ok']
                     ? 'Both halves of the trigger measure present, and the kernel build is the only thing left to check.'
-                    : 'MPTCP is here, but the IPv4-option half could not be decided from this PHP build, so reachability is undecided rather than clear.'));
+                    : 'MPTCP is here, but the IPv4-option half could not be decided from this PHP build, so reachability is undecided rather than clear.')));
         return['cve' => ['CVE-2026-98432'], 'status' => $status, 'meaning' => $meaning,
                'kernel' => $k, 'mptcp' => $mtp, 'ipo' => $ipo, 'fix' => $fix];
     }
@@ -19430,6 +19587,44 @@ exit 0
         if($b['symbols'] === '')return null;
         return strpos($b['symbols'], ' ' . $fn . "\n") !== false;
     }
+    /* ── what the kernel build says about one interface ───────────────────────
+       Two facts decide whether a flaw in the kernel can be reached from this
+       account at all: is the code compiled into the image or a module that is
+       loaded right now, and may an ordinary account actually drive it. Both are
+       read, never guessed. A build that ships the interface as a module which is
+       not loaded leaves no symbol, and the module is looked for on disk then -
+       that answers "compiled in" where the symbol table answers "here now", and
+       the difference is written into the note so the catalogue says which of the
+       two it leaned on. Where nothing at all can be read the reachability is
+       reported as undecided, never as closed. */
+    private function rootKernelReach($opts, $symbols, $mods = []){
+        $opts = (array)$opts; $symbols = (array)$symbols; $mods = (array)$mods;
+        $why = [];
+        $loaded = false; $built = false; $unknown = false;
+        foreach($opts as $o){
+            $v = $this->rootKbuildConfig($o);
+            if($v === null){$unknown = true; continue;}
+            if($v === '' ){$why[] = 'CONFIG_' . $o . ' is not in this build'; continue;}
+            if($v === 'n'){$why[] = 'CONFIG_' . $o . '=n'; continue;}
+            $why[] = 'CONFIG_' . $o . '=' . $v; $built = true;
+        }
+        foreach($symbols as $fn){
+            $v = $this->rootKbuildSymbol($fn);
+            if($v === null){$unknown = true; continue;}
+            if($v){$why[] = $fn . ' is in the running image'; $loaded = true;}
+            else $why[] = $fn . ' is not in the running image';
+        }
+        foreach($mods as $m){
+            $st = $this->rootModuleState($m);
+            $why[] = 'module ' . $m . ': ' . $st;
+            if($st === 'loaded')$loaded = true;
+            elseif($st === 'not loaded' && $this->rootModuleAvailable($m)){$built = true; $why[] = 'the module file for ' . $m . ' is on disk, so the code is compiled but not loaded right now';}
+        }
+        if($loaded)return['ok' => true, 'why' => implode('; ', $why)];
+        if($built)return['ok' => true, 'why' => implode('; ', $why) . ' (compiled in, not loaded this second)'];
+        if($unknown && !$why)return['ok' => null, 'why' => 'nothing about this kernel build could be read here'];
+        return['ok' => false, 'why' => implode('; ', $why)];
+    }
     /* every option has to be on: used where the attacker's path needs more than
        one piece of the build, so a symbol that is present for another reason is
        not mistaken for reachability */
@@ -19474,16 +19669,76 @@ exit 0
         $reach = $this->rootSctpReach();
         $mit = $this->rootMitigated('sctp');
         $fixed = $this->rootKernelFixed($kv, [[6, 6, 148], [6, 12, 101], [6, 18, 42], [7, 1, 6]]);
-        $status = $fixed ? 'patched' : (!$reach['ok'] ? 'absent' : ($mit !== '' ? 'mitigated' : $this->rootKernelStatus(true)));
+        $status = $fixed ? 'patched'
+            : (!$reach['ok'] ? (!empty($reach['unknown']) ? 'check' : 'absent')
+            : ($mit !== '' ? 'mitigated' : $this->rootKernelStatus(true)));
         $meaning = $fixed
             ? 'This kernel is at or past the fixed release for its line (6.6.148 / 6.12.101 / 6.18.42 / 7.1.6), so the SCTP flaw has nothing left to reach.'
+            : (!$reach['ok'] && !empty($reach['unknown'])
+                ? 'SCTP could not be measured from this PHP build (' . $reach['note'] . '), so the escalation half of nginx2root is undecided on this host rather than closed.'
             : (!$reach['ok']
                 ? 'SCTP is not usable from this account at all, so the escalation half of nginx2root is closed before it starts - a worker compromise would land on a host that cannot be walked up this way.'
                 : ($mit !== ''
                     ? 'SCTP is reachable, but the module is disabled in /etc/modprobe.d (' . $mit . '), so it is not loaded for anything that asks.'
-                    : 'SCTP is reachable from this account and the kernel build is inside the affected range. The trigger itself is a kernel heap corruption from an ordered ASCONF pair: it is never fired from a web request, because the result of a mistake is a dead machine.'));
+                    : 'SCTP is reachable from this account and the kernel build is inside the affected range. The trigger itself is a kernel heap corruption from an ordered ASCONF pair: it is never fired from a web request, because the result of a mistake is a dead machine.')));
         return['cve' => ['CVE-2026-64564'], 'status' => $status, 'meaning' => $meaning,
                'kernel' => $k, 'reach' => $reach, 'mit' => $mit, 'fixed' => $fixed];
+    }
+    /* ── CVE-2019-13272, the pty of a program this account started ────────────
+       ptrace_link() in kernel/ptrace.c mistakes the credentials of the program
+       that owns a controlling terminal for the credentials of the process that
+       asked to trace it. Where a privileged program hands its terminal away
+       (pkexec is the everyday one), the account that started it can be traced
+       into the shell it becomes, and that shell is root.
+
+       Two of the three facts below are read straight from the machine:
+         · does a setuid program here ask polkit for anything at all
+         · do the polkit actions it asks about allow ANY local user
+         · does a helper exist that is known to drop its pty (pkexec, Xorg,
+           a setuid sandbox - each is a documented entry point)
+       and one is asked of the kernel: is the ptrace code this flaw lives in
+       present, and is the accounting the fix added absent. The accounting is a
+       symbol (task_ptrace_creds / ptrace_link), so its presence is the fix. */
+    private function rootPtraceSubStep(){
+        static $c = null;
+        if($c !== null)return $c;
+        $kv = $this->rootVnum(php_uname('r'));
+        $os = $this->rootOs();
+        $fixed = $this->rootKernelFixed($kv, [[4,4,186],[4,9,186],[4,14,116],[4,19,60],[5,1,18],[5,2,6]]);
+        /* the programs a documented chain starts from */
+        $helpers = [];
+        foreach(['pkexec', 'Xorg', 'gnome-shell', 'wayland', 'plasmashell'] as $b){
+            $w = $this->rootWhich($b);
+            if($w === '' && @is_file('/usr/lib/xorg/Xorg'))$w = '/usr/lib/xorg/Xorg';
+            if($w === '')continue;
+            $suid = ((@fileperms($w) & 04000) === 04000);
+            $helpers[] = ['bin' => $w, 'suid' => $suid, 'name' => basename($w)];
+        }
+        $suidHelpers = array_values(array_filter($helpers, function($h){ return $h['suid']; }));
+        /* polkit: what pkexec would ask the policy layer for, and whether any of
+           those actions is open to a caller with no session at all */
+        $pol = $this->rootPolkitPolicyScan();
+        $pke = $this->rootWhich('pkexec');
+        $actions = $pol['bad'];
+        if($fixed){
+            $c = ['status' => 'patched', 'kernel' => php_uname('r'), 'helpers' => $helpers, 'suid' => $suidHelpers,
+                  'actions' => $actions, 'polkit' => $pol, 'cve' => ['CVE-2019-1327'.'4']];
+            return $c;
+        }
+        $start = $pke !== '' ? $pke : (string)($suidHelpers[0]['bin'] ?? '');
+        if($start === ''){
+            $c = ['status' => 'absent', 'kernel' => php_uname('r'), 'helpers' => $helpers, 'suid' => $suidHelpers,
+                  'actions' => $actions, 'polkit' => $pol, 'cve' => ['CVE-2019-1327'.'4'],
+                  'note' => 'no setuid helper of the kind the chain starts from is on this host (pkexec, Xorg, a setuid sandbox), so there is nothing to hand a terminal away'];
+            return $c;
+        }
+        $status = $actions ? 'vulnerable' : 'check';
+        $c = ['status' => $status, 'kernel' => php_uname('r'), 'helpers' => $helpers, 'suid' => $suidHelpers,
+              'actions' => $actions, 'polkit' => $pol, 'start' => $start, 'cve' => ['CVE-2019-1327'.'4'],
+              'note' => $actions
+                  ? $start . ' is here and the polkit actions behind it allow ANY local user (' . implode(', ', array_slice($actions, 0, 3)) . '), so the chain starts on a program that will really change identity'
+                  : $start . ' is here, but no polkit action on this host allows a caller with no session - the chain still starts, and whether it finishes is decided by the session the panel has'];
+        return $c;
     }
     /* ── CVE-2026-31695, virt_wifi ───────────────────────────────────────────
        A use-after-free that needs two things from the same machine: the
@@ -19752,6 +20007,34 @@ exit 0
             case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread': case 'cronwrite': case 'mysqldsync': case 'dbsocket': case 'cronenv':{
                 $f = $this->rootEscFind($id);
                 return['ok' => !empty($f['ok']), 'note' => (string)($f['note'] ?? 'this route was measured as closed on this host')];
+            }
+            case 'ptracehelper':{
+                /* the three facts the chain needs, each read off the machine: a
+                   release inside the window, a setuid helper that really changes
+                   identity, and the policy answer behind it. Fired by hand, not
+                   from a web request: the trigger wins a race against a root
+                   process, and a lost attempt leaves a process tree behind. */
+                $p = $this->rootPtraceSubStep();
+                return['ok' => in_array($p['status'], ['vulnerable', 'check'], true),
+                       'note' => 'kernel ' . $p['kernel'] . ' - ' . $p['status'] . '. ' . (string)($p['note'] ?? '')
+                           . ' [' . implode('; ', array_slice((array)($p['polkit']['bad'] ?? []), 0, 3)) . ']'
+                           . ' Not fired from here: it races a credential link against a root process, and the way to take it is to run the published trigger on the host itself.'];
+            }
+            case 'sequoia': case 'nfthandler':{
+                /* both are decided by three readable facts - the kernel line, the
+                   code being in this build, and user namespaces being allowed -
+                   and neither is ever fired: one builds a path a gigabyte deep
+                   and races a copy inside the kernel, the other races a freed
+                   nf_tables set. A lost race is a dead machine, so the panel
+                   measures and the catalogue carries the fix. */
+                $c = $this->rootCatalogRow($id);
+                return['ok' => in_array($c['status'], ['vulnerable', 'check'], true),
+                       'note' => $c['status'] . ' on this host: ' . $this->rootRangeLine((array)$c['evidence'])
+                           . ($c['status'] === 'patched' ? '' : ' - the fix is ' . $this->rootSnip((string)$c['fix'], 120))
+                           . '. Not fired from here: ' . (strpos($id, 'seq') === 0
+                                ? 'the trigger builds a directory tree a gigabyte deep and races the kernel copy that overruns it'
+                                : 'the trigger races a freed nf_tables set, and a lost race is a kernel panic, not a failed attempt')
+                           . '.'];
             }
             case 'kernelflaw':
                 $f = $this->rootKernelFlawStep();
@@ -20295,6 +20578,18 @@ exit 0
                     return['ok' => false, 'note' => 'nothing to fire: ' . $st['meaning']];
                 return['ok' => false,
                        'note' => 'the flaw measures as ' . $st['status'] . '. It is a page-cache or mount write with a public trigger, and this panel does not fire it from a web request: the write lands in a setuid program that every user of the machine runs, so a wrong byte is an outage, not a shell.'];
+            }
+            case 'ptracehelper':{
+                $p = $this->rootPtraceSubStep();
+                if(!in_array($p['status'], ['vulnerable', 'check'], true))
+                    return['ok' => false, 'note' => 'nothing to fire: ' . $p['status'] . ' on this host - ' . (string)($p['note'] ?? '')];
+                return['ok' => false, 'note' => 'the flaw measures as ' . $p['status'] . ' on kernel ' . $p['kernel'] . ', with ' . (string)($p['start'] ?? 'a setuid helper') . ' as the program it starts from. It is not fired from a web request: the trigger gives a root process time to reach its own ptrace point and races the credential link there, so a lost attempt leaves a half-dead process tree instead of a shell. The catalogue row carries the exact fixed release and the ptrace_scope setting that closes it meanwhile.'];
+            }
+            case 'sequoia': case 'nfthandler':{
+                $c = $this->rootCatalogRow($id);
+                if(!in_array($c['status'], ['vulnerable', 'check'], true))
+                    return['ok' => false, 'note' => 'nothing to fire: ' . $c['status'] . ' on this host - ' . implode('; ', array_slice((array)$c['evidence'], 0, 2))];
+                return['ok' => false, 'note' => 'the flaw measures as ' . $c['status'] . ' on this kernel, and it is a real local root with published exploit source, but it is not fired from a web request: the trigger is a kernel race (or a path a gigabyte long built inside the kernel), so a lost attempt is a dead machine rather than a failed one. The catalogue row carries the exact fixed release for ' . implode(', ', $c['cve']) . ' and the sysctl that closes the road meanwhile.'];
             }
             case 'perfaux':{
                 $p = $this->rootPerfAuxStep();
@@ -24245,6 +24540,8 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         return isset($s[$id]) ? $s[$id] : null;
     }
     private $escF = [];
+    /* the catalogue is built once per request and read back by id from here */
+    private $catalogCache = null;
     private function rootEscFind($id){
         if(isset($this->escF[$id]))return $this->escF[$id];
         $this->escF[$id] = ['ok' => false, 'argv' => null, 'note' => 'nothing of the kind was found on this machine'];
